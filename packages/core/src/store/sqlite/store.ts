@@ -289,6 +289,44 @@ function toMemorySource(row: MemorySourceRow): MemorySourceState {
  * OR rather than the default AND: BM25 scores partial matches, and requiring every term would turn a
  * five-word question into a demand that one passage contain all five.
  */
+/**
+ * The FTS5 table drives both memory queries, and the unary `+` is what makes it.
+ *
+ * `memory_passages_source` is an index on `(agent_id, source)`, so given
+ * `WHERE memory_fts MATCH ? AND +p.agent_id = ?` a planner can read the agent filter as the cheaper
+ * entry point and probe the virtual table once per row it finds. Measured over one 5,000-passage
+ * corpus, same code, `:memory:`:
+ *
+ *     sqlite 3.51.0 (bun 1.3.5)   SCAN f VIRTUAL TABLE INDEX 0:M1                  0.7 ms
+ *     sqlite 3.51.3 (node 22)     SEARCH p USING COVERING INDEX … (agent_id=?)   260.5 ms
+ *                                 SCAN f VIRTUAL TABLE INDEX 0:=M1
+ *     sqlite 3.53.3 (node 24)     SCAN f VIRTUAL TABLE INDEX 0:M1                  0.7 ms
+ *
+ * The `=` in `0:=M1` is the whole story: it is SQLite saying the virtual table will be probed once
+ * per row of the *other* table rather than scanned once, so the cost is linear in corpus size and
+ * grows as an agent remembers more — the one direction a retrieval path must not scale in. That the
+ * three versions disagree, and that the slow one sits **between** the two fast ones, is the reason
+ * this is pinned rather than left to the planner: it is not a version to wait out.
+ *
+ * `+p.agent_id` suppresses index use on that term only, which pins `SCAN f` on all three at
+ * 0.5–0.8 ms. Results are identical either way — SQLite applies the whole `WHERE` before `LIMIT`, so
+ * the agent filter still bounds what reaches it.
+ *
+ * Exported because `store.test.ts` runs `EXPLAIN QUERY PLAN` over these exact strings. A test holding
+ * its own copy of the SQL would go on passing after somebody edited the statement it was guarding.
+ */
+export const MEMORY_DF_SQL = `SELECT count(*) AS df FROM memory_fts f
+   JOIN memory_passages p ON p.rowid = f.rowid
+  WHERE memory_fts MATCH ? AND +p.agent_id = ?`
+
+export const MEMORY_CANDIDATES_SQL = `SELECT p.id, p.source, p.heading, p.text, p.terms, p.length,
+        p.at, p.stamped, p.tags, p.tokens
+   FROM memory_fts f
+   JOIN memory_passages p ON p.rowid = f.rowid
+  WHERE memory_fts MATCH ? AND +p.agent_id = ?
+  ORDER BY bm25(memory_fts)
+  LIMIT ?`
+
 function matchExpression(terms: readonly string[]): string {
     return terms.map((term) => `"${term}"`).join(" OR ")
 }
@@ -508,20 +546,8 @@ export class SqliteStore implements Store {
             ),
             // One term per call. The whole MATCH expression is a single bound parameter, so this stays
             // a cached statement rather than being rebuilt per query.
-            memoryDf: db.prepare(
-                `SELECT count(*) AS df FROM memory_fts f
-                   JOIN memory_passages p ON p.rowid = f.rowid
-                  WHERE memory_fts MATCH ? AND p.agent_id = ?`,
-            ),
-            memoryCandidates: db.prepare(
-                `SELECT p.id, p.source, p.heading, p.text, p.terms, p.length, p.at, p.stamped,
-                        p.tags, p.tokens
-                   FROM memory_fts f
-                   JOIN memory_passages p ON p.rowid = f.rowid
-                  WHERE memory_fts MATCH ? AND p.agent_id = ?
-                  ORDER BY bm25(memory_fts)
-                  LIMIT ?`,
-            ),
+            memoryDf: db.prepare(MEMORY_DF_SQL),
+            memoryCandidates: db.prepare(MEMORY_CANDIDATES_SQL),
             historyAll: db.prepare(
                 `SELECT ${MESSAGE_COLUMNS} FROM messages
                   WHERE agent_id = ? AND session_key = ? ORDER BY id ASC`,

@@ -629,9 +629,12 @@ context:
         await runtime.stop()
     })
 
-    test("a truncated but non-empty reply is still a completion", async () => {
-        // Truncation is visible to the user, so it is not dressed up as a failure — only the
-        // *empty* case is, because an empty success is indistinguishable from a broken agent.
+    test("a truncated but non-empty reply is reported as truncated, and keeps its text", async () => {
+        // The previous behaviour was `final`, on the reasoning that truncation is visible to the user
+        // so it needs no flag. That holds for a person watching a terminal and nowhere else: on a
+        // channel a cut-off reply reads as a short complete one, and to anything reading the result
+        // programmatically `final` plus exit 0 means success. The text is still delivered — this is a
+        // reason of its own, not an error — so nothing is hidden that used to be shown.
         const dir = workspace()
         const runtime = await Runtime.create({
             agents: [join(dir, "agent.yaml")],
@@ -645,8 +648,12 @@ context:
         })
 
         const result = await runtime.agent("test").send("hi")
-        expect(result.reason).toBe("final")
+        expect(result.reason).toBe("truncated")
         expect(result.text).toBe("partial answer")
+        // Named the field to change and said whose limit it was — `max_tokens` is only sent when
+        // configured, so "the endpoint's own" and "the one you set" are different remedies.
+        expect(result.error?.code).toBe("reply_truncated")
+        expect(result.error?.field).toBe("model.main.maxTokens")
         await runtime.stop()
     })
 })

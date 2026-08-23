@@ -1,0 +1,12 @@
+# The heavier half, once per push rather than once per commit.
+#
+# `build` is first, and the order is load-bearing: every sibling import resolves through that
+# package's `dist/`, so on a fresh clone `typecheck` and `test` both fail with "Cannot find module
+# '@dispach/core'" — 79 type errors and 34 test errors. It passes locally on a tree that has been
+# built before, which is exactly how the same ordering bug sat in CI for nine days.
+#
+# This is not the authority. CI is: it runs on a checkout with no `dist/`, on Linux, and under
+# Node as well as Bun, and none of those are reproducible here.
+bun run build
+bun run typecheck
+bun run test

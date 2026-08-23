@@ -14,16 +14,16 @@
  * decision 5.1 rejects.
  *
  * So the target is **the threshold of the stage below the deepest one that fired**. At 0.72 pressure
- * the deepest exceeded threshold is `snip` (0.70), so the target is `trim`'s 0.60. At 0.96 it is
+ * the deepest exceeded threshold is `micro` (0.70), so the target is `snip`'s 0.60. At 0.96 it is
  * `reset` (0.95), so the target is `collapse`'s 0.88. Every compaction moves the session down exactly
  * one rung, which gives hysteresis without a constant and spends only the fidelity that rung costs.
- * `trim` is the floor and has nothing below it, hence the one margin below.
+ * `snip` is the floor and has nothing below it, hence the one margin below.
  *
  * ## Which stages are allowed
  *
  * Only those whose own threshold has been crossed, and always **in order from the first** — the
  * validator guarantees the order is ascending, and skipping a rung is how a mild overflow gets a
- * digest it did not need. So at 0.72 the ladder may use `trim` and `snip` and nothing more; if those
+ * digest it did not need. So at 0.72 the ladder may use `snip` and `micro` and nothing more; if those
  * two cannot reach 0.60 it stops and says so, rather than reaching for a tool the pressure has not
  * authorised.
  *
@@ -52,13 +52,17 @@ import {
 } from "./stages.ts"
 
 /**
- * How far below `trim`'s threshold the floor stage aims.
+ * How far below the first stage's own threshold that stage aims.
  *
- * The one margin the scheme needs, because `trim` has no rung beneath it to borrow a number from.
- * Five points of the budget: enough that a turn or two of ordinary growth does not re-fire the ladder,
- * small enough that the cheapest stage is not asked to throw away a quarter of the conversation.
+ * The one margin the scheme needs, because the first rung has nothing beneath it to borrow a number
+ * from. Five points of the budget: enough that a turn or two of ordinary growth does not re-fire the
+ * ladder, small enough that the cheapest stage is not asked to throw away a quarter of the
+ * conversation.
+ *
+ * Named for the position rather than the stage. It was `TRIM_MARGIN` while `trim` was first, which
+ * made a fact about the floor read as a fact about one stage — and then `trim` moved.
  */
-const TRIM_MARGIN = 0.05
+const FLOOR_MARGIN = 0.05
 
 export type Thresholds = Readonly<Record<StageName, number>>
 
@@ -83,7 +87,15 @@ export interface LadderInput {
     /** What the estimator has learned about its own bias. */
     readonly calibration: Calibration
     /** The `compactor` role, when one is configured. Absent and failing are handled alike. */
-    readonly summarise?: (messages: readonly ChatMessage[]) => Promise<string>
+    readonly summarise?: (messages: readonly ChatMessage[], signal: AbortSignal) => Promise<string>
+    /**
+     * The turn's signal, forwarded to `summarise`.
+     *
+     * Optional so a test can call the ladder without one; when absent, `digestFor` supplies a signal
+     * that is never aborted — which is exactly the old behaviour, and is why this is a parameter
+     * rather than something the ladder invents.
+     */
+    readonly signal?: AbortSignal
 }
 
 export interface LadderResult {
@@ -143,7 +155,9 @@ export function deepestStage(
  */
 export function targetFraction(thresholds: Thresholds, deepestIndex: number): number {
     const below = STAGE_ORDER[deepestIndex - 1]
-    if (below === undefined) return Math.max(0, thresholds.trim - TRIM_MARGIN)
+    // Read the floor off `STAGE_ORDER` rather than naming a stage. Hard-coding `trim` was correct only
+    // while `trim` happened to be first, and it went on type-checking after it was not.
+    if (below === undefined) return Math.max(0, thresholds[STAGE_ORDER[0]] - FLOOR_MARGIN)
     return thresholds[below]
 }
 
@@ -155,7 +169,7 @@ async function digestFor(
         return { text: mechanicalDigest(messages), source: "mechanical" }
     }
     try {
-        const text = await input.summarise(messages)
+        const text = await input.summarise(messages, input.signal ?? new AbortController().signal)
         // An empty digest is a failed digest. An endpoint that returns nothing — a reasoning model
         // that spent its whole output budget thinking, which this repo has measured more than once —
         // would otherwise replace a span of history with a blank message and report success.

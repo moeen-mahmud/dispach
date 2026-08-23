@@ -387,6 +387,62 @@ CREATE TABLE memory_sources (
 );
 `,
     },
+    {
+        version: 7,
+        name: "turn_status_truncated_no_progress",
+        /**
+         * Two more ways a turn can end: `truncated` and `no_progress`.
+         *
+         * Both existed as behaviour before they existed as statuses. A reply cut off at the output
+         * limit with text on the floor fell through to `final` — a truncated answer recorded as a
+         * complete one — and a model repeating one call until the step cap ran out was recorded as
+         * `max_steps`, which sends whoever reads it to raise a budget that was not the problem.
+         *
+         * A rebuild, because SQLite cannot alter a CHECK constraint. Nothing references `turns`
+         * (`messages.turn_id` is a plain column with no foreign key), so the ordinary create-copy-
+         * drop-rename is safe and the outgoing key to `sessions` is simply restated. The indexes are
+         * dropped with the table and recreated verbatim — including the partial one on `running`,
+         * without which crash recovery at boot goes from an index scan to a full scan of every turn
+         * the agent has ever taken, silently and only on a large store.
+         */
+        sql: `
+CREATE TABLE turns_new (
+    turn_id       TEXT PRIMARY KEY,
+    agent_id      TEXT NOT NULL,
+    session_key   TEXT NOT NULL,
+    status        TEXT NOT NULL CHECK (
+                      status IN (
+                          'running', 'final', 'max_steps', 'no_progress',
+                          'truncated', 'stopped', 'timeout', 'error'
+                      )
+                  ),
+    source        TEXT NOT NULL,
+    input         TEXT NOT NULL,
+    text          TEXT NOT NULL DEFAULT '',
+    reasoning     TEXT NOT NULL DEFAULT '',
+    steps         INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    error_code    TEXT,
+    error_message TEXT,
+    error_hint    TEXT,
+    started_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    duration_ms   INTEGER,
+    FOREIGN KEY (agent_id, session_key)
+        REFERENCES sessions (agent_id, session_key) ON DELETE CASCADE
+);
+
+INSERT INTO turns_new SELECT * FROM turns;
+
+DROP TABLE turns;
+
+ALTER TABLE turns_new RENAME TO turns;
+
+CREATE INDEX turns_by_session ON turns (agent_id, session_key, started_at DESC);
+CREATE INDEX turns_running ON turns (status) WHERE status = 'running';
+`,
+    },
 ]
 
 export interface MigrationReport {

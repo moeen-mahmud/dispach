@@ -14,6 +14,7 @@
 import { isSessionSource, SESSION_SOURCE_PREFIX } from "../memory/conversation.ts"
 import type { ChatMessage } from "../model/provider.ts"
 import { type ContextBlock, SLOT, skillHeader, VOLATILE_HEADER } from "./blocks.ts"
+import { isTurnStart } from "./compaction/stages.ts"
 import { estimateMessageTokens, estimateTokens } from "./tokens.ts"
 
 export interface AssembleInput {
@@ -103,6 +104,18 @@ export interface AssembleInput {
     readonly toolBlocks?: readonly ContextBlock[]
     /** Oldest first. */
     readonly history: readonly ChatMessage[]
+    /**
+     * Newest messages that must survive the budget: the current turn's own trace.
+     *
+     * The walk below goes newest-first and stops at the first message that will not fit, dropping
+     * everything older. When the message that will not fit *is* the newest one — a single tool
+     * observation larger than what the pinned blocks left over — the stop happens immediately and the
+     * whole history goes, including the call and result the model is about to reason over. It then
+     * answers as though the tool had never run.
+     *
+     * Optional because `previewContext` has no turn in flight and nothing to protect.
+     */
+    readonly protectedTail?: number
     readonly input: string
     /** Surfaced in the pinned error slot so a failure survives compaction. */
     readonly lastError?: string
@@ -243,17 +256,58 @@ export function assembleContext(input: AssembleInput): AssembledContext {
     const kept: ChatMessage[] = []
     let dropped = 0
 
+    // Clamped rather than trusted, like the ladder's: a caller reporting a longer tail than the
+    // history it passed would otherwise protect a negative range.
+    const tailFrom = Math.max(
+        0,
+        input.history.length -
+            Math.max(0, Math.min(input.protectedTail ?? 0, input.history.length)),
+    )
+
     for (let i = input.history.length - 1; i >= 0; i -= 1) {
         const message = input.history[i]
         if (message === undefined) continue
         const cost = messageCost(message)
-        if (cost > remaining) {
+        // The tail goes in whatever it costs. Over budget is a loud failure at the endpoint; a turn
+        // reasoning about a tool result that was silently removed from its own prompt is not.
+        if (cost > remaining && i < tailFrom) {
             dropped = i + 1
             break
         }
         remaining -= cost
         kept.unshift(message)
     }
+
+    // What the person said, rescued from the dropped range.
+    //
+    // The walk above stops at the first message it cannot afford and drops everything older, which
+    // keeps history contiguous — the property the ladder's `trim` docstring is about, since an
+    // assistant turn answering a vanished call makes a model redo work. So the requests are re-added
+    // afterwards rather than skipped during the walk: a run of `user` messages has no dangling pair.
+    //
+    // Kept for the reason `trim` keeps them: measured over a real session they are **0.3%** of
+    // history, so dropping them frees nothing and costs the only record of what was asked. And this
+    // path is reached exactly when the ladder fell short, which is the worst moment to also lose the
+    // instruction. Found live rather than by reading — on an agent whose window could not fit its own
+    // workspace the ladder could do nothing, and this trim was dropping the turn that set the task on
+    // every single turn.
+    // Two things here are allowed past `promptBudget`: the protected tail above, and these requests.
+    // Both eat into `reserveOutput`, which is a reserve rather than a wall — but neither may pass the
+    // *window*, which is one. Measured live at a 6,000-token window: with no ceiling the prompt reached
+    // 6,424, which an endpoint whose real window is larger accepted silently and one whose window
+    // matched would have refused. Newest-first, because the recent request is the live one.
+    const ceiling = Math.max(promptBudget, input.window)
+    let spent = pinnedTokens + kept.reduce((sum, message) => sum + messageCost(message), 0)
+    const rescued: ChatMessage[] = []
+    for (const message of input.history.slice(0, dropped).filter(isTurnStart).reverse()) {
+        const cost = messageCost(message)
+        if (spent + cost > ceiling) break
+        spent += cost
+        rescued.unshift(message)
+    }
+    kept.unshift(...rescued)
+    // What was reported as lost is what was actually lost, so the count and the prompt agree.
+    const droppedMessages = dropped - rescued.length
 
     // Carrying the message itself, not just its role and content. A `tool` observation names the call
     // it answers and an assistant turn carries the calls it made; a block describes neither, so
@@ -305,7 +359,7 @@ export function assembleContext(input: AssembleInput): AssembledContext {
         messages: blocks.map((b) => b.message ?? { role: b.role, content: b.content }),
         totalTokens: blocks.reduce((sum, b) => sum + b.tokens, 0),
         promptBudget,
-        droppedMessages: dropped,
+        droppedMessages,
     }
 }
 

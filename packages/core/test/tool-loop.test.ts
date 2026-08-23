@@ -285,12 +285,73 @@ describe("repair", () => {
 })
 
 describe("the step cap", () => {
+    /**
+     * Four *different* calls, because the script's last entry repeats forever and identical repeats
+     * are `no_progress`, not `max_steps`. The two guards answer different questions and a fixture
+     * that trips both tests neither.
+     */
+    const varied = [
+        "Working on it.\nACTION: memory_write\ntext: one\nEND",
+        "Still going.\nACTION: memory_write\ntext: two\nEND",
+        "Nearly.\nACTION: memory_write\ntext: three\nEND",
+        "One more.\nACTION: memory_write\ntext: four\nEND",
+    ]
+
     test("running out of steps mid-task is max_steps, not a completed turn", async () => {
         // The model keeps calling tools and never answers. Reporting `final` here would be the
         // "healthy but does nothing" shape that hard rule 8 exists to prevent.
-        const { result, runtime } = await run(["Working on it.\nACTION: now\nEND"])
+        const { result, runtime } = await run(varied)
         expect(result.steps).toBe(4)
         expect(result.reason).toBe("max_steps")
+        await runtime.stop()
+    })
+
+    /**
+     * An answer that lands exactly on the last permitted step is a completion, not a casualty.
+     *
+     * This is the case that decides how the cap is detected. `steps >= maxSteps` is true here *and*
+     * for a turn the budget really did stop, so it cannot be the test on its own — which is why the
+     * loop records whether the model chose to stop rather than inferring it afterwards.
+     */
+    test("an answer on the last permitted step is final, not max_steps", async () => {
+        const { result, runtime } = await run([
+            ...varied.slice(0, 3),
+            "Here is what I found so far.",
+        ])
+        expect(result.steps).toBe(4)
+        // `text` accumulates across steps, so this is the last piece rather than the whole reply.
+        expect(result.text).toContain("Here is what I found so far.")
+        expect(result.reason).toBe("final")
+        await runtime.stop()
+    })
+})
+
+describe("no progress", () => {
+    test("the same call with the same arguments three times ends the turn", async () => {
+        const { result, events, runtime } = await run(["Checking.\nACTION: now\nEND"])
+        expect(result.reason).toBe("no_progress")
+        // Ends *before* the cap, which is the whole point: the remaining steps would have repeated it.
+        expect(result.steps).toBeLessThan(4)
+        const warning = events.find(
+            (event) =>
+                event.type === "agent.warning" &&
+                (event.data as { code?: string }).code === "no_progress",
+        )
+        expect(warning).toBeDefined()
+        // Names the call, so the reader knows which one to look at rather than which budget to raise.
+        expect(JSON.stringify(warning?.data)).toContain("now")
+        await runtime.stop()
+    })
+
+    test("the same tool with different arguments is progress, not a loop", async () => {
+        const { result, runtime } = await run([
+            "ACTION: memory_write\ntext: alpha\nEND",
+            "ACTION: memory_write\ntext: beta\nEND",
+            "ACTION: memory_write\ntext: gamma\nEND",
+            "Done.",
+        ])
+        expect(result.reason).toBe("final")
+        expect(result.text).toBe("Done.")
         await runtime.stop()
     })
 })

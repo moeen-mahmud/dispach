@@ -67,7 +67,7 @@ framework explainers, go straight to the specific thing.
 
 | | |
 | --- | --- |
-| Runtime | Bun (primary), Node 22+ (soft compat, CI-tested, never a blocker) |
+| Runtime | Bun (primary), Node 24+ (soft compat, CI-tested, never a blocker) |
 | Package manager | `bun` — never npm, pnpm, or yarn |
 | Workspaces | Bun workspaces, monorepo |
 | Build | `bun build` + `tsc --emitDeclarationOnly` |
@@ -1572,8 +1572,115 @@ Never claim a performance property without a number in `evals/` and a script to 
   agent whose rows are gone still loads and still runs — so a failure part-way leaves something that
   works. The reverse order leaves a manifest-less agent whose data is unreachable and whose name
   nothing can name. `removalSteps` is pure so the order is asserted without performing it.
+- **A step budget is not a plan, and the guard against a loop is repetition.** `init` wrote `maxSteps:
+  6` and justified it in its own comment — "a two-tool chain needs five steps… one spare" — which is the
+  budget for answering a question. Live, `create a sample pdf` spent six *productive* steps and died one
+  step before succeeding, its reply ending on "Let me install it". Four numbers disagreed (schema 12,
+  `init` 6, reference 8, minimal 4), which is itself the tell that none was reasoned. 40 now, with
+  `limits.noProgress.identicalCalls` as the real guard: a small cap and a repetition check both stop a
+  loop, and only one of them also stops recovery.
+- **How the loop exited is recorded, never inferred.** `steps >= maxSteps` is true both for a turn the
+  budget stopped and for an answer arriving exactly on the last permitted step, so it cannot decide
+  between them — `answered` is set at the one break that means the work is done. The old
+  `pendingWork || text === ""` reached the right verdict on every case that mattered; it is gone
+  because it asked about the model's sentence to learn about the loop. **Corollary about research: the
+  "max_steps misfiled as final" defect reported during planning was not real.** The reporting gap under
+  it was, and a plausible mechanism traced through source is still a hypothesis until the store agrees.
+- **`stats.reason` reached the transcript and was rendered nowhere, and that was the whole bug.** In the
+  TUI a turn stopped by its budget was pixel-identical to a completed one; the plain path had a sentence
+  for `max_steps` and printed it only when the reply was *empty*; `channels.ts:363` returns on empty text,
+  so a cut turn with no prose delivered **nothing at all** to Telegram. `endNote` is in **core** because
+  the channel path needs it too — three callers, one formatter — and `endedBadly` is `!== "final" &&
+  !== "stopped"` so a new reason cannot exit 0 by omission. Related: the plain path filtered
+  `agent.warning` to the single code `manifest_changed`, hiding every other warning ever added.
+- **An error constructor nobody calls is a hint nobody reads.** `turnTimeout` and `turnStopped` were
+  written in Phase 1, hints included, and never invoked — grep found only the definitions. So a
+  timed-out turn had `status: "timeout"`, three empty error columns, one parenthesis of output, and
+  **exit 0**. Grep for callers of an `errors.ts` factory before assuming a failure path reports itself.
+- **Compaction never drops what the person said, and that is arithmetic rather than policy.** Measured
+  on a real 47-message session: observations **83.9%** of history bytes, assistant prose 12.6%, tool
+  calls 3.2%, everything the person typed **0.3%** — 423 bytes of 150 KB. Deleting all of it frees
+  nothing and costs the only record of the task, in a session full of `"continue"` and `"yes"` that
+  oldest-first *kept* while dropping the instruction. One predicate, `isTurnStart`, shared by the
+  ladder's `trim` and `assembleContext`'s blunt trim — two definitions is how one path honoured the rule
+  while the other, on the same session a moment later, did not. Found live, not by reading.
+- **The ladder is ordered by information destroyed, not bytes freed — and that ordering is forced.**
+  `snip .60 → micro .70 → collapse .80 → reset .88 → trim .95`. `snip`/`micro` leave an `artifact_read`
+  pointer, `collapse`/`reset` leave meaning as a digest, `trim` leaves nothing, so `trim` is last despite
+  freeing the most; its gentle name is exactly why it was misplaced. The forced part: with `trim` third,
+  `collapse` and `reset` **could never fire** — they only run when `trim` failed to reach target, which
+  means `trim` had already stripped history to the request spine, and a digest *plus* the preserved spine
+  is never smaller than the spine alone. Measured 8316 → 7860 → 5064, then both `changed=false` at 495.
+  **Summarising must precede destroying or the summary has no subject.**
+- **Reordering `STAGE_ORDER` moves two invariants nobody names.** `runLadder` *replaces* the displacement
+  map with whatever a stage returns, and `trim` reindexes — so `trim` running third with an empty map
+  strands every artifact `snip` and `micro` recorded, leaving live `artifact_read` pointers to ids
+  `persist()` was never asked to write. And a digest is not a turn start, so an unprotected one is the
+  first thing `trim` eats. Both were silent; both are now guarded by tests that go red with the fix
+  reverted. Also: `TRIM_MARGIN` was a fact about the *floor* named after a stage, and `validate.ts` kept
+  a hand-copied `THRESHOLD_ORDER` that silently described a ladder that no longer existed.
+- **`this.window` is main's window, and the compactor is a different model.** Thirteen lines in
+  `agent.ts` had three defects: `requestParamsFor(compactor, this.window)`, no bound on the span against
+  `compactor.capabilities.contextWindow`, and `signal: new AbortController().signal` — never aborted, so
+  a hanging compactor outlived both the turn signal and `turnTimeoutMs`. `roles.ts` calls a cheap
+  compactor beside a large main "the intended production shape and usually the biggest available cost
+  win", which is precisely the configuration that overflows: it threw, `digestFor` caught it, the ladder
+  fell back to `mechanicalDigest`, and `digestSource: "mechanical"` was reported to nobody. **The
+  recommended cost optimisation had never once worked.** Guarded by reading the digest request's body.
+- **Two things may pass the prompt budget; nothing may pass the window in silence.** The current turn's
+  own trace and the person's requests are kept past `promptBudget`, because the alternative is a model
+  reasoning about a tool result absent from its own prompt — `reserveOutput` is a reserve being spent.
+  The window is not a reserve: measured live at a declared 6,000, a 12-step turn assembled **6,743**
+  tokens and was simply sent. An endpoint whose real window matched would have refused it. The rescue is
+  capped at the window and `prompt_over_window` names three remedies.
+- **A new `TurnEndReason` needs a store migration, and SQLite cannot alter a CHECK constraint.**
+  `turns.status` is `TEXT NOT NULL CHECK (status IN (…))`, so `truncated` and `no_progress` needed
+  migration 7 to create-copy-drop-rename. Nothing references `turns` (`messages.turn_id` is a plain
+  column), which is what makes that safe — and the indexes go with the table, including the *partial* one
+  on `running`, without which crash recovery at boot degrades from an index scan to a full scan of every
+  turn ever taken, silently and only on a large store.
+- **`docs/04-SPEC-WIRE.md` carried six rows for events that do not exist or have different fields.** A
+  second `context.pressure` naming `used`/`window`, a second `compaction.stage` naming `dropped`, a
+  `context.reset` naming `sessionKey`, a duplicate `phase.changed`, and `skill.selected`/`skill.none`,
+  which have never existed at all — sitting below the accurate rows in the *same table*, so anything
+  written against them read `undefined` from a documented field. Check a spec table against
+  `events/types.ts` before trusting it.
 - **`bun link` points at the checkout, and `bin` points at `dist/`.** So a collaborator must build
   *before* linking or the symlink dangles, and `bun run build` must build every workspace package the
   binary imports or the command runs yesterday's provider code from a stale `dist`. Both were
   undocumented until the README grew a setup section; the second is already a recorded hazard, and it
   presents as "your change is correct, the test fails, and the stack trace points into `dist`".
+- **CI has no `dist/`, so `build` runs second — after `lint` and before everything else.** The
+  workflow was ordered "cheapest-first so a lint error does not wait on a build", which is right about
+  lint and wrong about the rest: every sibling import resolves through that package's `dist/`, so on a
+  fresh checkout `typecheck` reports **79** `TS2307: Cannot find module '@dispach/core'` and `bun test`
+  **34** module-resolution errors — the merge gate red for nine days, on a tree where both commands
+  pass locally. That is the inverse of the recorded stale-`dist` hazard and it hides better: a stale
+  `dist` fails a test, an absent one fails a command that has nothing to do with the change, and the
+  local run cannot reproduce it because an earlier build already left the directory there. **Verify a
+  workflow change against a fresh clone, never against your working tree.**
+- **A CI job with no `timeout-minutes` is bounded by GitHub's six-hour ceiling, twice per matrix leg.**
+  A hang in `test under node` burned 6 h × 2 on every push for five days, reported as `cancelled`,
+  which reads as somebody's own doing. The bound is structural for the same reason `KeepAlive:
+  {Crashed: true}` is: a fault that stops once gets looked at, and one that retries forever gets a log
+  nobody opens. `test:node` also carries `--test-timeout`, so a hanging *test* is named and the rest of
+  the suite still runs — without it Node's runner stops dispatching at the hung file, and every file
+  after it in the glob is silently never run, which is indistinguishable in the log from a suite that
+  ended there.
+- **A memory query's *plan* is pinned with a unary `+`, because three SQLite versions disagree and the
+  slow one sits between the two fast ones.** `memory_passages_source` indexes `(agent_id, source)`, so
+  given `WHERE memory_fts MATCH ? AND p.agent_id = ?` a planner may enter through the agent filter and
+  probe the virtual table once per row it finds — `SCAN f VIRTUAL TABLE INDEX 0:=M1`, where the `=` is
+  SQLite telling you it is a per-row probe. Measured over 5,000 passages, `:memory:`, same code: 3.51.0
+  (bun) **0.7 ms**, 3.51.3 (node 22) **260 ms**, 3.53.3 (node 24) **0.7 ms**. So it is not a version to
+  wait out, and the cost is linear in corpus size — it gets worse exactly as an agent remembers more.
+  `+p.agent_id` suppresses index use on that one term and pins `SCAN f` on all three. Corollary that
+  cost a round: **the plan assertion cannot fail under `bun test`**, because bun already chooses right,
+  so the guard also asserts the `+` in the SQL text. A guard that can only go red on the
+  `continue-on-error` leg is the "passes with the fix reverted" shape again.
+- **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
+  under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
+  builds running beside it — which is a shared 2-core runner every time. Its own comment says the
+  criterion "gets renegotiated, not relaxed quietly", which is right and is why the number cannot just
+  be raised: `evals/` and `bench:boot` are where a measurement belongs, and a unit test's job is that
+  fifty skills load and the second scan is cached.

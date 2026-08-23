@@ -16,7 +16,7 @@
  * produce the same output and the tests need no fakes.
  */
 
-import type { AnyEvent } from "@dispach/core"
+import { type AnyEvent, endNote } from "@dispach/core"
 import { MAX_TRANSCRIPT_ITEMS, REASONING_FOLD_ROWS } from "#lib/const"
 import { ROLE_PREFIX } from "#lib/theme"
 import type {
@@ -270,24 +270,54 @@ function reduceEvent(state: TranscriptState, event: AnyEvent): TranscriptState {
                     break
                 }
             }
+            // Why the turn stopped, from the formatter the plain path uses. Until this existed
+            // `stats.reason` reached the reducer and was rendered nowhere, so a turn the step budget
+            // cut off looked exactly like a completed one — which is how an agent came to stop
+            // mid-task on "Let me install it" with nothing on screen explaining it.
+            const why = endNote(reason, { steps, durationMs })
+
             if (reply === -1) {
-                // A clean turn that produced nothing is not a normal outcome and must not look like one.
-                const said =
-                    reason === "final"
-                        ? append(next, "note", "the model returned no text", { stats })
-                        : next
+                // A turn that produced nothing is not a normal outcome and must not look like one.
+                const said = append(
+                    next,
+                    "note",
+                    why ?? (reason === "final" ? "the model returned no text" : ""),
+                    { stats },
+                )
                 return { ...said, live: undefined, status: "idle", turnFrom: undefined }
             }
             const items = [...next.items]
             const item = items[reply] as TranscriptItem
             items[reply] = { ...item, stats }
-            return { ...next, items, live: undefined, status: "idle", turnFrom: undefined }
+            const settled: TranscriptState = {
+                ...next,
+                items,
+                live: undefined,
+                status: "idle",
+                turnFrom: undefined,
+            }
+            // Below the reply, not attached to it: the reply is what the model said, and this is what
+            // the runtime did. Attaching it to the item would put a harness sentence in the model's
+            // voice — the distinction `note` exists for.
+            return why === undefined ? settled : append(settled, "note", why)
         }
 
         case "agent.error":
         case "error": {
             const { code, message, hint } = event.data
             return append(state, "error", `${code}: ${message}\nhint: ${hint}`)
+        }
+
+        case "context.dropped": {
+            const { messages, budget } = event.data
+            // A note, not a stage line: the ladder decided what to compact and this is the budget
+            // running out regardless. Worth saying because the agent is now answering without part of
+            // the conversation, and nothing else on any surface would mention it.
+            return append(
+                state,
+                "note",
+                `context: ${messages} older message(s) did not fit the ${budget}-token budget and were left out`,
+            )
         }
 
         case "agent.warning": {

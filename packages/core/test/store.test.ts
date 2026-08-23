@@ -13,7 +13,12 @@ import { join } from "node:path"
 import { formatSessionKey, isSessionKey, parseSessionKey } from "../src/store/session-key.ts"
 import { openDatabase, userVersion } from "../src/store/sqlite/driver.ts"
 import { MIGRATIONS, migrate } from "../src/store/sqlite/migrations.ts"
-import { openMemoryStore, SqliteStore } from "../src/store/sqlite/store.ts"
+import {
+    MEMORY_CANDIDATES_SQL,
+    MEMORY_DF_SQL,
+    openMemoryStore,
+    SqliteStore,
+} from "../src/store/sqlite/store.ts"
 import { describe, expect, runner, test } from "./_harness.ts"
 
 const AGENT = "assistant"
@@ -618,6 +623,47 @@ describe("runtime leases", () => {
         expect(await store.leases.orphans()).toEqual(["deleted-agent"])
         await store.close()
     })
+})
+
+describe("the memory queries are driven by the FTS index", () => {
+    // Two assertions, and the second is the one that fires.
+    //
+    // Not a timing test: that would have to be generous enough to pass on a loaded runner, while the
+    // plan is deterministic. The bad shape is the FTS table reported with an `=` in its index string
+    // (`INDEX 0:=M1`) — SQLite saying it will probe the virtual table once per row of the *other*
+    // table instead of scanning it once. Measured at 260 ms against 0.7 ms over 5,000 passages.
+    //
+    // But **the plan check cannot fail on either runner CI now runs**: bun 1.3.5 bundles SQLite
+    // 3.51.0 and node 24 bundles 3.53.3, and both choose correctly without the `+`. The only version
+    // measured to get it wrong is 3.51.3, in the node 22 that decision 13.5 just dropped from the
+    // matrix — so the plan assertion documents the claim and cannot go red anywhere. That is the
+    // "passes with the fix reverted" shape this repo has been caught by three times, which is why the
+    // `+` is asserted in the SQL text as well. Pinning that much syntax is the price of a guard that
+    // still holds once the version that found the bug is gone.
+    test.each([
+        ["memoryDf", MEMORY_DF_SQL, ['"a"', AGENT]],
+        ["memoryCandidates", MEMORY_CANDIDATES_SQL, ['"a"', AGENT, 5]],
+    ] as [string, string, (string | number)[]][])(
+        "%s scans the virtual table rather than probing it per row",
+        async (_name, sql, params) => {
+            expect(sql).toContain("+p.agent_id = ?")
+
+            const db = await openDatabase({ path: ":memory:" })
+            migrate(db)
+            const plan = db
+                .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+                .all<{ detail: string }>(...params)
+                .map((row) => row.detail)
+            db.close()
+
+            const virtual = plan.find((line) => line.includes("VIRTUAL TABLE"))
+            expect(virtual).toBeDefined()
+            expect(String(virtual)).toContain("SCAN")
+            expect(String(virtual)).not.toContain(":=")
+            // First, or something other than the index is driving the join.
+            expect(plan[0]).toBe(virtual)
+        },
+    )
 })
 
 describe("kv", () => {

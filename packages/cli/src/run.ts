@@ -21,6 +21,8 @@ import {
     type AnyEvent,
     BRAND,
     defaultStorePath,
+    endedBadly,
+    endNote,
     HarnessError,
     processAlive,
     Runtime as RuntimeClass,
@@ -815,10 +817,13 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
             )
         }),
 
-        // Exempt from `showRows`, like a gated call and for the same reason: a one-shot run whose
-        // agent just rewrote its own configuration must not be the only surface that does not say so.
+        // Every warning, and exempt from `showRows` like a gated call. It used to be one code —
+        // `manifest_changed` — so an agent that rewrote its own configuration was reported and
+        // everything else was not: a truncated reply, a repeated call, a compactor that silently fell
+        // back to a mechanical digest, a prompt over the window. `showRows` exists to keep a one-shot
+        // run free of *progress* rows, and a warning is not progress.
         runtime.bus.on("agent.warning", (event: AnyEvent) => {
-            if (event.type !== "agent.warning" || event.data.code !== "manifest_changed") return
+            if (event.type !== "agent.warning") return
             row(`  · ${event.data.message}\n    ${event.data.hint}`)
         }),
 
@@ -835,6 +840,16 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
         runtime.bus.on("tool.gated", (event: AnyEvent) => {
             if (event.type !== "tool.gated") return
             row(`  · ${event.data.slug} — blocked: ${event.data.reason}`)
+        }),
+
+        // Also not gated on `showRows`. The ladder ran and the budget was still short, so history was
+        // cut anyway — the same class as a blocked write: the run did less than it was asked to, and
+        // for six phases the only trace was a field on `AssembledContext` that nothing read.
+        runtime.bus.on("context.dropped", (event: AnyEvent) => {
+            if (event.type !== "context.dropped") return
+            row(
+                `  · context: ${event.data.messages} older message(s) did not fit the ${event.data.budget}-token budget and were left out`,
+            )
         }),
     ]
     const unsubscribe = () => {
@@ -920,20 +935,21 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
         if (streaming && !atLineStart) write("\n")
         else if (!streaming && result.text !== "") write(`${result.text}\n`)
 
-        if (result.reason === "stopped") {
-            const elapsed = cancelledAt === 0 ? 0 : performance.now() - cancelledAt
-            write(`\n^C cancelled after ${elapsed.toFixed(0)} ms\n`)
-        } else if (result.reason === "timeout") {
-            write(`\n(timed out after ${result.durationMs} ms)\n`)
-        } else if (result.reason === "error" && result.error !== undefined) {
+        // One formatter for every ending, shared with the transcript. The previous version had a
+        // sentence for three of the six reasons and printed the `max_steps` one only when the reply was
+        // empty — so an agent that stopped mid-task having produced prose said nothing at all.
+        const note = endNote(result.reason, {
+            steps: result.steps,
+            durationMs: result.durationMs,
+            ...(cancelledAt === 0 ? {} : { cancelledAfterMs: performance.now() - cancelledAt }),
+        })
+        if (note !== undefined) write(`\n(${note})\n`)
+        if (result.reason === "error" && result.error !== undefined) {
             process.stderr.write(
                 `\n${result.error.code}: ${result.error.message}\n  hint: ${result.error.hint}\n`,
             )
-            exitCode = EXIT_FAILURE
-        } else if (result.reason === "max_steps") {
-            write("\n(stopped at maxSteps with no reply — this is a failure, not a completion)\n")
-            exitCode = EXIT_FAILURE
         }
+        if (endedBadly(result.reason)) exitCode = EXIT_FAILURE
 
         if (!quiet && result.reason === "final") {
             write(

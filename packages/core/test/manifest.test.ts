@@ -83,8 +83,12 @@ describe("a valid manifest", () => {
         const { manifest, window } = load({ "agent.yaml": VALID })
         expect(manifest.id).toBe("test")
         expect(manifest.tools.dialect).toBe("nlt")
-        expect(manifest.limits.maxSteps).toBe(12)
-        expect(manifest.context.thresholds.trim).toBe(0.6)
+        expect(manifest.limits.maxSteps).toBe(40)
+        expect(manifest.limits.noProgress.identicalCalls).toBe(3)
+        // The first rung is `snip`, not `trim`: observations before whole turns.
+        expect(manifest.context.thresholds.snip).toBe(0.6)
+        // And `trim` is the last, not the first: it destroys without leaving a pointer or a digest.
+        expect(manifest.context.thresholds.trim).toBe(0.95)
         // Window comes from the capability registry when the manifest does not set it.
         expect(window).toBe(128_000)
     })
@@ -230,9 +234,26 @@ ${thresholds}`)
 
     test("inverted thresholds are rejected, naming the offending stage", () => {
         const error = expectFailure({
-            "agent.yaml": withThresholds("  thresholds:\n    trim: 0.9\n    snip: 0.7\n"),
+            "agent.yaml": withThresholds("  thresholds:\n    snip: 0.9\n    micro: 0.7\n"),
         })
-        expect(fields(error)).toContain("context.thresholds.snip")
+        expect(fields(error)).toContain("context.thresholds.micro")
+    })
+
+    /**
+     * The five numbers a manifest written before the reorder carries. Not malformed — ordered for a
+     * ladder that ran `trim` first. The generic ascending error would point at `trim` and say it must
+     * exceed `micro`: true, and about a line nobody typed.
+     */
+    test("thresholds in the old stage order are named as such, not as an inversion", () => {
+        const error = expectFailure({
+            "agent.yaml": withThresholds(
+                "  thresholds:\n    trim: 0.60\n    snip: 0.70\n    micro: 0.80\n    collapse: 0.88\n    reset: 0.95\n",
+            ),
+        })
+        expect(codes(error)).toContain("manifest_thresholds_legacy_order")
+        expect(codes(error)).not.toContain("manifest_thresholds_not_ascending")
+        // The hint has to carry the rewrite, or it is a diagnosis with no remedy.
+        expect(JSON.stringify(error)).toContain("snip 0.6")
     })
 
     test("a threshold outside (0,1) is rejected", () => {

@@ -19,7 +19,13 @@ import { type Calibration, comparableEstimate, observe, UNCALIBRATED } from "../
 import { runLadder, type Thresholds } from "../context/compaction/ladder.ts"
 import type { Displaced } from "../context/compaction/stages.ts"
 import { estimateMessageTokens } from "../context/tokens.ts"
-import { type ErrorDetail, HarnessError, toolRepairFailed } from "../errors.ts"
+import {
+    type ErrorDetail,
+    HarnessError,
+    toolRepairFailed,
+    turnStopped,
+    turnTimeout,
+} from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import type { TurnEndReason } from "../events/types.ts"
 import type { ChatMessage, ToolDefinition } from "../model/provider.ts"
@@ -38,6 +44,14 @@ import { runStep } from "./step.ts"
 
 export interface TurnLimits {
     readonly maxSteps: number
+    /**
+     * When to conclude the model is looping rather than working.
+     *
+     * Separate from `maxSteps` because they answer different questions and want opposite settings: the
+     * cap should be generous enough for real recovery, and this should be tight enough to catch a
+     * repeat. Sizing one number for both is how a six-step budget came to cut an agent off mid-task.
+     */
+    readonly noProgress: { readonly identicalCalls: number }
     readonly turnTimeoutMs: number
     readonly toolTimeoutMs: number
     readonly maxParallelTools: number
@@ -190,8 +204,15 @@ export interface TurnCompaction {
      * fresh `UNCALIBRATED` is correct and merely means the first turn runs on the raw estimate.
      */
     readonly calibration: Calibration
-    /** The `compactor` role. Absent, throwing and empty-returning are all handled the same way. */
-    readonly summarise?: (messages: readonly ChatMessage[]) => Promise<string>
+    /**
+     * The `compactor` role. Absent, throwing and empty-returning are all handled the same way.
+     *
+     * Takes the turn's signal, because it makes a network call and had none: it was invoked with a
+     * fresh `new AbortController().signal` that nothing ever aborted, so a hanging compactor blocked
+     * the step forever — outside the turn signal *and* outside `turnTimeoutMs`, which is the one
+     * bound the rest of the turn has.
+     */
+    readonly summarise?: (messages: readonly ChatMessage[], signal: AbortSignal) => Promise<string>
     /**
      * Persists what a stage displaced. Awaited *inside* the step loop, not at the end of the turn.
      *
@@ -269,6 +290,27 @@ function linkSignals(
     }
 }
 
+/**
+ * The detail for a turn that ended because it was aborted.
+ *
+ * `turnTimeout` and `turnStopped` were written in Phase 1 with hints already in them and **never
+ * called** — grep found only the definitions. So a timed-out turn carried `status: "timeout"` and
+ * three empty error columns, the plain path printed "(timed out after N ms)" and exited **0**, and
+ * the one sentence naming the field to raise sat unreachable in `errors.ts` for six phases.
+ *
+ * Returns the detail rather than throwing it: cancellation is a state in this loop, not an exception,
+ * and a `reason` other than these two has no detail to give.
+ */
+function abortDetail(
+    reason: TurnEndReason,
+    turnId: string,
+    timeoutMs: number,
+): ErrorDetail | undefined {
+    if (reason === "timeout") return turnTimeout(turnId, timeoutMs).toDetail()
+    if (reason === "stopped") return turnStopped(turnId).toDetail()
+    return undefined
+}
+
 export async function runTurn(input: TurnInput): Promise<TurnResult> {
     const turnId = input.turnId ?? newTurnId()
     const context = { agentId: input.agentId, sessionKey: input.sessionKey, turnId }
@@ -297,9 +339,26 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
      */
     let phase = input.phases?.current ?? ""
     let reason: TurnEndReason = "final"
+    /**
+     * The model produced a reply with no tool call, so it decided it was done.
+     *
+     * A flag rather than a comparison after the loop, for the reason `pinned` is a flag in the
+     * transcript: "did the budget stop this?" cannot be answered from `steps >= maxSteps`, because an
+     * answer that arrives exactly on the last permitted step satisfies it too. Inferring it from state
+     * is what made the previous version need `pendingWork`, which was wrong in the other direction.
+     */
+    let answered = false
     let error: TurnResult["error"]
     /** Consecutive repair attempts. Reset by any step whose calls were usable. */
     let repairs = 0
+    /**
+     * Signatures of the most recent tool-calling steps, oldest first, capped at the threshold.
+     *
+     * A ring rather than a full history: the question is whether the *last* N are identical, and
+     * keeping every signature of a forty-step turn to answer it would grow with the turn.
+     */
+    const identicalCalls = input.limits.noProgress.identicalCalls
+    const recentCalls: string[] = []
 
     input.bus.emit(
         "turn.start",
@@ -312,8 +371,6 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
     const trace: ChatMessage[] = [{ role: "user", content: input.input }]
     /** Prose from the current step that no history message carries yet. */
     let pendingProse = ""
-    /** True when the last step asked for more work, so exhausting the step cap is a failure. */
-    let pendingWork = false
     /** A mutating tool succeeded. Its effect happened, whatever the turn's outcome turns out to be. */
     let sideEffects = false
     /**
@@ -389,6 +446,10 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
         while (steps < input.limits.maxSteps) {
             if (link.signal.aborted) break
 
+            // The window as this step sees it: reduced by whatever the dialect puts in the request body
+            // rather than in a block. Named once because two readers need it — `assembleContext`'s
+            // budget, and the over-window check below.
+            const windowForTurn = Math.max(1, input.window - (tools?.wireTokens ?? 0))
             const assembleWith = (messages: readonly ChatMessage[]) =>
                 assembleContext({
                     identity: input.identity,
@@ -415,10 +476,14 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
                           }),
                     ...(input.reminder === undefined ? {} : { reminder: input.reminder }),
                     history: messages,
+                    // The current turn's trace, which the blunt trim may not cut. Derived from the
+                    // messages it is handed rather than from `history`, because the ladder may have
+                    // replaced that array by the time this runs.
+                    protectedTail: Math.max(0, messages.length - initialHistoryLength),
                     input: input.input,
                     // Reduced by whatever the dialect puts in the request body rather than in a block.
                     // Zero under NLT, so this is the same arithmetic it always was.
-                    window: Math.max(1, input.window - (tools?.wireTokens ?? 0)),
+                    window: windowForTurn,
                     reserveOutput: input.reserveOutput,
                 })
 
@@ -445,6 +510,8 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
                     ...(input.compaction.summarise === undefined
                         ? {}
                         : { summarise: input.compaction.summarise }),
+                    // So a hanging compactor dies with the turn rather than outliving it.
+                    signal: link.signal,
                 })
 
                 // After the ladder, describing the prompt that will actually be sent. Emitting
@@ -462,6 +529,28 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
                     },
                     context,
                 )
+
+                // A compactor was configured and the digest came from the fallback anyway. Silent, this
+                // is how "configured and never once worked" survives: the ladder catches every reason
+                // the call can fail — absent, throwing, empty — and reports the outcome only as a
+                // field on an event nobody reads. The measured cause is the span: sized against
+                // main's window it overflows a smaller compactor on the first real compaction.
+                if (
+                    input.compaction.summarise !== undefined &&
+                    result.digestSource === "mechanical"
+                ) {
+                    input.bus.emit(
+                        "agent.warning",
+                        {
+                            code: "compactor_fell_back",
+                            message:
+                                "A compactor role is configured, but the digest was written mechanically because the model call did not produce one.",
+                            hint: "Check that model.compactor's endpoint and key work, and that its context window fits the span it is asked to summarise — a compactor much smaller than model.main is the usual cause. The mechanical digest is factual but thin, so the session keeps working and remembers less.",
+                            field: "model.compactor",
+                        },
+                        context,
+                    )
+                }
 
                 for (const record of result.stages) {
                     input.bus.emit(
@@ -519,6 +608,43 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
                 context,
             )
 
+            // `droppedMessages` has been on `AssembledContext` since Phase 1, documented as "Reported,
+            // never silent", with no reader anywhere. So the budget could remove the oldest half of a
+            // conversation and the only trace was slightly less history in the prompt. It is the
+            // ladder falling short by another name, and it belongs on the bus for the same reason
+            // `compaction.stage` does.
+            // The prompt passed the window, which the budget exists to prevent and cannot always.
+            // Two things are deliberately allowed past `promptBudget` — the current turn's own trace
+            // and the person's requests — because the alternative is a turn reasoning about a tool
+            // result that was removed from its own prompt. What must not happen is that they pass the
+            // *window* in silence: measured live, a 12-step turn on a 6,000-token window assembled
+            // **6,743** tokens and was simply sent, which an endpoint with a smaller real window
+            // refuses and nothing here would have explained.
+            if (assembled.totalTokens > windowForTurn) {
+                input.bus.emit(
+                    "agent.warning",
+                    {
+                        code: "prompt_over_window",
+                        message: `The assembled prompt is ${assembled.totalTokens} tokens against a ${windowForTurn}-token window.`,
+                        hint: "The current turn's own calls and results cannot be compacted — dropping them would leave the model reasoning about a tool result absent from its prompt — so a turn that generates more than the window holds cannot be rescued by the ladder. Raise context.window if the model has the room, lower limits.maxSteps, or cut context.observationMaxTokens so each result costs less.",
+                        field: "context.window",
+                    },
+                    context,
+                )
+            }
+
+            if (assembled.droppedMessages > 0) {
+                input.bus.emit(
+                    "context.dropped",
+                    {
+                        messages: assembled.droppedMessages,
+                        budget: assembled.promptBudget,
+                        keptTokens: assembled.totalTokens,
+                    },
+                    context,
+                )
+            }
+
             steps += 1
             const stepContext = { ...context, stepId: newStepId() }
             const params = requestParamsFor(input.role, input.window)
@@ -551,7 +677,6 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
                     reported: step.promptTokens,
                 })
             }
-            pendingWork = false
 
             // With no catalogue there is nothing to look for, and running a parser over the reply
             // could only ever find a false positive in the model's prose.
@@ -577,31 +702,56 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
             // prevent. It happens for real: on a reasoning model, reasoning tokens are billed to
             // the output budget, so a `max_tokens` that does not cover the thinking returns no
             // content at all. Measured against deepseek-v4-pro with max_tokens=16.
+            // `max_tokens` is only sent when configured, so the limit that was hit is either
+            // that number or the endpoint's own — and saying which is the whole value of the
+            // message. Reporting a cap this runtime never sent is what made the previous
+            // version read as "the harness truncated me" when it had not.
+            const cap =
+                params.maxTokens === undefined
+                    ? "the endpoint's own output limit"
+                    : `the configured limit of ${params.maxTokens} tokens`
+            const spent =
+                step.outputTokens > 0
+                    ? `${step.outputTokens} output tokens were reported`
+                    : "the endpoint reported no usage, so how much it actually generated is unknown"
+            const capHint =
+                input.role.capabilities.thinking === "none"
+                    ? "Set model.<role>.maxTokens to raise the ceiling, if one is configured. Otherwise this is the endpoint's own limit and the request needs to ask for less."
+                    : "This model bills its thinking to the output budget and thinks harder the more it is constrained, so a ceiling that fits a bare question may leave nothing for the answer under a longer prompt. Either raise model.<role>.maxTokens, or set model.<role>.reasoningEffort — `none` is the measured fix when the work is short and well specified."
+
             if (
                 step.finishReason === "length" &&
                 text.trim() === "" &&
                 parsed.intents.length === 0
             ) {
                 reason = "error"
-                // `max_tokens` is only sent when configured, so the limit that was hit is either
-                // that number or the endpoint's own — and saying which is the whole value of the
-                // message. Reporting a cap this runtime never sent is what made the previous
-                // version read as "the harness truncated me" when it had not.
-                const cap =
-                    params.maxTokens === undefined
-                        ? "the endpoint's own output limit"
-                        : `the configured limit of ${params.maxTokens} tokens`
-                const spent =
-                    step.outputTokens > 0
-                        ? `${step.outputTokens} output tokens were reported`
-                        : "the endpoint reported no usage, so how much it actually generated is unknown"
                 const detail: ErrorDetail = {
                     code: "empty_reply_output_exhausted",
                     message: `The model produced no text and stopped at ${cap} — ${spent}${reasoning === "" ? "" : `, and ${reasoning.length} characters arrived as reasoning`}.`,
-                    hint:
-                        input.role.capabilities.thinking === "none"
-                            ? "Set model.<role>.maxTokens to raise the ceiling, if one is configured. Otherwise this is the endpoint's own limit and the request needs to ask for less."
-                            : "This model bills its thinking to the output budget and thinks harder the more it is constrained, so a ceiling that fits a bare question may leave nothing for the answer under a longer prompt. Either raise model.<role>.maxTokens, or set model.<role>.reasoningEffort — `none` is the measured fix when the work is short and well specified.",
+                    hint: capHint,
+                    field: "model.main.maxTokens",
+                }
+                error = detail
+                input.bus.emit("agent.warning", detail, context)
+                break
+            }
+
+            // The same limit, with text on the floor. Untreated this was the quietest ending in the
+            // runtime: the reply is cut mid-sentence, the loop falls through the no-tool-call break
+            // below, and the turn is recorded `final` — a truncated answer reported as a complete
+            // one, exiting 0, with `finishReason` living only on an event no first-party consumer
+            // reads. The empty case above was handled and this one was not, which is the harder half
+            // to notice, because the output looks like an answer.
+            //
+            // Intents are excluded deliberately. A `length` finish mid-`arguments` produces invalid
+            // JSON under `native`, which `readArguments` catches and turns into a repair — a better
+            // remedy than ending the turn, and one that already exists.
+            if (step.finishReason === "length" && parsed.intents.length === 0) {
+                reason = "truncated"
+                const detail: ErrorDetail = {
+                    code: "reply_truncated",
+                    message: `The reply stopped at ${cap} part-way through — ${spent}.`,
+                    hint: capHint,
                     field: "model.main.maxTokens",
                 }
                 error = detail
@@ -617,6 +767,39 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
             // An unreadable call counts as work: breaking here would drop it silently and report the
             // turn as a clean reply, which is the one outcome that must never happen.
             if (tools === undefined || (parsed.intents.length === 0 && unreadable.length === 0)) {
+                // The model chose to stop. Recorded, because this is the *only* exit that means the
+                // work is finished, and it is indistinguishable afterwards from the cap being reached:
+                // both leave `steps === maxSteps` when the answer arrives on the last permitted step.
+                answered = true
+                break
+            }
+
+            // Is the model working, or looping? Compared on slug *and* arguments, because the same
+            // tool with different arguments is progress and `exec ls` three times running is not.
+            //
+            // Checked before the calls run rather than after. A loop that has already been executed
+            // twice has had its side effects twice, and refusing the third is the only refusal still
+            // worth making — the same reasoning that puts the write gate ahead of the handler.
+            const signature = JSON.stringify(
+                parsed.intents.map((intent) => [intent.slug, intent.args]),
+            )
+            if (parsed.intents.length > 0) {
+                recentCalls.push(signature)
+                if (recentCalls.length > identicalCalls) recentCalls.shift()
+            }
+            if (
+                recentCalls.length === identicalCalls &&
+                recentCalls.every((entry) => entry === signature)
+            ) {
+                reason = "no_progress"
+                const detail: ErrorDetail = {
+                    code: "no_progress",
+                    message: `The model called ${parsed.intents.map((intent) => intent.slug).join(", ")} ${identicalCalls} times in a row with identical arguments, so the turn was stopped.`,
+                    hint: "The same call with the same arguments cannot produce a different result, so the remaining steps would have been spent repeating it. Usually the observation does not say what the model needs — check whether the tool failed with a message it cannot act on, or succeeded with output it cannot read. `limits.noProgress.identicalCalls` sets how many in a row it takes.",
+                    field: "limits.noProgress.identicalCalls",
+                }
+                error = detail
+                input.bus.emit("agent.warning", detail, context)
                 break
             }
 
@@ -762,7 +945,6 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
                     .map((message): ChatMessage => ({ ...message, origin: "repair" }))
                 history.push(...repairMessages)
                 trace.push(...repairMessages)
-                pendingWork = true
                 continue
             }
 
@@ -772,25 +954,28 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
                 .map((message): ChatMessage => ({ ...message, origin: "observation" }))
             history.push(...observation)
             trace.push(...observation)
-            pendingWork = true
         }
 
         if (link.signal.aborted) {
             reason = link.cause() ?? "stopped"
-        } else if (
-            reason === "final" &&
-            steps >= input.limits.maxSteps &&
-            (pendingWork || text === "")
-        ) {
-            // Guarded on `reason` so a diagnosis already made inside the loop — an exhausted
-            // output budget, say — is not overwritten by the coarser one. `pendingWork` is the
-            // honest test with tools in play: the model was mid-task and ran out of steps, which is
-            // a failure however much narration it produced along the way.
+            error = abortDetail(reason, turnId, input.limits.turnTimeoutMs)
+        } else if (reason === "final" && !answered && steps >= input.limits.maxSteps) {
+            // Guarded on `reason` so a diagnosis already made inside the loop — an exhausted output
+            // budget, say — is not overwritten by the coarser one.
+            //
+            // `answered` is the whole test, and it is a fact the loop recorded rather than an
+            // inference from what the model happened to write. The previous condition —
+            // `pendingWork || text === ""` — reached the same verdict on every case that matters,
+            // including the one that prompted this: a turn whose last step called a tool. It is
+            // replaced because it asked about the sentence to learn about the loop, needed a flag
+            // reset at the top of every step to stay true, and had no answer at all for the shape
+            // where narration and a finished answer look identical.
             reason = "max_steps"
         }
     } catch (caught) {
         if (link.signal.aborted) {
             reason = link.cause() ?? "stopped"
+            error = abortDetail(reason, turnId, input.limits.turnTimeoutMs)
         } else {
             reason = "error"
             const harness = caught instanceof HarnessError ? caught : undefined

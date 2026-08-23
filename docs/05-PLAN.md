@@ -2067,6 +2067,85 @@ match as highly as a relevant one, because idf cancels in the normalisation — 
 
 ---
 
+## Phase 7C — a turn that stops says so, and compaction keeps the task
+
+Moeen asked milo to `create a sample pdf`. Six productive steps — glob, read the pdf skill, try a
+heredoc, recover by writing a script file, run it, install the missing dependency — and then it
+stopped, one step before succeeding. The reply he received ends:
+
+> reportlab isn't installed. Let me install it — that's the library the pdf skill uses for creating PDFs.
+
+`turns.status = 'max_steps'`, `error_code` empty, nothing in `milo.err.log`, and nothing on screen.
+
+### What was measured first
+
+milo's real history, by content type (47 messages):
+
+| | messages | bytes | share |
+| --- | --- | --- | --- |
+| tool observations | 13 | 125,712 | **83.9%** |
+| assistant prose | 10 | 18,834 | 12.6% |
+| assistant tool calls | 13 | 4,813 | 3.2% |
+| **the person's own words** | **11** | **423** | **0.3%** |
+
+Both halves of the phase come out of that table. Decisions 12.1–12.12.
+
+### Built
+
+- **The step budget.** `maxSteps` 6 → 40 in `init`, 12 → 40 in the schema, 8 → 40 in the reference;
+  `init` stops overriding `turnTimeoutMs`/`toolTimeoutMs` (its 6 × 30 s already exceeded its own 120 s
+  turn). New `limits.noProgress.identicalCalls` (3), compared on slug **and** arguments, before the
+  calls run.
+- **Every ending reported, on every surface.** `endNote`/`endedBadly` in core, called by the plain
+  path, the transcript reducer and channel delivery. `truncated` and `no_progress` are new reasons
+  with their own store statuses (migration **7** widens the `turns.status` CHECK). `turnTimeout` and
+  `turnStopped` are called for the first time since Phase 1. `answered` replaces the `pendingWork`
+  inference. Every `agent.warning` now prints on the plain path, not just `manifest_changed`.
+- **Compaction keeps the task.** `trim` keeps every `isTurnStart` message and drops the working detail
+  around them; `collapse`/`reset` digest around a framed request spine; `assembleContext`'s blunt trim
+  rescues requests from the range it dropped, sharing the same predicate.
+- **The ladder reordered** to `snip .60 · micro .70 · collapse .80 · reset .88 · trim .95`, with
+  `trim` re-keying the displacement map and protecting digests, `FLOOR_MARGIN` read off `STAGE_ORDER`,
+  and `manifest_thresholds_legacy_order` naming the rewrite for a manifest in the old order.
+- **The compactor's own window, signal and bounded span**, plus a warning when a configured compactor
+  falls back to a mechanical digest.
+- **`context.dropped`** gives `droppedMessages` its first reader; **`prompt_over_window`** says when
+  the two permitted overruns pass the window.
+
+### Acceptance
+
+- [x] The original task completes: `create a sample pdf` → `final`, 2 steps, a valid one-page PDF
+      (`file` reports `PDF document, version 1.4, 1 pages`)
+- [x] A forced stop prints `(stopped after 2 steps without finishing — say "continue" to carry on, or
+      raise limits.maxSteps)` and exits **1**
+- [x] A timeout prints its remedy and exits **1**; the store carries `turn_timeout` with message and hint
+- [x] `no_progress` fires on three identical calls and not on three different ones
+- [x] An answer arriving on the last permitted step is `final`, not `max_steps`
+- [x] `trim` keeps every request at full stretch; the observations are what go
+- [x] A snipped-then-trimmed pointer still resolves — asserted, and red with the re-key reverted
+- [x] The digest span is bounded by the compactor's window and says when it was cut — asserted on the
+      request body, and red with the bound reverted
+- [x] Live: after several turns past the thresholds the agent quotes its first message verbatim and
+      says *"that's in the conversation record itself, not the memory notes"*
+- [x] `prompt_over_window` fires live with three remedies
+- [x] `bun test` 2556 · `test:node` 1190 · typecheck clean · lint at the 6 pre-existing warnings
+- [x] `bun run bench:boot` ok
+- [ ] `evals/budget` re-run — **not done.** The reorder invalidates the per-stage figures; `EMA_ALPHA`
+      is unaffected because it measures the estimator, not the ladder. Needs a live endpoint and a
+      note in the README saying which numbers moved.
+
+### Not done, deliberately
+
+- **A per-request model timeout.** `chat-completions.ts` passes only the linked signal, so a hung
+  endpoint is bounded by `turnTimeoutMs` — a bound, just a loose one. A second timeout that must also
+  exceed the endpoint's own is a second number to get wrong, and the ratio of one hung request to the
+  turn's budget is unchanged by `maxSteps` moving. Left as a known looseness rather than a guessed
+  default.
+- The NLT heredoc leak in milo's transcript (`exec` with `<<'PY'` put script text in the reply). Real,
+  separate, needs its own eval.
+
+---
+
 ## Phase 8 — Scheduling
 
 **Goal.** Cron, interval, and one-shot schedules that survive restart.

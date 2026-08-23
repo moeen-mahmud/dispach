@@ -51,11 +51,11 @@ context:
     - MEMORY.md
   reminder: REMINDER.md
   thresholds:
-    trim: 0.60
-    snip: 0.70
-    micro: 0.80
-    collapse: 0.88
-    reset: 0.95
+    snip: 0.60
+    micro: 0.70
+    collapse: 0.80
+    reset: 0.88
+    trim: 0.95
 
 tools:
   dialect: nlt
@@ -119,7 +119,9 @@ plugins:
     config: { endpoint: "http://localhost:9090" }
 
 limits:
-  maxSteps: 12
+  maxSteps: 40
+  noProgress:
+    identicalCalls: 3
   turnTimeoutMs: 1800000
   toolTimeoutMs: 120000
 
@@ -246,7 +248,7 @@ the provider caches nothing: DeepSeek caches context automatically server-side a
 | `reserveOutput` | 4096 | How much of the window to keep free for the reply, so the prompt cannot crowd it out. A **prompt-budget** number: it never becomes `max_tokens`. |
 | `observationMaxTokens` | 2000 | Above this a single tool observation is trimmed to head+tail with an artifact pointer. |
 | `files` | `[]` | **Deprecated.** Alias for `static`, warning at load and naming the replacement. Keeps resolving against the *manifest* directory rather than `workspace`, which is what makes it an alias rather than a rename. Setting both `files` and `static` is a load failure, not a merge. |
-| `thresholds` | see architecture | Compaction ladder trigger fractions **of the prompt budget** — `window` minus `reserveOutput`, not of the whole window. Measured against the window, a large reserve lets `assembleContext`'s oldest-first trim run while the ladder still reports mild pressure, which is the common case on a reasoning model. Must be strictly ascending and within `(0, 1)`; validated. |
+| `thresholds` | `snip .60 · micro .70 · collapse .80 · reset .88 · trim .95` | Compaction ladder trigger fractions **of the prompt budget** — `window` minus `reserveOutput`, not of the whole window. Measured against the window, a large reserve lets `assembleContext`'s oldest-first trim run while the ladder still reports mild pressure, which is the common case on a reasoning model. Must be strictly ascending **in stage order** and within `(0, 1)`; validated. The stage order is `snip → micro → collapse → reset → trim`, ordered by how much information each rung destroys rather than how many bytes it frees: `snip` and `micro` leave an `artifact_read` pointer, `collapse` and `reset` leave the meaning as a digest, `trim` leaves nothing. So `trim` is last despite freeing the most, and it is the fallback for the case where a digest would have grown the prompt and the no-growth guard refused it. A manifest ordered for the pre-reorder ladder (`trim` first) is refused by name, with the rewrite in the hint. |
 
 #### Workspace
 
@@ -718,7 +720,8 @@ Load order is manifest order; middleware composes outermost-first. A plugin whos
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `maxSteps` | 12 | Steps per turn before forced termination. Hitting it emits `turn.end` with `reason: max_steps` — an honest failure, not a silent truncation. |
+| `maxSteps` | 40 | Steps per turn before forced termination. Hitting it emits `turn.end` with `reason: max_steps` — an honest failure, not a silent truncation. Generous, because a step budget is not a plan: real work recovers, and each recovery costs a step. A six-step budget cut a live agent off one step after it had installed the dependency it needed, its reply ending on "Let me install it". `noProgress` is what stops a loop; this only stops a runaway. |
+| `noProgress.identicalCalls` | 3 | Identical consecutive tool calls — same slug **and** same arguments — before the turn ends as `reason: no_progress`. This is the guard a small `maxSteps` was standing in for, and it is better at the job: the same call with the same arguments cannot return a different answer, so the remaining steps would only repeat it. Two is a retry, which is often correct; three is a pattern. Compared before the calls run, because a loop that has already executed twice has had its side effects twice. |
 | `turnTimeoutMs` | 1800000 | 30 min. Must exceed any upstream timeout on the model endpoint. |
 | `toolTimeoutMs` | 120000 | Per tool execution. |
 | `maxParallelTools` | 4 | Read-only tools only; mutating tools always serialise. |
@@ -761,8 +764,10 @@ Enforced by `manifest/validate.ts`, all failing at load with a field path and a 
 
 1. `apiVersion` must be exactly `dispach/v1`.
 2. Secrets must be `*Env` references. A literal-looking key (`sk-`, `Bearer`, 32+ char hex) in a value fails.
-3. `context.thresholds` must be strictly ascending and within `(0, 1)`. They are fractions of the
-   prompt budget, `window - reserveOutput`.
+3. `context.thresholds` must be strictly ascending **in stage order** — `snip → micro → collapse →
+   reset → trim` — and within `(0, 1)`. They are fractions of the prompt budget,
+   `window - reserveOutput`. Values ordered for the old ladder (`trim` first) are refused as
+   `manifest_thresholds_legacy_order`, which names the rewrite rather than blaming a field.
 4. `tools.budget.reserveWrite` must be less than `budget.max`.
 5. Every `pinned` slug must resolve against the provider.
 6. Every `phases.*.allow` entry must match at least one resolved tool, or be `*`.

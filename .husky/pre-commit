@@ -1,4 +1,3 @@
-bun run typecheck
-bun run test
-bun run build
+# Fast only. A pre-commit hook that takes 40 seconds is one people learn to skip with
+# `--no-verify`, and a skipped hook checks nothing at all. The gate lives in pre-push and in CI.
 bunx lint-staged

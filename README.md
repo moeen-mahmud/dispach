@@ -84,7 +84,7 @@ Four things that are not obvious:
   `tools-system`, `tools-web`, `tools-composio` and `channel-telegram` from their `dist`, so building
   only `core` and `cli` leaves the binary running yesterday's provider code — and the symptom is the
   worst kind: your change is correct, a test fails, and the stack trace points into a stale `dist`.
-- **Node 22+ must be on your `PATH`.** The built binary's shebang is `#!/usr/bin/env node`; Bun builds
+- **Node 24+ must be on your `PATH`.** The built binary's shebang is `#!/usr/bin/env node`; Bun builds
   it and Node runs it.
 - **`DISPACH_HOME` relocates the whole sandbox.** Point it at a temporary directory and every agent,
   the store and the logs go there instead of `~/.dispach` — which is how to try things out, and how
@@ -240,7 +240,7 @@ bun run check:deps   # core imports nothing from a sibling package
 bun run bench:boot   # must stay under 1000 ms
 ```
 
-Requires Bun. Node 22+ is supported as a soft goal, tested in CI, never a merge blocker.
+Requires Bun. Node 24+ is supported as a soft goal, tested in CI, never a merge blocker.
 
 A few house rules that bite first, all enforced by tests rather than review:
 

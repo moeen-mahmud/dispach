@@ -149,8 +149,10 @@ describe("cancellation", () => {
         // The view-layer counterpart of the Phase 1 bug: cancelling discarded partial text because
         // an abort reached the loop as an exception. What was streamed has to end up committed.
         const state = run([START, chunk("half a th"), { kind: "cancelling" }, end("stopped")])
-        expect(state.items.map((i) => i.text)).toEqual(["half a th"])
+        // And a note under it, so scrollback distinguishes a reply you stopped from one that ended.
+        expect(state.items.map((i) => i.text)).toEqual(["half a th", "cancelled"])
         expect(state.items[0]?.stats?.reason).toBe("stopped")
+        expect(state.items[1]?.role).toBe("note")
         expect(state.status).toBe("idle")
     })
 
@@ -794,7 +796,7 @@ describe("a multi-step turn reads in the order it happened", () => {
 
     test("a cancelled turn still commits what it had streamed", () => {
         const state = run([START, chunk("half an ans"), { kind: "cancelling" }, end("stopped")])
-        expect(state.items.map((item) => item.role)).toEqual(["assistant"])
+        expect(state.items.map((item) => item.role)).toEqual(["assistant", "note"])
         expect(state.items[0]?.text).toBe("half an ans")
         expect(state.status).toBe("idle")
     })

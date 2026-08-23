@@ -18,6 +18,7 @@ import { assembleContext, slotReport } from "../context/assemble.ts"
 import { type Calibration, UNCALIBRATED } from "../context/budget.ts"
 import { renderCompactionNotice } from "../context/compaction-notice.ts"
 import { renderConfigSummary } from "../context/config-summary.ts"
+import { estimateMessageTokens } from "../context/tokens.ts"
 import {
     type ErrorDetail,
     envOverridden,
@@ -95,10 +96,44 @@ function mtimeOf(path: string): number | undefined {
 /** The slug whose presence decides whether the notice mentions following a pointer. */
 const ARTIFACT_READ = "artifact_read"
 
+/**
+ * How much of the compactor's window the digest span may occupy.
+ *
+ * The rest covers the instruction and the reply. Deliberately a share rather than a subtraction: the
+ * compactor may be a 32k model or a 1M one, and a fixed reserve that suits one starves the other.
+ */
+const DIGEST_SPAN_SHARE = 0.6
+
+/**
+ * The newest messages of a span that fit the compactor's window, oldest dropped first.
+ *
+ * Newest-first because a digest of the recent part is worth more than no digest at all, and because
+ * the older part is what earlier compactions have already been over. The caller says so in the
+ * instruction when anything was dropped — a digest that silently covers less than it was asked to is
+ * the failure this whole path exists to avoid.
+ */
+function withinWindow(messages: readonly ChatMessage[], window: number): readonly ChatMessage[] {
+    const budget = Math.max(1, Math.floor(window * DIGEST_SPAN_SHARE))
+    const kept: ChatMessage[] = []
+    let spent = 0
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i]
+        if (message === undefined) continue
+        const cost = estimateMessageTokens(message.content)
+        if (spent + cost > budget) break
+        spent += cost
+        kept.unshift(message)
+    }
+    return kept
+}
+
 const DIGEST_INSTRUCTION = [
     "Summarise the conversation above for your own future reference. You are writing notes to yourself, not a report for a person.",
     "",
-    "Keep: what the person asked for, decisions taken and why, facts established by tool results, and anything still outstanding.",
+    // The requests themselves are kept verbatim beside this digest, so restating them spends the word
+    // budget on the one thing that did not need summarising.
+    "The person's own requests are preserved verbatim below your summary, so do not restate them.",
+    "Keep: decisions taken and why, facts established by tool results, and anything still outstanding.",
     "Drop: pleasantries, your own reasoning, and anything already superseded.",
     "Write plain prose under 300 words. No headings, no preamble, no closing summary.",
     "End with one line naming what this summary does not cover, so a later step knows to ask rather than assume.",
@@ -530,8 +565,11 @@ export class Agent {
             role: this.roles.main,
             window: this.window,
             reserveOutput: this.manifest.context.reserveOutput,
+            // Named field by field rather than spread, so the compiler names anything the manifest
+            // grows and this forgets — which is what it did for `noProgress`.
             limits: {
                 maxSteps: this.manifest.limits.maxSteps,
+                noProgress: this.manifest.limits.noProgress,
                 turnTimeoutMs: this.manifest.limits.turnTimeoutMs,
                 toolTimeoutMs: this.manifest.limits.toolTimeoutMs,
                 maxParallelTools: this.manifest.limits.maxParallelTools,
@@ -1058,19 +1096,29 @@ export class Agent {
             ...(compactor === undefined
                 ? {}
                 : {
-                      summarise: async (messages) => {
+                      summarise: async (messages, signal) => {
+                          // The compactor's own window, not `this.window`. `this.window` is main's,
+                          // and `roles.ts` calls a cheap compactor beside a large main "the intended
+                          // production shape and usually the biggest available cost win" — which is
+                          // exactly the configuration where a span sized for main overflows the
+                          // compactor. It threw, `digestFor` caught it, and the ladder fell back to a
+                          // mechanical digest reporting `digestSource: "mechanical"` to nobody. So the
+                          // recommended optimisation was configuration with no effect.
+                          const window = compactor.capabilities.contextWindow
+                          const fitted = withinWindow(messages, window)
+                          const instruction =
+                              fitted.length === messages.length
+                                  ? DIGEST_INSTRUCTION
+                                  : `${DIGEST_INSTRUCTION}\n\nThe oldest ${messages.length - fitted.length} message(s) of this span did not fit and are not shown. Say so in your closing line.`
                           const result = await runStep({
                               role: compactor,
                               provider: compactor.provider,
-                              messages: [
-                                  { role: "system", content: DIGEST_INSTRUCTION },
-                                  ...messages,
-                              ],
-                              params: requestParamsFor(compactor, this.window),
+                              messages: [{ role: "system", content: instruction }, ...fitted],
+                              params: requestParamsFor(compactor, window),
                               promptTokens: 0,
                               bus: this.#bus,
                               context: { agentId: this.id, sessionKey },
-                              signal: new AbortController().signal,
+                              signal,
                           })
                           return result.text
                       },

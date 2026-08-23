@@ -12,13 +12,13 @@
         "packages/*"
     ],
     "engines": {
-        "node": ">=22"
+        "node": ">=24"
     },
     "scripts": {
         "build": "bun run --filter='@dispach/core' build && bun run --filter='@dispach/tools-*' build && bun run --filter='@dispach/channel-*' build && bun run --filter='@dispach/server' build && bun run --filter='@dispach/cli' build && bun scripts/rewrite-dts-extensions.ts",
         "typecheck": "bun run --filter='*' typecheck",
         "test": "bun test",
-        "test:node": "node --test packages/core/test/*.test.ts",
+        "test:node": "node --test --test-timeout=60000 packages/core/test/*.test.ts",
         "lint": "biome check .",
         "format": "biome format --write .",
         "check:deps": "bun scripts/check-deps.ts",
@@ -34,6 +34,7 @@
         "mock": "bun scripts/mock-endpoint.ts",
         "verify:endpoints": "bun scripts/verify-endpoints.ts",
         "eval:memory": "bun scripts/eval-memory.ts",
+        "eval:skills": "bun scripts/eval-skills.ts",
         "prepare": "husky"
     },
     "devDependencies": {

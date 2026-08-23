@@ -1,7 +1,7 @@
 /**
  * Binding the handler to a port.
  *
- * Two adapters, because the runtime targets are Bun (primary) and Node 22+ (soft compat). Both are
+ * Two adapters, because the runtime targets are Bun (primary) and Node 24+ (soft compat). Both are
  * thin — the handler is a `(Request) => Promise<Response>` and neither adapter contains a route.
  *
  * **WebSocket is Bun-only, and says so rather than pretending.** Bun has an upgrade path built into

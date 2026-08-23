@@ -30,11 +30,38 @@ export interface EventEnvelope<TType extends string = string, TData = unknown> {
     readonly data: TData
 }
 
-/** Why a turn stopped. `max_steps` and `timeout` are reported honestly, never as `final`. */
-export type TurnEndReason = "final" | "max_steps" | "stopped" | "timeout" | "error"
+/**
+ * Why a turn stopped. Everything that is not `final` is reported honestly, never as `final`.
+ *
+ * `max_steps` used to be applied only when the last step left work pending or produced no text, so a
+ * turn that exhausted its budget while narrating was recorded as a clean completion. There is no
+ * reading under which reaching the cap is `final`, and the condition is gone.
+ *
+ * `truncated` and `no_progress` are separate reasons rather than shades of the other two because each
+ * needs a different sentence: a truncated reply names an output limit and whose it was, and a stalled
+ * one names the call that repeated. Collapsing either into `max_steps` would put the wrong remedy in
+ * front of whoever reads it.
+ */
+export type TurnEndReason =
+    | "final"
+    | "max_steps"
+    | "no_progress"
+    | "truncated"
+    | "stopped"
+    | "timeout"
+    | "error"
 
 export interface ContextSlotReport {
     readonly slot: number
+    /**
+     * Human-facing name for the slot, from the first block in it.
+     *
+     * Declared because it is *sent*: `slotReport` has always included it and the interface has always
+     * omitted it, which type-checks because a function return is not excess-property-checked. So every
+     * reader saw `undefined` where the wire carried a name, and `04-SPEC-WIRE.md` documented a field
+     * the type said did not exist.
+     */
+    readonly label: string
     readonly tokens: number
     readonly pinned: boolean
 }
@@ -75,6 +102,18 @@ export interface EventDataMap {
     "agent.warning": ErrorDetail
     "turn.start": { source: string; inputTokens: number }
     "context.assembled": { slots: ContextSlotReport[]; total: number }
+    /**
+     * History that did not fit the prompt budget and was left out by `assembleContext`.
+     *
+     * This is the blunt trim, not the ladder: it runs after compaction has done what it can and drops
+     * whole messages newest-budget-first. `AssembledContext.droppedMessages` was documented as
+     * "Reported, never silent" and had no reader anywhere, so a prompt could lose the oldest half of a
+     * conversation with nothing saying so on any surface.
+     *
+     * Distinct from `compaction.stage` on purpose: a stage is a decision the ladder made and can
+     * explain, and this is the budget running out anyway.
+     */
+    "context.dropped": { messages: number; budget: number; keptTokens: number }
     /**
      * How full the prompt that was sent is. Emitted once per step, after any compaction.
      *

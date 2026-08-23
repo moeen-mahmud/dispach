@@ -101,13 +101,31 @@ export const ModelSchema = z
     })
     .strict()
 
+/**
+ * Compaction ladder trigger fractions of the *prompt budget* — `window` minus `reserveOutput` — not
+ * of the whole window. Must be strictly ascending in stage order; validated.
+ *
+ * The order is `snip → micro → collapse → reset → trim`, which is not the order the field names were
+ * first written in. It is ordered by information *destroyed*: `snip` and `micro` leave an
+ * `artifact_read` pointer, `collapse` and `reset` leave the meaning as a digest, and `trim` leaves
+ * nothing — so `trim` is the last rung despite freeing the most bytes. Two measurements forced it and
+ * `context/compaction/stages.ts` carries both; the second is not a preference — with `trim` third the
+ * digest stages could never fire, because a digest plus the preserved requests is never smaller than
+ * the requests alone.
+ *
+ * `collapse` at 0.80 is where the first model call happens, down from 0.88. That is the price of making
+ * the digest stages reachable at all, and it is stated rather than buried: below 0.80 the ladder is
+ * entirely mechanical, offline and testable.
+ *
+ * Declared in stage order so the table reads the way the ladder runs.
+ */
 export const ThresholdsSchema = z
     .object({
-        trim: z.number().default(0.6),
-        snip: z.number().default(0.7),
-        micro: z.number().default(0.8),
-        collapse: z.number().default(0.88),
-        reset: z.number().default(0.95),
+        snip: z.number().default(0.6),
+        micro: z.number().default(0.7),
+        collapse: z.number().default(0.8),
+        reset: z.number().default(0.88),
+        trim: z.number().default(0.95),
     })
     .strict()
 
@@ -446,10 +464,40 @@ export const PluginRefSchema = z.union([
         .strict(),
 ])
 
+/**
+ * When to conclude the model is stuck rather than working.
+ *
+ * A step cap protects against a model that loops; it is simply bad at it. Set low enough to catch a
+ * loop it also stops real work — a six-step budget cut an agent off one step after it had installed
+ * the dependency it needed — and set high enough for real work it lets a loop run to the cap. What
+ * actually distinguishes the two is repetition: a working agent's calls differ, a stuck one's do not.
+ *
+ * So the cap is generous and this is the guard. Compared on slug *and* arguments, because the same
+ * tool with different arguments is progress; `exec ls` twice in a row is not.
+ */
+export const NoProgressSchema = z
+    .object({
+        /**
+         * Identical consecutive tool calls before the turn ends as `no_progress`. Two is a retry, which
+         * is often correct — a transient failure deserves one more try. Three is a pattern.
+         */
+        identicalCalls: z.number().int().min(2).default(3),
+    })
+    .strict()
+
 export const LimitsSchema = z
     .object({
-        /** Steps per turn before forced termination, reported as `reason: max_steps`. */
-        maxSteps: z.number().int().positive().default(12),
+        /**
+         * Steps per turn before forced termination, reported as `reason: max_steps`.
+         *
+         * Generous on purpose. The previous default assumed a step budget was a *plan* — "a two-tool
+         * chain needs five steps, one spare" — which is the budget for answering a question, not for
+         * doing work. Real work recovers: a mangled command becomes a script file, a missing library
+         * gets installed, a failed test gets read. `noProgress` is what stops a loop; this only stops
+         * a runaway.
+         */
+        maxSteps: z.number().int().positive().default(40),
+        noProgress: NoProgressSchema.prefault({}),
         /** Must exceed any upstream timeout on the model endpoint. */
         turnTimeoutMs: z.number().int().positive().default(1_800_000),
         toolTimeoutMs: z.number().int().positive().default(120_000),

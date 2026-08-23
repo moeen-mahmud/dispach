@@ -172,7 +172,7 @@ export async function openDatabase(options: OpenOptions): Promise<SqlDatabase> {
             message: `Cannot open the SQLite database at ${options.path} using ${specifier}.`,
             hint:
                 runtime === "node"
-                    ? "node:sqlite needs Node 22.5 or newer. Check the path is writable and its parent directory exists — the runtime creates the directory but not a missing mount."
+                    ? "node:sqlite needs Node 22.5 or newer, and this project's floor is 24 — check `node --version` first. Otherwise check the path is writable and its parent directory exists; the runtime creates the directory but not a missing mount."
                     : "Check the path is writable and its parent directory exists.",
             cause,
         })

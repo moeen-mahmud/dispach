@@ -30,6 +30,7 @@ import { Inbox } from "../channels/inbox.ts"
 import { Outbox } from "../channels/outbox.ts"
 import type { ErrorDetail } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
+import { endNote } from "../loop/turn-end.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { OutboxStore } from "../store/store.ts"
 import type { Agent } from "./agent.ts"
@@ -362,7 +363,17 @@ export class ChannelHub {
             // An empty reply is still a turn that happened; it is just not something to send. A
             // zero-length message is an error at every provider, and delivering one would turn a
             // quiet turn into a channel error.
-            if (result.text.trim() === "") return
+            //
+            // Unless the turn was cut short, in which case there is something to say and silence is
+            // the worst available answer: on a channel nobody can see an exit code, a status line or
+            // a log file, so a turn stopped by its step budget with no prose to show delivered
+            // *nothing at all* — indistinguishable from a bot that is down.
+            const note = endNote(result.reason, {
+                steps: result.steps,
+                durationMs: result.durationMs,
+            })
+            const text = result.text.trim() === "" ? (note ?? "") : result.text
+            if (text === "") return
 
             await bound.outbox.enqueue({
                 agentId,
@@ -371,7 +382,7 @@ export class ChannelHub {
                 recipient: message.peerId,
                 turnId: result.turnId,
                 ...(message.thread === undefined ? {} : { thread: message.thread }),
-                text: result.text,
+                text,
             })
             await bound.outbox.drain(agentId)
         } catch (cause) {

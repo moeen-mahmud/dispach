@@ -127,18 +127,25 @@ context:
   # (window minus reserveOutput), not of the whole window. Measured against the window, a large
   # reserveOutput lets assembleContext's blunt oldest-first trim run while the ladder still reports
   # mild pressure, which is the common case on a reasoning model.
-  # trim drops whole turns · snip cuts oversized tool results to head and tail · micro replaces one
-  # with a pointer artifact_read follows · collapse digests all but the newest turns · reset digests
-  # everything. Mechanical up to micro: no model call happens below the collapse threshold, and a
-  # compactor that is absent, throws, or returns nothing falls back to a factual digest.
+  # snip cuts oversized tool results to head and tail · micro replaces one with a pointer
+  # artifact_read follows · collapse digests all but the newest turns · reset digests everything ·
+  # trim drops what the digests declined to summarise. Mechanical below collapse: no model call
+  # happens under 0.80, and a compactor that is absent, throws, or returns nothing falls back to a
+  # factual digest.
+  # Ordered by information DESTROYED, not bytes freed — snip and micro leave a pointer, collapse and
+  # reset leave meaning, trim leaves nothing. Measured: tool results were 84% of history bytes on a
+  # real session and everything the person had typed was 0.3%, so observations go first and no stage
+  # drops a request. And summarising must precede destroying: with trim third, collapse and reset
+  # could never fire, because a digest plus the preserved requests is never smaller than the
+  # requests alone.
   # Each stage aims at the threshold one rung BELOW the deepest that fired. That is where the
   # hysteresis comes from — aiming just under the trigger lands on it and fires again next turn.
   thresholds:
-    trim: 0.60
-    snip: 0.70
-    micro: 0.80
-    collapse: 0.88
-    reset: 0.95
+    snip: 0.60
+    micro: 0.70
+    collapse: 0.80
+    reset: 0.88
+    trim: 0.95
 
   budgets:
     static: 2000
@@ -318,13 +325,19 @@ tools:
 
 # ── limits ────────────────────────────────────────────────────────────────────────────────
 limits:
-  # Steps per turn before forced termination, reported as `reason: max_steps`. A two-tool chain
-  # needs three: call, observe, reply. This leaves room for one repair.
-  maxSteps: 8
+  # Steps per turn before forced termination, reported as `reason: max_steps`. Generous, because a
+  # step budget is not a plan: real work recovers — a mangled command becomes a script file, a
+  # missing library gets installed, a failed test gets read. Sizing this for the shortest successful
+  # path is what cut an agent off one step after it installed the dependency it needed.
+  maxSteps: 40
+  # What actually catches a stuck model. Identical consecutive calls — same tool AND same arguments —
+  # end the turn as `no_progress`. Two is a retry, which is often right. Three is a pattern.
+  noProgress:
+    identicalCalls: 3
   # Must exceed any upstream timeout on the model endpoint.
-  turnTimeoutMs: 300000
-  toolTimeoutMs: 30000
-  # Read-only tools only. Mutating tools always serialise, whatever this says.
+  turnTimeoutMs: 1800000
+  toolTimeoutMs: 120000
+  # Read-only tools only. Mutating tools always serialize, whatever this says.
   maxParallelTools: 4
 
 # ── Phase 7B: phase-scoped tool visibility ────────────────────────────────────────────────

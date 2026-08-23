@@ -23,6 +23,7 @@ import {
     mechanicalDigest,
     micro,
     reset,
+    STAGE_ORDER,
     type StageInput,
     type StageOutcome,
     snip,
@@ -31,7 +32,8 @@ import {
 import type { ChatMessage } from "../src/model/provider.ts"
 import { describe, expect, test } from "./_harness.ts"
 
-const THRESHOLDS: Thresholds = { trim: 0.6, snip: 0.7, micro: 0.8, collapse: 0.88, reset: 0.95 }
+/** Stage order, so the fixture reads the way the ladder runs: snip, micro, collapse, reset, trim. */
+const THRESHOLDS: Thresholds = { snip: 0.6, micro: 0.7, collapse: 0.8, reset: 0.88, trim: 0.95 }
 
 function ask(text: string): ChatMessage {
     return { role: "user", content: text }
@@ -70,15 +72,15 @@ function session(): ChatMessage[] {
 
 describe("the target is one rung down", () => {
     test("a stage aims at the threshold below the deepest one that fired", () => {
-        // 0.72 crosses trim and snip; the rung below snip is trim.
-        expect(deepestStage(THRESHOLDS, 0.72)?.stage).toBe("snip")
+        // 0.72 crosses snip and micro; the rung below micro is snip.
+        expect(deepestStage(THRESHOLDS, 0.72)?.stage).toBe("micro")
         expect(targetFraction(THRESHOLDS, 1)).toBe(0.6)
-        // 0.96 crosses everything; the rung below reset is collapse.
-        expect(deepestStage(THRESHOLDS, 0.96)?.stage).toBe("reset")
+        // 0.96 crosses everything; the rung below trim is reset.
+        expect(deepestStage(THRESHOLDS, 0.96)?.stage).toBe("trim")
         expect(targetFraction(THRESHOLDS, 4)).toBe(0.88)
     })
 
-    test("trim has no rung below it, so it uses the one margin in the scheme", () => {
+    test("the first rung has nothing below it, so it uses the one margin in the scheme", () => {
         expect(targetFraction(THRESHOLDS, 0)).toBeCloseTo(0.55, 5)
     })
 
@@ -106,23 +108,152 @@ describe("nothing over threshold costs nothing", () => {
     })
 })
 
-describe("trim drops whole turns", () => {
-    test("history begins at a turn boundary, never mid tool-exchange", () => {
+describe("trim drops working detail and keeps what the person said", () => {
+    test("every request survives, however hard it is pushed", () => {
         const history = session()
-        const outcome = trim({ history, target: historyTokens(history) - 10, protectedTail: 0 })
+        const asked = history.filter((m) => m.role === "user" && m.origin === undefined)
+        expect(asked.length).toBeGreaterThan(1)
+
+        // target 1 is unreachable, so this is the stage at full stretch — the case where an
+        // oldest-first design has thrown away everything it is allowed to.
+        const outcome = trim({ history, target: 1, protectedTail: 0 })
         expect(outcome.changed).toBe(true)
-        const first = outcome.messages[0]
-        // A `user` message that is not an observation. The distinction is the point: under NLT an
-        // observation is also `user`, so a naive "cut to the next user message" lands inside a tool
-        // exchange and leaves an assistant turn answering a call whose result is gone.
-        expect(first?.role).toBe("user")
-        expect(first?.origin).toBeUndefined()
-        expect(outcome.messages.length).toBeLessThan(history.length)
+
+        const survived = outcome.messages.filter((m) => m.role === "user" && m.origin === undefined)
+        expect(survived).toEqual(asked)
+        // And in the order they were asked, because a spine that reorders is worse than none.
+        expect(survived.map((m) => m.content)).toEqual(asked.map((m) => m.content))
     })
 
-    test("a single-turn history has nothing it may drop", () => {
-        const history = [ask("only question"), reply("only answer")]
+    test("the observations are what actually goes", () => {
+        const history = session()
+        const before = history.filter((m) => m.origin === "observation").length
+        expect(before).toBeGreaterThan(0)
+        const outcome = trim({ history, target: 1, protectedTail: 0 })
+        expect(outcome.messages.filter((m) => m.origin === "observation")).toEqual([])
+    })
+
+    test("the survivors are framed, or the oldest request reads as the live one", () => {
+        const outcome = trim({ history: session(), target: 1, protectedTail: 0 })
+        const first = outcome.messages[0]
+        expect(first?.origin).toBe("digest")
+        expect(first?.content).toContain("cannot be retrieved")
+        // No artifact id, because this stage writes no artifact. A marker implying one sends the model
+        // looking for a pointer nobody stored.
+        expect(first?.content).not.toContain("artifact_read")
+    })
+
+    test("a history of nothing but requests has nothing it may drop", () => {
+        const history = [ask("only question"), ask("and another")]
         expect(trim({ history, target: 1, protectedTail: 0 }).changed).toBe(false)
+    })
+
+    test("a lone reply is droppable — the working detail is the unit, not the turn", () => {
+        const history = [ask("only question"), reply("only answer")]
+        const outcome = trim({ history, target: 1, protectedTail: 0 })
+        expect(outcome.changed).toBe(true)
+        expect(outcome.messages.some((m) => m.content === "only answer")).toBe(false)
+        expect(outcome.messages.some((m) => m.content === "only question")).toBe(true)
+    })
+
+    test("it drops oldest-first, so recent detail outlives old detail", () => {
+        // Replies far larger than the header, deliberately. The header is itself a message and is
+        // charged for before anything is removed, so on a history of one-line turns trim takes more
+        // than the naive arithmetic suggests — real, and not what this test is about.
+        const first = `first answer ${"x".repeat(4000)}`
+        const second = `second answer ${"y".repeat(4000)}`
+        const history = [ask("first"), reply(first), ask("second"), reply(second)]
+        const target = historyTokens(history) - 400
+        const outcome = trim({ history, target, protectedTail: 0 })
+        expect(outcome.messages.some((m) => m.content === first)).toBe(false)
+        expect(outcome.messages.some((m) => m.content === second)).toBe(true)
+    })
+})
+
+describe("trim re-keys what earlier stages displaced", () => {
+    /**
+     * The trap the reorder set, and the one with data loss behind it.
+     *
+     * `trim` reindexes, and `runLadder` *replaces* the displacement map with whatever the stage
+     * returns rather than merging. While `trim` ran first it correctly returned an empty map and its
+     * own comment said there could never be one to lose. Running third, an empty map would discard
+     * everything `snip` and `micro` recorded — so `persist()` would never be asked to write those
+     * artifacts, while the pointers naming them stayed in the surviving messages. A live
+     * `artifact_read` id resolving to nothing, with no error anywhere.
+     */
+    test("a pointer that survives trim still names an artifact the caller was told to persist", () => {
+        // A large assistant reply first, so `trim` reaches its target by dropping that and leaves the
+        // pointers behind. Oldest-first is what makes the fixture's order load-bearing.
+        const history = [
+            ask("first"),
+            reply(`long narration ${"n".repeat(6000)}`),
+            reply("ACTION exec"),
+            observation("exec", 200),
+            ask("second"),
+            reply("ACTION exec"),
+            observation("exec", 200),
+            ask("third"),
+        ]
+
+        // `snip` records the originals, `micro` reuses them, `trim` then removes some messages.
+        const snipped = snip({ history, target: 1, protectedTail: 1 })
+        expect(snipped.displaced.size).toBeGreaterThan(0)
+        const microd = micro({
+            history: snipped.messages,
+            target: 1,
+            protectedTail: 1,
+            displaced: snipped.displaced,
+        })
+        const trimmed = trim({
+            history: microd.messages,
+            // Enough to cost the long narration and nothing more.
+            target: historyTokens(microd.messages) - 400,
+            protectedTail: 1,
+            displaced: microd.displaced,
+        })
+
+        // Every id still referenced by a surviving message is still in the map the ladder will persist.
+        const ids = [...trimmed.displaced.values()].map((entry) => entry.id)
+        for (const [index, message] of trimmed.messages.entries()) {
+            const match = /artifact_read\("([^"]+)"\)/.exec(message.content)
+            if (match?.[1] === undefined) continue
+            expect(ids).toContain(match[1])
+            // And keyed by where the message actually is now, not where it used to be.
+            expect(trimmed.displaced.get(index)?.id).toBe(match[1])
+        }
+        expect(ids.length).toBeGreaterThan(0)
+    })
+
+    test("a displacement whose message trim removed is not carried forward", () => {
+        const history = [ask("q"), reply("ACTION exec"), observation("exec", 200), ask("newest")]
+        const snipped = snip({ history, target: 1, protectedTail: 1 })
+        expect(snipped.displaced.size).toBe(1)
+        // Target 1 is unreachable, so trim removes every droppable message including the snipped one.
+        const trimmed = trim({
+            history: snipped.messages,
+            target: 1,
+            protectedTail: 1,
+            displaced: snipped.displaced,
+        })
+        expect(trimmed.messages.some((m) => m.origin === "observation")).toBe(false)
+        expect(trimmed.displaced.size).toBe(0)
+    })
+
+    test("trim leaves a digest alone — it runs after both stages that write one", () => {
+        const history = [
+            {
+                role: "user" as const,
+                content: "A DIGEST OF EARLIER WORK",
+                origin: "digest" as const,
+            },
+            ask("q"),
+            reply(`answer ${"x".repeat(3000)}`),
+            ask("newest"),
+        ]
+        const trimmed = trim({ history, target: 1, protectedTail: 1 })
+        expect(trimmed.messages.some((m) => m.content === "A DIGEST OF EARLIER WORK")).toBe(true)
+        // The assistant prose is what went.
+        expect(trimmed.messages.some((m) => m.role === "assistant")).toBe(false)
     })
 })
 
@@ -242,13 +373,40 @@ describe("micro points at the original, even after a snip", () => {
 })
 
 describe("digests", () => {
+    /**
+     * Turns substantial enough that a digest is a win. `session()` is not: with the request spine kept,
+     * collapsing it drops one short reply and adds a digest plus a header, so the no-growth guard
+     * refuses — correctly. A stage that is only worth running on a large history should be tested on
+     * one.
+     */
+    function longSession(): ChatMessage[] {
+        return [
+            ask("first question"),
+            reply(`first answer ${"a".repeat(3000)}`),
+            ask("second question"),
+            reply(`second answer ${"b".repeat(3000)}`),
+            ask("third question"),
+            reply(`third answer ${"c".repeat(3000)}`),
+        ]
+    }
+
     test("collapse keeps the newest turns and prepends the digest", () => {
-        const history = session()
+        const history = longSession()
         const outcome = collapse({ history, target: 10, protectedTail: 0, digest: "THE DIGEST" })
         expect(outcome.changed).toBe(true)
         expect(outcome.messages[0]?.content).toBe("THE DIGEST")
         expect(outcome.messages[0]?.origin).toBe("digest")
         expect(outcome.messages.at(-1)).toEqual(history.at(-1))
+    })
+
+    test("collapse keeps every request, including ones inside the span it digested", () => {
+        const history = longSession()
+        const outcome = collapse({ history, target: 10, protectedTail: 0, digest: "THE DIGEST" })
+        for (const asked of ["first question", "second question", "third question"]) {
+            expect(outcome.messages.some((m) => m.content === asked)).toBe(true)
+        }
+        // Framed, and pointing at the digest rather than claiming the detail is unrecoverable.
+        expect(outcome.messages.some((m) => m.content.includes("summarised above"))).toBe(true)
     })
 
     test("a digest longer than what it replaced is refused", () => {
@@ -273,12 +431,20 @@ describe("digests", () => {
         expect(text).toContain("Ask the person rather than guessing")
     })
 
-    test("reset replaces everything before the protected tail", () => {
+    test("reset replaces everything before the protected tail, except the requests", () => {
         const history = session()
         const outcome = reset({ history, target: 1, protectedTail: 1, digest: "ALL GONE" })
-        expect(outcome.messages.length).toBe(2)
         expect(outcome.messages[0]?.content).toBe("ALL GONE")
-        expect(outcome.messages[1]).toEqual(history.at(-1))
+        expect(outcome.messages.at(-1)).toEqual(history.at(-1))
+        // The last rung is the one most likely to be reached, and the worst place to be left unable to
+        // say what the work was. Pinned blocks survive here, and so do the person's words.
+        expect(outcome.messages.filter((m) => m.role === "user" && m.origin === undefined)).toEqual(
+            history.filter((m) => m.role === "user" && m.origin === undefined),
+        )
+        // Nothing else does — outside the protected tail, which is the current turn and untouchable.
+        const compacted = outcome.messages.slice(0, -1)
+        expect(compacted.some((m) => m.origin === "observation")).toBe(false)
+        expect(compacted.some((m) => m.role === "assistant")).toBe(false)
     })
 })
 
@@ -363,9 +529,11 @@ describe("ordering", () => {
             summarise: async () => "digest",
         })
         const order = result.stages.map((record) => record.stage)
-        // Whatever subset ran, it is a prefix of the validated order.
-        expect(order).toEqual(["trim", "snip", "micro", "collapse", "reset"].slice(0, order.length))
-        expect(order[0]).toBe("trim")
+        // Whatever subset ran, it is a prefix of the validated order. Compared against `STAGE_ORDER`
+        // rather than a literal: a hand-copied list is what made this test assert a ladder that no
+        // longer existed the moment the stages were reordered.
+        expect(order).toEqual([...STAGE_ORDER].slice(0, order.length))
+        expect(order[0]).toBe(STAGE_ORDER[0])
     })
 
     test("only the authorised stages are reachable", async () => {
@@ -381,15 +549,18 @@ describe("ordering", () => {
             calibration: UNCALIBRATED,
         })
         const reached = result.stages.map((record) => record.stage)
-        expect(reached).not.toContain("micro")
+        // 0.72 crosses `snip` and `micro`. Everything past `micro` is unauthorised — and the two that
+        // ask a model are among them, which is the property that keeps a mild overflow offline.
         expect(reached).not.toContain("collapse")
         expect(reached).not.toContain("reset")
+        expect(reached).not.toContain("trim")
     })
 
     test("a stage that changes nothing is recorded as such, and the next one runs", async () => {
-        // One turn only, so `trim` has nothing it may drop — but the observation is large, so `snip`
-        // does. A stage reporting success for a no-op would stall the ladder one rung too low.
-        const history = [ask("q"), reply("ACTION exec"), observation("exec", 200), reply("done")]
+        // An observation under `snip`'s keep budget, so `snip` has nothing to cut — but `micro` can
+        // still replace the body with a pointer, which is smaller. A stage reporting success for a
+        // no-op would stall the ladder one rung too low.
+        const history = [ask("q"), reply("ACTION exec"), observation("exec", 20), reply("done")]
         const total = historyTokens(history)
         const result = await runLadder({
             history,
@@ -400,13 +571,13 @@ describe("ordering", () => {
             calibration: UNCALIBRATED,
         })
         const records = new Map(result.stages.map((record) => [record.stage, record]))
-        expect(records.get("trim")?.changed).toBe(false)
-        expect(records.get("snip")?.changed).toBe(true)
+        expect(records.get("snip")?.changed).toBe(false)
+        expect(records.get("micro")?.changed).toBe(true)
     })
 
     test("falling short is reported rather than hidden", async () => {
-        // Everything is a human message, so nothing but `trim` can help — and `trim` may not touch a
-        // protected tail that is the whole history.
+        // No observation to snip or pointer, no span to digest, and the protected tail is the whole
+        // history — so every rung is authorised and none of them can do anything.
         const history = [ask("a".repeat(4000)), reply("b".repeat(4000))]
         const total = historyTokens(history)
         const result = await runLadder({

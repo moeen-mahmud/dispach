@@ -10,6 +10,7 @@
 import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { BRAND } from "../brand.ts"
+import { STAGE_ORDER, type StageName } from "../context/compaction/stages.ts"
 import { apiVersionMismatch, type ErrorDetail, HarnessError } from "../errors.ts"
 import { planWorkspace, type WorkspaceFileRef } from "../workspace/load.ts"
 import { planSoul } from "../workspace/soul.ts"
@@ -107,7 +108,50 @@ function shorten(value: string): string {
 
 // ─── Rules 3, 4, 10, 11 and the environment they need ────────────────────────────────────
 
-const THRESHOLD_ORDER = ["trim", "snip", "micro", "collapse", "reset"] as const
+/**
+ * The order these must ascend in is the order the ladder runs them in, so it is read from the ladder.
+ *
+ * It was a second hand-kept copy of `STAGE_ORDER` until the stages were reordered, at which point the
+ * copy silently described a ladder that no longer existed — the `NO_MANIFEST` and `offered` shape that
+ * has cost this repo a debugging round more than once.
+ */
+const THRESHOLD_ORDER = STAGE_ORDER
+
+/**
+ * The pre-reorder defaults, in the order they used to ascend in.
+ *
+ * A manifest written against them is not malformed, it is *old*: the same five numbers, the same five
+ * names, ordered for a ladder that ran `trim` first. Detected as its own case because the generic
+ * ascending error would point at `context.thresholds.trim` and say it must exceed `micro`, which is
+ * true, useless, and about a file nobody edited.
+ */
+const LEGACY_ORDER = ["trim", "snip", "micro", "collapse", "reset"] as const
+
+/**
+ * The old numbers, mapped onto the stage now in each position.
+ *
+ * Zipped from the two orders rather than written out, because a hint that names the wrong stage is
+ * worse than a generic one: it is a remedy someone will apply.
+ */
+function rewriteFrom(thresholds: Readonly<Record<StageName, number>>): string[] {
+    return THRESHOLD_ORDER.map((name, i) => {
+        const legacy = LEGACY_ORDER[i]
+        return legacy === undefined ? name : `${name} ${thresholds[legacy]}`
+    })
+}
+
+function ascendsIn(
+    thresholds: Readonly<Record<StageName, number>>,
+    order: readonly StageName[],
+): boolean {
+    for (let i = 1; i < order.length; i += 1) {
+        const previous = order[i - 1]
+        const name = order[i]
+        if (previous === undefined || name === undefined) return false
+        if (thresholds[name] <= thresholds[previous]) return false
+    }
+    return true
+}
 
 function validateThresholds(manifest: AgentManifest): ErrorDetail[] {
     const found: ErrorDetail[] = []
@@ -124,19 +168,33 @@ function validateThresholds(manifest: AgentManifest): ErrorDetail[] {
         })
     }
 
-    for (let i = 1; i < THRESHOLD_ORDER.length; i += 1) {
-        const previousName = THRESHOLD_ORDER[i - 1]
-        const name = THRESHOLD_ORDER[i]
-        if (previousName === undefined || name === undefined) continue
-        const previous = thresholds[previousName]
-        const current = thresholds[name]
-        if (current > previous) continue
-        found.push({
-            code: "manifest_thresholds_not_ascending",
-            message: `context.thresholds.${name} (${current}) must be greater than ${previousName} (${previous}).`,
-            hint: "The compaction ladder runs strictly in order trim → snip → micro → collapse → reset. Equal or inverted thresholds mean a stage can never fire, or fires out of order.",
-            field: `context.thresholds.${name}`,
-        })
+    if (found.length === 0 && !ascendsIn(thresholds, THRESHOLD_ORDER)) {
+        if (ascendsIn(thresholds, LEGACY_ORDER)) {
+            return [
+                {
+                    code: "manifest_thresholds_legacy_order",
+                    message:
+                        "context.thresholds ascends in the old stage order (trim first), which the ladder no longer uses.",
+                    hint: `The ladder now runs ${THRESHOLD_ORDER.join(" → ")}, ordered by how much information each stage destroys rather than how many bytes it frees: snip and micro leave an artifact_read pointer, collapse and reset leave a digest, and trim leaves nothing. Your five numbers still work — move each onto the stage in the same position: ${rewriteFrom(thresholds).join(", ")}. Deleting the block takes the defaults.`,
+                    field: "context.thresholds",
+                },
+            ]
+        }
+
+        for (let i = 1; i < THRESHOLD_ORDER.length; i += 1) {
+            const previousName = THRESHOLD_ORDER[i - 1]
+            const name = THRESHOLD_ORDER[i]
+            if (previousName === undefined || name === undefined) continue
+            const previous = thresholds[previousName]
+            const current = thresholds[name]
+            if (current > previous) continue
+            found.push({
+                code: "manifest_thresholds_not_ascending",
+                message: `context.thresholds.${name} (${current}) must be greater than ${previousName} (${previous}).`,
+                hint: `The compaction ladder runs strictly in order ${THRESHOLD_ORDER.join(" → ")}. Equal or inverted thresholds mean a stage can never fire, or fires out of order.`,
+                field: `context.thresholds.${name}`,
+            })
+        }
     }
 
     return found

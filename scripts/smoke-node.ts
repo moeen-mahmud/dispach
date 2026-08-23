@@ -2,7 +2,8 @@
 /**
  * Node compatibility smoke test, run unbundled against `packages/core/src`.
  *
- * Decision 2.2 makes Node 22+ a soft goal — reach without a second toolchain. The thing that
+ * Decision 2.2 makes Node a soft goal — reach without a second toolchain; 13.5 puts the floor at
+ * 24. The thing that
  * actually breaks it is import syntax: Node's native type-stripping refuses extensionless
  * relative specifiers and non-erasable TS syntax. This file proves the source tree satisfies
  * both, today, so Phase 2's "same suite under `bun test` and `node --test`" criterion is a

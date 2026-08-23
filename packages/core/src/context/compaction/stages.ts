@@ -8,13 +8,13 @@
  *
  * | stage | what it does | model |
  * | --- | --- | --- |
- * | `trim` | drops the oldest whole turns | no |
  * | `snip` | cuts oversized observations to head + tail | no |
  * | `micro` | replaces an observation body with a pointer | no |
  * | `collapse` | digests all but the newest turns | yes, with a fallback |
- * | `reset` | digests everything; only pinned blocks survive | yes, with a fallback |
+ * | `reset` | digests everything; pinned blocks and requests survive | yes, with a fallback |
+ * | `trim` | drops working detail the digests declined to summarise | no |
  *
- * ## Three properties that are load-bearing
+ * ## Four properties that are load-bearing
  *
  * **Nothing is destroyed, only displaced.** `snip` and `micro` return the full original content as a
  * `Displaced` entry for the caller to persist, and leave a pointer the agent can follow. The id is
@@ -34,13 +34,45 @@
  * ladder uses to escalate. A stage reporting success for a no-op would stall the ladder one rung below
  * where it needed to be, and the prompt would then be cut by `assembleContext`'s blunt oldest-first
  * trim with nothing explaining why.
+ *
+ * **No stage drops what the person said.** Not a preference — an arithmetic result. The person's own
+ * messages are 0.3% of history, so dropping every one of them frees nothing, and they are the only
+ * record of what the agent was asked to do. A session is full of `"continue"`, `"yes"`, `"where are we
+ * at?"`; oldest-first dropped the instruction and kept the continuations, leaving the model a run of
+ * acknowledgements with no antecedent. Keeping them needs no definition of "the task" and no model
+ * call: `isTurnStart` is a `user` message that is not an observation, and that is the whole predicate.
+ * `reset` is included — its contract is that pinned blocks *and the person's words* survive.
  */
 
 import { derivedId } from "../../ids.ts"
 import type { ChatMessage } from "../../model/provider.ts"
 import { estimateMessageTokens, estimateTokens } from "../tokens.ts"
 
-export const STAGE_ORDER = ["trim", "snip", "micro", "collapse", "reset"] as const
+/**
+ * The order the ladder runs them in, and the order the thresholds must ascend in.
+ *
+ * Ordered by **information destroyed**, which is not the same as bytes freed and is the mistake the
+ * first ordering made. Freeing bytes puts `trim` early, because dropping turns frees the most; but
+ * `snip` and `micro` leave a followable `artifact_read` pointer, `collapse` and `reset` leave the
+ * meaning as a digest, and `trim` leaves nothing at all. On that axis `trim` is the worst rung, not a
+ * middle one, and its gentle name is exactly why it was misplaced.
+ *
+ * Two measurements decided it. First, on a real 47-message session observations were **83.9%** of
+ * history bytes, assistant prose 12.6%, tool calls 3.2%, and everything the person had ever typed
+ * **0.3%** — 423 bytes of 150 KB. So observations come first and nothing drops the person's words.
+ *
+ * Second, and this is the forced part: with `trim` third, `collapse` and `reset` could never fire. They
+ * only get a turn when `trim` failed to reach target, which means `trim` had already dropped everything
+ * it was allowed to — leaving the request spine and nothing else. A digest *plus* the preserved spine
+ * cannot be smaller than the spine alone, so both refused, every time. Summarising has to precede
+ * destroying or the summary has no subject. Measured: 8316 → 7860 → 5064 → then `collapse` and `reset`
+ * both `changed=false` at 495 tokens.
+ *
+ * `trim` last is therefore the fallback for the case where the digests *declined* — a short history of
+ * terse turns, where a digest would grow the prompt and the no-growth guard refuses it. Then there is
+ * still working detail to remove and `trim` removes it.
+ */
+export const STAGE_ORDER = ["snip", "micro", "collapse", "reset", "trim"] as const
 
 export type StageName = (typeof STAGE_ORDER)[number]
 
@@ -64,8 +96,10 @@ export interface StageOutcome {
      * and reuses its id and its **original** content. Deriving the id afresh would hash the cut text,
      * so the pointer would resolve to a truncation of the thing it promises in full.
      *
-     * Indices are stable from `snip` onward because the ladder runs the stages in the validated order
-     * and `trim` — the only stage that reindexes — is strictly before both.
+     * `trim` reindexes, and since the reorder it runs *after* both. It therefore re-keys this map by the
+     * offset it removed rather than returning an empty one: dropping it would mean `persist()` never
+     * writes the artifacts `snip` and `micro` created, while the pointers naming them stay in the
+     * surviving messages — a live `artifact_read` id resolving to nothing.
      */
     readonly displaced: ReadonlyMap<number, Displaced>
     /** Estimated cost of `messages`, from the same function the budget uses. */
@@ -162,56 +196,97 @@ function tailStart(input: StageInput): number {
 }
 
 /**
- * A turn boundary is a `user` message that is not tool output.
+ * A turn boundary is a `user` message that is not tool output — in practice, something the person said.
+ *
+ * Exported because `assembleContext`'s blunt trim needs the same predicate. Two definitions of "what
+ * the person said" is how one path came to honour "no stage drops a request" while the other, running
+ * on the same session a moment later, did not.
  *
  * Under NLT an observation is also a `user` message, which is why this asks `isObservation` rather
  * than looking at the role alone — dropping "everything before the third user message" would
  * otherwise cut a history in the middle of a tool exchange and leave an assistant turn answering a
  * call whose result is gone.
  */
-function isTurnStart(message: ChatMessage): boolean {
+export function isTurnStart(message: ChatMessage): boolean {
     return message.role === "user" && !isObservation(message)
 }
 
 /**
- * S1 — drop the oldest whole turns.
+ * What the model is told where the working detail used to be.
  *
- * This is what `assembleContext` already does when the budget is tight, with one difference that is
- * the entire point: it drops at *turn* granularity, so history never begins with an assistant message
- * answering a call whose observation was dropped, or with an observation whose call is gone. The blunt
- * version leaves both shapes, and a model reading them re-answers work it has already done.
+ * Without it the survivors are a run of bare requests, and the `VOLATILE_HEADER` lesson applies
+ * directly: a fact with no frame is a fact a model will not connect to a question. Unframed, the
+ * oldest surviving `"add the tests"` reads as the live instruction and gets answered again.
+ *
+ * Deliberately says the detail is *gone* rather than offering a way back. `snip` and `micro` leave an
+ * `artifact_read` id because they have one; this stage does not, and a marker implying otherwise would
+ * send the model looking for a pointer that was never written — the same defect as a `snip` marker with
+ * no id in it.
+ *
+ * Kept short because it is charged for on every firing, and the no-growth guard is sensitive to it: a
+ * first draft three sentences long made `collapse` refuse on a short history, since the explanation
+ * cost more than the one reply it was able to drop. Framing, not prose.
+ */
+const TRIM_HEADER =
+    "Earlier requests, verbatim. The replies and tool output between them were dropped to fit the " +
+    "context window and cannot be retrieved."
+
+/**
+ * S5 — drop working detail outright, keeping what the person actually said.
+ *
+ * The obvious version drops whole turns oldest-first, which is what `assembleContext` does bluntly and
+ * what this stage used to do at turn granularity. Both throw away the person's own messages, and the
+ * arithmetic says not to: measured over a real session they are **0.3%** of history. Dropping every one
+ * of them frees nothing and costs the only record of what was asked.
+ *
+ * So the unit is the message, not the turn, and `isTurnStart` decides. Everything else in the
+ * compactable region goes oldest-first until the target is met. Dropping the assistant messages and
+ * their observations *together* is what keeps the two broken shapes away: a run of user messages has no
+ * assistant turn answering a vanished call, and no observation whose call is gone.
  */
 export function trim(input: StageInput): StageOutcome {
     const limit = tailStart(input)
-    const boundaries: number[] = []
+    const known = input.displaced ?? NO_DISPLACEMENTS
+
+    const droppable: number[] = []
     for (let i = 0; i < limit; i += 1) {
         const message = input.history[i]
-        if (message !== undefined && isTurnStart(message)) boundaries.push(i)
+        // A digest is not working detail, it is the record of working detail — and since the reorder
+        // `trim` runs after both digest stages, an unprotected one would be the first thing it ate.
+        if (message === undefined || isTurnStart(message) || message.origin === "digest") continue
+        droppable.push(i)
+    }
+    if (droppable.length === 0) return unchanged(input)
+
+    // The header is a message, so it is charged for before deciding how much to remove. Skipping that
+    // lets a tight target be missed by exactly the amount of the explanation.
+    const header: ChatMessage = { role: "user", content: TRIM_HEADER, origin: "digest" }
+    const removed = new Set<number>()
+    let tokens = historyTokens(input.history) + cost(header)
+    for (const index of droppable) {
+        if (tokens <= input.target) break
+        const message = input.history[index]
+        if (message === undefined) continue
+        removed.add(index)
+        tokens -= cost(message)
+    }
+    if (removed.size === 0) return unchanged(input)
+
+    // Re-key as we go. `trim` is the only stage that reindexes, and since the reorder it runs after
+    // `snip` and `micro` — returning an empty map here would strand every artifact they displaced,
+    // leaving their pointers naming ids that `persist()` was never asked to write.
+    const messages: ChatMessage[] = [header]
+    const displaced = new Map<number, Displaced>()
+    for (let i = 0; i < input.history.length; i += 1) {
+        if (removed.has(i)) continue
+        const message = input.history[i]
+        if (message === undefined) continue
+        const entry = known.get(i)
+        if (entry !== undefined) displaced.set(messages.length, entry)
+        messages.push(message)
     }
 
-    // The first boundary is the start of the oldest turn; dropping to it removes nothing. Candidates
-    // are the boundaries after it, each of which drops one more complete turn.
-    for (const boundary of boundaries.slice(1)) {
-        const kept = input.history.slice(boundary)
-        const tokens = historyTokens(kept)
-        if (tokens <= input.target) {
-            return { messages: kept, displaced: NO_DISPLACEMENTS, tokens, changed: true }
-        }
-    }
-
-    // Nothing on its own gets under target. Drop every turn we may — the ladder escalates from here,
-    // and a stage that refuses to help because it cannot finish the job is a stage that wasted a rung.
-    const last = boundaries[boundaries.length - 1]
-    if (last === undefined || last === 0) return unchanged(input)
-    const kept = input.history.slice(last)
-    return {
-        messages: kept,
-        // Deliberately empty rather than carried: `trim` reindexes, so any map keyed by the old
-        // indices is now wrong. It runs before `snip`, so there is never one to lose.
-        displaced: NO_DISPLACEMENTS,
-        tokens: historyTokens(kept),
-        changed: true,
-    }
+    return { messages, displaced, tokens: historyTokens(messages), changed: true }
 }
 
 /**
@@ -277,7 +352,7 @@ function cutMiddle(content: string, id: string): string {
 }
 
 /**
- * S2 — cut oversized observations to head and tail.
+ * S1 — cut oversized observations to head and tail.
  *
  * Oldest first, and it stops as soon as the target is met: an observation from three turns ago is
  * worth less than the one from the last turn, and cutting more than necessary spends fidelity the
@@ -314,7 +389,7 @@ export function snip(input: StageInput): StageOutcome {
 }
 
 /**
- * S3 — replace an observation body with a pointer.
+ * S2 — replace an observation body with a pointer.
  *
  * The pointer names the tool, the size, and the id, in that order, because those are the three facts
  * that let a model decide whether following it is worth a step. It is generated text and not an
@@ -388,7 +463,34 @@ function digestMessage(text: string): ChatMessage {
 }
 
 /**
- * S4 — digest everything but the newest turns.
+ * Framing for requests kept beside a digest.
+ *
+ * Different sentence from `TRIM_HEADER` because the situation is different: there the detail is gone,
+ * here it is summarised in the message above. Telling the model detail was destroyed when a digest of
+ * it is right there is the kind of small untruth that makes an agent hedge about what it knows.
+ */
+const DIGEST_SPINE_HEADER =
+    "Earlier requests, verbatim. What happened in response is summarised above."
+
+/**
+ * The person's own messages from a span that is about to be replaced, with a header explaining them.
+ *
+ * Empty when the span holds none, so a caller never inserts a header over nothing. This is the one
+ * mechanism behind the "no stage drops what the person said" property for the digesting stages —
+ * `trim` does its own because it keeps them in place rather than lifting them out.
+ */
+function requestSpine(
+    history: readonly ChatMessage[],
+    upto: number,
+    header: string,
+): readonly ChatMessage[] {
+    const requests = history.slice(0, Math.max(0, upto)).filter(isTurnStart)
+    if (requests.length === 0) return []
+    return [{ role: "user", content: header, origin: "digest" }, ...requests]
+}
+
+/**
+ * S3 — digest everything but the newest turns.
  *
  * `digest` is supplied by the caller because producing it may be a model call, and a pure function
  * cannot make one. The caller is also where the fallback is chosen, so this stage never has to know
@@ -404,7 +506,11 @@ export function collapse(input: StageInput & { readonly digest: string }): Stage
     if (boundaries.length <= COLLAPSE_KEEP_TURNS) return unchanged(input)
 
     const from = boundaries[boundaries.length - COLLAPSE_KEEP_TURNS] as number
-    const messages = [digestMessage(input.digest), ...input.history.slice(from)]
+    const messages = [
+        digestMessage(input.digest),
+        ...requestSpine(input.history, from, DIGEST_SPINE_HEADER),
+        ...input.history.slice(from),
+    ]
     const tokens = historyTokens(messages)
     // A digest longer than what it replaced is not a compaction. It happens on a short history of
     // terse turns, and accepting it would grow the prompt at the moment the ladder was asked to
@@ -416,16 +522,24 @@ export function collapse(input: StageInput & { readonly digest: string }): Stage
 }
 
 /**
- * S5 — everything becomes the digest, except the protected tail.
+ * S4 — everything becomes the digest, except the protected tail.
  *
  * The last rung. Pinned blocks are not history and survive untouched, which is why anything that must
  * always hold lives in slots 0–2 and never here. Firing this twice in one session is a
  * misconfiguration rather than a busy session, and the ladder says so.
+ *
+ * "Everything" has one exception, and it is deliberate: the person's own requests survive here too. A
+ * rung that discards them frees 0.3% and leaves an agent that cannot say what it was asked to do —
+ * which is the state a reset is most likely to be reached in, and the worst one to be blind in.
  */
 export function reset(input: StageInput & { readonly digest: string }): StageOutcome {
     const limit = tailStart(input)
     if (limit === 0) return unchanged(input)
-    const messages = [digestMessage(input.digest), ...input.history.slice(limit)]
+    const messages = [
+        digestMessage(input.digest),
+        ...requestSpine(input.history, limit, DIGEST_SPINE_HEADER),
+        ...input.history.slice(limit),
+    ]
     const tokens = historyTokens(messages)
     if (tokens >= historyTokens(input.history)) return unchanged(input)
     return { messages, displaced: NO_DISPLACEMENTS, tokens, changed: true }

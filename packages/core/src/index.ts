@@ -86,6 +86,7 @@ export {
     type TurnLimits,
     type TurnResult,
 } from "./loop/turn.ts"
+export { type EndContext, endedBadly, endNote } from "./loop/turn-end.ts"
 export {
     editManifest,
     editManifestSync,

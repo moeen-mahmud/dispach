@@ -423,10 +423,23 @@ test("an event a person must see is handled on BOTH output paths", () => {
     const transcript = FILES.find((file) => file.path === "transcript.ts")?.text ?? ""
     const plain = FILES.find((file) => file.path === "run.ts")?.text ?? ""
 
-    for (const type of ["tool.gated"]) {
+    for (const type of ["tool.gated", "context.dropped"]) {
         expect(transcript).toContain(`case "${type}"`)
         expect(plain).toContain(`runtime.bus.on("${type}"`)
     }
+})
+
+test("every way a turn can end has a sentence, on one shared formatter", () => {
+    // `endNote` lives in core and is called by the plain path, the transcript reducer and the channel
+    // delivery path. Three formatters is how the same ending came to be described three ways and
+    // reported on one surface: `stats.reason` reached the transcript and was rendered nowhere, and the
+    // plain path's `max_steps` line printed only when the reply was empty.
+    const plain = FILES.find((file) => file.path === "run.ts")?.text ?? ""
+    const transcript = FILES.find((file) => file.path === "transcript.ts")?.text ?? ""
+    expect(plain).toContain("endNote(")
+    expect(transcript).toContain("endNote(")
+    // And the exit code comes off the same union, so a new reason cannot exit 0 by omission.
+    expect(plain).toContain("endedBadly(")
 })
 
 test("a blocked write is reported even when tool rows are suppressed", () => {

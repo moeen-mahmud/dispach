@@ -5,9 +5,14 @@
  * there are no path separators to respect. A path glob has to distinguish `*` from `**`, or
  * `src/*.ts` silently matches `src/a/b/c.ts` and every result is wrong in the direction of too many.
  *
- * `node:fs/promises`'s own `glob` would do it, and is deliberately not used: it is still marked
- * experimental on Node 22, which is the version the compatibility leg of CI runs. A forty-line
- * matcher is cheaper than a runtime split between the two engines.
+ * `node:fs/promises`'s own `glob` would do it, and is not used. The original reason was that it was
+ * experimental on Node 22, the version the compatibility leg of CI ran — and **that reason expired**
+ * when the floor moved to 24 (decision 13.5), where it is stable. What has not been done is the work
+ * that would justify switching: the two engines would each use their own implementation, and whether
+ * `Bun.Glob` and `fs.glob` agree on ordering, on following symlinks, and on whether a pattern may
+ * escape the root has not been measured here. So this stays for now because one shared matcher cannot
+ * disagree with itself, and the note is that it is a candidate for deletion behind a comparison
+ * rather than a decision that still stands on its own.
  *
  * ## What is skipped, and why it is a list rather than a rule
  *

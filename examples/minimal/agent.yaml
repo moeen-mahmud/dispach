@@ -42,5 +42,9 @@ context:
   reserveOutput: 8192
 
 limits:
+  # Small on purpose, and the only manifest here where that is right: this example exists to be run
+  # against four endpoints in a few seconds, not to do work. Anything that does work wants the
+  # default of 40 — a six-step budget cut a real agent off one step after it had installed the
+  # dependency it needed. `noProgress`, not this, is what stops a stuck model.
   maxSteps: 4
   turnTimeoutMs: 120000

@@ -217,14 +217,9 @@ interface Event {
 | `context.pressure` | per step, after compaction | `fraction` (of the prompt actually sent), `tokens`, `budget`, `source: reported \| corrected \| estimated`, `peak?` (what the ladder faced) |
 | `compaction.stage` | per stage that ran | `stage`, `before`, `after`, `changed`, `digest?: model \| mechanical` |
 | `context.reset` | per S5 firing | `count`, `warning?` |
+| `context.dropped` | history the budget could not fit | `messages`, `budget`, `keptTokens` |
 | `phase.changed` | per `phase_set` that moved | `to`, `tools` (count now visible) |
-| `context.pressure` | per step | `used`, `window`, `fraction` |
-| `compaction.stage` | ladder fires | `stage`, `before`, `after`, `dropped` |
-| `context.reset` | S5 fires | `sessionKey` — warn level |
-| `skill.selected` | activation | `skill`, `score` |
-| `skill.none` | below threshold | `topScore` |
-| `phase.changed` | transition | `from`, `to`, `by` |
-| `model.call` | request sent | `role`, `model`, `promptTokens`, `cached` |
+| `model.call` | request sent | `role`, `model`, `promptTokens`, `cached`, `attempt` |
 | `model.chunk` | streaming | `delta` — suppressed unless subscriber opted in |
 | `model.result` | response done | `outputTokens`, `finishReason`, `latencyMs`, `costUsd?` |
 | `tool.call` | before execute | `slug`, `callId`, `argsHash`, `mutating` |
@@ -241,6 +236,12 @@ interface Event {
 | `schedule.fired` | timer | `scheduleId`, `kind`, `drift Ms` |
 | `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs` |
 | `error` | anything uncaught | `code`, `message`, `hint`, `stack?` |
+
+Six rows were removed from this table rather than corrected: a second `context.pressure` naming
+`used`/`window`, a second `compaction.stage` naming `dropped`, a `context.reset` naming `sessionKey`,
+a duplicate `phase.changed` naming `from`/`by`, and `skill.selected`/`skill.none`, which have never
+existed as events at all. They were an early draft left below the accurate rows in the same table, so
+anything written against them would have read `undefined` from a field this document promised.
 
 `tools.refreshed` is the only evidence a remote provider caught its cached catalogue up, and it is
 deliberately the only evidence: the refresh is detached, because awaiting it would put a network round
@@ -281,8 +282,14 @@ model invented and a field that failed coercion. The first occurrence is followe
 request; a second in a row ends the turn with `tool_repair_failed` rather than asking again, so two
 of these back to back is the signal that a catalogue needs work rather than that a model does.
 
-`turn.end.reason`: `final` \| `max_steps` \| `stopped` \| `timeout` \| `error`.
-Hitting `max_steps` is reported honestly rather than dressed up as a normal completion.
+`turn.end.reason`: `final` \| `max_steps` \| `no_progress` \| `truncated` \| `stopped` \| `timeout` \|
+`error`. Everything that is not `final` is reported honestly rather than dressed up as a normal
+completion, and each has its own sentence from `endNote` — the plain CLI, the transcript and the
+channel delivery path all call it, so no surface describes an ending in words of its own.
+
+`no_progress` and `truncated` are separate reasons rather than shades of `max_steps` and `final`
+because each needs a different remedy: a stalled turn names the call that repeated, and a truncated
+one names an output limit and whose it was. `turns.status` accepts both from migration 7.
 
 ### SSE framing
 

@@ -407,3 +407,86 @@ describe("the configuration block", () => {
         expect(estimateTokens(text)).toBeLessThan(260)
     })
 })
+
+describe("the blunt trim, and what it may not cut", () => {
+    /** One oversized observation, larger on its own than the whole prompt budget. */
+    function overSized(protectedTail?: number) {
+        return assembleContext({
+            identity: "You are a test fixture.",
+            history: [
+                { role: "user", content: "the original request" },
+                { role: "assistant", content: "ACTION exec", origin: "call" },
+                {
+                    role: "user",
+                    content: `OBSERVATION exec — ok\n${"row\n".repeat(4000)}`,
+                    origin: "observation",
+                },
+            ],
+            input: "what now",
+            window: 2000,
+            reserveOutput: 500,
+            ...(protectedTail === undefined ? {} : { protectedTail }),
+        })
+    }
+
+    test("what the person said survives even here, and the rest is reported", () => {
+        // The last-resort path, reached exactly when the ladder fell short — which is the worst moment
+        // to also lose the instruction. One predicate (`isTurnStart`) with the ladder, because two
+        // definitions of "what the person said" is how one path honoured the rule and the other did
+        // not, on the same session a moment apart.
+        const assembled = overSized()
+        const history = assembled.blocks.filter((block) => block.slot === SLOT.history)
+        expect(history.map((block) => block.content)).toEqual(["the original request"])
+        expect(assembled.droppedMessages).toBe(2)
+    })
+
+    test("the current turn's call and observation survive whatever they cost", () => {
+        // The walk is newest-first and stops at the first message that will not fit, dropping
+        // everything older. When the message that will not fit *is* the newest one — a tool result
+        // bigger than the remaining budget — that stop happens immediately and takes the whole
+        // history with it, including the call and result the model is about to reason over. It then
+        // answers as though the tool had never run, and nothing anywhere says so.
+        const assembled = overSized(2)
+        const history = assembled.blocks.filter((block) => block.slot === SLOT.history)
+        expect(history[0]?.content).toBe("ACTION exec")
+        expect(history[1]?.content).toContain("OBSERVATION exec")
+        // And nothing else, because the tail alone has already passed the window: the request cannot
+        // be rescued on top of it. Keeping the tail is a reserve being spent; adding to a prompt that
+        // has already passed the window is a request the endpoint refuses.
+        expect(history.length).toBe(2)
+    })
+
+    test("a request is rescued when there is room for it under the window", () => {
+        const assembled = assembleContext({
+            identity: "You are a test fixture.",
+            history: [
+                { role: "user", content: "the original request" },
+                { role: "assistant", content: "ACTION exec", origin: "call" },
+                {
+                    role: "user",
+                    content: `OBSERVATION exec — ok\n${"row\n".repeat(2000)}`,
+                    origin: "observation",
+                },
+                { role: "user", content: "and the newest thing I said" },
+            ],
+            input: "what now",
+            window: 3000,
+            reserveOutput: 500,
+            protectedTail: 1,
+        })
+        const history = assembled.blocks.filter((block) => block.slot === SLOT.history)
+        const contents = history.map((block) => block.content)
+        // Both requests, and the observation is what went.
+        expect(contents).toContain("the original request")
+        expect(contents).toContain("and the newest thing I said")
+        expect(contents.some((content) => content.includes("OBSERVATION"))).toBe(false)
+        expect(assembled.droppedMessages).toBeGreaterThan(0)
+    })
+
+    test("a tail longer than the history is clamped, not trusted", () => {
+        // A caller reporting more tail than it passed would otherwise protect a negative range.
+        const assembled = overSized(99)
+        expect(assembled.blocks.filter((block) => block.slot === SLOT.history).length).toBe(3)
+        expect(assembled.droppedMessages).toBe(0)
+    })
+})
