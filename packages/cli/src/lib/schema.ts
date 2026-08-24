@@ -8,6 +8,7 @@ import type { BrowseRow, InstallReport } from "#lib/browse"
 import type { Slice } from "#lib/scroll"
 import type { SessionRowSource } from "#lib/sessions-view"
 import type { CatalogueEntry } from "#lib/source-cache"
+import type { TextSelection } from "#lib/text-selection"
 import type {
     EditorState,
     EnvFacts,
@@ -353,6 +354,13 @@ export interface AppProps {
 }
 
 export interface TranscriptProps {
+    /**
+     * The live mouse selection, in buffer coordinates, or `undefined`.
+     *
+     * Buffer coordinates rather than screen ones, so scrolling leaves it alone: the window moves and the
+     * selection does not. `undefined` renders exactly what this component rendered before it existed.
+     */
+    readonly selection?: TextSelection
     /** Already flattened and wrapped by `transcriptRows`, so a row here is a row on screen. */
     readonly rows: readonly TranscriptRow[]
     /** Which of them to draw, and how many are out of sight. Decided by `lib/scroll.ts`. */

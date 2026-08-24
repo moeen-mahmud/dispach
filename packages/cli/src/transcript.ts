@@ -466,18 +466,31 @@ export function transcriptRows(
     const rows: TranscriptRow[] = []
     const visible = items.filter((item) => item.role !== "reasoning" || options.showReasoning)
 
+    /**
+     * A row this renderer invented: a gap, a label, a fold notice, a stats line.
+     *
+     * `lead: 0` because there is no prefix to exclude, and `continuation: false` because it starts a line of
+     * its own. Selectable, deliberately — a stats line or a banner note is text somebody may well want to
+     * copy, and the cells worth excluding are the role prefixes, which are per-row and handled below.
+     */
+    const chrome = (row: Omit<TranscriptRow, "lead" | "continuation">): TranscriptRow => ({
+        ...row,
+        lead: 0,
+        continuation: false,
+    })
+
     for (const [at, item] of visible.entries()) {
         // A blank row between items, and never a trailing one. The rich transcript is read rather than
         // grepped, and two turns that touch each other read as one wall of text; a blank row at the end
         // would instead be a permanent gap above the composer.
-        if (at > 0) rows.push({ key: `${item.id}:gap`, role: item.role, text: "" })
+        if (at > 0) rows.push(chrome({ key: `${item.id}:gap`, role: item.role, text: "" }))
 
         if (item.role === "banner") {
             // The banner keeps its content and loses its border. A bordered box inside a windowed list
             // costs two rows this module cannot count — Ink measures the frame, not us — and the frame
             // was decoration on a surface that is now itself a frame.
             const [title = "", ...lines] = item.text.split("\n")
-            rows.push({ key: `${item.id}:title`, role: "banner", text: title, bold: true })
+            rows.push(chrome({ key: `${item.id}:title`, role: "banner", text: title, bold: true }))
             for (const [n, line] of lines.entries()) {
                 for (const [w, wrapped] of wrapText(line, options.columns).entries()) {
                     rows.push({
@@ -485,6 +498,9 @@ export function transcriptRows(
                         role: "banner",
                         text: wrapped,
                         dim: true,
+                        lead: 0,
+                        // Only rows the *wrap* invented continue; a fresh source line does not.
+                        continuation: w > 0,
                     })
                 }
             }
@@ -506,25 +522,35 @@ export function transcriptRows(
                     ? body.length
                     : Math.min(body.length, REASONING_FOLD_ROWS)
             const folded = body.length - shown
-            rows.push({
-                key: `${item.id}:label`,
-                role: "reasoning",
-                dim: true,
-                text:
-                    folded > 0
-                        ? `· reasoning · ${body.length} rows · ⌥r expands`
-                        : `· reasoning · ${body.length} row${body.length === 1 ? "" : "s"}`,
-            })
-            for (const [n, line] of body.slice(0, shown).entries()) {
-                rows.push({ key: `${item.id}:${n}`, role: "reasoning", text: `${pad}${line}` })
-            }
-            if (folded > 0) {
-                rows.push({
-                    key: `${item.id}:folded`,
+            rows.push(
+                chrome({
+                    key: `${item.id}:label`,
                     role: "reasoning",
                     dim: true,
-                    text: `${pad}… ${folded} more row${folded === 1 ? "" : "s"}`,
+                    text:
+                        folded > 0
+                            ? `· reasoning · ${body.length} rows · ⌥r expands`
+                            : `· reasoning · ${body.length} row${body.length === 1 ? "" : "s"}`,
+                }),
+            )
+            for (const [n, line] of body.slice(0, shown).entries()) {
+                rows.push({
+                    key: `${item.id}:${n}`,
+                    role: "reasoning",
+                    text: `${pad}${line}`,
+                    lead: pad.length,
+                    continuation: n > 0,
                 })
+            }
+            if (folded > 0) {
+                rows.push(
+                    chrome({
+                        key: `${item.id}:folded`,
+                        role: "reasoning",
+                        dim: true,
+                        text: `${pad}… ${folded} more row${folded === 1 ? "" : "s"}`,
+                    }),
+                )
             }
             continue
         }
@@ -534,16 +560,22 @@ export function transcriptRows(
                 key: `${item.id}:${n}`,
                 role: item.role,
                 text: `${n === 0 ? prefix : pad}${line}`,
+                // The prefix on the first row and its hanging indent on every row after it are the same
+                // width, so one number covers both — and it is exactly the span a copy must drop.
+                lead: [...prefix].length,
+                continuation: n > 0,
             })
         }
 
         if (item.stats !== undefined && !options.quiet) {
-            rows.push({
-                key: `${item.id}:stats`,
-                role: item.role,
-                text: `  ${formatStats(item.stats)}`,
-                dim: true,
-            })
+            rows.push(
+                chrome({
+                    key: `${item.id}:stats`,
+                    role: item.role,
+                    text: `  ${formatStats(item.stats)}`,
+                    dim: true,
+                }),
+            )
         }
     }
 

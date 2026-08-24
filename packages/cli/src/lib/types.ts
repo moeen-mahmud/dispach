@@ -91,6 +91,23 @@ export interface TranscriptRow {
     readonly text: string
     readonly dim?: boolean
     readonly bold?: boolean
+    /**
+     * Columns of `text` that are the role prefix or its hanging indent.
+     *
+     * A selection may not include them and a copy must not contain them: `› ` and `  · ` are chrome this
+     * renderer added, not something anybody wrote. The reference CLI marks the same cells `noSelect` for
+     * the same reason. Rendering already knows the number — it builds the row from it — so carrying it is
+     * cheaper and safer than a consumer re-deriving it from the role.
+     */
+    readonly lead: number
+    /**
+     * This row continues the row above rather than starting a new logical line.
+     *
+     * What rejoins a wrapped paragraph on copy. Known here by construction — `transcriptRows` wraps the
+     * text and therefore knows which rows it invented — and *not* recoverable afterwards: a row's text is
+     * not a slice of its source, so nothing downstream can tell a wrap from a real newline.
+     */
+    readonly continuation: boolean
 }
 
 export interface TurnStats {
@@ -307,6 +324,21 @@ export type Intent =
      */
     | { readonly kind: "extend"; readonly to: MotionKind }
     | { readonly kind: "selectAll" }
+    /**
+     * A mouse gesture that is not the wheel, with where it happened.
+     *
+     * The keymap cannot resolve this on its own: turning a screen cell into a row of the conversation needs
+     * the frame's geometry, and the keymap is pure and has none. So it reports the gesture and the caller
+     * with the layout decides what it selects — the same split as `scroll`, which the keymap names and the
+     * component applies.
+     */
+    | {
+          readonly kind: "pointer"
+          readonly gesture: "press" | "drag" | "release"
+          readonly column: number
+          readonly row: number
+          readonly shift: boolean
+      }
     | { readonly kind: "historyPrev" }
     | { readonly kind: "historyNext" }
     | { readonly kind: "killToStart" }

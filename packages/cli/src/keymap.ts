@@ -146,8 +146,27 @@ export function keyToIntent(input: string, key: KeyState, context: KeyContext): 
     // through is the same bug with a different button.
     const mouse = mouseInput(input)
     if (mouse !== undefined) {
-        if (mouse.rows === 0) return { kind: "none" }
-        return { kind: "scroll", move: mouse.rows < 0 ? "up" : "down", times: Math.abs(mouse.rows) }
+        if (mouse.rows !== 0) {
+            return {
+                kind: "scroll",
+                move: mouse.rows < 0 ? "up" : "down",
+                times: Math.abs(mouse.rows),
+            }
+        }
+        // A press, drag or release. Reported rather than resolved: which row of the conversation a cell
+        // sits on is a question about the frame, and this function has no frame. Still claimed either way —
+        // a report that fell through would be typed into the message, which is the bug this branch exists
+        // for and does not stop being one because the gesture is now useful.
+        if (mouse.at !== undefined && mouse.kind !== undefined && mouse.kind !== "wheel") {
+            return {
+                kind: "pointer",
+                gesture: mouse.kind,
+                column: mouse.at.column,
+                row: mouse.at.row,
+                shift: mouse.shift === true,
+            }
+        }
+        return { kind: "none" }
     }
 
     // A key *release* is not a keystroke. `reportEventTypes` is on so that `super` survives on an arrow

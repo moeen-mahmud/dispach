@@ -516,6 +516,7 @@ function applyToLine(state: EditorState, intent: Intent): EditorState {
         // compile error rather than a silent edit applied to somebody's message.
         case "arm":
         case "scroll":
+        case "pointer":
         case "reasoning":
         case "paste":
         case "none":

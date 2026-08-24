@@ -45,10 +45,33 @@ describe("wrapText", () => {
         ])
     })
 
-    test("code points, not UTF-16 units", () => {
-        // `"👍".length` is 2 and it occupies one cell-ish. Counting units would wrap a line of emoji at
-        // half the width it can hold.
-        expect(wrapText("👍".repeat(10), 10)).toEqual(["👍".repeat(10)])
+    test("columns, not code points and not UTF-16 units", () => {
+        // Three different numbers, and only one of them is what a terminal draws. `"👍".length` is 2
+        // (UTF-16 units), `[..."👍"].length` is 1 (code points), and it occupies **2 columns**.
+        //
+        // This assertion used to read `[..."👍".repeat(10)]` — one row — and it was wrong in the direction
+        // that cannot be seen: ten thumbs measured as ten and drew as twenty, so a frame built on the
+        // measurement was a row short, and a row short on the alternate screen scrolls the buffer. Ten
+        // emoji at width 10 is five per row.
+        expect(wrapText("👍".repeat(10), 10)).toEqual(["👍".repeat(5), "👍".repeat(5)])
+        // A UTF-16 count would have given two per row, which is the other way to be wrong.
+        expect(wrapText("👍".repeat(4), 8)).toEqual(["👍".repeat(4)])
+    })
+
+    test("CJK is two columns wide, and a mark on a letter is none", () => {
+        // Both directions of the same rule. Four ideographs fill an eight-column window exactly; the
+        // combining acute adds a mark to the `e` rather than a column of its own.
+        expect(wrapText("日本語日本語", 8)).toEqual(["日本語日", "本語"])
+        expect(wrapText(`caf${"e\u0301"} au lait`, 12)).toEqual([`caf${"e\u0301"} au lait`])
+    })
+
+    test("a cut never lands inside a double-width character", () => {
+        // Half an emoji is not something a terminal can draw. The row comes out one column short instead,
+        // which is the only honest option — and the reason the long-word cut advances by columns rather
+        // than by cells.
+        for (const row of wrapText("👍".repeat(9), 5)) {
+            expect([...row].length, row).toBeLessThanOrEqual(2)
+        }
     })
 
     test("tabs are expanded, so a row containing one can be measured", () => {

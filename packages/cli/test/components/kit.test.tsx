@@ -33,7 +33,7 @@ import { LIVE_PANE_MAX_ROWS, MAX_INPUT_ROWS, SEARCH_ROWS } from "#lib/const"
 import { paletteFor } from "#lib/palette"
 import { FOLLOWING, slice } from "#lib/scroll"
 import { GLYPH, SPINNER_FRAMES, SPINNER_INTERVAL_MS } from "#lib/theme"
-import type { EditorState } from "#lib/types"
+import type { EditorState, TranscriptRow } from "#lib/types"
 import { livePane } from "#lib/wrap"
 import { transcriptRows } from "#transcript"
 import { KEY, mount, overflowing, renderFrame } from "../helpers/frame.tsx"
@@ -892,6 +892,61 @@ describe("the chat frame's arithmetic matches what is drawn", () => {
             })
             expect(livePane(text, 80, LIVE_PANE_MAX_ROWS).rows).toBe(frame.lines.length)
         }
+    })
+})
+
+describe("Transcript, with a mouse selection", () => {
+    // The harness strips ANSI, so the highlight's colour cannot be read here — the same limit that makes
+    // the caret's inverse video untestable. What is asserted is what a colour check would miss anyway: the
+    // row is still the row after being split into three spans, and no row wraps.
+    const rows: readonly TranscriptRow[] = [
+        { key: "a:0", role: "user", text: "› hello brave", lead: 2, continuation: false },
+        { key: "a:1", role: "user", text: "  new world", lead: 2, continuation: true },
+        {
+            key: "b:0",
+            role: "assistant",
+            text: "a reply that is quite long",
+            lead: 0,
+            continuation: false,
+        },
+    ]
+    const window = { from: 0, to: 3, above: 0, below: 0 }
+
+    test("a selected row still draws all of its text", () => {
+        const selection = {
+            anchor: { row: 0, column: 4 },
+            focus: { row: 2, column: 10 },
+            dragging: false,
+        }
+        const frame = renderFrame(h(Transcript, { rows, slice: window, selection }), {
+            columns: 60,
+        })
+        for (const word of ["hello", "brave", "new", "world", "reply", "quite"]) {
+            expect(frame.text, word).toContain(word)
+        }
+        expect(overflowing(frame, 60)).toEqual([])
+    })
+
+    test("with no selection it draws exactly what it drew before selections existed", () => {
+        const plain = renderFrame(h(Transcript, { rows, slice: window }), { columns: 60 })
+        expect(plain.text).toContain("hello brave")
+        expect(overflowing(plain, 60)).toEqual([])
+    })
+
+    test("a selection outside the window changes nothing on screen", () => {
+        // Buffer coordinates mean a selection can name rows the window is not showing. Those rows must
+        // simply not be drawn, rather than the highlight landing on whichever row is in that position now.
+        const scrolled = { from: 2, to: 3, above: 2, below: 0 }
+        const selection = {
+            anchor: { row: 0, column: 0 },
+            focus: { row: 1, column: 5 },
+            dragging: false,
+        }
+        const frame = renderFrame(h(Transcript, { rows, slice: scrolled, selection }), {
+            columns: 60,
+        })
+        expect(frame.text).toContain("a reply")
+        expect(frame.text).not.toContain("hello")
     })
 })
 

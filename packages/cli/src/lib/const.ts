@@ -205,6 +205,16 @@ export const LANDING_LIST_ROWS = 16
  */
 export const MIN_LANDING_TRANSCRIPT = 8
 
+/**
+ * How long after a press a second one still counts as a double-click.
+ *
+ * A terminal reports three presses and never a "double click", so the grouping is ours to infer — from time
+ * *and* position, because two clicks 300 ms apart on different words are two clicks. 400 ms is the common
+ * platform default; longer makes a deliberate second selection turn into a word-select, shorter makes a
+ * real double-click fail on a slow hand.
+ */
+export const MULTI_CLICK_MS = 400
+
 /** The blank row between the brand mark and the one-line header under it. */
 export const BRAND_GAP_ROWS = 1
 

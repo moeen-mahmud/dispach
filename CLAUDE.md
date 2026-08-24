@@ -744,6 +744,24 @@ Never claim a performance property without a number in `evals/` and a script to 
   `inverse`, which would cancel against the caret and read as several highlights across coloured roles.
   `ComposerRow` offsets are **buffer-absolute**: `wrapRows` reports them per line, and line-relative ones
   highlight the wrong text on every line after the first.
+- **`wrap.ts` measures columns, and the test that had to invert is the proof.** It counted code points, so
+  `"👍".repeat(10)` measured 10 and drew 20 — and the suite asserted that as correct for three phases. Every
+  cap built on it was short, and short by a row on the alternate screen is a frame taller than the terminal.
+  `lib/width.ts` is a range table, not a dependency, and it is honest about being per **code point**: a
+  grapheme cluster is summed, so a flag emoji over-measures — which wraps early, the only safe direction.
+  The long-word cut advances by columns rather than cells, because a cut inside a double-width character is
+  half a glyph nothing can draw.
+- **Mouse selection is in *buffer* coordinates, and that is the whole reason it is small.** The reference CLI
+  works in screen coordinates against a viewport grid and spends ~40% of its selection state surviving that
+  — accumulators for rows that scrolled out mid-drag, parallel soft-wrap bitmaps, clamp debt. We never lose
+  the text, so `{row, column}` into the row buffer needs none of it: scrolling moves the window and not the
+  selection, and a copy is a substring of data still in hand. What it *did* need is provenance on the row —
+  `lead` so a copy never contains the `› ` we added, `continuation` so a wrapped paragraph rejoins into its
+  source line — both known at construction and **not** recoverable afterwards. Mode **1002** is the enabling
+  change: without motion-while-held a drag is never reported, so selection was unreachable rather than
+  merely off. A selection is *cleared* by eviction, never re-keyed: rows are addressed by position, so a
+  trim would slide the highlight onto different text. And the release derives its range from its own report,
+  not from the closure's state, which on a fast drag is one motion behind.
 - **A key chord is verified against a real terminal, never against the parser.** Ink reporting *a* key
   says nothing about the bytes a terminal sent, and most chords have two spellings — ⌥← is `input "b" +
   meta` in Apple Terminal and `leftArrow + meta` in iTerm2; honour both. Two measured facts that cost a

@@ -27,6 +27,15 @@ export interface SpawnRequest {
     readonly env?: Readonly<Record<string, string | undefined>>
     readonly timeoutMs?: number
     readonly maxBuffer?: number
+    /**
+     * Text to write to the child's stdin, which is then closed.
+     *
+     * Added for the clipboard: `pbcopy` reads what it copies from stdin and there is no argument form. The
+     * alternative was a temporary file, which puts whatever was selected on disk — and a selection is
+     * routinely the most sensitive thing on the screen. The seam grows rather than the caller working
+     * around it, per the rule about first-party code not getting private escape hatches.
+     */
+    readonly input?: string
 }
 
 export interface SpawnResult {
@@ -42,6 +51,7 @@ export interface SpawnResult {
 export function spawnCapture(request: SpawnRequest): SpawnResult {
     const result = spawnSync(request.command, [...request.args], {
         encoding: "utf8",
+        ...(request.input === undefined ? {} : { input: request.input }),
         ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
         ...(request.env === undefined ? {} : { env: request.env as NodeJS.ProcessEnv }),
         ...(request.timeoutMs === undefined ? {} : { timeout: request.timeoutMs }),
@@ -72,8 +82,14 @@ export function spawnCaptureAsync(request: SpawnRequest): Promise<SpawnResult> {
             ...(request.env === undefined ? {} : { env: request.env as NodeJS.ProcessEnv }),
             // Never inherit: a child that writes to the terminal would paint over the rendered frame, and
             // one that reads from it would steal the keys the app is listening for.
-            stdio: ["ignore", "pipe", "pipe"],
+            // A pipe only when there is something to write. `ignore` otherwise, for the reason below.
+            stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         })
+        if (request.input !== undefined) {
+            // Ended immediately: a child reading stdin waits for EOF, so a pipe left open is a process
+            // that never exits and a promise that never settles.
+            child.stdin?.end(request.input)
+        }
         let stdout = ""
         let stderr = ""
         let signalled = false

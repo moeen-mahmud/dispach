@@ -21,6 +21,8 @@
 const TAB_WIDTH = 8
 const TAB = " ".repeat(TAB_WIDTH)
 
+import { cellWidths } from "#lib/width"
+
 /**
  * One drawn row, and which source characters it drew.
  *
@@ -54,7 +56,16 @@ export function wrapRows(line: string, columns: number): readonly WrappedRow[] {
     // placing a caret has to expand its own column the same way, which `expandColumn` is for.
     const flat = line.replaceAll("\t", TAB)
     const all = [...flat]
-    if (columns <= 0 || all.length <= columns) {
+    // Widths per cell, computed once. Every measurement below is a sum over this rather than a count of
+    // code points: an emoji is one code point and two columns, so counting made `"👍".repeat(10)` measure
+    // ten and draw twenty. Offsets stay in code points, because that is what a caller slices with.
+    const w = cellWidths(all)
+    const span = (from: number, to: number): number => {
+        let total = 0
+        for (let at = from; at < to; at += 1) total += w[at] ?? 0
+        return total
+    }
+    if (columns <= 0 || span(0, all.length) <= columns) {
         return [{ text: flat, lead: 0, from: 0, to: all.length }]
     }
 
@@ -100,7 +111,7 @@ export function wrapRows(line: string, columns: number): readonly WrappedRow[] {
         // only the one space a break consumes is, which is what keeps the offsets honest.
         let end = cursor
         while (end < all.length && all[end] !== " ") end += 1
-        const word = end - cursor
+        const word = span(cursor, end)
 
         if (word > columns) {
             // Longer than any row can hold. Flush what is pending, then cut it into full rows.
@@ -110,14 +121,26 @@ export function wrapRows(line: string, columns: number): readonly WrappedRow[] {
                 width = 0
             }
             let take = cursor
-            while (end - take > columns) {
+            while (span(take, end) > columns) {
+                // Advance by *columns*, not by cells. A cut that would land inside a double-width
+                // character stops before it, which is why the row can come out one column short: half an
+                // emoji is not a thing a terminal can draw, and drawing it anyway is how a row overflows.
+                let stop = take
+                let filled = 0
+                while (stop < end && filled + (w[stop] ?? 0) <= columns) {
+                    filled += w[stop] ?? 0
+                    stop += 1
+                }
+                // A single character wider than the whole window would otherwise loop forever taking
+                // nothing. Emit it alone and overflow by one column, which is the only option left.
+                if (stop === take) stop = take + 1
                 at = take
-                push(take + columns)
-                take += columns
+                push(stop)
+                take = stop
                 at = take
             }
             at = take
-            width = end - take
+            width = span(take, end)
         } else if (width > 0 && width + 1 + word > columns) {
             // Does not fit beside what is already on this row. The space before it is the break and is
             // drawn by neither row, which is why `to` and the next `from` are not the same number.

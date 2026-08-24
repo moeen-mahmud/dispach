@@ -54,9 +54,12 @@ describe("the tracking sequences themselves", () => {
         // constant was the literal text `ESC`, so the SGR request was *printed into the frame* and the
         // terminal was left in its default encoding. Every symptom of that is silent — the screen shows a
         // stray sequence somewhere and the reports arrive in a shape nobody asked for.
+        // Three modes now: 1000 (press/release/wheel), 1002 (motion while held — without which a drag is
+        // never reported at all), and 1006 (SGR encoding). Counted rather than pattern-matched, because
+        // the failure being guarded against is a literal `ESC` in the string.
         for (const sequence of [ENABLE_MOUSE, DISABLE_MOUSE]) {
             expect(sequence).not.toContain("ESC")
-            expect([...sequence].filter((char) => char === "\u001B")).toHaveLength(2)
+            expect([...sequence].filter((char) => char === "\u001B")).toHaveLength(3)
         }
     })
 
@@ -91,9 +94,36 @@ describe("mouseInput", () => {
     })
 
     test("a click is a report with no scroll in it, which still has to be claimed", () => {
-        // Zero rows, not `undefined`. The difference is whether the keymap swallows it or types it.
-        expect(mouseInput("[<0;10;5M")).toEqual({ rows: 0 })
-        expect(mouseInput("[<0;10;5m")).toEqual({ rows: 0 })
+        // `rows: 0` is the load-bearing part — it is what makes the keymap swallow a click rather than
+        // letting the report text reach the buffer. The position rides along now that a selection needs it,
+        // and the conversion from SGR's 1-based cells to zero-based happens here so no caller repeats it.
+        expect(mouseInput(`${ESC}[<0;10;5M`)).toEqual({
+            rows: 0,
+            at: { column: 9, row: 4 },
+            kind: "press",
+        })
+    })
+
+    test("press, drag and release are told apart, and shift is carried", () => {
+        // Motion is bit 5, so a left-button drag is 32. `m` as the final byte is a release whatever the
+        // button bits say — a terminal reports the button that *was* held, not one being pressed.
+        expect(mouseInput(`${ESC}[<32;3;7M`)?.kind).toBe("drag")
+        expect(mouseInput(`${ESC}[<0;3;7m`)?.kind).toBe("release")
+        // Shift is bit 2, so a shift-click is 4: it extends an existing selection instead of starting one.
+        expect(mouseInput(`${ESC}[<4;3;7M`)?.shift).toBe(true)
+        expect(mouseInput(`${ESC}[<0;3;7M`)?.shift).toBeUndefined()
+    })
+
+    test("only the newest position in a chunk survives, while wheel notches sum", () => {
+        // A drag arrives as a stream of motion reports and a selection follows the pointer rather than
+        // retracing it, so the last position wins. The wheel is the opposite case and is summed, which is
+        // why `rows` is a separate field — a flick coalesces several notches into one chunk, and honouring
+        // only the last would move a single row.
+        const dragged = mouseInput(`${ESC}[<32;3;7M${ESC}[<32;9;11M`)
+        expect(dragged?.at).toEqual({ column: 8, row: 10 })
+        const flicked = mouseInput(`${ESC}[<64;1;1M${ESC}[<64;1;1M`)
+        expect(flicked?.rows).toBe(-WHEEL_ROWS * 2)
+        expect(flicked?.at).toBeUndefined()
     })
 
     test("the X10 fallback is recognised, offsets and all", () => {
@@ -120,8 +150,20 @@ describe("the keymap claims every mouse report", () => {
         expect(intent("[<65;10;5M")).toEqual({ kind: "scroll", move: "down", times: WHEEL_ROWS })
     })
 
-    test("a click does nothing at all, rather than being typed", () => {
-        expect(intent("[<0;10;5M")).toEqual({ kind: "none" })
+    test("a click becomes a pointer gesture rather than being typed", () => {
+        // It used to resolve to `none`, which was right while nothing could act on it. Now it carries
+        // where it happened — the keymap reports the gesture and the component with the frame decides
+        // which row of the conversation that cell is on. What has not changed is the part that mattered:
+        // the report is *claimed*, so no coordinate text can reach the buffer.
+        expect(intent(`${ESC}[<0;10;5M`)).toEqual({
+            kind: "pointer",
+            gesture: "press",
+            column: 9,
+            row: 4,
+            shift: false,
+        })
+        expect(intent(`${ESC}[<32;10;5M`)).toMatchObject({ gesture: "drag" })
+        expect(intent(`${ESC}[<0;10;5m`)).toMatchObject({ gesture: "release" })
     })
 
     test("no mouse report ever becomes an insert", () => {

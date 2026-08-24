@@ -204,6 +204,38 @@ export function chatFrame(inputs: {
  * one function rather than an inline subtraction at the call site, so there is no second idea of whether the
  * gap row is included.
  */
+/**
+ * Which buffer row a screen cell is on, or `undefined` if the cell is not in the transcript.
+ *
+ * The one place the frame's vertical arithmetic is read backwards, and it belongs here because this module
+ * is where that arithmetic already lives. A caller deriving it would restate the brand's height, the gap,
+ * the header and the scroll-hint row — four numbers that are only correct together.
+ *
+ * Above the transcript, in order: the wordmark and its gap (landing only), the one-line header, and the
+ * scroll-hint row `Transcript` always draws even when it is blank. Below it, everything is chrome. A cell
+ * outside the window returns `undefined` rather than clamping, because clamping would make a click on the
+ * status line select the last row of the conversation.
+ */
+export function transcriptHit(
+    point: { readonly column: number; readonly row: number },
+    layout: {
+        readonly brandLines: number
+        /** The window `Transcript` was handed: `from` inclusive, `to` exclusive. */
+        readonly from: number
+        readonly to: number
+    },
+): { readonly row: number; readonly column: number } | undefined {
+    const top =
+        (layout.brandLines === 0 ? 0 : layout.brandLines + BRAND_GAP_ROWS) +
+        HEADER_ROWS +
+        SCROLL_HINT_ROWS
+    const offset = point.row - top
+    if (offset < 0) return undefined
+    const row = layout.from + offset
+    if (row >= layout.to) return undefined
+    return { row, column: point.column }
+}
+
 export function transcriptRowsAfterBrand(frame: ChatFrame, brandLines: number): number {
     const used = brandLines === 0 ? 0 : brandLines + BRAND_GAP_ROWS
     return Math.max(1, frame.body - used - SCROLL_HINT_ROWS)

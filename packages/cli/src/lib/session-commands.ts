@@ -174,6 +174,14 @@ export const KEY_BINDINGS: readonly KeyBindingSpec[] = [
         summary:
             "show the model's reasoning whole — folded to a few rows so the reply stays findable; ^O works on every terminal, ⌥r needs one that reports it",
     },
+    {
+        // The one entry that is not a keystroke, and it earns its place: mouse tracking is what makes the
+        // wheel scroll, and the same tracking is what stops the *terminal* selecting text — so without a
+        // line here, a person reasonably concludes selection is broken rather than reimplemented.
+        chord: "drag",
+        summary:
+            "select text in the conversation — it goes to the clipboard when you let go, so ⌘V works; double-click a word, esc clears it",
+    },
     { chord: "esc", summary: "return to the newest reply when you have scrolled away" },
 ]
 

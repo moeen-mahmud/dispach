@@ -26,7 +26,7 @@
 
 import { BRAND, VERSION } from "@dispach/core"
 import { Box, Text, useApp, useInput } from "ink"
-import { type ComponentType, useCallback, useEffect, useMemo, useState } from "react"
+import { type ComponentType, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { BRAND_INDENT, Brandmark } from "#components/Brandmark"
 import { CommandOutput } from "#components/CommandOutput"
 import type { ConfigEditorProps } from "#components/ConfigEditor"
@@ -44,13 +44,15 @@ import { useElapsed } from "#hooks/useElapsed"
 import { useTerminalSize } from "#hooks/useTerminalSize"
 import { useTurn } from "#hooks/useTurn"
 import { keyContext, keyToIntent } from "#keymap"
-import { chatFrame, transcriptRowsAfterBrand } from "#lib/chat-frame"
+import { chatFrame, transcriptHit, transcriptRowsAfterBrand } from "#lib/chat-frame"
+import { copyToClipboard } from "#lib/clipboard"
 import type { EditorRow } from "#lib/config-editor"
 import { applyEditorRow, editorRowsFor } from "#lib/config-rows"
 import {
     EXIT_ARM_MS,
     FALLBACK_COLUMNS,
     LANDING_LIST_ROWS,
+    MULTI_CLICK_MS,
     SEARCH_ROWS,
     SESSION_PICKER_ROWS,
 } from "#lib/const"
@@ -68,6 +70,17 @@ import {
 } from "#lib/session-commands"
 import type { SessionRowSource } from "#lib/sessions-view"
 import { runSubcommand } from "#lib/subcommand"
+import {
+    beginSelection,
+    dragSelection,
+    endSelection,
+    extendSelection,
+    lineAt,
+    selectedText,
+    type TextPoint,
+    type TextSelection,
+    wordAt,
+} from "#lib/text-selection"
 import { THEME } from "#lib/theme"
 import { wordmark } from "#lib/wordmark"
 import { lastStats, transcriptRows } from "#transcript"
@@ -181,6 +194,23 @@ export function App({
      * answer, which filled the terminal and left the reply itself somewhere above the fold.
      */
     const [expandReasoning, setExpandReasoning] = useState(false)
+    /**
+     * The mouse selection over the transcript, in buffer coordinates.
+     *
+     * Cleared by eviction below rather than re-keyed: rows are addressed by position, so dropping any from
+     * the front shifts every index — a selection kept across a trim would silently start covering different
+     * text, which is the "looks live and is not" failure `pinned` exists to prevent. There is also nothing
+     * to copy from rows that no longer exist.
+     */
+    const [selection, setSelection] = useState<TextSelection | undefined>(undefined)
+    /**
+     * The previous press, for counting clicks.
+     *
+     * A ref rather than state: nothing renders from it, and putting it in state would redraw the whole tree
+     * on every press. Multi-click has to be inferred from time and position because a terminal reports
+     * three presses and never a "double click" — the same reason the reference CLI keeps its own window.
+     */
+    const lastPress = useRef<{ at: TextPoint; when: number; clicks: number } | undefined>(undefined)
     // Derived from the buffer rather than stored, so the only palette state is where the cursor is.
     const palette = pane.kind === "none" ? paletteFor(editor.value) : undefined
     const [paletteIndex, setPaletteIndex] = useState(0)
@@ -273,7 +303,13 @@ export function App({
     // nothing, which is why the suppression carries a reason rather than the dependency being dropped.
     // biome-ignore lint/correctness/useExhaustiveDependencies: a deliberate trigger dependency; see above
     useEffect(() => {
-        if (view.pinned) trim()
+        if (!view.pinned) return
+        // Eviction shifts every row index, so a selection made before a trim would afterwards cover
+        // different text — the same hazard `pinned` exists for, applied to a highlight. Cleared rather
+        // than re-keyed: there is nothing to copy from rows that are gone, and a highlight that quietly
+        // slid onto another reply is worse than one that disappeared.
+        setSelection(undefined)
+        trim()
     }, [view.pinned, state.items.length, trim])
 
     // The armed ^C expires on its own. A prompt that stayed armed indefinitely would turn a ^C pressed
@@ -584,6 +620,78 @@ export function App({
                 })
                 return
             }
+            if (intent.kind === "pointer") {
+                // Screen cell to buffer row, through the one function that owns the frame's vertical
+                // arithmetic. `undefined` means the cell was chrome — the header, the composer, the status
+                // line — and a click there clears the selection rather than selecting the nearest row,
+                // because clamping would make clicking the status bar highlight the last reply.
+                const hit = transcriptHit(
+                    { column: intent.column, row: intent.row },
+                    { brandLines: mark?.lines.length ?? 0, from: window.from, to: window.to },
+                )
+                if (hit === undefined) {
+                    if (intent.gesture === "press") setSelection(undefined)
+                    return
+                }
+                if (intent.gesture === "press") {
+                    // Shift extends whatever is already there, which is the gesture for correcting a
+                    // selection that stopped a word short. Checked before the click count, because a
+                    // shift-click is a deliberate second gesture rather than a fast repeat of the first.
+                    if (intent.shift && selection !== undefined) {
+                        setSelection(extendSelection(selection, hit))
+                        lastPress.current = undefined
+                        return
+                    }
+                    const previous = lastPress.current
+                    const repeat =
+                        previous !== undefined &&
+                        Date.now() - previous.when <= MULTI_CLICK_MS &&
+                        previous.at.row === hit.row &&
+                        previous.at.column === hit.column
+                    // Third click wraps back to one, so a fourth starts a fresh drag rather than doing
+                    // nothing — a count that only grew would leave rapid clicking permanently stuck on
+                    // "line".
+                    const clicks = repeat ? (previous.clicks % 3) + 1 : 1
+                    lastPress.current = { at: hit, when: Date.now(), clicks }
+                    setSelection(
+                        clicks === 3
+                            ? lineAt(rows, hit)
+                            : clicks === 2
+                              ? wordAt(rows, hit)
+                              : beginSelection(hit),
+                    )
+                    return
+                }
+                if (intent.gesture === "drag") {
+                    setSelection((current) =>
+                        current === undefined ? undefined : dragSelection(current, hit),
+                    )
+                    return
+                }
+                // Release. The clipboard is written here and nowhere else, because `cmd+c` cannot reach a
+                // terminal app — the terminal claims it and finds no native selection, mouse tracking
+                // having disabled the one it would have used. Copying on mouse-up is what makes `cmd+v`
+                // work, and a copy that failed says so rather than leaving the previous clipboard in place
+                // looking like the wrong text was selected.
+                // Derived from *this* report rather than from the state in the closure. A release carries
+                // its own final position, and `selection` here is whatever the last render saw — which on
+                // a fast drag-and-release is one motion behind, so copying from it would drop the last few
+                // characters somebody deliberately included.
+                const finished =
+                    selection === undefined
+                        ? undefined
+                        : endSelection(dragSelection(selection, hit))
+                setSelection(finished)
+                const text = selectedText(rows, finished)
+                if (text !== "") {
+                    void copyToClipboard(text).then((result) => {
+                        if (!result.copied && result.problem !== "nothing selected") {
+                            note(`could not copy: ${result.problem ?? "unknown"}`)
+                        }
+                    })
+                }
+                return
+            }
             if (intent.kind === "reasoning") {
                 // A chord with nothing to act on has to say so.
                 //
@@ -787,7 +895,11 @@ export function App({
                     </Text>
                 </Box>
             ) : (
-                <Transcript rows={rows} slice={window} />
+                <Transcript
+                    rows={rows}
+                    slice={window}
+                    {...(selection === undefined ? {} : { selection })}
+                />
             )}
 
             {/*

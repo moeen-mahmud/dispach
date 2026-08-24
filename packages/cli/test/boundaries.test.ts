@@ -109,6 +109,14 @@ describe("the pure modules stay pure", () => {
         // it prints is asserted here rather than read off somebody's screen, and a module that reached
         // for `process.env` to decide what a terminal is would be reporting a guess.
         "lib/keys-view.ts",
+        // Display width. Pure because every wrapped row, every frame height and now every mouse column
+        // depends on it, and a table of ranges is exactly the thing to assert directly rather than
+        // through three layers of layout.
+        "lib/width.ts",
+        // The transcript's mouse selection. Pure because the whole design is that it holds *buffer*
+        // coordinates rather than screen ones, and that claim is only worth making if the arithmetic can
+        // be asserted without a terminal, a mouse, or a rendered frame.
+        "lib/text-selection.ts",
         "lib/wizard.ts",
         // The daemon's three. `launchd.ts` renders a plist and parses `launchctl` output;
         // `daemon-plan.ts` decides what would stop an install and what a service's state means;

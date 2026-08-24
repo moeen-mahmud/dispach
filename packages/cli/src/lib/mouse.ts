@@ -25,10 +25,21 @@
  * unprintable characters into a message on exactly the terminals least able to say why.
  */
 
-/** Button-press tracking plus SGR encoding. 1000 is the least that reports the wheel at all. */
-export const ENABLE_MOUSE = "\u001B[?1000h\u001B[?1006h"
+/**
+ * Button tracking, drag tracking, and SGR encoding.
+ *
+ * 1000 reports press and release and is the least that reports the wheel at all. **1002 adds motion while a
+ * button is held**, and without it a drag is not reported — which is why selecting text was not merely
+ * disabled but unreachable: the events never arrived. 1003 (motion with no button) is deliberately absent,
+ * because it makes the terminal send a report for every pixel of idle pointer movement and nothing here
+ * wants hover.
+ *
+ * Set low-to-high and reset high-to-low, so a terminal that only understands some of them is left in a
+ * state we asked for rather than a partial one.
+ */
+export const ENABLE_MOUSE = "\u001B[?1000h\u001B[?1002h\u001B[?1006h"
 /** Reversed on the way out, so a terminal is left handling its own mouse again. */
-export const DISABLE_MOUSE = "\u001B[?1006l\u001B[?1000l"
+export const DISABLE_MOUSE = "\u001B[?1006l\u001B[?1002l\u001B[?1000l"
 
 /**
  * Rows one notch of the wheel moves.
@@ -41,6 +52,11 @@ export const WHEEL_ROWS = 3
 /** Wheel-up and wheel-down in SGR's button numbering. 64 is the wheel bit plus button 0. */
 const WHEEL_UP = 64
 const WHEEL_DOWN = 65
+
+/** Motion bit — set on every report mode 1002 sends while a button is held. */
+const MOTION = 32
+/** Shift bit, so shift-clicking can extend a selection rather than starting a new one. */
+const SHIFT = 4
 
 /**
  * The escape prefix is **optional**, and that is not laxness.
@@ -55,9 +71,18 @@ const WHEEL_DOWN = 65
  * in the middle of a sentence is still a message.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: the escape byte is the thing being matched
-const SGR = /(?:^|\u001B)\[<(\d+);\d+;\d+[Mm]/g
+const SGR = /(?:^|\u001B)\[<(\d+);(\d+);(\d+)([Mm])/g
 // biome-ignore lint/suspicious/noControlCharactersInRegex: the escape byte is the thing being matched
 const X10 = /(?:^|\u001B)\[M[\s\S]{3}/g
+
+/** Which gesture a report describes. */
+export type MouseKind = "wheel" | "press" | "drag" | "release"
+
+/** Where a report happened, in **zero-based** screen cells. */
+export interface MousePoint {
+    readonly column: number
+    readonly row: number
+}
 
 export interface MouseInput {
     /**
@@ -67,6 +92,18 @@ export interface MouseInput {
      * swallowed. The `undefined` return is what means "no report".
      */
     readonly rows: number
+    /**
+     * The last gesture in the chunk, and where it happened. `undefined` when nothing positional was in it.
+     *
+     * The *last* rather than every one, because a drag arrives as a stream of motion reports and only the
+     * newest position matters — a selection follows the pointer, it does not retrace it. The wheel is the
+     * exception and is summed instead, which is why `rows` is separate: a flick coalesces several notches
+     * into one chunk and honouring only the last would move a single row.
+     */
+    readonly at?: MousePoint
+    readonly kind?: MouseKind
+    /** Held modifiers, from SGR's button bits. Shift is what extends a selection from a click. */
+    readonly shift?: boolean
 }
 
 /**
@@ -80,11 +117,27 @@ export function mouseInput(input: string): MouseInput | undefined {
     if (!input.includes("[<") && !input.includes("[M")) return undefined
     let rows = 0
     let seen = false
+    let at: MousePoint | undefined
+    let kind: MouseKind | undefined
+    let shift = false
     for (const match of input.matchAll(SGR)) {
         seen = true
         const button = Number(match[1])
-        if (button === WHEEL_UP) rows -= WHEEL_ROWS
-        else if (button === WHEEL_DOWN) rows += WHEEL_ROWS
+        if (button === WHEEL_UP) {
+            rows -= WHEEL_ROWS
+            continue
+        }
+        if (button === WHEEL_DOWN) {
+            rows += WHEEL_ROWS
+            continue
+        }
+        // SGR reports 1-based cells; everything downstream indexes from zero, so the conversion happens
+        // once, here, rather than at each of the callers that would each have to remember it.
+        at = { column: Math.max(0, Number(match[2]) - 1), row: Math.max(0, Number(match[3]) - 1) }
+        // `m` is a release whatever the button bits say. Motion is bit 5 (32); the low two bits are the
+        // button, and only the left one starts a selection.
+        kind = match[4] === "m" ? "release" : (button & MOTION) !== 0 ? "drag" : "press"
+        shift = (button & SHIFT) !== 0
     }
     for (const match of input.matchAll(X10)) {
         seen = true
@@ -95,5 +148,11 @@ export function mouseInput(input: string): MouseInput | undefined {
         if (button === WHEEL_UP) rows -= WHEEL_ROWS
         else if (button === WHEEL_DOWN) rows += WHEEL_ROWS
     }
-    return seen ? { rows } : undefined
+    if (!seen) return undefined
+    return {
+        rows,
+        ...(at === undefined ? {} : { at }),
+        ...(kind === undefined ? {} : { kind }),
+        ...(shift ? { shift } : {}),
+    }
 }

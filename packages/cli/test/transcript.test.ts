@@ -528,6 +528,10 @@ describe("transcriptRows — the finished conversation as rows", () => {
             role: "banner",
             text: "the product 0.1.0",
             bold: true,
+            // Every row carries what a selection needs: how many leading columns are chrome, and whether
+            // it continues the row above. A title is neither.
+            lead: 0,
+            continuation: false,
         })
         expect(rows[1]?.text).toBe("session local:default")
         expect(rows.every((row) => !row.text.includes("╭"))).toBe(true)
