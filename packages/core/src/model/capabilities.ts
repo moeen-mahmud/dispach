@@ -495,6 +495,87 @@ export function matchCapabilities(modelId: string): CapabilityEntry {
     return best?.entry ?? { pattern: "*", capabilities: CONSERVATIVE }
 }
 
+/**
+ * Where a role's context window came from.
+ *
+ * `CONSERVATIVE`'s 8,192 for an unmatched model id has been indistinguishable from a measured 8,192
+ * since the registry existed, and the registry's own comment is honest about why the number is low —
+ * *"A floor, not a ceiling… Claiming only what was shown"*. That honesty is exactly how it stays
+ * wrong: nothing downstream can tell a floor from a fact, so nobody corrects one.
+ *
+ * The conservative *value* stays. Over-reporting a window produces empty replies at
+ * `finishReason: length`, which is a worse failure than budgeting small. What changes is that nothing
+ * pretends to know.
+ *
+ * There is deliberately no `measured` case. `model probe --write` puts its number in the manifest like
+ * any other, and once written the honest answer to "where did this come from" *is* the manifest — the
+ * probe leaves a dated comment beside it for the person, which nothing parses. A schema field whose
+ * only job is to label another field would also be settable by hand, which turns a fact into a claim.
+ */
+export type WindowSource = "manifest" | "registry" | "fallback"
+
+export interface WindowProvenance {
+    readonly source: WindowSource
+    /**
+     * The registry pattern that matched, or `undefined` when the manifest decided.
+     *
+     * Carried because it is the more useful half of the diagnostic: `registry` says a row was found,
+     * and `claude-*` says the row found is **one row for every Claude model ever released**, which is
+     * the thing worth acting on. Required-but-undefined rather than optional — under
+     * `exactOptionalPropertyTypes` an optional field cannot be cleared by assignment, and a
+     * conditionally-spread field is the shape that has cost this repo six debugging rounds.
+     */
+    readonly pattern: string | undefined
+    readonly contextWindow: number
+}
+
+/**
+ * Which of the three decided this role's window, and what the number is.
+ *
+ * Answers for `contextWindow` alone rather than for the whole capability set. Every field in a
+ * registry row has the same problem, but the window is the one a budget divides by, so it is the one
+ * whose being a guess changes what the runtime does.
+ */
+export function windowProvenance(
+    modelId: string,
+    override?: ModelCapabilitiesOverride,
+): WindowProvenance {
+    if (override?.contextWindow !== undefined) {
+        return { source: "manifest", pattern: undefined, contextWindow: override.contextWindow }
+    }
+    const entry = matchCapabilities(modelId)
+    return {
+        // The registry ends in `*`, so this is the "nothing matched" case wearing the only pattern
+        // that could have caught it.
+        source: entry.pattern === "*" ? "fallback" : "registry",
+        pattern: entry.pattern,
+        contextWindow: entry.capabilities.contextWindow,
+    }
+}
+
+/**
+ * The provenance as one short tag, for a line that already carries the number.
+ *
+ * In core because three surfaces print it — `validate`, `/status` and `/context` — and a second
+ * wording is how two of them come to describe the same number differently. Same reasoning as the
+ * turn-end note: one formatter, several callers.
+ *
+ * The registry case names the **pattern**, which is the half worth reading: `registry claude-*` tells
+ * you at a glance that one row is answering for every Claude model ever released. The fallback case
+ * spends more words than the others because it is the one that means "nobody knows".
+ */
+export function describeWindowSource(provenance: WindowProvenance | undefined): string {
+    if (provenance === undefined) return ""
+    switch (provenance.source) {
+        case "manifest":
+            return "manifest"
+        case "registry":
+            return `registry ${provenance.pattern ?? "?"}`
+        case "fallback":
+            return "fallback (no row matched — a floor, not a measurement)"
+    }
+}
+
 /** Registry match merged with a manifest override. Only defined override keys are applied. */
 export function resolveCapabilities(
     modelId: string,

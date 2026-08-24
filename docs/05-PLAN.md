@@ -2725,3 +2725,125 @@ text whatever the field passes — and the test written to prove otherwise passe
 - [x] Deleting and retyping at the end of a wrapped value is visible throughout
 - [x] The new guard **fails** with the width removed — checked, unlike the wizard one
 - [x] `bun test` 2528/0 · `test:node` 1164/0 · `typecheck` clean · `lint` at the 6 pre-existing warnings
+
+---
+
+## Phase 7E — the terminal we actually run in
+
+**Shipped 2026-08-24.** Decisions 11.120–11.137.
+
+**Goal.** Four complaints, tenth round on the TUI: text could not be selected with the mouse,
+keyboard shortcuts did not fire, editor navigation did not work, and the composer floated mid-screen
+on the landing screen. Every previous round had guessed at chord behaviour against Ink's parser
+instead of against a terminal, which is why they kept coming back.
+
+### What was measured first
+
+- **Ink 7.1.1 parses the kitty keyboard protocol completely and negotiates it for us — and it is
+  opt-in, and we never opted in** (`ink.js:800`: *"Protocol is opt-in: if kittyKeyboard is not
+  specified, do nothing"*). Without it Ink's legacy branch folds super into meta (`modifier & 10`),
+  so `cmd+←` was **indistinguishable** from `⌥←` and both word-moved.
+- **`⌥r` was bound, handled, and dead.** Warp resolves Option+letter to a composed character before
+  the protocol layer, so it arrived as `®` — and `printableOnly` keeps anything ≥ 0x20, so the
+  documented chord *typed into the message*.
+- **Mode 1002 was never set**, so a drag was never reported: mouse selection was unreachable rather
+  than merely absent. The coordinates `mouse.ts` already parsed were thrown away.
+- **`wrap.ts` measured code points, not columns.** `wrap.test.ts` asserted `"👍"×10` at width 10 was
+  one row; it draws as 20 columns and wraps. Inverting that assertion was the fix.
+
+### Built
+
+- **The frame.** One `<Box flexGrow={1} />` above the composer in both states, so the input sits on
+  the bottom edge and stops walking down the screen as the first messages arrive (11.120, superseding
+  11.98).
+- **The keyboard.** `negotiateKeyboard()` pushes the protocol with `disambiguateEscapeCodes` and
+  `reportEventTypes`; `lib/csi.ts` decodes the modifier off the raw bytes anyway, because Warp omits
+  the event-type field and the negotiation alone was not enough (11.125). Full editor navigation:
+  `cmd+←/→` line, `⌥←/→` word, `cmd+↑/↓` buffer, Home/End (which had never worked), `cmd+⌫`,
+  `cmd+z`. `^O` does what `⌥r` does, needing neither the protocol nor a terminal setting (11.128).
+- **`dispach keys`** — a probe that prints raw bytes as hex, Ink's parse, the resolved intent, and
+  whether the protocol is proven rather than merely requested. It taps stdin because `useInput`
+  reports `input: ""` for exactly the keys worth probing (11.123).
+- **Width in columns.** `lib/width.ts`, a range table, honest about being per code point.
+- **Selection**, in buffer coordinates — which is what makes it small: the reference implementation
+  spends ~40% of its selection state surviving screen coordinates, and we never lose the text
+  (11.132). Drag, double-click a word, triple-click a line, shift-click to extend, in the transcript
+  *and* in the composer. Shift plus every motion extends in the editor (11.129).
+- **Follow-ups in the same phase:** the exit hang (11.135–11.136), the two-line faint resume notice
+  (11.137), and `/status`, which was advertised and unhandled.
+
+### Acceptance
+
+- [x] `cmd+←` → `cursorHome` and `⌥←` → `wordLeft`, asserted from the bytes a terminal sends
+- [x] A key release does not double-fire; the protocol reply is swallowed rather than typed
+- [x] Every documented `⌥` chord walks a drift test, which is what `⌥r` never had
+- [x] A 30-row transcript sweep copies exactly the window's rows and no chrome
+- [x] Live drag in the composer highlighted `'new world'`; typing `X` gave `hello brave X`
+- [x] The composer's last row is directly above the status bar in **both** states, at every width
+- [x] `bun test` 2718 · `test:node` 1193 · typecheck · lint at the 6 pre-existing warnings · bench ok
+
+### Deviations from the plan as written
+
+- **`mode: "auto"` did not work and became `"enabled"`.** Ink's 200 ms detection window loses the
+  race in Warp — the reply arrived after it closed and `CSI ? 0 u` was typed into the composer.
+- **`reportEventTypes` was recorded as the fix for `cmd+←` before it was measured, and it was not.**
+  Warp omits the field anyway. The bytes are decoded directly now, which is the version that works.
+- **The composer got selection too**, which the plan had as its own later stage.
+
+---
+
+## Phase 7D — the numbers the runtime runs on
+
+**Goal.** Every `init` preset's default model has an unverified context window, and nothing says so.
+`deepseek-v4-pro` is declared at 393,216 against a published 1,048,576; `claude-*` is **one row for
+every Claude model ever released**, so it cannot be right for `claude-sonnet-5` and an older model at
+once; and every deepseek row carries `promptCache: "none"`, which — if wrong — means the
+cache-stable prefix this architecture goes to real lengths to protect has never once been exercised
+against the endpoint in daily use.
+
+Decisions 3.7–3.9.
+
+### 7D.3 — window provenance *(built 2026-08-24)*
+
+`WindowProvenance` on every `ResolvedRole`: `manifest | registry | fallback`, with the matched
+pattern carried alongside. `windowReport(manifest)` is the one pure derivation behind all of it —
+`validate`, `/status`, `Agent.create`'s boot warning, and `/context` when it lands.
+
+- [x] `validate` names the source and prints a line per role that carries its own configuration:
+      `window 393216 registry deepseek-v4-flash*`, then `compactor qwen3.5:9b · window 32768 registry qwen3.5*`
+- [x] `/status` names it on the model line
+- [x] A `*` match warns once at boot on `agent.warnings`, naming the role, the id and the floor
+- [x] An unconfigured role does not report a second time — asserted, and red with the filter removed
+- [x] `bun test` 2725 · `test:node` 1200 · lint at the 6 pre-existing warnings · bench ok
+
+### 7D.1 — `/context` *(next)*
+
+A session-local breakdown of what is in the prompt right now: per-slot token counts from the existing
+`slotReport()`, the budget's denominator named explicitly — `ctx 61%` is a fraction of
+`window − wireTokens − reserveOutput` and the gauge has never said so — the `source`
+(`estimated`/`corrected`), and the last compaction. Session-local like `/tools` and `/status`,
+because `subcommandArgv` passes only a manifest path and `--plain`, so a command pane's child boots
+its own runtime and would report a different session.
+
+### 7D.2 — `dispach model probe`
+
+Measures the window for **every configured role**, cheapest-first: `GET /models` metadata (free), an
+over-range `max_tokens` whose refusal names the output ceiling (free), prompt caching by effect (two
+tiny calls), and a prompt-size search behind `--window` with a printed cost estimate (~$0.30 to reach
+1M on DeepSeek, $5–30 on OpenAI or Anthropic). Acceptance yields a **floor**; only a refusal naming a
+number yields a **ceiling**. `--write` goes through `core/manifest/edit.ts` and leaves a dated
+comment; the report also prints a paste-ready registry row, so changing a shipped default stays
+reviewed.
+
+**Acceptance must include the caching question as its own line**, not a footnote: whether the real
+endpoint reports cache hits decides if `promptCache: "none"` has been costing full price on every
+turn since the deepseek rows were written.
+
+### Not in this phase
+
+- **`/compact`.** Considered and rejected: the ladder already fires at 60% per step so there is no
+  cliff to pre-empt, and compaction rewrites the prompt and never the store, so a manual trigger
+  would have nothing durable to do. Do not add it back without revisiting that.
+- Provenance for capability fields other than `contextWindow`. Every field in a registry row has the
+  same problem; the window is the one a budget divides by.
+

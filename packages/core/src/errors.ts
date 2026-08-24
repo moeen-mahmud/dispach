@@ -833,6 +833,33 @@ export function envOverridden(overrides: readonly EnvOverride[]): ErrorDetail {
 }
 
 /**
+ * A model id that matched no registry row, so its context window is a floor rather than a fact.
+ *
+ * Unlike most things worth warning about at boot, this is *not* a correct configuration that happens
+ * to look odd — a `*` match means nothing in the registry recognised the model, and 8,192 is what the
+ * runtime will budget against until somebody says otherwise. On a model with a real window of 200k
+ * that wastes almost all of it; the failure is silent in the expensive direction, which is why it is
+ * a warning and the over-reporting direction is not (that one produces empty replies at
+ * `finishReason: length`, which announces itself).
+ *
+ * Named per role. An agent can run three models on three endpoints and only main's window has ever
+ * been visible anywhere, so a compactor on the fallback had nothing that could report it.
+ */
+export function modelWindowUnknown(
+    roles: readonly { readonly role: string; readonly modelId: string; readonly window: number }[],
+): ErrorDetail {
+    const described = roles
+        .map((entry) => `${entry.role} (${entry.modelId}, budgeting ${entry.window})`)
+        .join(", ")
+    return {
+        code: "model_window_unknown",
+        message: `No capability row matches ${roles.length === 1 ? "this model" : "these models"}: ${described}.`,
+        hint: "The window above is a conservative floor, not a measured limit, and the budget divides by it — on a model with a large window most of it goes unused. Set model.<role>.capabilities.contextWindow in the manifest if you know the number, or add a registry row if the model is a common one.",
+        field: "model",
+    }
+}
+
+/**
  * A `memory.retriever` name nothing implements.
  *
  * Refused at load rather than falling back to the one that exists. A typo would otherwise produce an

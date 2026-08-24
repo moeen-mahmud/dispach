@@ -21,6 +21,7 @@ import {
     type AnyEvent,
     BRAND,
     defaultStorePath,
+    describeWindowSource,
     endedBadly,
     endNote,
     HarnessError,
@@ -28,6 +29,7 @@ import {
     Runtime as RuntimeClass,
     type SessionSummary,
     VERSION,
+    windowReport,
 } from "@dispach/core"
 import { fetchCatalogue } from "#browse"
 import { initInteractive } from "#init"
@@ -1092,12 +1094,24 @@ async function sessionStatus(wired: Wired): Promise<string> {
         ? "off"
         : `enabled on ${manifest.server.host}:${manifest.server.port}, NOT bound here — \`serve\` binds it`
 
+    // Per role, and only the roles carrying their own configuration: an agent can run three models on
+    // three endpoints, and until this existed only main's window was reported anywhere at all — so a
+    // compactor budgeting against the fallback's 8,192 had nothing that could say so.
+    const windows = windowReport(manifest)
+    const others = windows.filter(
+        (entry) => entry.role !== "main" && entry.role === entry.configuredAs,
+    )
+
     return keyValue([
         { label: "agent", value: `${described.id} (${described.name})` },
         {
             label: "model",
-            value: `${described.model} · ${manifest.tools.dialect} · ${described.window} token window`,
+            value: `${described.model} · ${manifest.tools.dialect} · ${described.window} token window (${describeWindowSource(windows[0]?.window)})`,
         },
+        ...others.map((entry) => ({
+            label: entry.role,
+            value: `${entry.modelId} · ${entry.window.contextWindow} token window (${describeWindowSource(entry.window)})`,
+        })),
         { label: "channels", value: channels },
         { label: "http api", value: server },
         { label: "store", value: wired.runtime.store.location },

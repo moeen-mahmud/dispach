@@ -1,9 +1,11 @@
 import {
     CAPABILITY_REGISTRY,
+    describeWindowSource,
     globToRegExp,
     matchCapabilities,
     patternSpecificity,
     resolveCapabilities,
+    windowProvenance,
 } from "../src/model/capabilities.ts"
 import { describe, expect, test } from "./_harness.ts"
 
@@ -238,5 +240,45 @@ describe("manifest override merge", () => {
     test("false is a real override value, not an absent one", () => {
         // `{...base, ...override}` with a falsy-filtering bug would silently keep `true` here.
         expect(resolveCapabilities("gpt-4o-mini", { nativeTools: false }).nativeTools).toBe(false)
+    })
+})
+
+describe("window provenance", () => {
+    test("a manifest override is the manifest, whatever the registry says", () => {
+        const provenance = windowProvenance("deepseek-v4-pro", { contextWindow: 1_048_576 })
+        expect(provenance.source).toBe("manifest")
+        expect(provenance.contextWindow).toBe(1_048_576)
+        // No pattern: the registry did not decide this, and naming a row that lost would read as
+        // though it had.
+        expect(provenance.pattern).toBe(undefined)
+    })
+
+    test("an override of a different field leaves the window with the registry", () => {
+        // The check is on `contextWindow` specifically, not on "an override exists". An author
+        // setting `nativeTools` has said nothing about the window.
+        const provenance = windowProvenance("deepseek-v4-pro", { nativeTools: false })
+        expect(provenance.source).toBe("registry")
+    })
+
+    test("a matched row is the registry, and names the row", () => {
+        // The pattern is the useful half. `registry claude-*` says at a glance that one row is
+        // answering for every Claude model ever released.
+        const provenance = windowProvenance("claude-sonnet-5")
+        expect(provenance.source).toBe("registry")
+        expect(provenance.pattern).toBe("claude-*")
+    })
+
+    test("an unmatched id is the fallback, not a registry hit", () => {
+        // The whole point of the field: `CONSERVATIVE`'s 8,192 has been indistinguishable from a
+        // measured 8,192 since the registry existed.
+        const provenance = windowProvenance("some-model-nobody-listed-v9")
+        expect(provenance.source).toBe("fallback")
+        expect(provenance.contextWindow).toBe(8192)
+    })
+
+    test("the fallback's tag says it is a floor; the others stay short", () => {
+        expect(describeWindowSource(windowProvenance("claude-sonnet-5"))).toBe("registry claude-*")
+        expect(describeWindowSource(windowProvenance("nothing-matches-this"))).toContain("floor")
+        expect(describeWindowSource(windowProvenance("x", { contextWindow: 10 }))).toBe("manifest")
     })
 })

@@ -959,6 +959,72 @@ model:
         await runtime.stop()
     })
 
+    test("a model that matches no registry row warns, naming the role and the floor", async () => {
+        // `CONSERVATIVE`'s 8,192 for an unmatched id is indistinguishable from a measured 8,192, and
+        // the budget divides by it — on a model with a real 200k window almost all of it goes unused,
+        // silently and in the expensive direction.
+        const dir = mkdtempSync(join(tmpdir(), "runtime-window-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: test
+model:
+  main:
+    id: some-model-nobody-listed-v9
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+`,
+        )
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: { MODEL_API_KEY: "k" },
+            fetch: replyFetch,
+        })
+        const agent = runtime.agent("test")
+        const warning = agent.warnings.find((entry) => entry.code === "model_window_unknown")
+        expect(warning?.message).toContain("some-model-nobody-listed-v9")
+        expect(warning?.message).toContain("main")
+        expect(warning?.message).toContain("8192")
+        // Read off `agent.warnings` rather than the bus on purpose: boot finishes before anything
+        // subscribes, so a warning emitted there lands in an empty room.
+        await runtime.stop()
+    })
+
+    test("a recognised model warns about nothing, and an unconfigured role is not a second mistake", async () => {
+        // The half that keeps the warning readable. `selector` and `compactor` fall back to main's
+        // instance, so without the `configuredAs` filter one unknown model would be reported three
+        // times — and three lines about one mistake is how a banner teaches people to skip it.
+        const dir = mkdtempSync(join(tmpdir(), "runtime-window-known-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: test
+model:
+  main:
+    id: unlisted-model-a
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+  compactor:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+`,
+        )
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: { MODEL_API_KEY: "k" },
+            fetch: replyFetch,
+        })
+        const warning = runtime
+            .agent("test")
+            .warnings.find((entry) => entry.code === "model_window_unknown")
+        // One warning, naming main only: the selector fell back to main and the compactor matched.
+        expect(warning?.message).toContain("unlisted-model-a")
+        expect((warning?.message ?? "").includes("selector")).toBe(false)
+        expect((warning?.message ?? "").includes("gpt-4o-mini")).toBe(false)
+        await runtime.stop()
+    })
+
     test("agreement and env-only variables say nothing", async () => {
         const dir = mkdtempSync(join(tmpdir(), "runtime-agree-"))
         writeFileSync(

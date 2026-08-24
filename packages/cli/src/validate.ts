@@ -11,12 +11,14 @@
 import { isAbsolute, resolve } from "node:path"
 import {
     buildChannels,
+    describeWindowSource,
     HarnessError,
     loadKnowledge,
     loadManifest,
     resolveCapabilities,
     resolveWorkspace,
     ruleBudgetFailure,
+    windowReport,
 } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
@@ -125,18 +127,34 @@ export function validateCommand(options: ValidateOptions): number {
             return EXIT_OK
         }
 
-        const roles = (["main", "selector", "compactor"] as const)
-            .map((role) => {
-                const config = manifest.model[role]
-                return config === undefined ? `${role}=→main` : `${role}=${config.id}`
-            })
+        // One derivation with `Agent.create`'s boot warning, so a window this command calls a fact
+        // cannot be one the runtime calls a guess.
+        const windows = windowReport(manifest)
+        const roles = windows
+            .map((entry) =>
+                entry.role === entry.configuredAs
+                    ? `${entry.role}=${entry.modelId}`
+                    : `${entry.role}=→main`,
+            )
             .join(" ")
+        // Only the roles that carry their own configuration. A fallback role's number is main's,
+        // already on the line above, and repeating it says a second model was checked.
+        const perRole = windows.filter((entry) => entry.role === entry.configuredAs)
 
         process.stdout.write(
             `ok  ${loaded.path}\n` +
                 `  id           ${manifest.id}${manifest.name === undefined ? "" : ` (${manifest.name})`}\n` +
                 `  models       ${roles}\n` +
-                `  window       ${loaded.window} (reserveOutput ${manifest.context.reserveOutput}, maxOutput ${capabilities.maxOutput})\n` +
+                `  window       ${loaded.window} ${describeWindowSource(windows[0]?.window)} (reserveOutput ${manifest.context.reserveOutput}, maxOutput ${capabilities.maxOutput})\n` +
+                (perRole.length < 2
+                    ? ""
+                    : `${perRole
+                          .slice(1)
+                          .map(
+                              (entry) =>
+                                  `  ${entry.role.padEnd(12)} ${entry.modelId} · window ${entry.window.contextWindow} ${describeWindowSource(entry.window)}\n`,
+                          )
+                          .join("")}`) +
                 `  capabilities thinking=${capabilities.thinking} promptCache=${capabilities.promptCache} nativeTools=${capabilities.nativeTools} strictSchema=${capabilities.strictSchema}\n` +
                 `  dialect      ${manifest.tools.dialect}\n` +
                 `  workspace    ${tiers === "" ? "(none)" : tiers}\n` +

@@ -161,11 +161,15 @@ export { setInSource, uncommentInSource } from "./manifest/yaml-edit.ts"
 export {
     CAPABILITY_REGISTRY,
     type CapabilityEntry,
+    describeWindowSource,
     globToRegExp,
     type ModelCapabilities,
     matchCapabilities,
     patternSpecificity,
     resolveCapabilities,
+    type WindowProvenance,
+    type WindowSource,
+    windowProvenance,
 } from "./model/capabilities.ts"
 export {
     type ChatCompletionsConfig,
@@ -198,8 +202,10 @@ export {
     type ResolvedRole,
     type ResolvedRoles,
     type ResolveRolesOptions,
+    type RoleWindow,
     requestParamsFor,
     resolveRoles,
+    windowReport,
 } from "./model/roles.ts"
 export { parseSSE, type SSEEvent } from "./model/sse.ts"
 export { nearest } from "./nearest.ts"

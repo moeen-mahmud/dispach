@@ -23,6 +23,7 @@ import {
     type ErrorDetail,
     envOverridden,
     memoryNotConfigured,
+    modelWindowUnknown,
     phaseAllowUnmatched,
     toolGatedAfterFirstUse,
     unknownRetriever,
@@ -54,6 +55,7 @@ import {
     type ResolveRolesOptions,
     requestParamsFor,
     resolveRoles,
+    windowReport,
 } from "../model/roles.ts"
 import { loadSkills, type SkillCatalogue } from "../skills/index.ts"
 import { activateSkills } from "../skills/load.ts"
@@ -471,11 +473,30 @@ export class Agent {
         const overrides =
             loaded.envOverrides.length === 0 ? [] : [envOverridden(loaded.envOverrides)]
 
+        // A role whose model matched nothing in the registry is budgeting against a floor. Through
+        // `windowReport` rather than off `roles`, so the thing that warns and the thing `validate`
+        // prints are one derivation. Roles that fall back to main are dropped by the `configuredAs`
+        // test: they share main's instance, so an unconfigured pair would report one mistake three
+        // times, and three lines about one mistake is how a banner teaches people to skip it.
+        const unknownWindows = windowReport(loaded.manifest)
+            .filter((entry) => entry.role === entry.configuredAs)
+            .filter((entry) => entry.window.source === "fallback")
+            .map((entry) => ({
+                role: entry.role,
+                modelId: entry.modelId,
+                window: entry.window.contextWindow,
+            }))
+
         return new Agent({
             loaded,
             roles,
             workspace,
-            warnings: [...warnings, ...providerWarnings, ...overrides],
+            warnings: [
+                ...warnings,
+                ...providerWarnings,
+                ...overrides,
+                ...(unknownWindows.length === 0 ? [] : [modelWindowUnknown(unknownWindows)]),
+            ],
             bus,
             store,
             tools: options.tools ?? ToolRegistry.empty(),
