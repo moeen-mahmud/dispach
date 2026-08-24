@@ -39,12 +39,12 @@ import type { SkillBrowserProps } from "#components/SkillBrowser"
 import { Spinner } from "#components/Spinner"
 import { StatusBar } from "#components/StatusBar"
 import { Transcript } from "#components/Transcript"
-import { applyIntent, EMPTY_EDITOR, submit } from "#editor"
+import { applyIntent, EMPTY_EDITOR, selectionRange, submit } from "#editor"
 import { useElapsed } from "#hooks/useElapsed"
 import { useTerminalSize } from "#hooks/useTerminalSize"
 import { useTurn } from "#hooks/useTurn"
 import { keyContext, keyToIntent } from "#keymap"
-import { chatFrame, transcriptHit, transcriptRowsAfterBrand } from "#lib/chat-frame"
+import { chatFrame, composerHit, transcriptHit, transcriptRowsAfterBrand } from "#lib/chat-frame"
 import { copyToClipboard } from "#lib/clipboard"
 import type { EditorRow } from "#lib/config-editor"
 import { applyEditorRow, editorRowsFor } from "#lib/config-rows"
@@ -630,7 +630,38 @@ export function App({
                     { brandLines: mark?.lines.length ?? 0, from: window.from, to: window.to },
                 )
                 if (hit === undefined) {
-                    if (intent.gesture === "press") setSelection(undefined)
+                    // Not the transcript — try the composer. Selecting your own draft with the mouse is
+                    // the same gesture and a different target, so it is the same branch rather than a
+                    // second handler that would have to re-derive which cell belongs to whom.
+                    const offset = composerHit(
+                        { column: intent.column, row: intent.row },
+                        { editor, columns, rows: size.rows, hint: landing },
+                    )
+                    if (offset === undefined) {
+                        // Genuine chrome. A press clears both selections rather than clamping to whatever
+                        // is nearest, because a click on the status line that highlighted the last reply
+                        // would look deliberate.
+                        if (intent.gesture === "press") {
+                            setSelection(undefined)
+                            setEditor((current) => ({ ...current, anchor: undefined }))
+                        }
+                        return
+                    }
+                    setSelection(undefined)
+                    setEditor((current) =>
+                        intent.gesture === "press" && !intent.shift
+                            ? // A press places the caret and starts a possible selection from it; the
+                              // anchor is set now so the first drag report has something to extend from.
+                              { ...current, cursor: offset, anchor: offset }
+                            : // A drag, or a shift-click, moves the cursor and keeps the anchor — which is
+                              // exactly what `extend` does for a shifted motion, expressed directly
+                              // because there is no motion here, only a destination.
+                              {
+                                  ...current,
+                                  cursor: offset,
+                                  anchor: current.anchor ?? current.cursor,
+                              },
+                    )
                     return
                 }
                 if (intent.gesture === "press") {
@@ -653,6 +684,9 @@ export function App({
                     // "line".
                     const clicks = repeat ? (previous.clicks % 3) + 1 : 1
                     lastPress.current = { at: hit, when: Date.now(), clicks }
+                    // One selection at a time. Two visible highlights with one clipboard between them is
+                    // a screen that cannot say what ⌘C would copy.
+                    setEditor((current) => ({ ...current, anchor: undefined }))
                     setSelection(
                         clicks === 3
                             ? lineAt(rows, hit)
@@ -690,6 +724,20 @@ export function App({
                         }
                     })
                 }
+                return
+            }
+            if (intent.kind === "copySelection" || intent.kind === "cutSelection") {
+                const range = selectionRange(editor)
+                if (range === undefined) {
+                    note("nothing selected — hold shift with a motion, or drag in the box")
+                    return
+                }
+                const text = [...editor.value].slice(range.start, range.end).join("")
+                if (intent.kind === "cutSelection")
+                    setEditor((current) => applyIntent(current, intent))
+                void copyToClipboard(text).then((result) => {
+                    if (!result.copied) note(`could not copy: ${result.problem ?? "unknown"}`)
+                })
                 return
             }
             if (intent.kind === "reasoning") {

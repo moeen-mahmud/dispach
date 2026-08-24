@@ -207,6 +207,11 @@ export function keyToIntent(input: string, key: KeyState, context: KeyContext): 
         if (key.delete) return { kind: "killToEnd" }
         if (input === "z") return key.shift ? { kind: "redo" } : { kind: "undo" }
         if (input === "a") return { kind: "selectAll" }
+        // Reachable only where the protocol delivers `super`, and the terminal may claim them first for
+        // its own copy — which is exactly why a *selection* in the composer does not auto-copy: the
+        // fallback for a chord that may not arrive is retyping, not a surprise clipboard write.
+        if (input === "c") return { kind: "copySelection" }
+        if (input === "x") return { kind: "cutSelection" }
         // Unclaimed, and deliberately swallowed for the same reason an unclaimed option chord is: the
         // insert branch would type the bare letter, so cmd+s would put an "s" in the message.
         return { kind: "none" }

@@ -325,6 +325,14 @@ export type Intent =
     | { readonly kind: "extend"; readonly to: MotionKind }
     | { readonly kind: "selectAll" }
     /**
+     * Copy or cut what is selected in the message.
+     *
+     * Separate intents rather than one with a flag, because only one of them edits the line — and the
+     * reducer's job is the edit. The clipboard write is the caller's, the same split `submit` already has.
+     */
+    | { readonly kind: "copySelection" }
+    | { readonly kind: "cutSelection" }
+    /**
      * A mouse gesture that is not the wheel, with where it happened.
      *
      * The keymap cannot resolve this on its own: turning a screen cell into a row of the conversation needs

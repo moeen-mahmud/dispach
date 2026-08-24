@@ -7,7 +7,8 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { transcriptHit } from "#lib/chat-frame"
+import { EMPTY_EDITOR } from "#editor"
+import { composerHit, promptRows, transcriptHit } from "#lib/chat-frame"
 
 describe("transcriptHit", () => {
     // Working screen: no wordmark. Above the transcript there is the one-line header and the scroll-hint
@@ -51,5 +52,81 @@ describe("transcriptHit", () => {
         // Horizontal chrome is per row, not per frame — the role prefix — so it is excluded by the row's
         // own `lead` rather than here. Subtracting anything at this level would double-count it.
         expect(transcriptHit({ column: 17, row: 2 }, working)?.column).toBe(17)
+    })
+})
+
+describe("composerHit", () => {
+    // The composer is located from the *bottom*, because the frame is bottom-anchored: the status line is
+    // the last row and the composer sits `promptRows` above it (plus the landing hint when there is one).
+    // Counting down from the top would mean knowing the height of the live pane, the palette, the history
+    // search and the confirm line, and being wrong about any one of them puts the caret on another row.
+    const ROWS = 30
+    const COLUMNS = 80
+
+    function hit(value: string, column: number, row: number, hint = false) {
+        return composerHit(
+            { column, row },
+            { editor: { ...EMPTY_EDITOR, value, cursor: 0 }, columns: COLUMNS, rows: ROWS, hint },
+        )
+    }
+
+    /** The row the composer's first line of text is drawn on, derived the same way the frame does it. */
+    function firstTextRow(value: string, hint = false) {
+        const editor = { ...EMPTY_EDITOR, value, cursor: 0 }
+        return ROWS - 1 - (hint ? 1 : 0) - promptRows(editor, COLUMNS) + 1
+    }
+
+    test("a cell on the text row maps to the offset under it", () => {
+        const row = firstTextRow("hello world")
+        // Text starts four columns in: one border, one padding, two of prompt gutter.
+        expect(hit("hello world", 4, row)).toBe(0)
+        expect(hit("hello world", 10, row)).toBe(6)
+    })
+
+    test("a click left of the text lands at the start of the row", () => {
+        // The border, the padding and the gutter are chrome. Clicking them means the start of the line,
+        // which is what clicking a gutter means in every editor.
+        const row = firstTextRow("hello")
+        expect(hit("hello", 0, row)).toBe(0)
+        expect(hit("hello", 3, row)).toBe(0)
+    })
+
+    test("a click past the end of a short line lands at its end", () => {
+        const row = firstTextRow("hi")
+        expect(hit("hi", 60, row)).toBe(2)
+    })
+
+    test("the border rows and everything below are not the composer", () => {
+        const row = firstTextRow("hello")
+        expect(hit("hello", 4, row - 1)).toBeUndefined()
+        expect(hit("hello", 4, row + 1)).toBeUndefined()
+        // The status line is the last row and must never be part of the input.
+        expect(hit("hello", 4, ROWS - 1)).toBeUndefined()
+    })
+
+    test("the landing hint shifts the composer up by exactly one row", () => {
+        expect(hit("hello", 4, firstTextRow("hello", true), true)).toBe(0)
+        // And the same cell is no longer the composer once the hint is gone.
+        expect(hit("hello", 4, firstTextRow("hello", true), false)).toBeUndefined()
+    })
+
+    test("a second line is a second row, with offsets past the newline", () => {
+        const value = "first\nsecond"
+        const row = firstTextRow(value)
+        expect(hit(value, 4, row)).toBe(0)
+        // 6 is the offset of `s`: five characters and the newline.
+        expect(hit(value, 4, row + 1)).toBe(6)
+        expect(hit(value, 7, row + 1)).toBe(9)
+    })
+
+    test("a wrapped line maps by row, not by counting from the start", () => {
+        // The offsets come from `composerLayout`, which wraps the same way the renderer draws — so a
+        // click on the second visual row of one long line lands past the break rather than near the top.
+        const value =
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi"
+        const row = firstTextRow(value)
+        const second = hit(value, 4, row + 1)
+        expect(second).toBeDefined()
+        expect(second ?? 0).toBeGreaterThan(60)
     })
 })

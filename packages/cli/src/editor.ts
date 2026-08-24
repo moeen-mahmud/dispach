@@ -397,6 +397,11 @@ export function applyIntent(state: EditorState, intent: Intent): EditorState {
         return { ...moved, anchor }
     }
 
+    // Cut is a deletion; copy touches nothing. Both leave the clipboard to the caller — a pure reducer
+    // cannot spawn `pbcopy`, and a reducer that could would be untestable for the sake of one line.
+    if (intent.kind === "cutSelection") return deleteRange(state)
+    if (intent.kind === "copySelection") return state
+
     if (intent.kind === "selectAll") {
         return { ...state, anchor: 0, cursor: chars(state.value).length }
     }
@@ -525,6 +530,8 @@ function applyToLine(state: EditorState, intent: Intent): EditorState {
         // exhaustive switch keeps doing its job: a new intent has to be considered, not absorbed.
         case "extend":
         case "selectAll":
+        case "copySelection":
+        case "cutSelection":
             return state
     }
 }

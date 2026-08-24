@@ -180,7 +180,7 @@ export const KEY_BINDINGS: readonly KeyBindingSpec[] = [
         // line here, a person reasonably concludes selection is broken rather than reimplemented.
         chord: "drag",
         summary:
-            "select text in the conversation — it goes to the clipboard when you let go, so ⌘V works; double-click a word, esc clears it",
+            "select text — in the conversation it goes to the clipboard when you let go, so ⌘V works; in the input box it does not, because you are usually about to type over it (⌘C copies, ⌘X cuts). Double-click a word, triple-click a line, esc clears",
     },
     { chord: "esc", summary: "return to the newest reply when you have scrolled away" },
 ]

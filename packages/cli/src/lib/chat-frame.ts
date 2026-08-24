@@ -236,6 +236,64 @@ export function transcriptHit(
     return { row, column: point.column }
 }
 
+/**
+ * Which offset in the message a screen cell is on, or `undefined` if the cell is not in the composer.
+ *
+ * The composer's position is computable because the frame is bottom-anchored (decision 11.120): the status
+ * line is the last row, the landing hint sits above it, and the composer occupies exactly `promptRows`
+ * above that. Counting down from the top would mean knowing the height of every optional block in between
+ * — the live pane, the palette, the history search, the confirm line — and being wrong about any one of
+ * them would put the caret on the wrong row.
+ *
+ * Horizontally: one border column, one of `paddingX`, then the two-column prompt gutter. `PROMPT_PADDING`
+ * is the pair of borders *and* the pair of paddings, so half of it is the left inset — which is why the
+ * text does not start at `PROMPT_PADDING`.
+ *
+ * The returned offset is a code-point index into `editor.value`, which is what the reducer's `cursor` and
+ * `anchor` are: a caller never has to know that rows were involved.
+ */
+export function composerHit(
+    point: { readonly column: number; readonly row: number },
+    inputs: {
+        readonly editor: EditorState
+        readonly columns: number
+        /** The terminal's height, which is the frame's height. */
+        readonly rows: number
+        /** Whether the one-line landing hint is drawn under the composer. */
+        readonly hint: boolean
+    },
+): number | undefined {
+    const layout = composerLayout(
+        inputs.editor,
+        Math.max(1, inputs.columns - PROMPT_PADDING - PROMPT_GUTTER),
+    )
+    const total = layout.rows.length
+    const { from, to } = viewport(
+        total,
+        layout.caretRow,
+        Math.max(1, Math.min(total, MAX_INPUT_ROWS)),
+    )
+    // Only the notice *above* shifts the text down. The one below sits under it and is already inside the
+    // block height, so counting it here would move the first row twice.
+    const above = from > 0 ? 1 : 0
+    // The newline hint is inside `Prompt`'s own box, so it is part of what `promptRows` counts and needs
+    // no separate term here.
+    const block = promptRows(inputs.editor, inputs.columns)
+    const top = inputs.rows - STATUS_ROWS - (inputs.hint ? 1 : 0) - block
+    // One border row, then any "… n lines above" notice, then the visible rows.
+    const firstText = top + PROMPT_BORDER_ROWS / 2 + above
+    const offset = point.row - firstText
+    if (offset < 0 || offset >= to - from) return undefined
+    const row = layout.rows[from + offset]
+    if (row === undefined) return undefined
+    // Left inset: half of `PROMPT_PADDING` is the left border plus the left padding.
+    const textColumn = point.column - PROMPT_PADDING / 2 - PROMPT_GUTTER
+    if (textColumn < 0) return row.start
+    // Past the end of the row's text means the end of that row, which is what clicking in the empty space
+    // after a short line means everywhere else.
+    return Math.min(row.end, row.start + Math.max(0, textColumn - row.lead))
+}
+
 export function transcriptRowsAfterBrand(frame: ChatFrame, brandLines: number): number {
     const used = brandLines === 0 ? 0 : brandLines + BRAND_GAP_ROWS
     return Math.max(1, frame.body - used - SCROLL_HINT_ROWS)
