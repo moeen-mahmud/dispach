@@ -137,6 +137,7 @@ export function App({
     initialDraft,
     manifestPath,
     catalogue,
+    status,
 }: AppProps) {
     const { exit } = useApp()
     const size = useTerminalSize()
@@ -367,6 +368,28 @@ export function App({
                     return
                 case "tools":
                     note(toolsReport(toolsView(agent)))
+                    return
+                case "status":
+                    // Declared in `SESSION_COMMANDS`, advertised in `/help` and generated into the
+                    // palette — and unhandled here, so it fell out of this switch and was sent to the
+                    // model as prose. Not a type error: the union's first member is
+                    // `{kind: SessionCommandKind}` and this switch has no exhaustiveness guard, which
+                    // is why `boundaries.test.ts` now walks every kind. Seventh instance in this repo
+                    // of every layer being right and one not being connected.
+                    //
+                    // Awaited through `.then` rather than inline: a component cannot block, and the
+                    // note *is* the acknowledgement — the same shape `reset` below uses.
+                    if (status === undefined) {
+                        note("status is unavailable in this session")
+                        return
+                    }
+                    status()
+                        .then(note)
+                        .catch((error: unknown) =>
+                            note(
+                                `could not read the status: ${error instanceof Error ? error.message : String(error)}`,
+                            ),
+                        )
                     return
                 case "reset":
                     // Fire-and-report rather than awaited: a component cannot block, and the note is

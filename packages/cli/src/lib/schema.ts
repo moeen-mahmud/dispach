@@ -312,6 +312,19 @@ export interface AppProps {
             manifestPath: string,
         ) => Promise<InstallReport>
     }
+    /**
+     * `/status` — what this agent is and what is actually running.
+     *
+     * Injected for the same reason `catalogue` is: the host owns the runtime, the screen owns neither it
+     * nor the filesystem. Specifically it needs `runtime.channels.started`, which is the difference
+     * between a channel that is *configured* and one that is *connected* — and the whole reason this
+     * screen exists is that reading the manifest instead produced an agent reporting a live Telegram
+     * binding from inside a `run` where nothing was listening.
+     *
+     * Absent means `/status` is not offered, which is honest; it must never mean the word is accepted
+     * and silently billed to the model as prose, which is what it did before this prop existed.
+     */
+    readonly status?: () => Promise<string>
     /** The agent's id, for the one-line header. Distinct from `model`, which is the endpoint's. */
     readonly agentName: string
     /**

@@ -14,6 +14,7 @@ import { BRAND } from "@dispach/core"
 import { DAEMON_ACTIONS } from "#daemon"
 import { COMMANDS } from "#lib/commands"
 import { helpText } from "#lib/help"
+import { SESSION_COMMANDS } from "#lib/session-commands"
 import { SKILLS_ACTIONS } from "#skills"
 
 const SRC = resolve(import.meta.dirname, "..", "src")
@@ -437,6 +438,24 @@ describe("the process actually leaves", () => {
         ).map((file) => file.path)
         expect(offenders).toEqual([])
     })
+})
+
+test("every session command in the table is handled by the chat", () => {
+    // `/status` was declared in `SESSION_COMMANDS`, advertised in `/help`, generated into the palette —
+    // and had no `case` in `App.tsx`, so it fell out of the switch and was billed to the model as prose.
+    // TypeScript cannot catch it: `SessionCommand`'s first member is `{kind: SessionCommandKind}` and the
+    // switch carries no exhaustiveness guard, so a missing arm is a fall-through rather than an error.
+    //
+    // Same shape as the CLI-command test below and as `DOCUMENTED_CTRL_LETTERS` — the drift this repo
+    // keeps paying for is a table that grows a row while the thing consuming it does not.
+    const app = FILES.find((file) => file.path === "components/App.tsx")?.text ?? ""
+    expect(SESSION_COMMANDS.length).toBeGreaterThan(0)
+    // Collected rather than asserted per row: `toContain` against a 1,000-line file prints the whole
+    // file as the diff, which is a guard nobody can read the failure of. This prints the words.
+    const unhandled = SESSION_COMMANDS.filter(
+        (command) => !app.includes(`case "${command.kind}"`),
+    ).map((command) => command.word)
+    expect(unhandled).toEqual([])
 })
 
 test("every command in the table is wired to an implementation", () => {

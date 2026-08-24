@@ -722,6 +722,10 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
                 load: (onStatus: (line: string) => void) => fetchCatalogue({ onStatus }),
                 install: async (skills, into) => installReport(installSkills(skills, into)),
             },
+            // The same definition the plain REPL calls at its own `/status`, reached through a callback
+            // rather than by handing the component a runtime — one function, two callers, so the two
+            // paths cannot come to disagree about whether a channel is connected.
+            status: () => sessionStatus(wired),
             ...(wired.draft.current === "" ? {} : { initialDraft: wired.draft.current }),
         }),
         { exitOnCtrlC: false, ...negotiateKeyboard(wired.noEnhancedKeys) },
