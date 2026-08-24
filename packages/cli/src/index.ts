@@ -12,7 +12,9 @@
  * `validate --json`. A static import anywhere on this path would be paid by every command.
  *
  * **Commands return exit codes; they never call `process.exit`.** Exiting mid-write discards buffered
- * stdout when the output is a pipe, which is how `--json` gets read.
+ * stdout when the output is a pipe, which is how `--json` gets read. This file is the one exception,
+ * on the last line, and only after `finish` has drained the output — a command that exits by itself
+ * skips the teardowns and the drain both.
  *
  * **Asking for help is a success.** The previous entry point set exit code 1 for `--help` given
  * without a command, reporting failure for the one thing that had worked.
@@ -28,7 +30,7 @@ import { parse } from "#lib/args"
 import { askExactly, askYesNo } from "#lib/confirm"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { readEnv } from "#lib/env"
-import { finish, installGuards } from "#lib/exit"
+import { finishNow, installGuards } from "#lib/exit"
 import { helpText } from "#lib/help"
 import { resolveAgentRef } from "#lib/sandbox"
 import { quietAcceptedWarnings } from "#lib/warnings"
@@ -362,8 +364,13 @@ async function dispatch(argv: readonly string[]): Promise<number> {
 quietAcceptedWarnings()
 installGuards()
 
-// One `finish` for every route out, so the terminal is restored and buffered output drains before
-// the process ends.
+// One way out for every route, so the terminal is restored and buffered output drains before the
+// process ends — and then the process actually ends.
+//
+// `finish` alone was the bug: it sets `process.exitCode` and lets the event loop empty, which assumes
+// the loop can empty. A runtime leaves a keep-alive socket to the tool provider in Node's global
+// `fetch` pool, so it does not — measured at 180 seconds still alive after `/exit`, and the `tools`
+// command killed at 30. `lib/exit.ts` carries the numbers.
 await dispatch(process.argv.slice(2))
     .catch(report)
-    .then((code) => finish(code))
+    .then((code) => finishNow(code))

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test"
 import { LEAVE_ALT_SCREEN, RESET_STYLE } from "#lib/const"
 import {
     finish,
+    flushOutput,
     markAltScreen,
     markMouse,
     markTerminalDirty,
@@ -246,5 +247,64 @@ describe("mouse tracking", () => {
         const terminal = fakeTerminal({ outIsTTY: false, inIsTTY: false })
         restoreTerminal(terminal)
         expect(terminal.written.join("")).toBe("")
+    })
+})
+
+describe("draining the output before the process leaves", () => {
+    /**
+     * A stream that queues its write callbacks, so a test can decide when the bytes have "gone out".
+     *
+     * `writableNeedDrain` is deliberately absent, which is what makes this a guard rather than a
+     * restatement: the old implementation looked only at that flag, so against this stream it returned
+     * immediately with a write still pending. Revert the fix and `settled` is true before `release()`.
+     */
+    function pendingStream() {
+        const callbacks: (() => void)[] = []
+        return {
+            stream: {
+                write(_chunk: string, callback: () => void) {
+                    callbacks.push(callback)
+                    return false
+                },
+            } as unknown as Parameters<typeof flushOutput>[0],
+            pending: () => callbacks.length,
+            release: () => {
+                for (const callback of callbacks.splice(0)) callback()
+            },
+        }
+    }
+
+    test("the wait ends when the stream reports the write through, and not before", async () => {
+        // Measured against a real pipe with a sleeping reader: 10 MB survives this way, where an
+        // immediate `process.exit` delivered 65,536 bytes — one pipe buffer. This is that property in
+        // a form a unit test can hold: the promise is the stream's callback and nothing else.
+        const fake = pendingStream()
+        let settled = false
+        const waiting = flushOutput(fake.stream).then(() => {
+            settled = true
+        })
+        // A turn of the microtask queue is all a wrongly-implemented drain needs to resolve on.
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(settled).toBe(false)
+        expect(fake.pending()).toBe(1)
+        fake.release()
+        await waiting
+        expect(settled).toBe(true)
+    })
+
+    test("an ended stream is not waited on, and is not written to either", async () => {
+        // The check is up front rather than in a catch: a throw here lands inside the one function whose
+        // whole job is to run when the process is already ending.
+        let writes = 0
+        const ended = {
+            writableEnded: true,
+            write: () => {
+                writes += 1
+                return true
+            },
+        } as unknown as Parameters<typeof flushOutput>[0]
+        await flushOutput(ended)
+        expect(writes).toBe(0)
     })
 })

@@ -1748,6 +1748,21 @@ Never claim a performance property without a number in `evals/` and a script to 
   the suite still runs — without it Node's runner stops dispatching at the hung file, and every file
   after it in the glob is silently never run, which is indistinguishable in the log from a suite that
   ended there.
+- **`process.exitCode` plus a drained loop is not an exit, and the loop does not drain.** `finish` set the code
+  and returned, on the correct rule that `process.exit` discards unflushed piped output. But a command that
+  boots a runtime leaves a keep-alive TLS socket to `backend.composio.dev:443` in Node's **global `fetch`
+  pool** — opened by the post-readiness refresh, ref'd, and closable through no public API. Measured: still
+  alive **180 s** after `/exit`; the `tools` command killed at 30 s; `tools --json | jq` would have waited
+  forever. It was reported as the TUI getting stuck and had nothing to do with Ink — `^C` only appeared to
+  work because SIGINT is deliberately unhandled, so the *default action* killed the process, and the second
+  press was the whole tell. So the entry point calls `finishNow`. The other half is that the drain has to be
+  real: `writableNeedDrain` is only true *over* the high-water mark, so `flush` was a no-op in the common
+  case, and a zero-length write's callback is the receipt because `Writable` calls back in write order — 10 MB
+  survives a sleeping reader, where an immediate exit delivered **65,536 bytes**, one pipe buffer. The wait is
+  unbounded on purpose: a timeout would trade silent truncation for a bounded exit, and truncation is worse.
+  Corollary for verification: **a keystroke written in the same chunk as its line is the paste path**, which
+  composes rather than sends — the pty run that "proved" `/exit` still hung was typing `/exit\r` in one write,
+  the trap already recorded two bullets up, walked into again while checking the fix for it.
 - **A memory query's *plan* is pinned with a unary `+`, because three SQLite versions disagree and the
   slow one sits between the two fast ones.** `memory_passages_source` indexes `(agent_id, source)`, so
   given `WHERE memory_fts MATCH ? AND p.agent_id = ?` a planner may enter through the agent filter and

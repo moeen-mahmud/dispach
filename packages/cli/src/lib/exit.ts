@@ -11,12 +11,22 @@
  *
  * **Truncated output.** `process.stdout.write` to a *pipe* is asynchronous, and `process.exit()`
  * discards whatever has not flushed — so a `sessions … | head` invocation could lose its last lines,
- * intermittently and only when piped. The rule here is to set `process.exitCode` and let the event
- * loop drain. `process.exit` is called only where the alternative is hanging: a crash guard, or a
- * signal arriving while something unref'd holds the loop open.
+ * intermittently and only when piped. Measured: 10 MB written and then exited immediately arrives as
+ * **65,536 bytes**, one pipe buffer.
+ *
+ * The rule used to be "set `process.exitCode` and let the event loop drain", and that rule assumed the
+ * loop *can* drain. It cannot. A command that boots a runtime leaves a keep-alive TLS socket to the
+ * tool provider in Node's global `fetch` pool — `backend.composio.dev:443`, opened by the
+ * post-readiness refresh — and that socket is ref'd, with no public API to close it. Measured: the
+ * process was still alive **180 seconds** after `/exit`, and the `tools` command had to be killed at 30 s.
+ * `^C` appeared to work only because SIGINT is deliberately unhandled here, so the default action kills
+ * the process. a `tools --json | jq` invocation would have waited forever.
+ *
+ * So the rule is now: run the teardowns, drain the output *properly*, then leave. Both halves are
+ * load-bearing — draining without leaving is the hang above, and leaving without draining is the
+ * truncation above.
  */
 
-import { once } from "node:events"
 import {
     DISABLE_ENHANCED_KEYS,
     EXIT_FAILURE,
@@ -189,20 +199,41 @@ export function resetForTests(
     signalsClaimed = false
 }
 
-async function flush(stream: { writableNeedDrain?: boolean }): Promise<void> {
-    if (stream.writableNeedDrain === true) {
-        await once(stream as unknown as NodeJS.EventEmitter, "drain")
-    }
+/** Enough of a stream to wait on. Spelled out so a test can supply one without a pipe. */
+interface Drainable {
+    write(chunk: string, callback: () => void): unknown
+    readonly writableEnded?: boolean
+    readonly destroyed?: boolean
 }
 
 /**
- * Wait for stdout to drain.
+ * Wait until everything written to stdout has actually reached the operating system.
  *
- * Writing to a *pipe* is asynchronous, so a long session feeding a slow reader accumulates unwritten
- * output in memory. Awaiting this between turns bounds that to one turn's worth.
+ * This used to test `writableNeedDrain` and await a `drain` event, which is a weaker claim than it
+ * reads as: the flag is only true once the buffer is *over* the high-water mark, so a modest pending
+ * write to a pipe reported nothing to wait for and the function named "flush" returned immediately.
+ * That was survivable while the process went on to idle until the loop emptied, and is not survivable
+ * now that it exits on purpose.
+ *
+ * A zero-length write is the receipt. `Writable` invokes callbacks in write order once the underlying
+ * write completes, so a chunk queued behind everything else calls back only after everything else has
+ * gone out. Measured against a pipe with a sleeping reader: 10 MB exits complete, where an immediate
+ * `process.exit` delivered 65,536 bytes.
+ *
+ * **The wait is deliberately unbounded.** A timeout would trade a silent truncation for a bounded exit,
+ * and with a slow reader — `| less`, a terminal being scrolled — truncation is the worse of the two. A
+ * closed reader is not the hazard it looks like: the callback still fires, carrying `EPIPE`.
+ *
+ * Also awaited between turns, where the point is different: a long session feeding a slow reader
+ * accumulates unwritten output in memory, and this bounds that to one turn's worth.
  */
-export function flushOutput(): Promise<void> {
-    return flush(process.stdout)
+export async function flushOutput(stream: Drainable = process.stdout): Promise<void> {
+    // Nothing to wait for, and writing would throw. Checked rather than caught, because a throw here
+    // lands inside the function whose whole job is to run when things are already ending.
+    if (stream.writableEnded === true || stream.destroyed === true) return
+    await new Promise<void>((resolve) => {
+        stream.write("", () => resolve())
+    })
 }
 
 async function runTeardowns(): Promise<void> {
@@ -221,17 +252,32 @@ async function runTeardowns(): Promise<void> {
 }
 
 /**
- * The ordinary way out. Returns rather than exiting so buffered stdout drains on its own; callers
- * return from `main` immediately after.
+ * Everything that has to happen before the process ends: teardowns, the terminal, the exit code, and
+ * the output.
+ *
+ * Sets `process.exitCode` rather than exiting, so a caller that has its own reason to stay alive can.
+ * Nothing in `src/` is such a caller any more — the entry point uses `finishNow` — but the split is
+ * what makes this testable: a `finish` that exited would take the test runner with it.
  */
 export async function finish(code: number): Promise<void> {
     await runTeardowns()
     restoreTerminal()
     process.exitCode = code
-    await flush(process.stdout)
+    await flushOutput()
 }
 
-/** For a signal or a crash, where waiting for the loop to drain would mean hanging. */
+/**
+ * Finish, and then actually leave.
+ *
+ * The ordinary way out, not the exceptional one. It was written for a signal or a crash — "where
+ * waiting for the loop to drain would mean hanging" — on the assumption that the ordinary path could
+ * wait. It cannot: the module docstring records the measurement, a keep-alive socket in the global
+ * `fetch` pool that outlived the process by three minutes.
+ *
+ * Safe to call here and nowhere earlier, because `finish` has already awaited the teardowns and the
+ * output. Anything still holding the loop open at this point is a resource with no owner, and waiting
+ * on one is what the hang was.
+ */
 export async function finishNow(code: number): Promise<never> {
     await finish(code)
     process.exit(code)

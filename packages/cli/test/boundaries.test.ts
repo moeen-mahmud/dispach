@@ -416,6 +416,29 @@ describe("hard rule 3 — the brand lives in one file", () => {
     })
 })
 
+describe("the process actually leaves", () => {
+    test("the entry point exits deliberately rather than waiting for the loop", () => {
+        // `finish` sets `process.exitCode` and lets the event loop empty, which assumes the loop can
+        // empty. A command that boots a runtime leaves a keep-alive socket to the tool provider in
+        // Node's global `fetch` pool, so it does not: measured at 180 seconds still alive after
+        // `/exit`, and the `tools` command killed at 30. Reverting the last line to `finish(code)` restores
+        // the hang and changes nothing else, which is why it is asserted from the source text.
+        const entry = FILES.find((file) => file.path === "index.ts")?.text ?? ""
+        expect(entry).toContain("finishNow(code)")
+        expect(entry).not.toContain("=> finish(code)")
+    })
+
+    test("no command exits on its own, so the drain is never skipped", () => {
+        // The other half: the exit is safe only because `finish` has already flushed stdout. A command
+        // calling `process.exit` itself skips the teardowns and the drain both, which is the truncation
+        // the entry point's docstring has forbidden since Phase 2 — `lib/exit.ts` is the one exception.
+        const offenders = FILES.filter(
+            (file) => file.path !== "lib/exit.ts" && /(?<!\.)\bprocess\.exit\(/.test(file.text),
+        ).map((file) => file.path)
+        expect(offenders).toEqual([])
+    })
+})
+
 test("every command in the table is wired to an implementation", () => {
     // The entry point throws for an unwired command, but only when someone runs it. This catches it
     // at test time instead.
