@@ -8,7 +8,9 @@
 
 import { describe, expect, test } from "bun:test"
 import type { ChatMessage } from "@dispach/core"
-import { priorMessages } from "#lib/resume"
+import { BRAND } from "@dispach/core"
+import { DIM_STYLE, RESET_STYLE } from "#lib/const"
+import { priorMessages, resumeNotice } from "#lib/resume"
 
 const CALL = ["ACTION: file_read", "path: notes.md", "END"].join("\n")
 
@@ -108,5 +110,43 @@ describe("priorMessages", () => {
             "native",
         )
         expect(out).toEqual([{ role: "assistant", text: CALL }])
+    })
+})
+
+describe("resumeNotice", () => {
+    // The one thing that survives a session, and it had no test at all until now — which is how it came
+    // to lead with `session <key> ·` and bury the pasteable half at the end of a sentence.
+    test("the second line is the whole command and nothing else", () => {
+        // Load-bearing: a person selects that line and pastes it. Anything sharing the line — a label, a
+        // key, a bullet — has to be removed by hand before it runs, which is the difference between a
+        // note and a chore.
+        const lines = resumeNotice({ ref: "milo", sessionKey: "local:3c2dc5" }).split("\n")
+        expect(lines[2]).toBe(`${BRAND.slug} run milo --session local:3c2dc5${RESET_STYLE}`)
+    })
+
+    test("it opens with a blank line and a label, and ends with one newline", () => {
+        const notice = resumeNotice({ ref: "milo", sessionKey: "local:3c2dc5" })
+        expect(notice.startsWith(`\n${DIM_STYLE}Resume this session with:\n`)).toBe(true)
+        expect(notice.endsWith("\n")).toBe(true)
+        expect(notice.endsWith("\n\n")).toBe(false)
+    })
+
+    test("the dim is opened once and closed before the last newline", () => {
+        // Dim persists across a newline, so two lines need one open and one close. The close has to land
+        // *before* the final newline or the shell prompt printed next inherits it — which looks like the
+        // terminal broke rather than like a styling slip.
+        const notice = resumeNotice({ ref: "milo", sessionKey: "local:3c2dc5" })
+        expect(notice.split(DIM_STYLE)).toHaveLength(2)
+        expect(notice.split(RESET_STYLE)).toHaveLength(2)
+        expect(notice).toContain(`${RESET_STYLE}\n`)
+        expect(notice.indexOf(RESET_STYLE)).toBe(notice.length - RESET_STYLE.length - 1)
+    })
+
+    test("a missing agent id becomes a placeholder rather than a gap", () => {
+        // A command silently missing its agent looks complete and is not, which is the worse of the two
+        // failures: the placeholder says what is wanted exactly where it is wanted.
+        expect(resumeNotice({ ref: undefined, sessionKey: "local:3c2dc5" })).toContain(
+            `${BRAND.slug} run <your agent> --session local:3c2dc5`,
+        )
     })
 })

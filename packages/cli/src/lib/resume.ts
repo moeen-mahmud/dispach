@@ -25,7 +25,8 @@
  */
 
 import type { ChatMessage, DialectId } from "@dispach/core"
-import { proseOf } from "@dispach/core"
+import { BRAND, proseOf } from "@dispach/core"
+import { DIM_STYLE, RESET_STYLE } from "#lib/const"
 import type { PriorMessage } from "#transcript"
 
 /**
@@ -47,4 +48,33 @@ export function priorMessages(
         shown.push({ role: message.role, text })
     }
     return shown
+}
+
+/**
+ * The note a clean exit leaves on the shell's own screen.
+ *
+ * Nothing else survives. That was the decision and the alternate screen enforces it whether we agree or
+ * not — so the one thing worth printing is not the conversation, which is in the store, but the command
+ * that reaches it again.
+ *
+ * Two lines and faint, which is a change from the one bright line this used to be. The old form led with
+ * `session <key> ·` and buried the command behind `resume with:`, so the half a person needs to *copy*
+ * sat at the end of a sentence they had to read first. The key is not lost by dropping the prefix — it is
+ * inside the command, which is the only place it is any use. And faint because this is the epilogue: the
+ * work is over, and a line as loud as the output above it reads as one more result.
+ *
+ * The agent is named by the ref `resolveAgentRef` accepts rather than by a path, because a line you
+ * cannot paste is a line that reads as help and is not.
+ */
+export function resumeNotice(input: {
+    readonly ref: string | undefined
+    readonly sessionKey: string
+}): string {
+    // Named rather than omitted when the id is missing: a command with a placeholder in it says what is
+    // wanted where it is wanted, and a command silently missing its agent looks complete and is not.
+    const ref = input.ref ?? "<your agent>"
+    const command = `${BRAND.slug} run ${ref} --session ${input.sessionKey}`
+    // The blank line above separates it from whatever the shell had on screen before the session took it.
+    // The reset precedes the last newline so the prompt after it is not faint.
+    return `\n${DIM_STYLE}Resume this session with:\n${command}${RESET_STYLE}\n`
 }

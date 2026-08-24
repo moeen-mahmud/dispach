@@ -10,6 +10,15 @@
 
 export const SHOW_CURSOR = "\u001B[?25h"
 export const RESET_STYLE = "\u001B[0m"
+/**
+ * Faint text, for the one thing written outside Ink that is not the point of the output.
+ *
+ * SGR 2 rather than a grey foreground: a fixed colour is wrong on half the terminals in existence,
+ * and dim is the terminal's own opinion about what recedes on the theme in use. It persists across a
+ * newline, so a multi-line note opens it once and resets once — and the reset lands before the final
+ * newline, or the shell prompt that follows inherits it.
+ */
+export const DIM_STYLE = "\u001B[2m"
 
 /**
  * The alternate screen buffer — a second, empty screen the terminal swaps in, discards on the way

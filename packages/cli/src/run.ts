@@ -54,7 +54,7 @@ import { ENABLE_MOUSE } from "#lib/mouse"
 import { resolveModeFromProcess } from "#lib/output"
 import { CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { keyValue } from "#lib/render"
-import { priorMessages } from "#lib/resume"
+import { priorMessages, resumeNotice } from "#lib/resume"
 import { listAgents, storePath } from "#lib/sandbox"
 import type { RunOptions } from "#lib/schema"
 import { screenColumns } from "#lib/screen"
@@ -730,28 +730,19 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
 
     await instance.waitUntilExit()
 
-    // Restore *before* writing, or the pointer line lands on the buffer that is about to be discarded.
+    // Restore *before* writing, or the notice lands on the buffer that is about to be discarded.
     // `restoreTerminal` is idempotent and runs again from the exit hook, so doing it here costs nothing
     // and is the only way to get a byte onto the shell's own screen.
     restoreTerminal()
-    if (!restart) process.stdout.write(resumeLine(wired))
+    if (!restart) {
+        process.stdout.write(
+            resumeNotice({
+                ref: wired.agent.describe().id,
+                sessionKey: wired.sessionKey,
+            }),
+        )
+    }
     return restart ? RESTART : EXIT_OK
-}
-
-/**
- * The one line a clean exit leaves behind.
- *
- * Nothing else survives — that was the decision, and the alternate screen enforces it whether we agree
- * or not. What a person needs afterwards is not the conversation, which is in the store, but the two
- * facts that reach it again: which session it was, and the command that resumes it. A failure prints its
- * own error and its hint; this is the success case, and one line is what success is worth.
- *
- * The agent is named by the path it was loaded from rather than by its id, because that is what
- * `resolveAgentRef` accepts — a line you cannot paste is a line that reads as help and is not.
- */
-function resumeLine(wired: Wired): string {
-    const ref = wired.agent.describe().id ?? "<your agent>"
-    return `session ${wired.sessionKey} · resume with: ${BRAND.slug} run ${ref} --session ${wired.sessionKey}\n`
 }
 
 /** Line-oriented, and byte-identical whether stdout is a terminal or a pipe. */
