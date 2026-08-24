@@ -97,6 +97,28 @@ describe("documented provider behaviour", () => {
         expect(matchCapabilities("deepseek-v4-flash").capabilities.thinking).toBe("deepseek")
     })
 
+    test("v4-flash carries a measured ceiling, and its window is not its output cap", () => {
+        // Measured 2026-08-25 by `model probe --window`: the endpoint refused a 1,048,576-token
+        // prompt and *named* 1,048,576, which is a ceiling. The row previously said 393,216 —
+        // inherited from the pro row, where it came from an **acceptance** and was therefore only
+        // ever a floor. Asserted because a measured value nothing checks is one that drifts back.
+        const flash = matchCapabilities("deepseek-v4-flash").capabilities
+        expect(flash.contextWindow).toBe(1_048_576)
+        // The pair that must not be collapsed. They were equal on this model before and are not now,
+        // which is exactly the case where an assumption that they track each other would break.
+        expect(flash.maxOutput).toBe(393_216)
+        expect(flash.contextWindow).toBeGreaterThan(flash.maxOutput)
+    })
+
+    test("the flash row records how its window was measured, not just that it was", () => {
+        // `verified` is prose nothing parses, and that is the point — but a row claiming a
+        // measurement has to say which kind. "Refused and named" is a ceiling; "accepted" is a
+        // floor, and the two have already been confused once in this very registry.
+        const flash = CAPABILITY_REGISTRY.find((entry) => entry.pattern === "deepseek-v4-flash*")
+        expect(flash?.verified).toContain("2026-08-25")
+        expect(flash?.verified).toContain("ceiling")
+    })
+
     test("an unseen v4 id falls back to the v4 family, not to the pre-v4 defaults", () => {
         const unseen = matchCapabilities("deepseek-v4-turbo").capabilities
         expect(unseen.thinking).toBe("deepseek")

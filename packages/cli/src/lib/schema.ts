@@ -325,6 +325,14 @@ export interface AppProps {
      * and silently billed to the model as prose, which is what it did before this prop existed.
      */
     readonly status?: () => Promise<string>
+    /**
+     * `/context` — the prompt's per-slot cost and the budget it is measured against.
+     *
+     * Injected like `status`, and session-local for a reason worth stating: `subcommandArgv` passes
+     * only a manifest path and `--plain`, so a command pane's child boots its *own* runtime with its
+     * own empty session and would confidently report a different conversation's context.
+     */
+    readonly contextView?: () => Promise<string>
     /** The agent's id, for the one-line header. Distinct from `model`, which is the endpoint's. */
     readonly agentName: string
     /**

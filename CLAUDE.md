@@ -1748,6 +1748,37 @@ Never claim a performance property without a number in `evals/` and a script to 
   the suite still runs — without it Node's runner stops dispatching at the hung file, and every file
   after it in the glob is silently never run, which is indistinguishable in the log from a suite that
   ended there.
+- **A floor and a ceiling are different claims, and the registry's honesty about that is how it stayed
+  wrong.** A request that *succeeds* at 100,000 tokens proves the window is at least that; one *refused
+  naming a number* proves it is exactly that. `deepseek-v4-pro` sits at 393,216 against a published
+  1,048,576 because the row recorded a floor — its comment says so, *"Claiming only what was shown"* —
+  and nothing downstream could tell a floor from a fact, so nobody corrected one. `model probe` labels
+  every finding, prefers a ceiling over a *larger* floor (a floor of 900,000 beside a ceiling of 128,000
+  means the search measured something else), and `--write` refuses a floor by name. The corollary that
+  cost a round before any money was spent: **a floor must be reported in the endpoint's own
+  `prompt_tokens`, never in the size the loop asked for** — `filler()` repeats a word and a word is not
+  a token, so labelling a floor with the requested size makes the one honest output of the technique a
+  guess. Resolved live: `deepseek-v4-flash*` said 393,216 — inherited from the pro row, where the test
+  comment records it as *"a proven floor: max_tokens=393216 beside an 85-token prompt was accepted"* —
+  and the endpoint refused a 1,048,576-token prompt **naming** 1,048,576. The registry had been
+  publishing 37.5% of the window. `maxOutput` stays 393,216: the two were equal on that model and are
+  not any more, which is the case where assuming they track each other breaks.
+- **The `promptCache: "none"` alarm was refuted by the thing built to check it, and the answer was
+  already in a comment.** The suspicion — that `none` on every `deepseek-*` row meant the cache-stable
+  prefix had never been exercised — reached a plan document and a memory note before anybody measured
+  it. The registry comment beside those rows had answered it already (*"a statement about the runtime's
+  job, not the provider's behaviour"*), and a live probe measured **1024 of 1115 prompt tokens cached**
+  with no cache-control markers sent. Two things survive: the field is read by exactly one thing in the
+  tree, a line of `validate`'s output, which is the `includeHistory` shape again; and **a false premise
+  that reaches a plan is how the next round starts from the same wrong place**, so the refutation is
+  written where the alarm was, including in the memory note that carried it.
+- **An error message is full of numbers that mean nothing, and one of them is a *lower* bound.** The
+  refusal parser was deliberately narrow — only *labelled* numbers, never the largest integer, because
+  a request id would eventually become somebody's context window — and it still answered **1** on
+  DeepSeek's real wording, `the valid range of max_tokens is [1, 393216]`, printing `output cap 1`. The
+  adversarial tests covered unlabelled numbers and never anticipated a labelled *range*. Found by
+  running the command against a real endpoint, not by reading it. `Math.max` over every labelled match
+  is what saves it once the range pattern exists.
 - **`process.exitCode` plus a drained loop is not an exit, and the loop does not drain.** `finish` set the code
   and returned, on the correct rule that `process.exit` discards unflushed piped output. But a command that
   boots a runtime leaves a keep-alive TLS socket to `backend.composio.dev:443` in Node's **global `fetch`

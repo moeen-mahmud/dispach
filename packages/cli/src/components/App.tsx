@@ -138,6 +138,7 @@ export function App({
     manifestPath,
     catalogue,
     status,
+    contextView,
 }: AppProps) {
     const { exit } = useApp()
     const size = useTerminalSize()
@@ -368,6 +369,22 @@ export function App({
                     return
                 case "tools":
                     note(toolsReport(toolsView(agent)))
+                    return
+                case "context":
+                    // Same shape as `status` below: a component cannot block, so the note is the
+                    // acknowledgement. Absent means the surface is not offered rather than accepted
+                    // and silently billed to the model, which is what `/status` did for three phases.
+                    if (contextView === undefined) {
+                        note("context is unavailable in this session")
+                        return
+                    }
+                    contextView()
+                        .then(note)
+                        .catch((error: unknown) =>
+                            note(
+                                `could not read the context: ${error instanceof Error ? error.message : String(error)}`,
+                            ),
+                        )
                     return
                 case "status":
                     // Declared in `SESSION_COMMANDS`, advertised in `/help` and generated into the

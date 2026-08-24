@@ -61,6 +61,7 @@ import { listAgents, storePath } from "#lib/sandbox"
 import type { RunOptions } from "#lib/schema"
 import { screenColumns } from "#lib/screen"
 import {
+    contextReport,
     resolveSessionCommand,
     sessionHelpText,
     toolsReport,
@@ -728,6 +729,7 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
             // rather than by handing the component a runtime — one function, two callers, so the two
             // paths cannot come to disagree about whether a channel is connected.
             status: () => sessionStatus(wired),
+            contextView: () => sessionContext(wired, wired.sessionKey),
             ...(wired.draft.current === "" ? {} : { initialDraft: wired.draft.current }),
         }),
         { exitOnCtrlC: false, ...negotiateKeyboard(wired.noEnhancedKeys) },
@@ -890,6 +892,9 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
                 return "handled"
             case "status":
                 row(await sessionStatus(wired))
+                return "handled"
+            case "context":
+                row(await sessionContext(wired, sessionKey))
                 return "handled"
             case "reset":
                 await agent.clearSession(sessionKey)
@@ -1117,6 +1122,31 @@ async function sessionStatus(wired: Wired): Promise<string> {
         { label: "store", value: wired.runtime.store.location },
         { label: "background", value: await supervision(wired, described.id) },
     ])
+}
+
+/**
+ * `/context` — what is in the prompt right now, and what the percentage is a percentage of.
+ *
+ * Through `previewContext`, which calls `assembleContext` with the same arguments `send` does. A
+ * second assembly here would answer a question about a prompt nothing sends, and would drift the
+ * first time a slot moved — the rule the HTTP surface's context endpoint already follows.
+ */
+async function sessionContext(wired: Wired, sessionKey: string): Promise<string> {
+    const preview = await wired.agent.previewContext({ sessionKey })
+    const [main] = windowReport(wired.agent.manifest)
+    return contextReport({
+        slots: preview.slots,
+        total: preview.total,
+        window: preview.window,
+        windowSource: describeWindowSource(main?.window),
+        wireTokens: preview.wireTokens,
+        reserveOutput: preview.reserveOutput,
+        calibration: preview.calibration,
+        lastCompaction:
+            preview.compactions === 0
+                ? undefined
+                : `${preview.compactions} stage${preview.compactions === 1 ? "" : "s"} run this session`,
+    })
 }
 
 /**

@@ -2795,11 +2795,19 @@ instead of against a terminal, which is why they kept coming back.
 ## Phase 7D — the numbers the runtime runs on
 
 **Goal.** Every `init` preset's default model has an unverified context window, and nothing says so.
-`deepseek-v4-pro` is declared at 393,216 against a published 1,048,576; `claude-*` is **one row for
-every Claude model ever released**, so it cannot be right for `claude-sonnet-5` and an older model at
-once; and every deepseek row carries `promptCache: "none"`, which — if wrong — means the
-cache-stable prefix this architecture goes to real lengths to protect has never once been exercised
-against the endpoint in daily use.
+`deepseek-v4-pro` is declared at 393,216 against a published 1,048,576, and `claude-*` is **one row
+for every Claude model ever released**, so it cannot be right for `claude-sonnet-5` and an older model
+at once.
+
+**The third premise was wrong, and finding that out was worth the phase on its own.**
+`promptCache: "none"` on every deepseek row looked like a cost bug — the hypothesis being that the
+cache-stable prefix had never been exercised against the endpoint in daily use. The registry comment
+beside those rows had already answered it (*"`none` is a statement about the runtime's job, not the
+provider's behaviour"*), and the first live probe measured **1024 of 1115 prompt tokens cached** with
+no cache-control markers sent. So the comment was right, caching has been working all along, and
+`promptCache` turns out to be **read by exactly one thing in the tree** — a line of `validate`'s
+output. Recorded here rather than quietly dropped: the alarm reached a plan document and a memory
+note, and a false premise that survives is how the next round starts from the same wrong place.
 
 Decisions 3.7–3.9.
 
@@ -2816,16 +2824,29 @@ pattern carried alongside. `windowReport(manifest)` is the one pure derivation b
 - [x] An unconfigured role does not report a second time — asserted, and red with the filter removed
 - [x] `bun test` 2725 · `test:node` 1200 · lint at the 6 pre-existing warnings · bench ok
 
-### 7D.1 — `/context` *(next)*
+### 7D.1 — `/context` *(built 2026-08-24)*
 
-A session-local breakdown of what is in the prompt right now: per-slot token counts from the existing
-`slotReport()`, the budget's denominator named explicitly — `ctx 61%` is a fraction of
-`window − wireTokens − reserveOutput` and the gauge has never said so — the `source`
-(`estimated`/`corrected`), and the last compaction. Session-local like `/tools` and `/status`,
-because `subcommandArgv` passes only a manifest path and `--plain`, so a command pane's child boots
-its own runtime and would report a different session.
+A session-local breakdown of what is in the prompt right now. Decisions 11.138–11.139.
 
-### 7D.2 — `dispach model probe`
+`previewContext` gained the three terms only it knows — `wireTokens`, `calibration`, `compactions` —
+and `contextReport` in `lib/session-commands.ts` is the pure formatter both paths call. Session-local
+like `/tools` and `/status`, because `subcommandArgv` passes only a manifest path and `--plain`, so a
+command pane's child boots its own runtime and would confidently report a different conversation.
+
+- [x] The budget prints as its subtraction, and the percentage divides by it rather than by the window
+- [x] `estimated` versus `corrected ×N.NN from K reported figures`
+- [x] Per-slot rows with the pinned ones marked — pinned survives every stage including S5
+- [x] Window provenance on the first line, from 7D.3
+- [x] Every line fits at 80 columns, verified from a live capture rather than by counting characters
+- [x] The `SessionCommandKind` drift test caught the missing `App.tsx` arm the moment the command was
+      registered, and the plain path's switch is exhaustiveness-checked so TypeScript caught that one
+
+**One regression, caught by the guard written for it.** Adding a command pushed the landing palette
+past `LANDING_LIST_ROWS`, so `/daemon` fell off behind `… 1 below`. `palette.test.ts` asserts the
+relationship and `roots.test.tsx` asserts the frame; both went red, the constant moved 16 → 17. This
+is the second time that pair has done its job.
+
+### 7D.2 — `model probe`
 
 Measures the window for **every configured role**, cheapest-first: `GET /models` metadata (free), an
 over-range `max_tokens` whose refusal names the output ceiling (free), prompt caching by effect (two
@@ -2835,9 +2856,69 @@ number yields a **ceiling**. `--write` goes through `core/manifest/edit.ts` and 
 comment; the report also prints a paste-ready registry row, so changing a shipped default stays
 reviewed.
 
-**Acceptance must include the caching question as its own line**, not a footnote: whether the real
-endpoint reports cache hits decides if `promptCache: "none"` has been costing full price on every
-turn since the deepseek rows were written.
+*(built 2026-08-24)*
+
+- [x] Four techniques, cheapest first: `GET /models`, an over-range `max_tokens`, caching by effect,
+      and a prompt-size search behind `--window`
+- [x] Every configured role; a role that falls back to main is not probed twice
+- [x] A **floor** is reported as a floor and `--write` refuses to write one — a floor written as
+      `contextWindow` becomes "exactly this much" for every future reader, which is how 393,216 got
+      there in the first place
+- [x] `--write` goes through `editManifest`, so what lands is schema-checked rather than re-serialised
+- [x] A paste-ready registry row is printed, never written: changing a shipped default affects every
+      agent that ever runs that model
+- [x] Techniques that found nothing are printed — "the endpoint clamps `max_tokens` silently" is
+      information about the endpoint, and a report showing only successes looks like it had nothing
+      to say
+- [x] The caching question, answered live: **yes**, 1024 of 1115 tokens, via `prompt_cache_hit_tokens`
+- [x] `--window`'s estimate is in **tokens**, with `--price` for the arithmetic. A departure from the
+      plan as written, which said dollars: a price table in this repo would be wrong within a quarter,
+      and a confidently wrong dollar figure is worse than an honest token count
+- [x] `bun test` 2769 · `test:node` 1201 · lint at the 6 pre-existing warnings · bench ok
+
+**One defect the live run found in the probe itself.** DeepSeek refuses with *"the valid range of
+max_tokens is [1, 393216]"*, and the first parser answered **1** — the range's lower bound — printing
+`output cap 1`. The adversarial tests covered unlabelled numbers and never anticipated a labelled
+*range*. Found by running the command against a real endpoint rather than by reading it, which is the
+whole argument for the live step; the real wording is now a test.
+
+**The window, measured (2026-08-25).** `--window --price 0.28` against `api.deepseek.com`:
+
+```
+measured      1048576 (ceiling) · refused a 1048576-token prompt and named 1048576
+agreement     configured value is 393216, which is 655,360 tokens short
+output cap    393216
+prompt cache  yes — 1024 cached of 1115 prompt tokens, via prompt_cache_hit_tokens
+```
+
+So `deepseek-v4-flash` really is a **1,048,576**-token model and the registry has been declaring
+37.5% of it. The search was designed to raise a *floor* and returned a **ceiling**, because the
+request that ends a doubling search is a refusal and refusals name numbers — the better-than-designed
+outcome the module predicted, and the reason `--write` could act on this at all.
+
+Cost: the printed estimate was an upper bound of 4,186,112 tokens ≈ $1.17 at the given price; the run
+stopped at the eighth of nine requests and the refused one generates nothing, so roughly 1.04M billed —
+less again, because each prompt is a prefix-extension of the last and the caching this same command
+had just confirmed applies to them.
+
+**The row was reviewed and changed (2026-08-25).** `deepseek-v4-flash*` now carries
+`contextWindow: 1_048_576`, with `verified` recording that it is a ceiling and how it was obtained.
+Held for a round first rather than written by the probe, which is decision 3.11 working as intended: a
+manifest is one agent, a registry row is every agent that ever runs the model.
+
+What the old number was is the interesting part. 393,216 came from the pro row, whose own test comment
+records its provenance — *"`contextWindow` is a proven floor: max_tokens=393216 beside an 85-token
+prompt was accepted"*. A floor, written into the field every budget divides by, and inherited by flash
+on the strength of "limits assumed same as pro". That is decision 3.10 in its natural habitat.
+
+`maxOutput` stays 393,216 and is separately confirmed. Window and output cap were equal on this model
+and are not any more, which makes it the one row where an assumption that they track each other would
+break — asserted, so it cannot drift back. The `deepseek-v4-pro*` row is **not** touched: it was not
+measured, and inheriting flash's number is the same shortcut running the other way.
+
+**`--window` now asks before spending** (decision 3.14). The estimate printed and the money went
+anyway, which makes an estimate decoration; `askYesNo` answers no on a non-TTY, so a pipe or a CI run
+is told rather than charged, and `--yes` is the scripted way through.
 
 ### Not in this phase
 

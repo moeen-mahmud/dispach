@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test"
 import { type KeyContext, keyToIntent } from "#keymap"
 import {
+    contextReport,
     DOCUMENTED_CTRL_LETTERS,
     DOCUMENTED_META_LETTERS,
     KEY_BINDINGS,
@@ -286,5 +287,78 @@ describe("/tools shows trust", () => {
         // The header counts tools and names the protocol as a protocol — `dialect nlt` leading the
         // line once read as a third tool.
         expect(report).toContain("2 tools · call format nlt")
+    })
+})
+
+describe("contextReport", () => {
+    const view = {
+        slots: [
+            { slot: 0, label: "identity", tokens: 412, pinned: true },
+            { slot: 1, label: "tools", tokens: 688, pinned: true },
+            { slot: 9, label: "history", tokens: 1464, pinned: false },
+        ],
+        total: 2564,
+        window: 393_216,
+        windowSource: "registry deepseek-v4-flash*",
+        wireTokens: 0,
+        reserveOutput: 8192,
+        calibration: { ratio: 1, samples: 0 },
+        lastCompaction: undefined,
+    }
+
+    test("the budget is written as its subtraction, not as a result", () => {
+        // The whole reason this screen exists. `ctx 61%` has never said what it is 61% *of*, and the
+        // denominator is not the window: `assembleContext` is handed `window − wireTokens` and then
+        // subtracts `reserveOutput` from that. A reader who disagrees with the number can see which
+        // term they disagree with.
+        const out = contextReport(view)
+        expect(out).toContain("385024 = window 393216 − wire 0 − reserveOutput 8192")
+    })
+
+    test("the percentage divides by the budget, never by the window", () => {
+        // 2564/385024 is 0.7%; 2564/393216 is 0.65%. Close enough to look right and wrong for the
+        // reason the report exists, which is why the assertion is on the figure rather than the shape.
+        expect(contextReport(view)).toContain("2564 tokens · 0.7% of budget")
+    })
+
+    test("wireTokens is a real term and moves the budget", () => {
+        // Zero under `nlt` and non-zero under `native`, where the catalogue rides in the request body
+        // and is charged without ever being a block.
+        const out = contextReport({ ...view, wireTokens: 1200 })
+        expect(out).toContain("383824 = window 393216 − wire 1200 − reserveOutput 8192")
+    })
+
+    test("an uncalibrated session says the number is a raw estimate", () => {
+        // The estimator runs 16-20% low on tool-heavy prompts — the overflow direction, exactly when
+        // the window is tight. A percentage with no samples behind it carries that bias untouched.
+        expect(contextReport(view)).toContain("estimated")
+        expect(contextReport(view)).toContain("runs low")
+    })
+
+    test("a calibrated one says by how much, and how many figures back it", () => {
+        const out = contextReport({ ...view, calibration: { ratio: 1.18, samples: 4 } })
+        expect(out).toContain("corrected ×1.18 from 4 reported figures")
+        expect(out.includes("estimated")).toBe(false)
+    })
+
+    test("every slot is listed with its number, and pinning is marked", () => {
+        const out = contextReport(view)
+        expect(out).toContain("identity")
+        expect(out).toContain("history")
+        // Pinned blocks survive every compaction stage including S5, so which ones they are is the
+        // difference between a prompt that can shrink and one that cannot.
+        const historyRow = out.split("\n").find((line) => line.includes("history")) ?? ""
+        expect(historyRow.includes("pinned")).toBe(false)
+        const identityRow = out.split("\n").find((line) => line.includes("identity")) ?? ""
+        expect(identityRow).toContain("pinned")
+    })
+
+    test("a session with no compaction says so rather than leaving the row out", () => {
+        // `keyValue` drops an empty value, and a missing row reads as "no such concept" — the same
+        // reason slot 2 prints `none` for an absent capability instead of omitting the line.
+        expect(contextReport(view)).toContain("none this session")
+        expect(contextReport({ ...view, lastCompaction: "3 stages run this session" })).toContain(
+            "3 stages run this session",
+        )
     })
 })

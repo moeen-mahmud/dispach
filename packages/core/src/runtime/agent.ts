@@ -259,6 +259,14 @@ export class Agent {
     #calibrations = new Map<string, Calibration>()
     #resets = new Map<string, number>()
     /**
+     * Compaction stages run in this session, accumulated the same way `#resets` is.
+     *
+     * Not persisted, for the same reason the calibration is not: compaction rewrites the prompt and
+     * never the store, so a resumed session re-reads the whole conversation and re-compacts it. A
+     * count carried across a restart would describe work that is about to be redone.
+     */
+    #compactions = new Map<string, number>()
+    /**
      * Phase per session, cached in front of the store.
      *
      * Unlike the calibration this *is* persisted — in `sessions.phase`, a column that has existed since
@@ -628,6 +636,12 @@ export class Agent {
             this.#phases.set(sessionKey, result.phase)
             await this.store.sessions.setPhase(this.id, sessionKey, result.phase)
         }
+        if (result.compactions !== undefined && result.compactions > 0) {
+            this.#compactions.set(
+                sessionKey,
+                (this.#compactions.get(sessionKey) ?? 0) + result.compactions,
+            )
+        }
         if (result.resets !== undefined && result.resets > 0) {
             this.#resets.set(sessionKey, (this.#resets.get(sessionKey) ?? 0) + result.resets)
         }
@@ -770,7 +784,26 @@ export class Agent {
         readonly slots: readonly { slot: number; label: string; tokens: number; pinned: boolean }[]
         readonly total: number
         readonly window: number
+        /**
+         * Tool schemas that ride in the request body rather than in a block.
+         *
+         * Reported because it is the term that makes the budget arithmetic add up and is invisible
+         * everywhere else: `assembleContext` is handed `window − wireTokens`, so `Pressure.budget`'s
+         * docstring saying `window − reserveOutput` is true of the number it received and not of the
+         * window a person configured. Zero under `nlt`, where the catalogue is a block like any other.
+         */
+        readonly wireTokens: number
         readonly reserveOutput: number
+        /**
+         * How far this session's estimator has been corrected by what the endpoint actually charged.
+         *
+         * `samples: 0` means nothing has come back yet and the total is a raw estimate — which runs
+         * 16–20% *low* on the prompts that matter, in the overflow direction, exactly when the window
+         * is tight. A reader deciding whether to trust the percentage needs this, not just the number.
+         */
+        readonly calibration: Calibration
+        /** Compaction stages run in this session so far. Zero on a conversation under no pressure. */
+        readonly compactions: number
     }> {
         const sessionKey = options.sessionKey ?? Agent.DEFAULT_SESSION
         const input = options.input ?? ""
@@ -810,7 +843,10 @@ export class Agent {
             slots: slotReport(assembled.blocks),
             total: assembled.totalTokens,
             window: this.window,
+            wireTokens: tools?.wireTokens ?? 0,
             reserveOutput: this.manifest.context.reserveOutput,
+            calibration: this.#calibrations.get(sessionKey) ?? UNCALIBRATED,
+            compactions: this.#compactions.get(sessionKey) ?? 0,
         }
     }
 

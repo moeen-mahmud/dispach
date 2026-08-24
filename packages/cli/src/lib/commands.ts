@@ -687,6 +687,50 @@ export const COMMANDS: readonly CommandSpec[] = [
         // `serve` stays up only as long as its terminal, which makes an agent configured for a
         // channel answer only while a window is open. This installs it as a supervised service.
         //
+        name: "model",
+
+        inSession: "output",
+        summary: "ask the endpoint what it can actually do — window, output cap, prompt caching",
+        args: [
+            {
+                name: "action",
+                required: true,
+                help: "what to do",
+                choices: [
+                    {
+                        value: "probe",
+                        help: "measure every configured role against its own endpoint",
+                    },
+                ],
+            },
+            { name: "agent", required: true, help: "path or sandbox agent name" },
+        ],
+        flags: [
+            {
+                name: "window",
+                kind: "boolean",
+                help: "search for the window by growing a prompt until it is refused — costs real tokens, and prints the estimate first",
+            },
+            {
+                name: "price",
+                kind: "number",
+                placeholder: "usd",
+                help: "dollars per million input tokens, if you want --window's estimate in money",
+            },
+            {
+                name: "write",
+                kind: "boolean",
+                help: "record a measured ceiling in the manifest; a floor is refused, because a floor is not a window",
+            },
+            {
+                name: "yes",
+                kind: "boolean",
+                help: "answer the --window spend prompt; nothing else is affected",
+            },
+            { name: "json", kind: "boolean", help: "machine-readable findings" },
+        ],
+    },
+    {
         // Second action-as-positional command after `soul` — and the reason `ArgSpec.choices`
         // exists, since seven verbs hidden inside a prose help string is a set nothing can check.
         name: "daemon",

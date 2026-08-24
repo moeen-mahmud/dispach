@@ -1025,6 +1025,44 @@ model:
         await runtime.stop()
     })
 
+    test("previewContext reports the terms the budget is made of, not just the total", async () => {
+        // The far-end test the recurring defect asks for. `wireTokens`, `calibration` and
+        // `compactions` are each set on an object literal inside `previewContext`, which is not
+        // excess-property-checked — so a misspelled or forgotten key type-checks and lands nowhere,
+        // and `/context` would print a confident `− wire undefined`. Six rounds of this repo's history
+        // are that exact shape, so the value is read out here rather than asserted where it is set.
+        const dir = mkdtempSync(join(tmpdir(), "runtime-preview-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: test
+model:
+  main:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+`,
+        )
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: { MODEL_API_KEY: "k" },
+            fetch: replyFetch,
+        })
+        const preview = await runtime.agent("test").previewContext({ sessionKey: "s" })
+
+        // Present and numeric, which is the claim: `undefined` would be the bug, and zero is the
+        // correct answer for an `nlt` agent that has taken no turn.
+        expect(typeof preview.wireTokens).toBe("number")
+        expect(preview.wireTokens).toBe(0)
+        expect(preview.compactions).toBe(0)
+        // Uncalibrated until an endpoint reports a figure, which is what makes `/context` say the
+        // percentage is a raw estimate rather than implying it has been checked.
+        expect(preview.calibration.samples).toBe(0)
+        expect(preview.calibration.ratio).toBe(1)
+        expect(preview.window).toBeGreaterThan(0)
+        await runtime.stop()
+    })
+
     test("agreement and env-only variables say nothing", async () => {
         const dir = mkdtempSync(join(tmpdir(), "runtime-agree-"))
         writeFileSync(

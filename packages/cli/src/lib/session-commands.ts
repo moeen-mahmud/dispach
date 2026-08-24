@@ -17,8 +17,16 @@
  */
 
 import { nearest } from "@dispach/core"
+import { keyValue } from "#lib/render"
 
-export type SessionCommandKind = "help" | "status" | "restart" | "tools" | "reset" | "exit"
+export type SessionCommandKind =
+    | "help"
+    | "status"
+    | "context"
+    | "restart"
+    | "tools"
+    | "reset"
+    | "exit"
 
 export interface SessionCommandSpec {
     readonly kind: SessionCommandKind
@@ -39,6 +47,16 @@ export const SESSION_COMMANDS: readonly SessionCommandSpec[] = [
         word: "/status",
         aliases: [],
         summary: "model, channels, server, store — what this agent is and what is actually running",
+    },
+    {
+        // The status line has carried `ctx 61%` since Phase 7A and has never said what the denominator
+        // is — it is not the window, and two of its three terms are invisible from outside the
+        // assembler. This is where they are written down.
+        kind: "context",
+        word: "/context",
+        aliases: [],
+        summary:
+            "what is in the prompt right now, per slot, and what the percentage is a percentage of",
     },
     {
         kind: "restart",
@@ -438,5 +456,83 @@ export function toolsReport(view: ToolsView): string {
         // count leads; the protocol is labelled as what it is.
         `${view.tools.length} tool${view.tools.length === 1 ? "" : "s"} · call format ${view.dialect} · catalogue ${view.catalogueTokens} tokens, on every turn`,
         ...rows,
+    ].join("\n")
+}
+
+/**
+ * Everything `/context` needs, gathered by the host.
+ *
+ * A view rather than the agent itself, for the reason every view in this file is one: the report is a
+ * pure function of these numbers, and a test that has to boot a runtime to check an arithmetic line
+ * is a test nobody writes.
+ */
+export interface ContextView {
+    readonly slots: readonly {
+        readonly slot: number
+        readonly label: string
+        readonly tokens: number
+        readonly pinned: boolean
+    }[]
+    readonly total: number
+    readonly window: number
+    /** Already rendered by `describeWindowSource` — the CLI owns no second wording for it. */
+    readonly windowSource: string
+    readonly wireTokens: number
+    readonly reserveOutput: number
+    readonly calibration: { readonly ratio: number; readonly samples: number }
+    /** The last compaction stage this session ran, if any. */
+    readonly lastCompaction: string | undefined
+}
+
+/**
+ * `/context` — what is in the prompt right now, and what the percentage is a percentage *of*.
+ *
+ * The status line has carried `ctx 61%` since Phase 7A without ever saying what the denominator is,
+ * and it is not the window: `assembleContext` is handed `window − wireTokens` and then subtracts
+ * `reserveOutput` from that. Three terms, two of them invisible. So the budget line is written out as
+ * the subtraction rather than as a result — a reader who disagrees with the number can see which term
+ * they disagree with.
+ *
+ * `estimated` versus `corrected` is the other thing worth a line. The estimator runs **16–20% low**
+ * on the prompts that matter (`evals/budget`, measured over a session filling with tool results),
+ * which is the overflow direction exactly when the window is tight; a percentage from a session with
+ * no samples yet is that raw estimate, and the reader deserves to know which one they are reading.
+ */
+export function contextReport(view: ContextView): string {
+    const budget = Math.max(1, view.window - view.wireTokens - view.reserveOutput)
+    const percent = ((view.total / budget) * 100).toFixed(1)
+    const trust =
+        view.calibration.samples === 0
+            ? // Deliberately short: at 100 columns the longer version wrapped, and a wrapped value in a
+              // `keyValue` block loses its alignment. "estimated" already carries "no figure yet"; what
+              // it does not carry is the direction of the error, and that is the half worth the words.
+              "estimated — the estimator runs low on tool-heavy prompts"
+            : `corrected ×${view.calibration.ratio.toFixed(2)} from ${view.calibration.samples} reported ${view.calibration.samples === 1 ? "figure" : "figures"}`
+    // Widest label decides the column, so a slot named later cannot push the numbers out of line.
+    const pad = view.slots.reduce((longest, entry) => Math.max(longest, entry.label.length), 0)
+    const slots = view.slots.map(
+        (entry) =>
+            `    ${String(entry.slot).padStart(2)}  ${entry.label.padEnd(pad)}  ${String(entry.tokens).padStart(6)}${entry.pinned ? "  pinned" : ""}`,
+    )
+    return [
+        keyValue([
+            { label: "window", value: `${view.window} (${view.windowSource})` },
+            {
+                label: "budget",
+                // Written as the subtraction on purpose. `wireTokens` is zero under `nlt` and the term
+                // is still printed: a zero that is shown is a term a reader can rule out, and a term
+                // that is absent is one they have to know about to miss.
+                value: `${budget} = window ${view.window} − wire ${view.wireTokens} − reserveOutput ${view.reserveOutput}`,
+            },
+            { label: "prompt", value: `${view.total} tokens · ${percent}% of budget` },
+            { label: "counted", value: trust },
+            {
+                label: "compaction",
+                value: view.lastCompaction ?? "none this session",
+            },
+        ]),
+        "",
+        "  slots",
+        ...slots,
     ].join("\n")
 }

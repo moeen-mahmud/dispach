@@ -180,7 +180,14 @@ class ToolCallBuffer {
  * which 404s. Azure OpenAI carries a mandatory `?api-version=`, so this is a real endpoint
  * shape rather than a hypothetical one.
  */
-function endpointUrl(baseUrl: string): string {
+/**
+ * The chat endpoint for a base URL.
+ *
+ * Exported so a diagnostic reaches the *same* URL a turn does. A probe that built its own would be
+ * measuring a URL nothing sends to, and the trailing-slash handling below is exactly the kind of
+ * detail two copies come to disagree about.
+ */
+export function endpointUrl(baseUrl: string): string {
     try {
         const url = new URL(baseUrl)
         url.pathname = `${url.pathname.replace(/\/+$/, "")}/chat/completions`
@@ -190,6 +197,33 @@ function endpointUrl(baseUrl: string): string {
         // provider directly, fall back rather than throwing from a URL parse.
         return `${baseUrl.replace(/\/+$/, "")}/chat/completions`
     }
+}
+
+/**
+ * The sibling `GET /models` URL, for the one technique that costs nothing.
+ *
+ * Same base, same trailing-slash rule, different leaf — kept beside `endpointUrl` so the pair moves
+ * together if a gateway ever needs the path rewritten.
+ */
+export function modelsUrl(baseUrl: string): string {
+    return endpointUrl(baseUrl).replace(/\/chat\/completions$/, "/models")
+}
+
+/**
+ * The `authorization` header for a role, or `{}` when the manifest names no key variable.
+ *
+ * Throws the same `apiKeyMissing` a turn would, with the same field path, so a probe run against a
+ * misconfigured agent fails the way the agent will rather than in some new way.
+ */
+export function bearerHeaders(
+    apiKeyEnv: string | undefined,
+    env: Record<string, string | undefined>,
+    field: string,
+): Record<string, string> {
+    if (apiKeyEnv === undefined) return {}
+    const key = env[apiKeyEnv]
+    if (key === undefined || key === "") throw apiKeyMissing(apiKeyEnv, `${field}.apiKeyEnv`)
+    return { authorization: `Bearer ${key}` }
 }
 
 function asString(value: unknown): string | undefined {

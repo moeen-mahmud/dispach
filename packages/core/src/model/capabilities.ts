@@ -335,11 +335,19 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
             thinking: "deepseek",
             promptCache: "none",
             parallelToolCalls: false,
-            contextWindow: 393_216,
+            // A **ceiling**, not a floor: the endpoint refused a 1,048,576-token prompt and named
+            // 1,048,576 in the refusal. That is the distinction decision 3.10 exists for — this row
+            // previously carried 393,216, inherited from the pro row, where it had been established
+            // by an *acceptance* (`max_tokens=393216` beside an 85-token prompt) and was therefore
+            // only ever a floor. The registry was publishing 37.5% of the real window.
+            contextWindow: 1_048_576,
+            // Unchanged and separately confirmed: the output cap really is 393,216, from the
+            // endpoint's own stated range. A window and an output limit are different numbers, and
+            // this model is the reason to say so — they were equal before and are not now.
             maxOutput: 393_216,
         },
         verified:
-            "2026-08-12 against api.deepseek.com/v1 (reasoning confirmed; limits assumed same as pro)",
+            "2026-08-12 against api.deepseek.com/v1 (reasoning confirmed). Measured 2026-08-25 by `model probe --window`: contextWindow 1048576 as a ceiling — the endpoint refused a 1048576-token prompt and named that number; maxOutput 393216 from a refusal naming the range [1, 393216]; automatic prompt caching confirmed at 1024 of 1115 prompt tokens with no breakpoints sent, which is why promptCache stays `none` (it describes the runtime's job, not the provider's behaviour).",
     },
     {
         pattern: "deepseek-v4*",

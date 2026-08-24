@@ -319,6 +319,7 @@ Stated plainly, because the alternative is someone assuming otherwise:
 | `soul` | scaffold a compact identity file from a long-form one |
 | `agents` | what one or more manifest *paths* produce |
 | `keys` | press a chord and see the bytes, Ink's reading of them, and the intent |
+| `model probe` | ask the endpoint what it can actually do — window, output cap, prompt caching |
 | `terminal-setup` | teach a terminal to send shift+enter as a newline |
 
 ## Documentation

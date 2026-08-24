@@ -172,9 +172,12 @@ export {
     windowProvenance,
 } from "./model/capabilities.ts"
 export {
+    bearerHeaders,
     type ChatCompletionsConfig,
     createChatCompletionsProvider,
     DEFAULT_RETRY,
+    endpointUrl,
+    modelsUrl,
     type RetryPolicy,
 } from "./model/chat-completions.ts"
 export {

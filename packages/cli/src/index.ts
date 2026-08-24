@@ -35,6 +35,7 @@ import { helpText } from "#lib/help"
 import { resolveAgentRef } from "#lib/sandbox"
 import { quietAcceptedWarnings } from "#lib/warnings"
 import { memoryCommand } from "#memory"
+import { modelCommand } from "#model"
 import { removeCommand } from "#remove"
 import { runCommand } from "#run"
 import { serveCommand } from "#serve"
@@ -335,6 +336,18 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 follow: flags.bool("follow"),
                 truncate: flags.bool("truncate"),
                 dryRun: flags.bool("dry-run"),
+                json: flags.bool("json"),
+            })
+        }
+
+        case "model": {
+            const price = flags.num("price")
+            return await modelCommand({
+                manifestPath: resolveAgentRef(positionals[1] as string),
+                window: flags.bool("window"),
+                ...(price === undefined ? {} : { price }),
+                write: flags.bool("write"),
+                yes: flags.bool("yes"),
                 json: flags.bool("json"),
             })
         }
