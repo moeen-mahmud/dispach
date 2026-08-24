@@ -198,6 +198,14 @@ export const COMMANDS: readonly CommandSpec[] = [
             },
             { name: "quiet", kind: "boolean", help: "suppress the banner and per-turn stats" },
             {
+                // The same override `keys` carries, on the command that actually holds a session. The env
+                // form works everywhere; a flag exists because the case this covers is "try it without,
+                // once" and reaching for a variable to answer a one-off question is friction.
+                name: "no-enhanced-keys",
+                kind: "boolean",
+                help: "do not negotiate the kitty keyboard protocol (cmd chords stop arriving)",
+            },
+            {
                 name: "no-reasoning",
                 kind: "boolean",
                 help: "hide the thinking a reasoning model streams (shown by default)",
@@ -578,6 +586,22 @@ export const COMMANDS: readonly CommandSpec[] = [
             },
             STORE,
             JSON_FLAG,
+        ],
+    },
+    {
+        // The instrument, not a setting. `terminal-setup` below changes a terminal's configuration; this
+        // one only reports what the current terminal already does, which is the question that has to be
+        // answered first and could not be until now.
+        name: "keys",
+        inSession: "hidden",
+        summary: "press a chord and see the bytes, Ink's reading of them, and the intent",
+        args: [],
+        flags: [
+            {
+                name: "no-enhanced-keys",
+                kind: "boolean",
+                help: "do not negotiate the kitty keyboard protocol",
+            },
         ],
     },
     {

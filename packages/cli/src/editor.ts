@@ -34,6 +34,7 @@ export const EMPTY_EDITOR: EditorState = {
     past: [],
     future: [],
     search: undefined,
+    anchor: undefined,
 }
 
 function chars(value: string): string[] {
@@ -332,7 +333,82 @@ function redo(state: EditorState): EditorState {
     }
 }
 
+/** The selected range, normalised so `start <= end`. `undefined` when nothing is selected. */
+export function selectionRange(
+    state: EditorState,
+): { readonly start: number; readonly end: number } | undefined {
+    if (state.anchor === undefined || state.anchor === state.cursor) return undefined
+    return state.anchor < state.cursor
+        ? { start: state.anchor, end: state.cursor }
+        : { start: state.cursor, end: state.anchor }
+}
+
+/** Cut the selected range out, leaving the caret where it was and no selection behind. */
+function deleteRange(state: EditorState): EditorState {
+    const range = selectionRange(state)
+    if (range === undefined) return { ...state, anchor: undefined }
+    const current = chars(state.value)
+    return {
+        ...remember(state, { coalesce: false }),
+        value: [...current.slice(0, range.start), ...current.slice(range.end)].join(""),
+        cursor: range.start,
+        anchor: undefined,
+    }
+}
+
+/**
+ * Which intents replace a selection rather than acting beside it.
+ *
+ * Typing over a selection replaces it and backspace removes it — that is what every editor does and what
+ * makes a selection worth having. A *motion* does not: it collapses the selection and moves, which is the
+ * `anchor: undefined` at the end of `applyIntent` rather than a deletion here.
+ */
+function replacesSelection(intent: Intent): boolean {
+    return (
+        intent.kind === "insert" ||
+        intent.kind === "newline" ||
+        intent.kind === "backspace" ||
+        intent.kind === "delete"
+    )
+}
+
 export function applyIntent(state: EditorState, intent: Intent): EditorState {
+    // A selection is replaced before the intent is applied, and for backspace and delete that *is* the
+    // whole edit — pressing ⌫ with three words selected removes the three words, it does not remove them
+    // and then eat a fourth character. Ordered before the search branch below because a search has no
+    // selection to replace: `searchType` writes to the query, never to the line.
+    if (
+        state.search === undefined &&
+        replacesSelection(intent) &&
+        selectionRange(state) !== undefined
+    ) {
+        const cut = deleteRange(state)
+        if (intent.kind === "backspace" || intent.kind === "delete") return cut
+        return applyIntent(cut, intent)
+    }
+
+    if (intent.kind === "extend") {
+        // The motion is applied by the same code the unshifted chord uses, on a copy with no anchor, so a
+        // selection cannot disagree with the plain move about where the cursor lands. The anchor is
+        // whichever one already existed — extending twice grows one selection rather than starting a
+        // second — and falls back to where the caret was when the first shift chord arrived.
+        const anchor = state.anchor ?? state.cursor
+        const moved = applyIntent({ ...state, anchor: undefined }, { kind: intent.to })
+        return { ...moved, anchor }
+    }
+
+    if (intent.kind === "selectAll") {
+        return { ...state, anchor: 0, cursor: chars(state.value).length }
+    }
+
+    const next = applyToLine(state, intent)
+    // Every other intent collapses the selection. Written once here rather than in each motion case: ten
+    // cases each remembering to clear a field is ten chances for one of them not to, and the one that
+    // forgot would leave a highlight on screen with nothing selecting it.
+    return next.anchor === undefined ? next : { ...next, anchor: undefined }
+}
+
+function applyToLine(state: EditorState, intent: Intent): EditorState {
     // While the search is open, the keys that would edit the line extend the query instead. Routed
     // here rather than by emitting a parallel set of search intents from the keymap: the keys mean the
     // same thing to a reader — type, rub out, move, choose — and only the target changes.
@@ -380,6 +456,10 @@ export function applyIntent(state: EditorState, intent: Intent): EditorState {
             return { ...state, cursor: lineAt(state.value, state.cursor).start }
         case "cursorEnd":
             return { ...state, cursor: lineAt(state.value, state.cursor).end }
+        case "bufferStart":
+            return { ...state, cursor: 0 }
+        case "bufferEnd":
+            return { ...state, cursor: chars(state.value).length }
         case "wordLeft":
             return { ...state, cursor: wordStart(chars(state.value), state.cursor) }
         case "wordRight":
@@ -439,6 +519,11 @@ export function applyIntent(state: EditorState, intent: Intent): EditorState {
         case "reasoning":
         case "paste":
         case "none":
+            return state
+        // Handled by `applyIntent` before it delegates here, and listed rather than defaulted so the
+        // exhaustive switch keeps doing its job: a new intent has to be considered, not absorbed.
+        case "extend":
+        case "selectAll":
             return state
     }
 }

@@ -72,7 +72,7 @@ export async function terminalSetupCommand(options: TerminalSetupOptions): Promi
 
     process.stdout.write(
         `${section("shift+enter", true)}\n${indent(
-            `⌥⏎ already puts a new line in a message, everywhere, with no setup. This command is for shift+⏎, which a terminal can only send once it has been given a key binding.`,
+            `⌥ or ⇧ ⏎ already puts a new line in a message, everywhere, with no setup. This command is for shift+⏎, which a terminal can only send once it has been given a key binding.`,
         )}\n`,
     )
 

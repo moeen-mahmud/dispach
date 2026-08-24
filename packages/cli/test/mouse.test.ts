@@ -33,6 +33,9 @@ const KEYS = {
     backspace: false,
     delete: false,
     meta: false,
+    home: false,
+    end: false,
+    super: false,
 } as const
 
 const CONTEXT = {

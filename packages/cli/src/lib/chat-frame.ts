@@ -54,10 +54,13 @@ const LIVE_LABEL = 14
 /**
  * The composer, including its border and the newline hint it shows once a message has two lines.
  *
- * `roomy` is the landing form: a blank row inside the box above and below the input, and one outside it
- * separating the box from the banner. Three rows, only ever while there is no conversation to spend them on.
+ * One form, both states. There used to be a `roomy` landing variant three rows taller, which existed
+ * because the composer sat directly under the banner with the slack below it — the padding was what kept
+ * its border off the text above. With the slack above it (decision 11.98, reversed) there is nothing to
+ * separate it from, and 11.90's own argument now applies to both states rather than one: every row the
+ * composer takes is a row of conversation, and this is the function that charges for them.
  */
-export function promptRows(editor: EditorState, columns: number, roomy = false): number {
+export function promptRows(editor: EditorState, columns: number): number {
     // Visual rows, not logical lines. Counting lines was correct only while nothing wrapped, and it went
     // wrong in the direction that cannot be seen: a wrapped message drew more rows than the frame had
     // subtracted, so the bottom of the composer went under the status line.
@@ -72,7 +75,6 @@ export function promptRows(editor: EditorState, columns: number, roomy = false):
     const { from, to } = viewport(total, caretRow, Math.max(1, Math.min(total, MAX_INPUT_ROWS)))
     return (
         PROMPT_BORDER_ROWS +
-        (roomy ? 3 : 0) +
         (to - from) +
         (from > 0 ? 1 : 0) +
         (total - to > 0 ? 1 : 0) +
@@ -147,10 +149,11 @@ export function chatFrame(inputs: {
     /** A confirmation question, which is one line above the composer. */
     readonly confirming: boolean
     /**
-     * Nothing has been sent yet, so the brand mark is up and the composer is the roomier form.
+     * Nothing has been sent yet, so the brand mark is up.
      *
-     * One flag for both, because they are one state — the landing screen — and letting them drift would mean
-     * a taller composer with no wordmark, or the reverse, in some combination nobody chose.
+     * It used to mean a roomier composer as well, and no longer does: the composer is one form in both
+     * states now that the slack sits above it. What is left is the wordmark's allowance, which is the only
+     * thing on the frame that a landing screen still spends rows on.
      */
     readonly landing: boolean
     /** The one-line hint under the composer, shown only while landing. */
@@ -172,7 +175,7 @@ export function chatFrame(inputs: {
         livePane(liveText, inputs.columns - LIVE_LABEL, LIVE_PANE_MAX_ROWS).rows +
         paletteRows(inputs.palette, inputs.paletteMaxRows) +
         searchRows(inputs.editor, inputs.searchMaxRows) +
-        promptRows(inputs.editor, inputs.columns, inputs.landing) +
+        promptRows(inputs.editor, inputs.columns) +
         (inputs.confirming ? 1 : 0) +
         (inputs.hint ? 1 : 0)
 

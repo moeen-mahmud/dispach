@@ -28,6 +28,7 @@ import {
 } from "#lib/browse"
 import { ENTER_ALT_SCREEN, EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { flushOutput, markAltScreen, onExit, restoreTerminal } from "#lib/exit"
+import { negotiateKeyboard } from "#lib/keyboard"
 import { resolveModeFromProcess } from "#lib/output"
 import { bullet, indent, section } from "#lib/render"
 import { columnsFor, layoutRow } from "#lib/rows"
@@ -255,7 +256,7 @@ export async function browseCommand(options: BrowseOptions): Promise<number> {
                 finish()
             },
         }),
-        { exitOnCtrlC: false },
+        { exitOnCtrlC: false, ...negotiateKeyboard() },
     )
     onExit(() => instance.unmount())
     await closed

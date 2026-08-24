@@ -23,6 +23,14 @@ export interface EnvFacts {
     readonly debug: boolean
     /** Sandbox root override (`<ENVPREFIX>HOME`). Tests point it at a tmpdir, never real HOME. */
     readonly sandboxHome: string | undefined
+    /**
+     * `<ENVPREFIX>NO_CSI_U` — do not negotiate the kitty keyboard protocol.
+     *
+     * The hatch for a terminal that answers the protocol query and then implements it badly. `mode:
+     * "auto"` already covers a terminal that stays silent, so this is not for "might not work" — it is
+     * for "answers and is worse", which no amount of detection can tell apart from "answers and works".
+     */
+    readonly noEnhancedKeys: boolean
 }
 
 // ─── transcript ──────────────────────────────────────────────────────────────────────────
@@ -177,6 +185,34 @@ export interface KeyState {
     readonly backspace: boolean
     readonly delete: boolean
     readonly meta: boolean
+    /**
+     * Home and End. Ink has reported these since 7.0 and this type never declared them, so they were
+     * parsed on the way in and dropped on the floor: both keys did nothing at all, in every surface,
+     * for as long as the CLI has existed. Nothing to negotiate and nothing to configure — a missing
+     * field, and the cheapest fix on the whole keyboard.
+     */
+    readonly home: boolean
+    readonly end: boolean
+    /**
+     * Cmd on macOS, Win elsewhere — and **only ever true under the kitty keyboard protocol**.
+     *
+     * No legacy escape sequence can express it. Worse, Ink's legacy path folds it into `meta`
+     * (`key.meta = key.meta || !!(modifier & 10)`, where bit 8 is super and bit 2 is alt), so without
+     * the protocol `cmd+←` is indistinguishable from `⌥←` and silently word-moves. Negotiating the
+     * protocol is what separates them; `mode: "auto"` means this is simply `false` where it cannot be
+     * known, which is the honest value rather than a guess.
+     */
+    readonly super: boolean
+    /**
+     * Press, repeat, or release — and `release` must be dropped before anything acts on the key.
+     *
+     * `reportEventTypes` is what makes an arrow-with-modifier parse through Ink's kitty branch rather
+     * than its legacy one, which is the only way `super` survives on an arrow key. The cost is that
+     * Ink passes the event type straight through (`use-input.js:63`) and filters nothing, so every
+     * enhanced key would otherwise fire twice: once down, once up. Optional because a terminal that
+     * never negotiated the protocol reports no event type at all.
+     */
+    readonly eventType?: "press" | "repeat" | "release"
 }
 
 /**
@@ -187,6 +223,25 @@ export interface KeyState {
  * rather than imported from Ink.
  */
 export type ScrollMove = "up" | "down" | "pageUp" | "pageDown" | "top" | "bottom"
+
+/**
+ * The intents that only move the cursor.
+ *
+ * A subset of `Intent["kind"]` written out rather than derived, because it is the set `extend` may carry
+ * and that is a smaller claim than "every intent with no payload". Deriving it would silently admit the
+ * next payload-free intent — `undo`, say — into a shift chord.
+ */
+export type MotionKind =
+    | "cursorLeft"
+    | "cursorRight"
+    | "cursorHome"
+    | "cursorEnd"
+    | "wordLeft"
+    | "wordRight"
+    | "lineUp"
+    | "lineDown"
+    | "bufferStart"
+    | "bufferEnd"
 
 export type Intent =
     | { readonly kind: "submit" }
@@ -233,6 +288,25 @@ export type Intent =
     | { readonly kind: "cursorRight" }
     | { readonly kind: "cursorHome" }
     | { readonly kind: "cursorEnd" }
+    /**
+     * The ends of the whole buffer, not of a line — `cmd+↑`/`cmd+↓`.
+     *
+     * Distinct from `cursorHome`/`cursorEnd` because a message can have many lines and macOS binds both
+     * pairs: cmd with a horizontal arrow is the line, cmd with a vertical one is the document. Collapsing
+     * them would make one of the two chords silently mean the other.
+     */
+    | { readonly kind: "bufferStart" }
+    | { readonly kind: "bufferEnd" }
+    /**
+     * A motion that moves the cursor and leaves the anchor, which is what selecting *is*.
+     *
+     * One intent carrying a motion rather than a shifted twin of every motion: ten motions would have
+     * become twenty intents and twenty reducer cases, and the second ten would have been the first ten
+     * plus one line each. The keymap decides that shift means extend; the reducer reuses the motion it
+     * already implements, so a selection can never disagree with the plain move about where it lands.
+     */
+    | { readonly kind: "extend"; readonly to: MotionKind }
+    | { readonly kind: "selectAll" }
     | { readonly kind: "historyPrev" }
     | { readonly kind: "historyNext" }
     | { readonly kind: "killToStart" }
@@ -314,4 +388,17 @@ export interface EditorState {
     readonly future: readonly EditorSnapshot[]
     /** Set while `^R` is open. */
     readonly search: EditorSearch | undefined
+    /**
+     * Where a selection started, or `undefined` when there is none.
+     *
+     * Required-but-possibly-undefined rather than optional, exactly as `search` above is, and for the same
+     * reason: `exactOptionalPropertyTypes` makes an optional field impossible to *clear* by assignment, and
+     * clearing this one happens on every unshifted keystroke. Declaring it required also turns every
+     * existing construction site into a compile error, which is how they get found rather than missed.
+     *
+     * A code-point offset like `cursor`, and deliberately not a `{start, end}` pair: the pair cannot say
+     * which end is moving, so shift-extending leftward past the anchor and back would collapse to the
+     * wrong side. Anchor plus cursor keeps the direction, and the *rendered* range normalises.
+     */
+    readonly anchor: number | undefined
 }

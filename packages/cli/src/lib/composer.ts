@@ -41,6 +41,26 @@ export interface ComposerRow {
     readonly text: string
     /** Where the caret sits in this row, or `undefined` when it is on another row. */
     readonly caret: number | undefined
+    /**
+     * Buffer-absolute code-point offsets of the source this row draws, `start` inclusive and `end` not.
+     *
+     * Absolute rather than line-relative, which is the only form a selection can use: `wrapRows` reports
+     * offsets into a single *line*, and a selection is a range over the whole buffer. Adding the line's own
+     * start here is the one place that translation belongs — a renderer recomputing it would need the
+     * split, the tab expansion and the wrap all over again to get the same number.
+     */
+    readonly start: number
+    readonly end: number
+    /** Columns of `text` that are re-applied indent, which no selection may highlight. */
+    readonly lead: number
+}
+
+/** A run of a row that is drawn the same way: selected or not, caret or not. */
+export interface RowSegment {
+    readonly text: string
+    readonly selected: boolean
+    /** The single cell the caret inverts. Never wider than one code point. */
+    readonly caret: boolean
 }
 
 export interface ComposerLayout {
@@ -63,6 +83,9 @@ export function composerLayout(editor: EditorState, columns: number): ComposerLa
 
     const rows: ComposerRow[] = []
     let caretRow = 0
+    // Where each line starts in the buffer, in code points. The `+ 1` is the newline itself, which no row
+    // draws and every offset after it has to account for.
+    let base = 0
     for (const [at, line] of lines.entries()) {
         const wrapped = wrapRows(line, width)
         // The caret's column has to be translated into the same tab-expanded coordinates the rows are
@@ -83,6 +106,9 @@ export function composerLayout(editor: EditorState, columns: number): ComposerLa
         for (const [n, row] of wrapped.entries()) {
             if (n === on) caretRow = rows.length
             rows.push({
+                start: base + row.from,
+                end: base + row.to,
+                lead: row.lead,
                 text: row.text,
                 // Clamped into the row: a caret past `to` can only mean the source column sat in the
                 // whitespace a break consumed, and the end of the row is the honest place for it.
@@ -92,6 +118,47 @@ export function composerLayout(editor: EditorState, columns: number): ComposerLa
                         : undefined,
             })
         }
+        base += [...line].length + 1
     }
     return { rows, caretRow }
+}
+
+/**
+ * One row, split into the runs a renderer can paint in one go.
+ *
+ * Built as runs rather than as three slices because the caret can sit anywhere — including inside the
+ * selection — and slicing for both produces overlapping ranges that have to be reconciled. Walking the row
+ * once and grouping adjacent code points by how they are drawn has no such case, and the caret staying
+ * exactly one cell wide is a property of the walk rather than something to remember.
+ *
+ * The indent is never selected. Those columns are chrome the wrap re-applied; highlighting them would
+ * suggest text is included that no offset in the buffer corresponds to.
+ */
+export function rowSegments(
+    row: ComposerRow,
+    selection: { readonly start: number; readonly end: number } | undefined,
+): readonly RowSegment[] {
+    const cells = [...row.text]
+    const segments: RowSegment[] = []
+    for (const [column, cell] of cells.entries()) {
+        // A column past the indent maps back to the source by the same arithmetic the caret uses; one
+        // inside it maps to nothing, which is why it can never be selected.
+        const offset = column < row.lead ? -1 : row.start + (column - row.lead)
+        const isSelected =
+            selection !== undefined && offset >= selection.start && offset < selection.end
+        const isCaret = row.caret === column
+        const last = segments.at(-1)
+        // The caret is its own run always, so it stays one cell wide even in the middle of a selection.
+        if (last !== undefined && !isCaret && !last.caret && last.selected === isSelected) {
+            segments[segments.length - 1] = { ...last, text: last.text + cell }
+            continue
+        }
+        segments.push({ text: cell, selected: isSelected, caret: isCaret })
+    }
+    // A caret past the last character has no cell to invert, so it needs one. Same reason `LineCursor`
+    // inverts a trailing space today.
+    if (row.caret !== undefined && row.caret >= cells.length) {
+        segments.push({ text: " ", selected: false, caret: true })
+    }
+    return segments
 }

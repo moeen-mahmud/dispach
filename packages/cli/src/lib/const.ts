@@ -28,6 +28,15 @@ export const ENTER_ALT_SCREEN = "\u001B[?1049h"
 export const LEAVE_ALT_SCREEN = "\u001B[?1049l"
 
 /**
+ * Pop the kitty keyboard protocol: `CSI < u`, the counterpart to the `CSI > flags u` Ink pushes.
+ *
+ * Here rather than in `lib/keyboard.ts` so the dependency runs one way — `lib/exit.ts` needs the
+ * sequence and `lib/keyboard.ts` needs `markEnhancedKeys`, and only one of those two can import the
+ * other. Terminal-mode sequences already live in this module, which makes this the side that moves.
+ */
+export const DISABLE_ENHANCED_KEYS = "\u001B[<u"
+
+/**
  * Fallback width. A pty can genuinely report `columns === 0` — measured, under `script -q`, which
  * is how this repo drives a real TTY in a test harness. Any layout maths that divides by the
  * terminal width has to survive that.

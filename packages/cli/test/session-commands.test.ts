@@ -12,7 +12,9 @@ import { describe, expect, test } from "bun:test"
 import { type KeyContext, keyToIntent } from "#keymap"
 import {
     DOCUMENTED_CTRL_LETTERS,
+    DOCUMENTED_META_LETTERS,
     KEY_BINDINGS,
+    META_LETTERS_THAT_ARE_ARROWS,
     resolveSessionCommand,
     SESSION_COMMANDS,
     sessionHelpText,
@@ -189,6 +191,9 @@ const NO_KEYS: KeyState = {
     backspace: false,
     delete: false,
     meta: false,
+    home: false,
+    end: false,
+    super: false,
 }
 
 /** Both, because `^C` and `^D` answer differently depending on which one holds. */
@@ -219,6 +224,12 @@ function honoured(letter: string): boolean {
     )
 }
 
+function honouredWithMeta(letter: string): boolean {
+    return CONTEXTS.some(
+        (context) => keyToIntent(letter, { ...NO_KEYS, meta: true }, context).kind !== "none",
+    )
+}
+
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz".split("")
 
 describe("documented bindings and real bindings are the same set", () => {
@@ -231,6 +242,23 @@ describe("documented bindings and real bindings are the same set", () => {
     test("every chord the prompt honours is documented", () => {
         const documented = new Set(DOCUMENTED_CTRL_LETTERS)
         const missing = ALPHABET.filter((letter) => honoured(letter) && !documented.has(letter))
+        expect(missing).toEqual([])
+    })
+
+    test("every documented option chord is one the prompt actually honours", () => {
+        // This arm did not exist, and its absence is the whole reason `⌥r` could be documented in the
+        // table, bound in the keymap, handled in `App.tsx`, and still reach nothing — the ctrl loop below
+        // has been two-way since Phase 2 and the option chords were simply never walked.
+        for (const letter of DOCUMENTED_META_LETTERS) {
+            expect(honouredWithMeta(letter), letter).toBe(true)
+        }
+    })
+
+    test("every option chord the prompt honours is documented", () => {
+        const documented = new Set([...DOCUMENTED_META_LETTERS, ...META_LETTERS_THAT_ARE_ARROWS])
+        const missing = ALPHABET.filter(
+            (letter) => honouredWithMeta(letter) && !documented.has(letter),
+        )
         expect(missing).toEqual([])
     })
 

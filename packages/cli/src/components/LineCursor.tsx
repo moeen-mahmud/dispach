@@ -27,7 +27,8 @@
  */
 
 import { Box, Text } from "ink"
-import { composerLayout } from "#lib/composer"
+import { selectionRange } from "#editor"
+import { composerLayout, rowSegments } from "#lib/composer"
 import { viewport } from "#lib/rows"
 import { THEME } from "#lib/theme"
 import type { EditorState } from "#lib/types"
@@ -82,6 +83,9 @@ export function LineCursor({
 
     // The gutter is drawn on the first row and matched by a blank on every row after it, so the text
     // stays in one column — which means the text itself only ever gets what is left.
+    // Derived here rather than passed in: it is a function of the editor state this component already
+    // has, and a prop would let a caller draw a highlight the reducer does not believe in.
+    const selection = selectionRange(editor)
     const { rows: all, caretRow } = composerLayout(
         editor,
         Math.max(1, (columns ?? Number.MAX_SAFE_INTEGER) - lead),
@@ -104,7 +108,7 @@ export function LineCursor({
                 // length.
                 const chars = secret === true ? [...row.text].map(() => "•") : [...row.text]
                 const glyph = at === from && hiddenAbove === 0 ? gutter : pad
-                if (row.caret === undefined) {
+                if (row.caret === undefined && selection === undefined) {
                     return (
                         // Keyed by index: two identical rows in a message are not the same row, and a
                         // content key would collapse them.
@@ -114,13 +118,38 @@ export function LineCursor({
                         </Text>
                     )
                 }
+                // Runs rather than slices. The caret can sit inside the selection, and slicing for both
+                // produces overlapping ranges that have to be reconciled; `rowSegments` walks the row once
+                // and the caret stays one cell wide by construction. Masking is applied after the split so
+                // a secret field's dots line up with the runs rather than with the source.
+                const runs = rowSegments(row, selection)
+                let column = 0
                 return (
                     <Text key={`row-${at}`} wrap="truncate">
                         <Text color={THEME.accent}>{glyph}</Text>
-                        {chars.slice(0, row.caret).join("")}
-                        {/* Inverting a trailing space is how the cursor stays visible at end of line. */}
-                        <Text inverse>{chars[row.caret] ?? " "}</Text>
-                        {chars.slice(row.caret + 1).join("")}
+                        {runs.map((run) => {
+                            const key = `run-${at}-${column}`
+                            column += [...run.text].length
+                            const text =
+                                secret === true ? [...run.text].map(() => "•").join("") : run.text
+                            // Inverting a trailing space is how the caret stays visible at end of line;
+                            // `rowSegments` supplies that space when the caret is past the last character.
+                            if (run.caret) {
+                                return (
+                                    <Text key={key} inverse>
+                                        {text}
+                                    </Text>
+                                )
+                            }
+                            if (run.selected) {
+                                return (
+                                    <Text key={key} backgroundColor={THEME.selection}>
+                                        {text}
+                                    </Text>
+                                )
+                            }
+                            return <Text key={key}>{text}</Text>
+                        })}
                     </Text>
                 )
             })}

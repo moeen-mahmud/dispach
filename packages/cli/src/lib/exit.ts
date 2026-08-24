@@ -17,7 +17,14 @@
  */
 
 import { once } from "node:events"
-import { EXIT_FAILURE, EXIT_SIGTERM, LEAVE_ALT_SCREEN, RESET_STYLE, SHOW_CURSOR } from "#lib/const"
+import {
+    DISABLE_ENHANCED_KEYS,
+    EXIT_FAILURE,
+    EXIT_SIGTERM,
+    LEAVE_ALT_SCREEN,
+    RESET_STYLE,
+    SHOW_CURSOR,
+} from "#lib/const"
 import { DISABLE_MOUSE } from "#lib/mouse"
 import type { TerminalHandles } from "#lib/schema"
 
@@ -38,6 +45,7 @@ let restored = false
 let dirty = false
 let altScreen = false
 let mouse = false
+let enhancedKeys = false
 let signalsClaimed = false
 
 /**
@@ -82,6 +90,23 @@ export function markAltScreen(): void {
 export function markMouse(): void {
     dirty = true
     mouse = true
+}
+
+/**
+ * Ink negotiated the kitty keyboard protocol, so the terminal has to be told to stop reporting that way.
+ *
+ * Ink pops it itself on unmount and around a suspend — this exists for the path it cannot cover, which is
+ * the same one `markMouse` exists for: a signal. `SIGTERM` is the only route a service manager uses, and
+ * a terminal left in the protocol hands the next shell `CSI u` for every Ctrl chord, which reads as a
+ * broken keyboard and outlives the process.
+ *
+ * Set by the render sites rather than derived, because whether the protocol was actually *pushed* depends
+ * on the terminal answering a query 200 ms after mount — so the honest flag is "we asked", and popping a
+ * protocol that was never pushed is a no-op on every terminal.
+ */
+export function markEnhancedKeys(): void {
+    dirty = true
+    enhancedKeys = true
 }
 
 /**
@@ -130,6 +155,19 @@ export function restoreTerminal(handles: TerminalHandles = processHandles()): vo
     // Before the buffer swap, for the same reason the style reset is: the request was made against this
     // buffer and the shell must not be left with a terminal that reports clicks at it.
     if (mouse) handles.out.write(DISABLE_MOUSE)
+    // Before the buffer swap for the same reason, and after the mouse for no reason but stable ordering
+    // — a test asserts the sequence, and an order nothing pins is an order that drifts.
+    //
+    // This is usually the *second* pop: Ink pops on unmount, and on both the normal and the signal path
+    // the unmount teardown has already run by the time this fires. Kept anyway, because the path it exists
+    // for is the one where teardowns do not run at all — a hard crash — and a terminal left reporting
+    // `CSI u` for every Ctrl chord outlives the process. Seen in a capture as `[<u[<u`.
+    //
+    // The cost is stated rather than hidden. A pop on an empty stack is ignored, so standalone this is
+    // harmless; nested inside *another* application that pushed its own flags, the extra pop takes that
+    // application's entry instead. That trade is accepted for a top-level CLI and would be the wrong one
+    // for a library.
+    if (enhancedKeys) handles.out.write(DISABLE_ENHANCED_KEYS)
     if (altScreen) handles.out.write(LEAVE_ALT_SCREEN)
 }
 
@@ -139,6 +177,7 @@ export function resetForTests(
         readonly dirty?: boolean
         readonly altScreen?: boolean
         readonly mouse?: boolean
+        readonly enhancedKeys?: boolean
     } = {},
 ): void {
     teardowns.length = 0
@@ -146,6 +185,7 @@ export function resetForTests(
     dirty = options.dirty ?? true
     altScreen = options.altScreen ?? false
     mouse = options.mouse ?? false
+    enhancedKeys = options.enhancedKeys ?? false
     signalsClaimed = false
 }
 

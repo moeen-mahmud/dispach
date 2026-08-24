@@ -36,6 +36,8 @@ export const SHIFT_ENTER_SEQUENCE = "\u001B[13;2u"
 /** The same thing spelled for a config file that wants an escaped literal rather than the byte. */
 export const SHIFT_ENTER_ESCAPED = "\\x1b[13;2u"
 
+import { BRAND } from "@dispach/core"
+
 export type TerminalId =
     | "vscode"
     | "ghostty"
@@ -58,6 +60,13 @@ export interface TerminalRecipe {
      * "not recognised" is a lie about what we know; inventing a recipe for it produces the one outcome
      * this module is arranged to avoid — a command that reports success and changes nothing. Found by
      * running the command: the author's own terminal turned out to be one of these.
+     *
+     * There was briefly a fourth, `none` — "nothing to configure" — added when the kitty keyboard protocol
+     * turned out to make shift+⏎ work in Warp on its own. It is gone, because the measurement behind it was
+     * incomplete: the protocol fixes the *arrow* chords and not the letter ones, so Warp does have a step
+     * after all. Recorded here rather than silently reverted, because the mistake is the useful part — a
+     * state was invented for a case that a fuller measurement dissolved, and a state nothing reaches is
+     * exactly the dead vocabulary this repo keeps removing.
      */
     readonly how: "write" | "explain" | "unverified"
     /** Path relative to the home directory. Absent for an `explain` terminal. */
@@ -112,11 +121,22 @@ const RECIPES: readonly TerminalRecipe[] = [
     {
         id: "warp",
         name: "Warp",
-        how: "unverified",
-        reason: "its shortcuts are configured in the app rather than in a file, and whether any of them can send a raw escape sequence has not been verified here",
+        how: "explain",
+        // Corrected twice, and the second correction is the instructive one.
+        //
+        // It was `unverified`. Then the kitty keyboard protocol turned out to fix the *arrow* chords, so
+        // this became `none` — nothing to configure. Measured against a real session, that was wrong for
+        // **letters**: ⌥r still arrives as the composed character `®`, because Warp resolves Option to a
+        // character before the protocol layer ever sees the key. Pushing `CSI > 3 u` does not change it.
+        //
+        // So there is one thing to configure after all, and it is a Warp setting rather than a file. What
+        // it buys is only the option-*letter* chords: ⌥←/⌥→ and every cmd chord already work without it,
+        // because those carry their modifier inside the sequence.
+        reason: "Option is resolved to a character before the keyboard protocol sees it, so ⌥ plus a letter arrives as text like `®` unless Warp is told otherwise",
         steps: [
-            "Use ⌥⏎, which needs no configuration and works in every terminal",
-            "Warp's own shortcuts are under Settings → Keyboard shortcuts, if you want to try",
+            "Settings → Features → Keys → tick “Left and Right Option Key is Meta”",
+            "That is only needed for ⌥ plus a *letter*. ⌥ and cmd with arrows already work, and so does shift+⏎",
+            `Every letter chord here has a control-key twin that needs none of this — \`${BRAND.slug} keys\` shows exactly what your terminal sends`,
         ],
     },
     {

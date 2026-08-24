@@ -98,7 +98,7 @@ export const NEWLINE_HINT = "⌥⏎ or a trailing \\ for a new line · ⏎ sends
  * two presses. A hint naming a chord that does something else — or nothing — is worse than no hint, and
  * this is the one screen where a person has no conversation to learn the keys from.
  */
-export const NEW_SESSION_HINT = "/ commands · ⏎ sends · ⌥⏎ new line · ^C twice leaves"
+export const NEW_SESSION_HINT = "/ commands · ⏎ sends · ⇧⏎ new line · ^C twice leaves"
 
 export const KEY_BINDINGS: readonly KeyBindingSpec[] = [
     {
@@ -117,9 +117,40 @@ export const KEY_BINDINGS: readonly KeyBindingSpec[] = [
         summary:
             "a line up or down inside the message — the same history at its first and last line",
     },
-    { chord: "⌥⏎", summary: "a new line in the message; a trailing \\ does the same; ⏎ sends it" },
-    { chord: "⌥← / ⌥→", summary: "back one word / forward one" },
+    {
+        // Both, and the qualification belongs here rather than in the composer hint. ⌥⏎ arrives as `ESC`
+        // then carriage return and works in every terminal; ⇧⏎ needs one that can distinguish it, which
+        // the kitty keyboard protocol delivers where it negotiates — and where it does not, ⇧⏎ *is* ⏎ and
+        // silently sends the message. A permanently-visible hint cannot carry that condition; this line
+        // can, which is the split `Prompt.tsx` documents.
+        chord: "⌥⏎ / ⇧⏎",
+        summary:
+            "a new line in the message — ⌥⏎ everywhere, ⇧⏎ where the terminal can tell it apart (`keys` says); a trailing \\ does the same; ⏎ sends it",
+    },
+    { chord: "⌥← / ⌥→", summary: "back one word / forward one — ^← / ^→ do the same" },
     { chord: "⌥⌫ / ⌥d", summary: "delete the word before the cursor / after it" },
+    { chord: "Home / End", summary: "start of line / end of line, the same as ^A / ^E" },
+    {
+        // Cmd chords need the kitty keyboard protocol, which is negotiated at mount and simply does not
+        // arrive on a terminal that declines it — so this row names the readline equivalent alongside,
+        // rather than describing a chord that silently does nothing on half the terminals in use.
+        chord: "cmd← / cmd→",
+        summary: "start of line / end of line, where the terminal reports cmd (else ^A / ^E)",
+    },
+    {
+        chord: "cmd↑ / cmd↓",
+        summary: "the start / end of the whole message, however many lines it has",
+    },
+    { chord: "cmd⌫ / cmd⌦", summary: "delete to the start of the line / to the end" },
+    { chord: "cmdz / cmd⇧z", summary: "undo / redo, the same as ^Z / ^Y" },
+    {
+        // One row for the whole family, because the rule is one sentence: shift turns any motion above
+        // into a selection. Listing ten shifted chords separately would be ten rows saying that once each.
+        chord: "⇧ + any motion",
+        summary:
+            "select as the cursor moves — ⇧← a character, ⇧⌥← a word, ⇧cmd← to the line start, ⇧cmd↑ to the top; typing or ⌫ replaces what is selected",
+    },
+    { chord: "cmda", summary: "select the whole message" },
     {
         chord: "^R",
         summary: "search what you have already sent — ↑↓ to pick, ⏎ to use it, esc to cancel",
@@ -139,9 +170,9 @@ export const KEY_BINDINGS: readonly KeyBindingSpec[] = [
     { chord: "⌥↑ / ⌥↓", summary: "the same, one row at a time" },
     { chord: "⌥PgUp / ⌥PgDn", summary: "the start of the conversation / back to the newest reply" },
     {
-        chord: "⌥r",
+        chord: "^O / ⌥r",
         summary:
-            "show the model's reasoning whole — it is folded to a few rows so the reply stays findable",
+            "show the model's reasoning whole — folded to a few rows so the reply stays findable; ^O works on every terminal, ⌥r needs one that reports it",
     },
     { chord: "esc", summary: "return to the newest reply when you have scrolled away" },
 ]
@@ -154,6 +185,33 @@ export const KEY_BINDINGS: readonly KeyBindingSpec[] = [
 export const DOCUMENTED_CTRL_LETTERS: readonly string[] = KEY_BINDINGS.flatMap((spec) =>
     [...spec.chord.matchAll(/\^([A-Za-z])/g)].map((match) => (match[1] ?? "").toLowerCase()),
 )
+
+/**
+ * Every option-letter chord the table documents, read back the same way.
+ *
+ * The ctrl list above has had a two-way drift test since Phase 2 and the option chords never did — so
+ * `⌥r` was documented, bound, handled, and reaching nothing, with no test anywhere able to say so. The
+ * asymmetry was not a decision: `^` is one character to match and `⌥` is one the regex simply never
+ * learned about.
+ */
+export const DOCUMENTED_META_LETTERS: readonly string[] = KEY_BINDINGS.flatMap((spec) =>
+    // A *lowercase* letter that no other letter follows, which is narrower than the ctrl regex for two
+    // reasons the first version of this got wrong. `⌥PgUp` starts with a capital and is a key name, so
+    // a `[A-Za-z]` class extracted a phantom `⌥p` and the test failed against a chord that does not
+    // exist. And a letter chord is always one letter here, so requiring nothing after it keeps a future
+    // `⌥Home` out of the list too.
+    [...spec.chord.matchAll(/⌥([a-z])(?![A-Za-z])/g)].map((match) => match[1] ?? ""),
+)
+
+/**
+ * Letters a terminal sends *as* an option chord without anybody pressing them.
+ *
+ * `⌥←` reaches us as `ESC b` from Apple Terminal and as `CSI 1;3D` from iTerm2, so `keyToIntent` honours
+ * `meta` plus the letter `b` — and that is an encoding, not a binding. Documenting `⌥b` would advertise a
+ * chord nobody uses to mean a thing they already have an arrow key for. Listed here rather than dropped
+ * from the check, so the exemption is a decision with a reason on it instead of a hole in the test.
+ */
+export const META_LETTERS_THAT_ARE_ARROWS: readonly string[] = ["b", "f"]
 
 export type SessionCommand =
     | { readonly kind: SessionCommandKind; readonly rest?: string }

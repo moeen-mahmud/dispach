@@ -16,7 +16,7 @@
 
 import { describe, expect, test } from "bun:test"
 import { EMPTY_EDITOR } from "#editor"
-import { composerLayout } from "#lib/composer"
+import { type ComposerRow, composerLayout, rowSegments } from "#lib/composer"
 import type { EditorState } from "#lib/types"
 import { expandColumn, wrapRows, wrapText } from "#lib/wrap"
 
@@ -137,5 +137,78 @@ describe("composerLayout", () => {
         // `columns - 1` floors at 1, so the reserved cell cannot make the window zero-wide.
         const layout = composerLayout(editor("abc"), 1)
         expect(layout.rows.length).toBeGreaterThan(0)
+    })
+})
+
+describe("rowSegments", () => {
+    function layout(value: string, cursor: number, columns: number) {
+        return composerLayout({ ...EMPTY_EDITOR, value, cursor }, columns)
+    }
+
+    test("no selection and no caret is one run", () => {
+        const row = layout("hello", 99, 40).rows[0]
+        expect(row).toBeDefined()
+        const runs = rowSegments({ ...(row as ComposerRow), caret: undefined }, undefined)
+        expect(runs).toEqual([{ text: "hello", selected: false, caret: false }])
+    })
+
+    test("a selection in the middle is three runs", () => {
+        const row = layout("hello world", 99, 40).rows[0]
+        const runs = rowSegments(
+            { ...(row as ComposerRow), caret: undefined },
+            { start: 6, end: 11 },
+        )
+        expect(runs.map((run) => run.text)).toEqual(["hello ", "world"])
+        expect(runs.map((run) => run.selected)).toEqual([false, true])
+    })
+
+    test("the caret is its own run, one cell wide, even inside a selection", () => {
+        // The case that made runs the right shape rather than slices: slicing for a selection and a caret
+        // separately produces overlapping ranges, and where they overlap the caret vanishes.
+        const row = layout("hello world", 8, 40).rows[0]
+        const runs = rowSegments(row as ComposerRow, { start: 6, end: 11 })
+        const caret = runs.filter((run) => run.caret)
+        expect(caret).toHaveLength(1)
+        expect([...(caret[0]?.text ?? "")]).toHaveLength(1)
+        expect(caret[0]?.selected).toBe(true)
+        // And the row is still the row: concatenating the runs gives back exactly what was drawn.
+        expect(runs.map((run) => run.text).join("")).toBe(row?.text ?? "")
+    })
+
+    test("a caret past the last character gets a cell of its own", () => {
+        // Same reason the old renderer inverted a trailing space: there is nothing at that column to
+        // invert, so the segment walk supplies one.
+        const row = layout("hi", 2, 40).rows[0]
+        const runs = rowSegments(row as ComposerRow, undefined)
+        expect(runs.at(-1)).toEqual({ text: " ", selected: false, caret: true })
+    })
+
+    test("the hanging indent is never selected", () => {
+        // Those columns are chrome the wrap re-applied. Highlighting them would claim text is selected
+        // that no offset in the buffer corresponds to.
+        const rows = layout("  alpha beta gamma delta", 99, 14).rows
+        const wrapped = rows.find((row) => row.lead > 0)
+        expect(wrapped).toBeDefined()
+        const runs = rowSegments(
+            { ...(wrapped as ComposerRow), caret: undefined },
+            { start: 0, end: 99 },
+        )
+        expect(runs[0]?.selected).toBe(false)
+        expect([...(runs[0]?.text ?? "")]).toHaveLength(wrapped?.lead ?? 0)
+    })
+
+    test("row offsets are buffer-absolute, so a selection spans lines correctly", () => {
+        // Line-relative offsets would make every line after the first select the wrong text — the bug this
+        // field exists to avoid, and the reason the newline is counted in the base.
+        const rows = layout("first\nsecond", 99, 40).rows
+        expect(rows[0]?.start).toBe(0)
+        expect(rows[0]?.end).toBe(5)
+        expect(rows[1]?.start).toBe(6)
+        expect(rows[1]?.end).toBe(12)
+        const second = rowSegments(
+            { ...(rows[1] as ComposerRow), caret: undefined },
+            { start: 6, end: 9 },
+        )
+        expect(second.filter((run) => run.selected).map((run) => run.text)).toEqual(["sec"])
     })
 })

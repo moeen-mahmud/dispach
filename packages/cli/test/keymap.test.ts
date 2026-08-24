@@ -17,6 +17,9 @@ const NO_KEYS: KeyState = {
     backspace: false,
     delete: false,
     meta: false,
+    home: false,
+    end: false,
+    super: false,
 }
 
 /** A single-line buffer sits on both the first and the last line, which is the common case. */

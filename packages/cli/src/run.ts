@@ -49,6 +49,7 @@ import {
     onExit,
     restoreTerminal,
 } from "#lib/exit"
+import { negotiateKeyboard } from "#lib/keyboard"
 import { ENABLE_MOUSE } from "#lib/mouse"
 import { resolveModeFromProcess } from "#lib/output"
 import { CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
@@ -66,6 +67,7 @@ import {
 } from "#lib/session-commands"
 import { SESSION_KEY_LENGTH, sessionKeyFrom } from "#lib/session-key"
 import type { CatalogueEntry } from "#lib/source-cache"
+import { openTap } from "#lib/stdin-tap"
 import type { RenderMode } from "#lib/types"
 import { type InstallOutcome, skillsCommand } from "#skills"
 import { type PriorMessage, seed, seedHistory } from "#transcript"
@@ -424,7 +426,7 @@ async function pickFromSandbox(
                 result = picked
             },
         }),
-        { exitOnCtrlC: false },
+        { exitOnCtrlC: false, ...negotiateKeyboard(options.noEnhancedKeys) },
     )
     onExit(() => instance.unmount())
     await instance.waitUntilExit()
@@ -577,7 +579,7 @@ async function pickSession(sessions: readonly SessionSummary[]): Promise<string 
                 instance.unmount()
             },
         }),
-        { exitOnCtrlC: false },
+        { exitOnCtrlC: false, ...negotiateKeyboard() },
     )
     onExit(() => instance.unmount())
     await instance.waitUntilExit()
@@ -645,6 +647,15 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
     // The buffer is discarded on the way out and never joins the scrollback, which is the whole point and
     // also the cost: the conversation is gone from the screen the moment the session ends. That is what
     // the pointer line below exists for, and what makes `^C` take two presses.
+    // Before `render`, which is the whole point: two listeners on one `data` event both receive the
+    // chunk, ordering is registration order, and this one has to have parsed a sequence before Ink's
+    // handler fires for it. `lib/csi.ts` says what it is for — Ink merges the super bit into `meta`, so
+    // without this `cmd+←` is `⌥←`.
+    const tap = openTap()
+    onExit(() => {
+        tap.close()
+    })
+
     markAltScreen()
     // Tracking with the buffer swap, and only here: the chat is the one surface whose keymap claims every
     // mouse report, and a surface that asked for them without claiming them would have Ink type them into
@@ -699,6 +710,7 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
             // columns, rows 6 and 8 of a fresh session. The plain path keeps it, because there is no
             // header there and it is the only place the version appears.
             initial: seedHistory(seed(wired.banner.slice(1)), wired.prior),
+            correctKeys: tap.correct,
             showReasoning: wired.showReasoning,
             quiet: wired.quiet,
             // So a slash command runs against *this* agent: without it a child would resolve whichever
@@ -712,7 +724,7 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
             },
             ...(wired.draft.current === "" ? {} : { initialDraft: wired.draft.current }),
         }),
-        { exitOnCtrlC: false },
+        { exitOnCtrlC: false, ...negotiateKeyboard(wired.noEnhancedKeys) },
     )
     onExit(() => instance.unmount())
 

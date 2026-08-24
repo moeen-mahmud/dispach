@@ -105,6 +105,10 @@ describe("the pure modules stay pure", () => {
         "lib/templates.ts",
         "lib/theme.ts",
         "lib/select.ts",
+        // The key probe's formatter. Pure because the whole point of it is to be believable: every line
+        // it prints is asserted here rather than read off somebody's screen, and a module that reached
+        // for `process.env` to decide what a terminal is would be reporting a guess.
+        "lib/keys-view.ts",
         "lib/wizard.ts",
         // The daemon's three. `launchd.ts` renders a plist and parses `launchctl` output;
         // `daemon-plan.ts` decides what would stop an install and what a service's state means;

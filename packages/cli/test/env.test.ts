@@ -51,6 +51,7 @@ test("the real environment is readable without arguments", () => {
         "debug",
         "dumbTerminal",
         "noColor",
+        "noEnhancedKeys",
         "sandboxHome",
     ])
 })

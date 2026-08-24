@@ -45,6 +45,7 @@ import {
     webBackendByValue,
 } from "#lib/init-flow"
 import { findAndInstallSkill } from "#lib/init-skills"
+import { negotiateKeyboard } from "#lib/keyboard"
 import { resolveModeFromProcess } from "#lib/output"
 import { CHANNEL_IDS, PROVIDER_IDS } from "#lib/providers"
 import { agentsDir } from "#lib/sandbox"
@@ -368,7 +369,7 @@ async function runWizard(
                 collected = answers
             },
         }),
-        { exitOnCtrlC: false },
+        { exitOnCtrlC: false, ...negotiateKeyboard() },
     )
     onExit(() => instance.unmount())
     await instance.waitUntilExit()

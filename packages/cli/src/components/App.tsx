@@ -115,6 +115,7 @@ export function App({
     warnings,
     freshSession,
     initial,
+    correctKeys,
     showReasoning,
     quiet,
     onRestart,
@@ -487,7 +488,16 @@ export function App({
     )
 
     useInput(
-        (input, key) => {
+        (input, reported) => {
+            // Modifiers off the wire where they can be had, before anything reads one.
+            //
+            // Ink folds the super bit into `meta` on its legacy path (`modifier & 10`), so `cmd+←` and
+            // `⌥←` arrive as the same keystroke and both word-move — measured in a real Warp session.
+            // First line of the handler rather than beside `keyToIntent`, because the palette branch below
+            // reads `key.escape` and `key.upArrow` too, and a correction applied after it would be one
+            // that two of the three branches never got.
+            const key = correctKeys === undefined ? reported : correctKeys(reported, input)
+
             // A pending confirmation owns the keyboard for exactly one keystroke. Anything other than a
             // yes is a no — including a stray arrow, because the safe answer to an unclear one is to stay.
             if (confirming) {
@@ -575,6 +585,28 @@ export function App({
                 return
             }
             if (intent.kind === "reasoning") {
+                // A chord with nothing to act on has to say so.
+                //
+                // Reported as "⌥r doesn't do anything", and it was arriving and resolving correctly the
+                // whole time: it toggles a fold, and a fold with nothing in it looks exactly like a dead
+                // key. Two different reasons for that, and they need two different sentences — a model
+                // that never streams reasoning is not the same as a turn that has not produced any yet,
+                // and only the first is worth changing a flag over.
+                // Visibility, not existence — and the order matters. `useTurn` appends a reasoning item
+                // for every delta the model streams *regardless* of `showReasoning`, and `transcript.ts`
+                // filters them out at render. So a session with reasoning hidden has items that cannot be
+                // shown, and testing existence first fell through to a toggle whose rows were filtered
+                // away: silently nothing, which is the failure this whole branch exists to prevent.
+                if (!showReasoning) {
+                    note(
+                        "reasoning is off: either this model does not stream it, or --no-reasoning is set",
+                    )
+                    return
+                }
+                if (!state.items.some((item) => item.role === "reasoning")) {
+                    note("no reasoning to show yet — this expands it once a turn has streamed some")
+                    return
+                }
                 // Unfolding changes how tall the conversation is, so the window has to be told to follow
                 // the newest row again — leaving it parked would put the reader at a row that has moved.
                 setExpandReasoning((current) => !current)
@@ -759,19 +791,20 @@ export function App({
             )}
 
             {/*
-             * Absorbs the slack, so the composer sits on the bottom edge from the first frame.
+             * Absorbs the slack, so the composer sits on the bottom edge of every frame.
              *
-             * Without it the input box is drawn immediately under whatever content exists, which means it
-             * walks down the screen as the first few messages arrive and only settles once the transcript
-             * fills the window. The place you type should not move; a spacer costs nothing when the
-             * transcript is full, because there is no slack left to absorb.
+             * Unconditional, and that is the whole of decision 11.98's reversal. It used to stand down while
+             * landing, on the grounds that twelve blank rows between the banner and the input read as a
+             * half-empty screen — but a bottom-anchored input is where the eye already rests, so what those
+             * rows read as is a prompt waiting. The reference CLI puts ~25 there and nobody reports it.
              *
-             * Not while landing, though. There the transcript holds a five-line banner in a fourteen-row
-             * window, so the spacer put twelve blank rows between the banner and the input — a third of a
-             * thirty-row terminal, reading as a half-empty screen rather than a prompt waiting for you. The
-             * slack goes *below* the composer instead, which is the spacer at the other end.
+             * The cost of the old arrangement was not the blank rows, it was that the composer *moved*: it
+             * was drawn under whatever content existed, so it walked down the screen as the first few
+             * messages arrived and only settled once the transcript filled the window. The place you type
+             * should not move. A spacer costs nothing once the transcript is full, because by then there is
+             * no slack left for it to take.
              */}
-            {landing ? null : <Box flexGrow={1} />}
+            <Box flexGrow={1} />
 
             {state.live === undefined ? null : (
                 <Live live={state.live} showReasoning={showReasoning} columns={columns} />
@@ -799,7 +832,7 @@ export function App({
                 editor={editor}
                 busy={busy}
                 columns={columns}
-                {...(landing ? { roomy: true, placeholder: "Ask anything…" } : {})}
+                {...(landing ? { placeholder: "Ask anything…" } : {})}
             />
             {/*
              * The keys worth knowing before there is a conversation to learn them from. It stands down once
@@ -811,9 +844,6 @@ export function App({
                     {NEW_SESSION_HINT}
                 </Text>
             ) : null}
-            {/* The other end of the spacer above: on the landing screen the slack belongs under the
-                composer, so the input sits with the banner and the status line stays on the bottom edge. */}
-            {landing ? <Box flexGrow={1} /> : null}
             {/* The status line is the footer, under the input — where every reference CLI puts
                 it, and where the eye rests between keystrokes. */}
             <StatusBar

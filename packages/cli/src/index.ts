@@ -23,6 +23,7 @@ import { agentsCommand } from "#agents"
 import { browseCommand } from "#browse"
 import { daemonCommand } from "#daemon"
 import { initCommand } from "#init"
+import { keysCommand } from "#keys"
 import { parse } from "#lib/args"
 import { askExactly, askYesNo } from "#lib/confirm"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
@@ -147,6 +148,9 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 quiet: flags.bool("quiet"),
                 showReasoning: flags.bool("show-reasoning"),
                 noReasoning: flags.bool("no-reasoning"),
+                // Only when actually written. `flags.bool` returns `false` for an absent boolean, and
+                // passing that would turn "no opinion" into "definitely on" and override the env var.
+                ...(flags.bool("no-enhanced-keys") ? { noEnhancedKeys: true } : {}),
                 plain: flags.bool("plain"),
             })
         }
@@ -278,6 +282,9 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 json: flags.bool("json"),
             })
         }
+
+        case "keys":
+            return await keysCommand({ noEnhancedKeys: flags.bool("no-enhanced-keys") })
 
         case "terminal-setup":
             return await terminalSetupCommand({

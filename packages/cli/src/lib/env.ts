@@ -29,5 +29,7 @@ export function readEnv(env: Readonly<Record<string, string | undefined>> = proc
         sandboxHome: isSet(env[`${BRAND.envPrefix}HOME`])
             ? env[`${BRAND.envPrefix}HOME`]
             : undefined,
+        // Brand-derived like the sandbox root above, so a rename moves it.
+        noEnhancedKeys: isSet(env[`${BRAND.envPrefix}NO_CSI_U`]),
     }
 }

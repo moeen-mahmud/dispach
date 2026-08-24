@@ -64,6 +64,7 @@ import {
     MAX_SCREEN_ROWS,
 } from "#lib/const"
 import { flushOutput, markAltScreen, onExit, restoreTerminal } from "#lib/exit"
+import { negotiateKeyboard } from "#lib/keyboard"
 import { resolveModeFromProcess } from "#lib/output"
 import { bullet, keyValue } from "#lib/render"
 import { resolveAgentRef, storePath } from "#lib/sandbox"
@@ -560,7 +561,7 @@ async function edit(
                 finish()
             },
         }),
-        { exitOnCtrlC: false },
+        { exitOnCtrlC: false, ...negotiateKeyboard() },
     )
     onExit(() => instance.unmount())
     await closed

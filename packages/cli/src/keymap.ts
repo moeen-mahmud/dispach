@@ -8,8 +8,9 @@
  */
 
 import { lineInfo } from "#editor"
+import { isTerminalReply } from "#lib/csi"
 import { mouseInput } from "#lib/mouse"
-import type { EditorState, Intent, KeyState } from "#lib/types"
+import type { EditorState, Intent, KeyState, MotionKind } from "#lib/types"
 
 export interface KeyContext {
     /** A turn is in flight. */
@@ -114,6 +115,15 @@ function ctrlIntent(letter: string, context: KeyContext): Intent {
             return { kind: "historyNext" }
         case "r":
             return { kind: "searchOpen" }
+        case "o":
+            // The same thing ⌥r does, on a chord that cannot fail to arrive.
+            //
+            // ⌥r needs either the kitty protocol or the terminal's option-as-meta setting; a ctrl letter
+            // needs neither, because it is a single control byte every terminal has always sent. Reported
+            // as "⌥r doesn't do anything", and while the immediate cause was a fold with nothing in it,
+            // the standing cause is that a view toggle should not depend on a terminal handshake at all.
+            // ^O is what the reference CLI binds its own transcript toggle to, so the habit transfers.
+            return { kind: "reasoning" }
         case "z":
             // Undo, not SIGTSTP. Ink puts stdin in raw mode, so the terminal never generates the
             // signal and the byte arrives here — which makes this a choice rather than an accident.
@@ -140,6 +150,61 @@ export function keyToIntent(input: string, key: KeyState, context: KeyContext): 
         return { kind: "scroll", move: mouse.rows < 0 ? "up" : "down", times: Math.abs(mouse.rows) }
     }
 
+    // A key *release* is not a keystroke. `reportEventTypes` is on so that `super` survives on an arrow
+    // key (Ink's kitty branch requires the `:eventType` field), and the cost is that Ink hands the type
+    // through without filtering — so every enhanced key arrives twice, down and up, and every chord would
+    // fire twice. Repeats are kept: holding a key down is a real thing to do.
+    if (key.eventType === "release") return { kind: "none" }
+
+    // ─── shift extends a selection ───────────────────────────────────────────────────────
+    //
+    // Before the cmd, ctrl and option blocks, because every one of them would otherwise claim the chord
+    // and drop the shift: `cmd+shift+←` arrives as `CSI 1;10D` — one plus shift plus super — and the
+    // super block below matches on `key.super` without looking at shift at all.
+    //
+    // Only the motion keys are recognised, which is what keeps this from swallowing ordinary typing:
+    // `key.shift` is true for every capital letter, and a letter matches none of the tests in
+    // `shiftMotion`. Return is not a motion either, so `⇧⏎` still reaches the newline branch.
+    if (key.shift) {
+        const to = shiftMotion(key)
+        if (to !== undefined) return { kind: "extend", to }
+    }
+
+    // ─── command chords ──────────────────────────────────────────────────────────────────
+    //
+    // `super` is Cmd, and it is only ever true once the kitty keyboard protocol has been negotiated —
+    // no legacy sequence can express it, and Ink's legacy path folds it into `meta`, which is why
+    // `cmd+←` used to word-move like `⌥←` instead of jumping to the start of the line.
+    //
+    // Horizontal is the line, vertical is the whole message: that is what macOS binds and what every
+    // editor on the platform does. Before the ctrl and meta blocks because a chord can carry more than
+    // one modifier, and cmd is the most specific claim.
+    if (key.super) {
+        if (key.leftArrow) return { kind: "cursorHome" }
+        if (key.rightArrow) return { kind: "cursorEnd" }
+        if (key.upArrow) return { kind: "bufferStart" }
+        if (key.downArrow) return { kind: "bufferEnd" }
+        if (key.backspace) return { kind: "killToStart" }
+        if (key.delete) return { kind: "killToEnd" }
+        if (input === "z") return key.shift ? { kind: "redo" } : { kind: "undo" }
+        if (input === "a") return { kind: "selectAll" }
+        // Unclaimed, and deliberately swallowed for the same reason an unclaimed option chord is: the
+        // insert branch would type the bare letter, so cmd+s would put an "s" in the message.
+        return { kind: "none" }
+    }
+
+    // Ctrl with an arrow or a backspace is the other spelling of a word operation — Linux and Windows
+    // convention, and the reference honours `ctrl || meta || fn` for exactly one action because a
+    // physical chord reaches a terminal in more than one encoding. Before `ctrlIntent`, which dispatches
+    // on a *letter* and would see an empty string here.
+    // A terminal's answer to a question this process asked is not a keystroke. Claimed next to the mouse
+    // for the same reason: Ink hands it over as text, and text reaches the insert branch.
+    if (isTerminalReply(input)) return { kind: "none" }
+
+    if (key.ctrl && key.leftArrow) return { kind: "wordLeft" }
+    if (key.ctrl && key.rightArrow) return { kind: "wordRight" }
+    if (key.ctrl && key.backspace) return { kind: "killWord" }
+
     if (key.ctrl) return ctrlIntent(input.toLowerCase(), context)
 
     // ─── option chords ───────────────────────────────────────────────────────────────────
@@ -156,6 +221,12 @@ export function keyToIntent(input: string, key: KeyState, context: KeyContext): 
     //   ⇧⏎  kitty protocol `CSI 13;2u`  → return + shift        (only once the terminal is taught)
     //
     // Both spellings of each are honoured, so the same binding works in both families of terminal.
+    //
+    // Under the kitty protocol these arrive as `CSI <codepoint>;3u` instead — `⌥r` is `CSI 114;3u`, and
+    // Ink reports it as `input "r"` with `meta` set, which is the same shape the table above describes.
+    // That is why negotiating the protocol needed no change here: these bindings were always right and
+    // simply never arrived, because Warp's Option-as-Meta setting is off by default and `⌥r` was
+    // reaching us as the composed character `®`.
     if (key.meta) {
         if (key.return) return { kind: "newline" }
         // ⌥↑/⌥↓ walk the conversation a row at a time, and ⌥PgUp/⌥PgDn go to its ends. Bare ↑/↓ cannot
@@ -192,6 +263,12 @@ export function keyToIntent(input: string, key: KeyState, context: KeyContext): 
     if (key.pageUp) return { kind: "scroll", move: "pageUp" }
     if (key.pageDown) return { kind: "scroll", move: "pageDown" }
 
+    // Home and End. Ink has always parsed them; `KeyState` never declared the fields, so both keys did
+    // nothing whatsoever until now. The raw-sequence fallback further down catches the terminals that
+    // send a spelling Ink does not flag.
+    if (key.home) return { kind: "cursorHome" }
+    if (key.end) return { kind: "cursorEnd" }
+
     if (key.return) return context.searching ? { kind: "searchAccept" } : { kind: "submit" }
     if (key.backspace) return { kind: "backspace" }
     if (key.delete) return { kind: "delete" }
@@ -221,6 +298,13 @@ export function keyToIntent(input: string, key: KeyState, context: KeyContext): 
     // characters at once rather than assuming a single keypress.
     if (input === "") return { kind: "none" }
 
+    // Home and End again, by raw sequence. There are four spellings in the wild and Ink flags only some
+    // of them — the reference keeps the same fallback for the same reason (`useTextInput.ts:385-389`).
+    // After the empty-input check and before the printable filter, which would otherwise strip the
+    // escape and insert `[H` into the message.
+    if (input === "\u001B[H" || input === "\u001B[1~") return { kind: "cursorHome" }
+    if (input === "\u001B[F" || input === "\u001B[4~") return { kind: "cursorEnd" }
+
     // Newlines inside that chunk are line breaks, not control noise. Stripping them — which the
     // printable filter below would do — silently joins the last word of one line to the first word
     // of the next and submits nothing, so a pasted multi-line prompt arrives mangled with no error.
@@ -234,6 +318,40 @@ export function keyToIntent(input: string, key: KeyState, context: KeyContext): 
 
     const printable = printableOnly(input)
     return printable === "" ? { kind: "none" } : { kind: "insert", text: printable }
+}
+
+/**
+ * Which motion a shift chord extends by, or `undefined` when the key is not a motion at all.
+ *
+ * Modifier first, then the bare keys, so `shift+cmd+←` is a line and `shift+⌥←` is a word rather than both
+ * being a character. `shift+↑` extends a line up even on the first line, where the unshifted arrow means
+ * history: selecting upward is unambiguous, and a history chord that also grew a selection would be one
+ * key doing two unrelated things.
+ *
+ * `input` is deliberately not consulted. The `ESC b` spelling of `⌥←` would arrive shifted as `ESC B`, and
+ * matching a capital letter here is how `shift+B` would start selecting words. Terminals send the CSI form
+ * for a shifted arrow, which carries the flags this reads.
+ */
+function shiftMotion(key: KeyState): MotionKind | undefined {
+    if (key.super) {
+        if (key.leftArrow) return "cursorHome"
+        if (key.rightArrow) return "cursorEnd"
+        if (key.upArrow) return "bufferStart"
+        if (key.downArrow) return "bufferEnd"
+        return undefined
+    }
+    if (key.meta || key.ctrl) {
+        if (key.leftArrow) return "wordLeft"
+        if (key.rightArrow) return "wordRight"
+        return undefined
+    }
+    if (key.home) return "cursorHome"
+    if (key.end) return "cursorEnd"
+    if (key.leftArrow) return "cursorLeft"
+    if (key.rightArrow) return "cursorRight"
+    if (key.upArrow) return "lineUp"
+    if (key.downArrow) return "lineDown"
+    return undefined
 }
 
 /**

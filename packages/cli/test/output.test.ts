@@ -9,6 +9,7 @@ const QUIET_ENV: EnvFacts = {
     ci: false,
     debug: false,
     sandboxHome: undefined,
+    noEnhancedKeys: false,
 }
 
 /** A terminal with nothing unusual in the environment. */

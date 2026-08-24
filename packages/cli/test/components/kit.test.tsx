@@ -15,6 +15,7 @@ import { createElement as h } from "react"
 import { Banner } from "#components/Banner"
 import { CommandOutput } from "#components/CommandOutput"
 import { HistorySearch } from "#components/HistorySearch"
+import { KeyProbe } from "#components/KeyProbe"
 import { LineCursor } from "#components/LineCursor"
 import { Live } from "#components/Live"
 import { Palette } from "#components/Palette"
@@ -35,7 +36,7 @@ import { GLYPH, SPINNER_FRAMES, SPINNER_INTERVAL_MS } from "#lib/theme"
 import type { EditorState } from "#lib/types"
 import { livePane } from "#lib/wrap"
 import { transcriptRows } from "#transcript"
-import { mount, overflowing, renderFrame } from "../helpers/frame.tsx"
+import { KEY, mount, overflowing, renderFrame } from "../helpers/frame.tsx"
 
 const editorWith = (value: string, cursor = value.length) => ({ ...EMPTY_EDITOR, value, cursor })
 
@@ -831,22 +832,20 @@ describe("the chat frame's arithmetic matches what is drawn", () => {
         }
     })
 
-    test("the composer in its landing form, which is three rows taller", () => {
-        // `roomy` was two rows and is three: a blank inside the box on each side, plus one outside it
-        // separating the box from the banner now that the landing slack sits *below* the composer rather
-        // than above it. Asserted because the number is restated here and only a render can settle it.
+    test("the landing composer is exactly as tall as the working one", () => {
+        // There used to be a `roomy` landing form three rows taller — padding inside the box and a margin
+        // above it, both there to keep the border off the banner while the slack sat *below* the composer.
+        // The slack is above it now, so there is nothing to separate it from, and the height has to be the
+        // same in both states or `promptRows` is charging for a row that is not drawn. A placeholder is the
+        // only thing landing still changes here, and a placeholder occupies the row the caret was already on.
         const editor = multi(1)
-        const frame = renderFrame(
-            h(Prompt, {
-                editor,
-                busy: false,
-                columns: 80,
-                roomy: true,
-                placeholder: "Ask anything…",
-            }),
+        const plain = renderFrame(h(Prompt, { editor, busy: false, columns: 80 }), { columns: 80 })
+        const landing = renderFrame(
+            h(Prompt, { editor, busy: false, columns: 80, placeholder: "Ask anything…" }),
             { columns: 80 },
         )
-        expect(promptRows(editor, 80, true)).toBe(frame.lines.length)
+        expect(landing.lines.length).toBe(plain.lines.length)
+        expect(promptRows(editor, 80)).toBe(landing.lines.length)
     })
 
     test("the composer with the cursor scrolled into a long message", () => {
@@ -893,5 +892,142 @@ describe("the chat frame's arithmetic matches what is drawn", () => {
             })
             expect(livePane(text, 80, LIVE_PANE_MAX_ROWS).rows).toBe(frame.lines.length)
         }
+    })
+})
+
+describe("LineCursor, with a selection", () => {
+    // The harness strips ANSI, so the *colour* cannot be asserted here — the same limitation that makes
+    // the caret's inverse video untestable, and recorded as such since it was written. What can be
+    // asserted is the risk the run splitting actually introduces: a row rebuilt from segments must be the
+    // same row. A dropped or duplicated cell would be invisible in a colour assertion and obvious here.
+    function selected(value: string, anchor: number, cursor: number, columns: number) {
+        return renderFrame(
+            h(LineCursor, {
+                editor: { ...EMPTY_EDITOR, value, cursor, anchor },
+                maxRows: MAX_INPUT_ROWS,
+                columns: columns - 4,
+            }),
+            { columns },
+        )
+    }
+
+    test("the text survives the split, at every width", () => {
+        const message = "select the middle of this sentence please"
+        for (const columns of [40, 60, 80, 100]) {
+            const frame = selected(message, 7, 17, columns)
+            const drawn = frame.lines.join("").replace(/\s+/g, " ")
+            for (const word of message.split(" ")) {
+                expect(drawn, `${columns}: ${word}`).toContain(word)
+            }
+            expect(overflowing(frame, columns), String(columns)).toEqual([])
+        }
+    })
+
+    test("a selection spanning a wrapped row draws on both rows", () => {
+        // Two rows, one selection. The offsets are buffer-absolute for exactly this case; line-relative
+        // ones would have highlighted the wrong half of the second row.
+        // Long enough to actually wrap at this width: the first version was 35 characters in a 36-column
+        // window and drew one row, so the assertion it was making could not fail.
+        const message = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda"
+        const frame = selected(message, 3, 40, 40)
+        expect(frame.lines.length).toBeGreaterThan(1)
+        expect(overflowing(frame, 40)).toEqual([])
+    })
+
+    test("a selection across a newline keeps both lines", () => {
+        const frame = selected("first line\nsecond line", 3, 15, 60)
+        const drawn = frame.lines.join(" ")
+        expect(drawn).toContain("first")
+        expect(drawn).toContain("second")
+    })
+
+    test("a secret field never leaks its value, selected or not", () => {
+        // Masking is applied after the split, so the dots have to line up with the runs rather than with
+        // the source — which is the one way a highlight could have leaked a character of a password.
+        const frame = renderFrame(
+            h(LineCursor, {
+                editor: { ...EMPTY_EDITOR, value: "hunter2", cursor: 7, anchor: 0 },
+                maxRows: MAX_INPUT_ROWS,
+                columns: 40,
+                secret: true,
+            }),
+            { columns: 44 },
+        )
+        expect(frame.text).not.toContain("hunter2")
+        expect(frame.text).toContain("•")
+    })
+})
+
+describe("KeyProbe", () => {
+    test("it says what it cannot yet know, rather than guessing", () => {
+        // The verdict is the load-bearing line: Ink does not expose whether its handshake succeeded, so
+        // before any key is pressed the only honest report is "asked, unproven". A probe that printed
+        // "active" on the strength of having *requested* the protocol would be the exact failure it
+        // exists to catch — a claim about a terminal that nobody measured.
+        const frame = renderFrame(
+            h(KeyProbe, { columns: 80, asked: true, terminal: "Warp", onDone: () => {} }),
+            { columns: 80 },
+        )
+        expect(frame.text).toContain("Warp")
+        expect(frame.text).toContain("requested")
+        expect(frame.text).toContain("nothing pressed yet")
+        expect(frame.text).not.toContain("active")
+        expect(overflowing(frame, 80)).toEqual([])
+    })
+
+    test("with the override set it says the cmd chords cannot arrive", () => {
+        const frame = renderFrame(
+            h(KeyProbe, { columns: 80, asked: false, terminal: "Warp", onDone: () => {} }),
+            { columns: 80 },
+        )
+        expect(frame.text).toContain("not requested")
+    })
+
+    test("a pressed chord shows all three layers, and q leaves", async () => {
+        let done = false
+        const harness = mount(
+            h(KeyProbe, {
+                columns: 80,
+                asked: true,
+                terminal: "Warp",
+                onDone: () => {
+                    done = true
+                },
+            }),
+            { columns: 80, rows: 30 },
+        )
+        await harness.press(KEY.kittySuperLeft)
+        const frame = harness.frame()
+        expect(frame.text).toContain("bytes")
+        expect(frame.text).toContain("ink")
+        expect(frame.text).toContain("intent")
+        expect(frame.text).toContain("cursorHome")
+        expect(frame.text).toContain("super")
+        // A modifier only the protocol can express, so the verdict is now evidence rather than a hope.
+        expect(frame.text).toContain("active")
+        expect(overflowing(frame, 80)).toEqual([])
+        await harness.press("q")
+        harness.unmount()
+        expect(done).toBe(true)
+    })
+
+    test("^C is recorded rather than obeyed — a probe must be able to show its own exit chord", async () => {
+        let done = false
+        const harness = mount(
+            h(KeyProbe, {
+                columns: 80,
+                asked: true,
+                terminal: "Warp",
+                onDone: () => {
+                    done = true
+                },
+            }),
+            { columns: 80, rows: 30 },
+        )
+        await harness.press(KEY.ctrl("c"))
+        const frame = harness.frame()
+        harness.unmount()
+        expect(done).toBe(false)
+        expect(frame.text).toContain("ctrl")
     })
 })

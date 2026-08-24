@@ -23,7 +23,7 @@ import type { PromptProps } from "#lib/schema"
 import { NEWLINE_HINT } from "#lib/session-commands"
 import { BORDER_STYLE, THEME } from "#lib/theme"
 
-export function Prompt({ editor, busy, placeholder, roomy, columns }: PromptProps) {
+export function Prompt({ editor, busy, placeholder, columns }: PromptProps) {
     const lines = editor.value.split("\n").length
     // Two border columns and `paddingX={1}` on each side. Subtracted here rather than inside the cursor,
     // because the box that spends them is this one.
@@ -38,14 +38,6 @@ export function Prompt({ editor, busy, placeholder, roomy, columns }: PromptProp
                 // was running it.
                 width={columns}
                 paddingX={1}
-                // Breathing room, on the splash only. The transcript's composer stays tight because
-                // `chat-frame.ts` measures it and every row it takes is a row of conversation — and because
-                // a two-row-taller input under a live reply reads as a bigger box, not a calmer one.
-                paddingY={roomy === true ? 1 : 0}
-                // A row between the banner and the box. On the landing screen the composer sits directly
-                // under the ready line — the slack having moved below it — and without this the border
-                // touches the text above, which reads as one block rather than two things.
-                marginTop={roomy === true ? 1 : 0}
             >
                 <LineCursor
                     editor={editor}

@@ -186,6 +186,46 @@ export const KEY = {
     /** Option+enter: ESC then carriage return. The one newline chord every terminal can send. */
     metaEnter: "\u001B\r",
     metaBackspace: "\u001B\u007F",
+    /**
+     * Home and End, all four spellings in the wild. Ink flags the first pair and not the second, which
+     * is why the keymap keeps a raw-sequence fallback as well as reading `key.home`/`key.end`.
+     */
+    home: "\u001B[H",
+    end: "\u001B[F",
+    homeTilde: "\u001B[1~",
+    endTilde: "\u001B[4~",
+    /**
+     * Under the kitty keyboard protocol. `CSI <codepoint>;<modifier>u` for a letter, `CSI 1;<modifier><final>`
+     * for an arrow; the modifier is `1 + shift(1) + alt(2) + ctrl(4) + super(8)`.
+     *
+     * These are the spellings that actually reach us now the protocol is negotiated, and until this table
+     * had them **no test in the repo had ever fed a modified chord through Ink's parser** — `metaLeft` and
+     * friends above were defined and never used, so the dual-spelling claim in `keymap.ts` was only ever
+     * asserted against hand-built flag objects.
+     */
+    kittyMetaR: "\u001B[114;3u",
+    /**
+     * Arrows carry the `:1` event type, and that is not decoration.
+     *
+     * Ink's kitty branch for special keys is `/^\x1b\[(\d+);(\d+):(\d+)([A-Za-z~])$/` — it **requires**
+     * the `:eventType` field. Without it, `CSI 1;9D` falls through to Ink's *legacy* branch, which folds
+     * super into meta (`modifier & 10`), and cmd+← becomes indistinguishable from ⌥← all over again. That
+     * is the whole reason `reportEventTypes` is negotiated alongside `disambiguateEscapeCodes`, and the
+     * reason this table cannot use the shorter spelling: a terminal that omits the field gives us no cmd
+     * chords, and no amount of code on this side can recover the bit Ink has already merged away.
+     */
+    kittySuperLeft: "\u001B[1;9:1D",
+    kittySuperRight: "\u001B[1;9:1C",
+    kittySuperUp: "\u001B[1;9:1A",
+    kittySuperDown: "\u001B[1;9:1B",
+    kittyCtrlLeft: "\u001B[1;5:1D",
+    kittyCtrlRight: "\u001B[1;5:1C",
+    /** A letter, so the `CSI codepoint;modifier u` form — no event type needed for Ink to read it. */
+    kittySuperZ: "\u001B[122;9u",
+    /** Backspace is codepoint 127, so cmd+backspace is `CSI 127;9u`. */
+    kittySuperBackspace: "\u001B[127;9u",
+    /** A key *release*: event type 3 in the `:` field. Ink parses it and filters nothing. */
+    kittyMetaRRelease: "\u001B[114;3:3u",
     ctrl: (letter: string): string =>
         String.fromCharCode(letter.toLowerCase().charCodeAt(0) - "a".charCodeAt(0) + 1),
 } as const

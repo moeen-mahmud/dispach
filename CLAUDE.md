@@ -691,6 +691,59 @@ Never claim a performance property without a number in `evals/` and a script to 
   was about. termheat's `App.tsx` is the shape: mount, then `useEffect` → load, spinner inside the
   frame. And progress reaches the screen through a **callback**, never stdout, because writing to
   stdout while Ink owns the frame paints over it.
+- **Ink's kitty keyboard protocol is opt-in, and not opting in is why `⌥r` typed `®` for nine rounds.**
+  Ink 7.1 parses `CSI u` completely and `Key` already carried `super`, `hyper`, `home` and `end` — and
+  `ink.js:800` reads *"Protocol is opt-in: if kittyKeyboard is not specified, do nothing"*. Without it `⌥`
+  depends on a terminal setting that is off by default in Warp, so the composed character arrives, and
+  `printableOnly` keeps anything ≥ 0x20. `cmd` is worse than absent: the legacy branch folds super into
+  meta (`modifier & 10`), so `cmd+←` is **indistinguishable from `⌥←`** and silently word-moves.
+  `negotiateKeyboard()` is one call site because it also registers the pop — Ink withdraws the protocol on
+  unmount and cannot on a signal. Two traps inside it. `disambiguateEscapeCodes` alone fixes every letter
+  chord and **no arrow**: `kittySpecialKeyRe` *requires* the `:eventType` field, so `CSI 1;9D` falls to the
+  legacy path — the first byte test used the short spelling and six cases failed against correct code. And
+  `reportEventTypes` makes Ink pass `eventType` through **unfiltered**, so dropping `release` is what stops
+  every enhanced chord firing twice. **Negotiating that flag is still not enough**, which was learned from a
+  real session rather than from the spec: Warp omits the event-type field anyway, so `cmd+←` arrived as
+  `meta` and word-moved exactly like `⌥←`. `lib/csi.ts` therefore reads the modifier off the bytes, where
+  bit 8 is unambiguous either way — key *identity* still comes from Ink, and only the four modifier flags
+  are overridden, only when a sequence matched the key Ink reported. The queue it drains is matched by
+  identity rather than position, because a record applied to the wrong keystroke is worse than no
+  correction. The tap feeding it is opened by the **host, before `render`**: two listeners on one `data`
+  event both receive the chunk, ordering is registration order, and a component cannot register before the
+  renderer that mounts it. `KeyState` gaining `home`/`end` was free and separate: Ink had always
+  reported them, the type never declared them, and both keys had therefore done nothing in every surface
+  since the CLI existed.
+- **`useInput` cannot tell you what the terminal sent, so a byte probe taps stdin.** For a special key Ink
+  reports `input: ""` with flags set — so `keys`, built to print bytes, printed an **empty byte row for
+  every arrow, Home and cmd chord**, which is exactly the set it exists to diagnose. Found by driving it
+  under a pty, not by reading it. The host registers a `data` listener *before* `render`: two listeners on
+  one event both receive the chunk, and registration order guarantees it is queued before `useInput` fires.
+  Related honesty rule for the same command: Ink does not expose whether its handshake succeeded, so the
+  protocol line reports **evidence** — `super` or an `eventType` proves it — and says "requested, unproven"
+  until one arrives rather than defaulting to a verdict. "Off because you asked" is a third state.
+- **The ⌥ chords had no drift test while the ^ chords had one in both directions, and that asymmetry is how
+  a documented binding rots.** `DOCUMENTED_CTRL_LETTERS` has walked every `^X` through `keyToIntent` since
+  Phase 2; nothing walked `⌥`, so `⌥r` being documented, bound, handled and dead was invisible to 1,000
+  passing tests. Adding the arm found two things at once: `⌥([A-Za-z])` extracts a phantom `⌥p` from
+  `⌥PgUp`, so the class has to be lowercase-with-nothing-following; and `b`/`f` are honoured-but-undocumented
+  because they are the `ESC b`/`ESC f` *spellings* of `⌥←`/`⌥→` — an encoding, not a binding — so they are
+  exempted **by name** rather than by loosening the check.
+- **A selection is anchor-plus-cursor, and a row is painted as runs.** A `{start, end}` pair cannot say
+  which end is moving, so extending left past the anchor and back collapses to the wrong side. `anchor` is
+  `number | undefined` rather than optional for the same reason `search` is — an optional field cannot be
+  *cleared* by assignment under `exactOptionalPropertyTypes`, and this is cleared on every unshifted key.
+  One `extend` intent carries the motion instead of ten shifted twins, and the reducer applies it through
+  the same code the plain chord uses, so the two can never disagree about where the cursor lands. Three
+  orderings are load-bearing and each was a bug first: the shift branch must precede the cmd/ctrl/option
+  blocks, because each matches its own modifier without consulting shift (`cmd+shift+←` is `CSI 1;10D`);
+  an edit replacing a selection must delete the range and **return** for ⌫/⌦, or backspace eats the
+  selection *and then another character*; and `shiftMotion` reads flags only, never `input`, since `⌥←`'s
+  `ESC b` spelling arrives shifted as `ESC B` and matching a capital is how `shift+B` starts selecting.
+  Rendering splits into runs rather than slices because the caret can sit *inside* the selection — two
+  overlapping slice ranges make the caret vanish — and the highlight is a `backgroundColor`, not
+  `inverse`, which would cancel against the caret and read as several highlights across coloured roles.
+  `ComposerRow` offsets are **buffer-absolute**: `wrapRows` reports them per line, and line-relative ones
+  highlight the wrong text on every line after the first.
 - **A key chord is verified against a real terminal, never against the parser.** Ink reporting *a* key
   says nothing about the bytes a terminal sent, and most chords have two spellings — ⌥← is `input "b" +
   meta` in Apple Terminal and `leftArrow + meta` in iTerm2; honour both. Two measured facts that cost a
@@ -1481,14 +1534,24 @@ Never claim a performance property without a number in `evals/` and a script to 
   nobody asked for, and the wheel still appears to work because the parser accepts both encodings. A
   rendered grid cannot show it; `repr()` of the last few hundred bytes shows it immediately. A test now
   asserts each constant holds exactly two escape **bytes** and no `ESC` letters.
-- **A `flexGrow` spacer above the composer is right with a conversation and wrong without one.** On the
-  landing screen the transcript held a five-line banner in a fourteen-row window, so twelve blank rows sat
-  between the banner and the input on a thirty-row terminal — a third of the screen, reading as half-empty
-  rather than as a prompt waiting for you. The slack goes *below* the composer while landing. In the same
-  frame the banner's first row duplicated the sticky header exactly, brand, version, agent and model, three
-  rows apart: the rich path drops it and anything genuinely absent from the header (`window`) moves down a
-  line. The plain path keeps the row, because it has no header and that is the only place the version
-  appears — so the fix belongs at the `seed()` call, not in the line builder both paths share.
+- **The `flexGrow` spacer goes above the composer in every state, and the blank rows under it were never
+  the problem.** This was the other way round for three phases (decision 11.98) on a real measurement —
+  twelve blank rows between the banner and the input on a thirty-row terminal — and the wrong conclusion
+  from it. A bottom-anchored input is where the eye already rests, so those rows read as a prompt waiting;
+  the reference CLI puts roughly twenty-five there and its frame has no landing branch at all, just one
+  growing region and a `flexShrink={0}` bottom that "never moves". What the old arrangement actually cost
+  was that the composer *moved*: drawn under whatever content existed, it walked down the screen as the
+  first messages arrived. `roomy` went with the reversal — its padding and margin existed only to keep the
+  border off the banner it used to sit against. **Two guards for this could not fail**, which is the
+  transferable half: the first looped over `freshSession` with a fixture containing a `user` message, so
+  `landing` was false in both arms and the working screen was asserted twice; the second reverted the
+  spacer to the wrong *side* of the composer, which changes no layout at all. Trailing blank rows are
+  trimmed from a frame, so "the last line is the status bar" is true either way — the assertion that
+  fails is *no blank row between the box and the last line*. In the same frame the banner's first row
+  duplicated the sticky header exactly, brand, version, agent and model, three rows apart: the rich path
+  drops it and anything genuinely absent from the header (`window`) moves down a line. The plain path
+  keeps the row, because it has no header and that is the only place the version appears — so the fix
+  belongs at the `seed()` call, not in the line builder both paths share.
 - **`includeHistory` indexes messages with *no* `origin` — an allowlist of prose, never a blocklist of tool
   output.** The runtime stamps everything it authored (`observation`, `call`, `repair`, `digest`), so the
   allowlist excludes a fifth kind added later by default. Inverting it is not a style choice: `observation`

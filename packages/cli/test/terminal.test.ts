@@ -34,11 +34,23 @@ describe("detection", () => {
         expect(detectTerminal({ GHOSTTY_RESOURCES_DIR: "/x" })).toBe("ghostty")
     })
 
-    test("Warp is recognised even though there is no recipe for it", () => {
-        // Found by running the command: reporting a known terminal as unrecognised is a lie about what
-        // we know, and inventing a recipe would report success and change nothing.
+    test("Warp is recognised, and its one step is the Option key", () => {
+        // Two corrections deep. It was `unverified`; the kitty protocol made the arrow chords work so it
+        // became `none`, "nothing to configure"; and then ⌥r turned out to still arrive as the composed
+        // character `®`, because Warp resolves Option to a character before the protocol sees the key. So
+        // there is a step, it is a Warp setting rather than a file, and it buys only the letter chords.
         expect(detectTerminal({ TERM_PROGRAM: "WarpTerminal" })).toBe("warp")
-        expect(recipeFor("warp")?.how).toBe("unverified")
+        expect(recipeFor("warp")?.how).toBe("explain")
+        expect(recipeFor("warp")?.steps?.[0]).toContain("Meta")
+    })
+
+    test("`unverified` is still reachable vocabulary, and nothing ships using it", () => {
+        // Warp was the only one, so this branch has no shipped instance — and unlike the short-lived
+        // `none` state, it is worth keeping: the next terminal nobody has checked needs exactly it, and
+        // the alternative (calling an unchecked terminal "unrecognised") is a lie about what we know.
+        // Asserted rather than assumed, so if it ever becomes false the branch has a real user and this
+        // test is the thing to delete.
+        expect(knownTerminals().filter((recipe) => recipe.how === "unverified")).toEqual([])
     })
 
     test("an unknown terminal is unknown, not guessed at", () => {
@@ -262,7 +274,7 @@ describe("the command", () => {
         expect(lines.join("")).toContain("⌥⏎")
     })
 
-    test("a recognised terminal with no recipe says so, and exits zero", async () => {
+    test("a terminal configured in its own settings is explained, and exits zero", async () => {
         const lines: string[] = []
         const write = process.stdout.write.bind(process.stdout)
         process.stdout.write = ((chunk: string) => {
@@ -279,8 +291,11 @@ describe("the command", () => {
             process.stdout.write = write
         }
         expect(code).toBe(0)
-        expect(lines.join("")).toContain("no verified recipe")
         expect(lines.join("")).toContain("Warp")
+        expect(lines.join("")).toContain("has to be done by hand")
+        expect(lines.join("")).toContain("Meta")
+        // Not "nobody has checked it": somebody has, and the answer is a named setting.
+        expect(lines.join("")).not.toContain("no verified recipe")
     })
 
     test("an explain-only terminal prints steps and exits zero", async () => {

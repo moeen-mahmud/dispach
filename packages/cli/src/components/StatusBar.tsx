@@ -37,6 +37,11 @@ function exitHint(status: TurnStatus, armed: boolean): string {
     return armed ? " · ^C again to leave" : " · ^C twice to leave · /exit"
 }
 
+function reasoningHint(status: TurnStatus): string {
+    if (status !== "idle") return ""
+    return " · ^O show reasoning"
+}
+
 /**
  * Below this the gauge is hidden: the lowest shipped threshold is `trim` at 0.60, so anything under
  * half is a prompt with nothing to say about itself.
@@ -92,6 +97,7 @@ export function StatusBar({
                 </Text>
             )}
             {last === undefined || quiet ? "" : ` · last ${formatStats(last)}`}
+            {reasoningHint(status)}
             {armed === true ? (
                 <Text color={THEME.warning}>{exitHint(status, true)}</Text>
             ) : (

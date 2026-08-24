@@ -11,6 +11,7 @@ import type { CatalogueEntry } from "#lib/source-cache"
 import type {
     EditorState,
     EnvFacts,
+    KeyState,
     LiveTurn,
     RenderMode,
     TranscriptRow,
@@ -173,6 +174,14 @@ export interface RunOptions {
     readonly showReasoning?: boolean
     /** Turns off the reasoning stream that a thinking model shows by default. */
     readonly noReasoning?: boolean
+    /**
+     * Do not negotiate the kitty keyboard protocol for this session.
+     *
+     * `undefined` means "no opinion", which `negotiateKeyboard` resolves from `<ENVPREFIX>NO_CSI_U` —
+     * so this is threaded as-is rather than coerced to a boolean, or a flag nobody passed would
+     * silently override an environment somebody set.
+     */
+    readonly noEnhancedKeys?: boolean
     readonly plain?: boolean
 }
 
@@ -249,6 +258,14 @@ export interface AppProps {
     readonly model: string
     /** Notes printed once above the conversation: version, session, store, any reaped turn. */
     readonly initial: TranscriptState
+    /**
+     * The key Ink reported, with its modifiers read off the raw bytes.
+     *
+     * Injected because the tap it reads from has to be registered *before* `render`, which a component
+     * cannot do for itself. Optional, and the default is identity: a frame test mounts this component with
+     * no stdin to tap, and a missing correction has to mean "trust Ink" rather than "crash".
+     */
+    readonly correctKeys?: (key: KeyState, input: string) => KeyState
     readonly showReasoning: boolean
     readonly quiet: boolean
     /**
@@ -387,14 +404,6 @@ export interface PromptProps {
      * says what this is, and a permanent "Ask anything…" there would be a label on something obvious.
      */
     readonly placeholder?: string
-    /**
-     * A taller frame, with a blank row above and below the input.
-     *
-     * The splash only. In the transcript every row the composer takes is a row of conversation, and
-     * `chat-frame.ts` measures the tight form — so this cannot become the default without changing that
-     * arithmetic, which is exactly the drift the measurement exists to catch.
-     */
-    readonly roomy?: boolean
 }
 
 export interface BrandmarkProps {

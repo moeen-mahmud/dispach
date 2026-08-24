@@ -318,6 +318,7 @@ Stated plainly, because the alternative is someone assuming otherwise:
 | `workspace` | check the workspace files against the authoring rules |
 | `soul` | scaffold a compact identity file from a long-form one |
 | `agents` | what one or more manifest *paths* produce |
+| `keys` | press a chord and see the bytes, Ink's reading of them, and the intent |
 | `terminal-setup` | teach a terminal to send shift+enter as a newline |
 
 ## Documentation

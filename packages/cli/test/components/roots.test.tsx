@@ -27,7 +27,7 @@ import type { AppProps } from "#lib/schema"
 import type { CatalogueEntry } from "#lib/source-cache"
 import { GLYPH, SPINNER_FRAMES } from "#lib/theme"
 import { wordmark } from "#lib/wordmark"
-import { KEY, mount, overflowing, renderFrame } from "../helpers/frame.tsx"
+import { KEY, mount, overflowing, renderFrame, stripAnsi } from "../helpers/frame.tsx"
 
 const AGENTS: readonly SandboxAgent[] = [
     {
@@ -500,6 +500,24 @@ function stubAppProps(): AppProps {
 }
 
 /** A conversation long enough that no terminal shows all of it. */
+function bannerOnly(): AppProps["initial"] {
+    // No `user` item, which is what `landing` actually tests for. A real landing screen has exactly this:
+    // the boot banner and nothing else.
+    return {
+        items: [
+            {
+                id: "b",
+                role: "banner" as const,
+                text: "Dispach 0.1.0 · milo\nsession local:abc123 · 0 message(s)",
+            },
+        ],
+        live: undefined,
+        status: "idle" as const,
+        nextId: 1,
+        turnFrom: undefined,
+    }
+}
+
 function longHistory(turns: number): AppProps["initial"] {
     return {
         items: Array.from({ length: turns }, (_, at) => ({
@@ -1024,6 +1042,94 @@ describe("App, the landing state", () => {
         expect(frame.text).toContain("/memory")
         expect(frame.text).toContain("/daemon")
         expect(frame.text).not.toContain("below")
+    })
+
+    test("option+r says why nothing happened when there is nothing to expand", async () => {
+        // Reported as "⌥r doesn't do anything". It resolved correctly the whole time — it toggles a fold,
+        // and a fold with nothing in it is indistinguishable from a dead key. The chord is fed as the
+        // bytes the protocol actually sends, so this covers delivery and feedback in one pass.
+        const harness = mount(
+            h(App, { ...stubAppProps(), freshSession: true, showReasoning: true }),
+            { columns: 100, rows: 30 },
+        )
+        await harness.press(KEY.kittyMetaR)
+        const frame = harness.frame()
+        harness.unmount()
+        expect(frame.text).toContain("no reasoning to show yet")
+    })
+
+    test("and says something different when the model never streams it", async () => {
+        // Two causes, two sentences: a model that cannot stream reasoning is a fact about the manifest,
+        // and a turn that has not produced any yet is a fact about the minute you are in. Only the first
+        // is worth changing a flag over, so telling somebody the wrong one sends them to the wrong place.
+        const harness = mount(
+            h(App, { ...stubAppProps(), freshSession: true, showReasoning: false }),
+            { columns: 100, rows: 30 },
+        )
+        await harness.press(KEY.kittyMetaR)
+        const frame = harness.frame()
+        harness.unmount()
+        expect(frame.text).toContain("reasoning is off")
+    })
+
+    test("the composer sits on the bottom edge, landing or not", () => {
+        // Decision 11.98, reversed. The landing screen used to put its `flexGrow` spacer *below* the
+        // composer, so the input floated up under the banner with a third of the screen blank beneath it.
+        // Two branches also meant the two states could drift, which is 11.90's whole argument.
+        //
+        // The invariant is positional rather than a row count: everything from the composer's top border
+        // down to the last line is drawn, and any slack is above it. A blank line below the box would mean
+        // the spacer is on the wrong side; a blank line being the *last* line would mean the status bar has
+        // been pushed off the bottom.
+        // `landing` is `freshSession && no user item`, so a fixture with a user message in it is *not* the
+        // landing state however `freshSession` is set — the first version of this test looped over
+        // `freshSession` with `longHistory(2)` and therefore checked the working screen twice, passing with
+        // the fix reverted. The two states need two fixtures, and the brandmark assertion below is what
+        // proves each scenario is the state it claims to be.
+        const scenarios = [
+            { name: "landing", freshSession: true, initial: bannerOnly(), mark: true },
+            { name: "working", freshSession: false, initial: longHistory(2), mark: false },
+        ]
+        for (const rows of [24, 30, 50]) {
+            for (const columns of [40, 60, 100]) {
+                for (const scenario of scenarios) {
+                    const harness = mount(
+                        h(App, {
+                            ...stubAppProps(),
+                            freshSession: scenario.freshSession,
+                            initial: scenario.initial,
+                        }),
+                        { columns, rows },
+                    )
+                    const frame = harness.frame()
+                    harness.unmount()
+                    const where = `${rows}x${columns} ${scenario.name}`
+                    // The placeholder, not the brandmark: `frame.brand` is an allowance that goes to zero
+                    // on a short terminal, so the wordmark is legitimately absent at 24 rows and cannot
+                    // say which state this is. The placeholder is passed on exactly the `landing` flag.
+                    expect(
+                        frame.text.includes("Ask anything"),
+                        `${where} is the state it claims`,
+                    ).toBe(scenario.mark)
+                    const top = frame.lines.findIndex((line) => line.includes("\u256d"))
+                    const bottom = frame.lines.findIndex((line) => line.includes("\u2570"))
+                    expect(top, where).toBeGreaterThanOrEqual(0)
+                    expect(bottom, where).toBeGreaterThan(top)
+                    // Nothing blank from the box down. The hint and the status line are all that follow it.
+                    const below = frame.lines.slice(top)
+                    expect(
+                        below.filter((line) => stripAnsi(line).trim() === ""),
+                        where,
+                    ).toEqual([])
+                    // And the slack really is above: two messages cannot fill a 24-row terminal, so there
+                    // has to be at least one blank row up there for the spacer to have absorbed.
+                    expect(
+                        frame.lines.slice(0, top).some((line) => stripAnsi(line).trim() === ""),
+                        where,
+                    ).toBe(true)
+                }
+            }
+        }
     })
 
     test("the frame still fits, landing or not, at every size", () => {

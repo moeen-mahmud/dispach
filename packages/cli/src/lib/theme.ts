@@ -29,6 +29,15 @@ export interface Theme {
     readonly info: string
     /** Cancelling — the one transitional state worth its own colour. */
     readonly emphasis: string
+    /**
+     * The background a selected run is painted on.
+     *
+     * A background rather than `inverse`, which is what the caret uses. Inverse swaps foreground and
+     * background, so on a coloured run it produces a different colour per role and reads as three
+     * highlights rather than one selection — and where a selection contains the caret the two inversions
+     * cancel and the caret disappears inside it. A solid background composes instead of fighting.
+     */
+    readonly selection: string
     /** Non-focal boxes: cards, frames. */
     readonly border: string
     /** The focused box: the input line, the banner. */
@@ -56,6 +65,9 @@ export const THEME: Theme = {
     error: "red",
     info: "blue",
     emphasis: "cyan",
+    // 16-colour safe like every token but `brand`: chalk maps it to whatever the terminal has, and a
+    // named colour survives a 16-colour terminal where a hex triplet would be approximated.
+    selection: "blue",
     border: "gray",
     borderActive: "magenta",
     brand: "magenta",
