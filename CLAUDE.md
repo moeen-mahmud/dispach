@@ -1805,6 +1805,76 @@ Never claim a performance property without a number in `evals/` and a script to 
   cost a round: **the plan assertion cannot fail under `bun test`**, because bun already chooses right,
   so the guard also asserts the `+` in the SQL text. A guard that can only go red on the
   `continue-on-error` leg is the "passes with the fix reverted" shape again.
+- **A model writes a shell script into an `exec` argument without NLT's `<<<`, and a blank line inside it
+  ends the argument — the rest becomes the *reply* and the truncated command still runs.** `consumeLine`
+  clears `openKey` on a blank line (deliberately: gluing prose onto the last value is its own bug), so the
+  next line has a block open, no open key and no key match, and falls to `closeBlock(); text.push(line)`.
+  Measured on the real parser: `command` came back as `python3 <<PY\nimport sys`, the remaining script
+  landed in the reply, and **`malformed` was `undefined`** — no repair, no event, exit 0. The truncated
+  string is *valid*, so `coerceArgs` raises nothing; the shell sees an unterminated heredoc, reads to EOF
+  and executes half the script. The `word:` variant (`try:`, `else:`) is the safe one — it becomes a field
+  and earns a repair. Do **not** fix this by tolerating blank lines: the set is not enumerable, which is
+  why the backstop exists. Full reproduction in `docs/05-PLAN.md` under *Carried backlog*.
+- **`setTimeout` clamps a delay past 2^31−1 ms (24.86 days) to 1 and fires immediately.** Measured on both
+  runtimes — bun at 7 ms, node at 3 ms, `TimeoutOverflowWarning` on stderr the only signal. `at` schedules
+  are documented to accept ten years, so a raw `setTimeout(dueAt − now)` delivers a 2036 reminder at boot,
+  marks the one-shot spent and reports success. Everything armed goes through `min(delay, HORIZON)`. The
+  clamp also buys suspend and clock jumps: timers run on libuv's **monotonic** clock, so an NTP step does
+  not move an armed one — which is why a firing timer means *re-read the wall clock*, never *this is due*.
+- **A due schedule is advanced at dispatch, never at completion — and the in-flight set is not enough.**
+  Found live: one `at` schedule ran **twice, 852 ms apart, in one process**, with every piece behaving as
+  designed. Advancing after the run left the row due for the whole turn, so `#arm` read a past due time,
+  armed a zero delay, woke immediately, found the same row, and *correctly* deferred it — and the deferral
+  fired it again on completion. The in-flight set prevents **concurrency**; only advancing the row stops it
+  being **due**, and those are different questions. Corollary: this is why there is no `UPDATE … RETURNING`
+  claim. The lease already makes one process the only writer per agent, so a claim guards a race that
+  cannot happen and introduces one that can — clearing the due time mid-run leaves it NULL forever if the
+  process dies, and the schedule stops with nothing reporting it.
+- **Jitter must not compound.** The next run is anchored on the **un-jittered** boundary; feeding the
+  jittered instant back adds the offset once per fire and measured 16m19s between fires of a 15-minute
+  schedule — the exact cumulative drift the design exists to prevent, reintroduced by the mechanism meant
+  to spread load. `cron` self-corrects because it recomputes from the expression, so only `every` could
+  accumulate, which is precisely why `DueDecision` returns `anchor` for both.
+- **DST falls out of walking local calendar fields; it is not coded.** The cron search asks `zone.ts` for
+  each candidate's instant, so a spring-forward gap has none and is skipped (Quartz's behaviour — a daily
+  02:15 does not fire that day) and a repeated fall-back hour is visited once by a forward walk. Two
+  further traps in that module: `hourCycle: "h23"`, because `hour12: false` reports midnight as hour **24**
+  on some engines and silently becomes the next day; and the **verification** in `instantFrom` is what
+  distinguishes "this local time exists" from "this local time is in a gap" — without it a 02:30 that never
+  happened resolves to 01:30 and the schedule fires at the wrong time rather than not at all.
+- **The next-occurrence horizon is 1462 days, and 366 is a defect that rejects legal expressions.** From
+  March 2026 the next 29 February is in **2028**, so `0 3 29 2 *` returns nothing at a one-year bound — and
+  the closest prior art additionally *refuses it at write time* as unsatisfiable. Descend by calendar unit
+  rather than counting minutes: measured, that is 0.03 ms against a flat scan's 25.7 ms on the same query.
+- **A test that injects the thing being tested is not a guard.** The overlong-`at` test injected `setTimer`,
+  so the real `setTimeout` never ran and the 32-bit coercion could not happen — it proved the scheduler did
+  not *decide* to fire and passed with the clamp reverted. What makes it a guard is asserting the **delay it
+  asks for**. Revert the fix and watch the new test go red, every time; this is the third instance recorded
+  in this file.
+- **`anchorAt` is the *pending* boundary, never the last one — and whether it has been consumed is an
+  argument, not something to infer.** The boot recompute treated it as already fired and asked for the
+  occurrence *after* the one still waiting: measured live across two starts, a daily brief went "in 4h"
+  → "in 28h" and a leap-year schedule 2028 → 2032, on schedules that had never run. It needs two
+  process lifetimes with something pending in between, so no unit test could see it. The paired trap:
+  dispatch and boot want *different* answers from the same anchor, and inferring consumption from
+  `from >= at` marked an overdue one-shot spent without ever firing it — which is the miss the
+  late-fire policy exists to prevent. `decideDue` takes `consumed` because only the caller knows.
+- **Run it twice before believing it.** Three of Phase 8's four real bugs needed exactly that — two
+  boots, two listings, one flag end-to-end. A phase that touches durable state across process
+  lifetimes is not verified by one run, however clean that run looks: the double-fire, the
+  restart-skips-an-occurrence and the dropped `init` flag all produced a perfect-looking first run.
+- **`init`'s answer funnels are object literals in *two* files, and a step missing from either is
+  silently dropped.** `--schedules daily` was accepted and lost — once in the answers literal in
+  `init.ts`, three lines above its own comment describing this exact defect, and once in the flag
+  dispatch in `index.ts`. Both type-checked. Fifth instance of this shape here (`apiKeyEnv`,
+  `ChatMessage.toolCalls`, `TurnInput.skills`, `ToolContext.readArtifact`, `ToolContext.memoryDir`),
+  and the guard is the same one every time: **a test at the far end that reads the value out of the
+  generated file**, never at the layer that sets it.
+- **A CLI must not write what reconciliation will undo.** `schedules --disable` on a manifest-owned
+  schedule wrote the store, printed success, and was reverted at the next boot — the manifest owns
+  the schedules it declares, `enabled` included. It refuses now and names the line to edit. Naming an
+  edit beats performing one here: `manifest/edit.ts` is deliberately the one writer, and a schedule
+  lives in a sequence whose index the command has no business knowing.
 - **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
   under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
   builds running beside it — which is a shared 2-core runner every time. Its own comment says the

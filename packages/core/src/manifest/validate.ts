@@ -15,6 +15,7 @@ import { apiVersionMismatch, type ErrorDetail, HarnessError } from "../errors.ts
 import { planWorkspace, type WorkspaceFileRef } from "../workspace/load.ts"
 import { planSoul } from "../workspace/soul.ts"
 import type { AgentManifest } from "./schema.ts"
+import { customRoleNames, MODEL_ROLES } from "./schema.ts"
 
 /** Rule 1, checked against the raw document before the schema runs. */
 export function assertApiVersion(raw: Record<string, unknown>): void {
@@ -501,9 +502,106 @@ function validateChannels(
  * never looks like a user's intent.
  */
 const UNSUPPORTED_SECTIONS: readonly { key: string; feature: string; phase: string }[] = [
-    { key: "schedules", feature: "schedules", phase: "Phase 8" },
     { key: "plugins", feature: "plugins", phase: "Phase 9" },
 ]
+
+/**
+ * Schedules, and the model roles they name.
+ *
+ * Three checks, each of which is otherwise a failure at the first fire rather than at load — which
+ * for a schedule means hours or days later, on a machine nobody is watching.
+ *
+ * The third is the one worth explaining. Opening `model:` to custom roles means a **typo in a
+ * reserved name silently becomes a custom role**: `compacter:` parses, `compactor` falls back to
+ * `main`, and a configured cheap compactor stops being used with nothing reporting it. A declared
+ * role that no schedule references is exactly the shape that typo makes, so warning about it catches
+ * the case that the schema no longer can.
+ */
+function validateSchedules(raw: Record<string, unknown>, manifest: AgentManifest): ErrorDetail[] {
+    const found: ErrorDetail[] = []
+    const entries = Array.isArray(raw.schedules) ? raw.schedules : []
+
+    const channelIds = new Set(
+        (Array.isArray(raw.channels) ? raw.channels : [])
+            .map((entry) =>
+                entry !== null && typeof entry === "object" && !Array.isArray(entry)
+                    ? (entry as { id?: unknown }).id
+                    : undefined,
+            )
+            .filter((id): id is string => typeof id === "string"),
+    )
+
+    const declaredRoles = new Set<string>([...MODEL_ROLES, ...customRoleNames(manifest.model)])
+    const referencedRoles = new Set<string>()
+    const ids = new Set<string>()
+
+    for (const [index, entry] of entries.entries()) {
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue
+        const schedule = entry as Record<string, unknown>
+        const id = typeof schedule.id === "string" ? schedule.id : `[${index}]`
+
+        if (ids.has(id)) {
+            found.push({
+                code: "schedule_id_duplicate",
+                message: `Two schedules share the id "${id}".`,
+                hint: "A schedule id is the key reconciliation matches on and the segment of its session key, so it must be unique within an agent.",
+                field: `schedules[${index}].id`,
+            })
+        }
+        ids.add(id)
+
+        // Rule 8 in 02-SPEC-MANIFEST.md, and decision 9.3: validated here rather than at the first
+        // fire, which is where an unroutable target otherwise surfaces.
+        const deliver = schedule.deliver
+        if (deliver === undefined) {
+            found.push({
+                code: "schedule_missing_delivery",
+                message: `Schedule "${id}" has no delivery target.`,
+                hint: 'Set deliver to { channel, to }, or the literal "none" to return results only via the event stream.',
+                field: `schedules[${index}].deliver`,
+            })
+        } else if (deliver !== "none" && typeof deliver === "object" && !Array.isArray(deliver)) {
+            const channel = (deliver as { channel?: unknown }).channel
+            if (typeof channel === "string" && !channelIds.has(channel)) {
+                found.push({
+                    code: "schedule_delivery_channel_unknown",
+                    message: `Schedule "${id}" delivers to "${channel}", which is not a channel id on this agent.${
+                        channelIds.size === 0
+                            ? " The agent declares no channels."
+                            : ` Declared: ${[...channelIds].join(", ")}.`
+                    }`,
+                    hint: 'A delivery target names a channel\'s id, not its type. Use deliver: "none" to return results through the event stream instead.',
+                    field: `schedules[${index}].deliver.channel`,
+                })
+            }
+        }
+
+        const role = schedule.role
+        if (typeof role === "string") {
+            referencedRoles.add(role)
+            if (!declaredRoles.has(role)) {
+                found.push({
+                    code: "schedule_role_unknown",
+                    message: `Schedule "${id}" names the model role "${role}", which is not declared under model:. Declared: ${[...declaredRoles].join(", ")}.`,
+                    hint: "Add the role under model:, or point the schedule at one of the declared roles. Omit role entirely to use main.",
+                    field: `schedules[${index}].role`,
+                })
+            }
+        }
+    }
+
+    for (const name of customRoleNames(manifest.model)) {
+        if (referencedRoles.has(name)) continue
+        found.push({
+            code: "model_role_unreferenced",
+            message: `model.${name} is declared but no schedule names it, so nothing will ever use it.`,
+            hint: `If "${name}" was meant to be one of ${MODEL_ROLES.join(", ")}, it is misspelled — and the misspelled one is silently falling back to main. Otherwise point a schedule at it with role: ${name}, or remove it.`,
+            field: `model.${name}`,
+        })
+    }
+
+    return found
+}
 
 function validateSupportedSections(
     raw: Record<string, unknown>,
@@ -657,6 +755,7 @@ export function validateManifest(manifest: AgentManifest, options: ValidateOptio
         ...validateBaseUrls(manifest),
         ...validateApiKeyEnv(manifest, options.env),
         ...validateDialectSupport(manifest, options.capabilities),
+        ...validateSchedules(options.raw, manifest),
         ...validateSupportedSections(
             options.raw,
             options.knownProviders ?? [],

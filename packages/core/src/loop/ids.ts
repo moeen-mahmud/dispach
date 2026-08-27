@@ -26,3 +26,14 @@ export function newTurnId(now = Date.now()): string {
 export function newStepId(now = Date.now()): string {
     return id("s", now)
 }
+
+/**
+ * One scheduled run's identity, which becomes the thread segment of its session key.
+ *
+ * A scheduled run gets a fresh session every time, so a daily brief never accumulates history it
+ * was not asked to carry — and every run stays in the store as its own conversation, which is what
+ * makes "what did last Tuesday's brief actually say" a question with an answer.
+ */
+export function newRunId(now = Date.now()): string {
+    return id("r", now)
+}

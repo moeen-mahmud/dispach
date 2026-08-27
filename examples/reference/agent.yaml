@@ -6,7 +6,7 @@
 #
 # The commenting is not cosmetic. A section this build does not implement is **refused at load**,
 # naming the phase, rather than parsed and ignored: a runtime that silently drops configuration
-# lies about what it is doing. Uncomment `schedules` today and the load fails on purpose.
+# lies about what it is doing. Uncomment `plugins` today and the load fails on purpose.
 #
 # `docs/02-SPEC-MANIFEST.md` is the binding reference. This file is the worked copy.
 
@@ -76,6 +76,18 @@ model:
   #   baseUrl: ${MODEL_BASE_URL}
   #   apiKeyEnv: MODEL_API_KEY
   # compactor: { $ref: model.selector }
+
+  # Any other key here is a CUSTOM ROLE, which a schedule may name with `role:`. Nothing selects
+  # one on its own — that is the difference between this and the three reserved names above.
+  #
+  # A role nothing references produces a warning, and that warning is the point: opening this map
+  # means a misspelled `compactor` parses cleanly as a custom role while the real one silently
+  # falls back to main. "Declared but unused" is exactly what that typo looks like.
+  cheap:
+    id: deepseek-v4-flash
+    baseUrl: https://api.deepseek.com/v1
+    apiKeyEnv: MODEL_API_KEY
+    reasoningEffort: none
 
 # ── context ───────────────────────────────────────────────────────────────────────────────
 context:
@@ -474,19 +486,43 @@ server:
   port: 7420
   tokenEnv: DISPACH_API_TOKEN
 
-# ── Phase 8: schedules ────────────────────────────────────────────────────────────────────
+# ── schedules ─────────────────────────────────────────────────────────────────────────────
 # Validated at write time rather than fire time. `deliver` is required — `{channel,to}` or the
 # literal "none" to return results through the event stream only.
 #
-# schedules:
-#   - id: morning-brief
-#     kind: cron                   # cron | every | at
-#     expr: "0 8 * * *"            # cron: 5 or 6 field · every: "15m" · at: ISO 8601, max +10y
-#     task: "Summarise today's calendar and unread email."
-#     deliver: { channel: tg, to: "@moeen" }
-#     session: isolated            # or `shared:<key>`
-#     enabled: true
-#     timezone: Asia/Dhaka         # IANA name; defaults to TZ, then UTC
+# Only `serve` fires these. `run` reconciles them so `validate` and a listing see them, and starts
+# no timer — the same rule channels follow, and for the same reason.
+#
+# Timing worth knowing before writing one:
+#   · `cron` is wall-clock-anchored, so it observes DST. An occurrence whose local time does not
+#     exist on a spring-forward day is SKIPPED — a daily 02:15 does not fire that day. On a
+#     fall-back the repeated hour fires exactly ONCE. Avoid 00:00–03:00 and neither applies.
+#   · `every` is interval-anchored and ignores DST entirely.
+#   · Every fire carries a fixed offset derived from the schedule id — at most a tenth of the
+#     interval, capped at 15 minutes — so a hundred agents on "0 8 * * *" do not hit an endpoint
+#     at the same instant. Stable across restarts, so a schedule fires at the same offset daily.
+#     A one-shot carries none: an instant means that instant.
+#   · After downtime a recurring schedule skips to its next occurrence and reports how many it
+#     dropped; it never replays a backlog. An `at` whose moment passed fires once, late, flagged.
+#   · A fire arriving while the previous run is still going is held, at most one deep.
+schedules:
+  - id: morning-brief
+    kind: cron                     # cron | every | at
+    expr: "0 8 * * *"              # cron: 5 or 6 field · every: "15m" · at: ISO 8601, max +10y
+    task: "Summarise today's calendar and unread email."
+    deliver: { channel: tg, to: "@moeen" }
+    session: isolated              # or `shared:<key>` — isolated is a fresh session every run
+    enabled: true
+    timezone: Asia/Dhaka           # IANA name; defaults to TZ, then UTC. cron only.
+
+  - id: pulse
+    kind: every
+    expr: 15m
+    task: "Check the deploy queue and say nothing unless something is stuck."
+    deliver: none                  # results reach the event stream only
+    # Runs on `model.cheap` below rather than on main. A heartbeat and a weekly report are worth
+    # very different amounts of money, and this is how that is said without a second endpoint.
+    role: cheap
 
 # ── Phase 9: plugins ──────────────────────────────────────────────────────────────────────
 # Trusted in-process code, documented as such. Resolved at boot from this list; never installed

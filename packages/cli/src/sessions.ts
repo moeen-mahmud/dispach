@@ -22,6 +22,70 @@ function pad(value: string, width: number): string {
     return value.length >= width ? value : value + " ".repeat(width - value.length)
 }
 
+/**
+ * Collapse a schedule's per-run sessions into one row.
+ *
+ * An isolated scheduled run gets a fresh session every time — `schedule:<id>:<runId>` — which is
+ * what keeps a daily brief from accumulating history it was never asked to carry, and what makes
+ * "what did last Tuesday's brief say" a question with an answer. The cost lands here: a 15-minute
+ * schedule writes about 35,000 sessions a year, and unfolded they bury every conversation a person
+ * actually had.
+ *
+ * Folded by the schedule id, newest run's activity shown, with the count beside it. The individual
+ * keys are still addressable — `--session schedule:brief:r_…` reads one — so nothing is hidden,
+ * only summarized.
+ */
+interface ListRow {
+    readonly sessionKey: string
+    readonly phase: string | undefined
+    messages: number
+    turns: number
+    lastActivityAt: string
+    runs?: number
+}
+
+function foldScheduleRuns(sessions: readonly SessionSummary[]): readonly ListRow[] {
+    const folded = new Map<string, ListRow>()
+    const out: ListRow[] = []
+
+    for (const session of sessions) {
+        const parts = session.sessionKey.split(":")
+        // Exactly three segments, the first `schedule`: anything else is somebody's own key and is
+        // left alone. A two-segment `schedule:brief` is a shared-session schedule and is a real
+        // single conversation, not a run.
+        const row: ListRow = {
+            sessionKey: session.sessionKey,
+            phase: session.phase,
+            messages: session.messages,
+            turns: session.turns,
+            lastActivityAt: session.lastActivityAt,
+        }
+
+        if (parts.length !== 3 || parts[0] !== "schedule") {
+            out.push(row)
+            continue
+        }
+
+        const id = `schedule:${parts[1]}`
+        const seen = folded.get(id)
+        if (seen === undefined) {
+            const entry: ListRow = { ...row, sessionKey: `${id}:*`, runs: 1 }
+            folded.set(id, entry)
+            out.push(entry)
+            continue
+        }
+        seen.runs = (seen.runs ?? 1) + 1
+        seen.messages += session.messages
+        seen.turns += session.turns
+        // The listing sorts by activity, so the fold keeps the most recent of the group.
+        if (session.lastActivityAt > seen.lastActivityAt) {
+            seen.lastActivityAt = session.lastActivityAt
+        }
+    }
+
+    return out
+}
+
 function printList(sessions: readonly SessionSummary[]): void {
     if (sessions.length === 0) {
         // Exit 0: an agent with no conversations yet is a correct answer to the question asked, not
@@ -30,14 +94,19 @@ function printList(sessions: readonly SessionSummary[]): void {
         return
     }
 
-    const keyWidth = Math.max(7, ...sessions.map((s) => s.sessionKey.length))
+    const rows = foldScheduleRuns(sessions)
+    const keyWidth = Math.max(7, ...rows.map((s) => s.sessionKey.length))
     process.stdout.write(
         `${pad("SESSION", keyWidth)}  ${pad("MSGS", 5)}  ${pad("TURNS", 5)}  ${pad("PHASE", 8)}  LAST\n`,
     )
-    for (const session of sessions) {
+    for (const session of rows) {
+        const runs =
+            session.runs === undefined
+                ? ""
+                : `  (${session.runs} run${session.runs === 1 ? "" : "s"})`
         process.stdout.write(
             `${pad(session.sessionKey, keyWidth)}  ${pad(String(session.messages), 5)}  ` +
-                `${pad(String(session.turns), 5)}  ${pad(session.phase ?? "-", 8)}  ${ago(session.lastActivityAt, Date.now())}\n`,
+                `${pad(String(session.turns), 5)}  ${pad(session.phase ?? "-", 8)}  ${ago(session.lastActivityAt, Date.now())}${runs}\n`,
         )
     }
 }

@@ -301,6 +301,7 @@ case-insensitive and whole-word against the current input. See `07-SPEC-WORKSPAC
 | `policy.mode` | `allow` | What happens to a call no rule mentions. `allow` because **pinning is the primary authorization** — an agent has only the tools its manifest pinned. `ask` on an unattended run means `onNoApprover` answers it, so a schedule would do nothing. |
 | `policy.allow` / `policy.deny` | `[]` | `Tool` or `Tool(pattern)`. Evaluated **deny → allow, first match, specificity never reorders** — so a deny carries no exceptions. A rule naming a primary content field (`exec(command:…)`) is refused: a compound command defeats it. |
 | `policy.onNoApprover` | `deny` | What `ask` means with nobody to ask — a schedule, a pipe, a channel with no approver. |
+| `model.<name>` | — | Beyond `main`, `selector` and `compactor`, any key under `model:` is a **custom role** a schedule may name with `role:`. A role nothing references is warned about, because that is also what a misspelled `compactor` looks like. |
 | `untrusted.onMutate` | `refuse` | What to do when untrusted content is in the turn and a mutating tool is requested: `refuse \| confirm \| allow`. A tainted mutating call needs **explicit** authorization — a matching `policy.allow` rule or a live approval; `mode: allow` is the absence of a rule, not one. `confirm` asks when an approver is reachable and refuses when none is. |
 
 **Configuring a remote provider and pinning nothing from it is a valid, startable agent.** A remote
@@ -695,9 +696,26 @@ API-initiated turns.
 | `expr` | yes | cron: 5 or 6 field. every: duration (`15m`, `2h`). at: ISO 8601, max +10 years. |
 | `task` | yes | Prompt text for the run. |
 | `deliver` | yes | `{ channel, to }` or the literal `none`. **Validated at write time** with a specific error naming what's missing. |
-| `session` | no | `isolated` (default) or `shared:<key>`. |
+| `session` | no | `isolated` (default) or `shared:<key>`. `isolated` is a **fresh session per run** — `schedule:<id>:<runId>` — so a daily brief never accumulates history it was not asked to carry, and every run stays in the store as its own conversation. |
 | `enabled` | no | Default true. Disabled schedules are listed by default. |
-| `timezone` | no | IANA name. Defaults to `TZ` then UTC. |
+| `timezone` | no | IANA name. Defaults to `TZ` then UTC. Applies to `cron` only: `every` is interval-anchored and does not participate in DST. |
+| `role` | no | A model role from `model:` to run this turn on instead of `main`. Omit for `main`. |
+
+**Timing.** `cron` is wall-clock-anchored and `every` is interval-anchored. On a DST spring-forward a
+`cron` occurrence whose local time does not exist is **skipped entirely** — a daily 02:15 does not
+fire that day, not shifted and not late — and on a fall-back the repeated hour fires **exactly once**.
+Scheduling between midnight and 03:00 is best avoided for that reason. `every` is unaffected by
+either: `every: 24h` across a transition fires 24 hours later, an hour earlier by the clock.
+
+Fire times carry a **deterministic offset derived from the schedule id**, at most `min(interval/10,
+15 min)`, so a hundred schedules written `0 8 * * *` do not all reach an endpoint at the same instant.
+It is stable across restarts rather than random, so a schedule fires at the same offset every day. A
+one-shot carries none: an author who wrote an instant meant that instant.
+
+**After downtime**, a `cron` or `every` schedule advances to its next occurrence and reports how many
+it dropped; it never replays a backlog. An `at` whose moment passed fires **once, late, flagged** —
+nothing else will ever fire it. A fire arriving while the previous run of the same schedule is still
+going is held until that run finishes, at most one deep.
 
 Schedules declared in the manifest are reconciled into the store at load: created,
 updated, or removed to match. Schedules created through the API and absent from the

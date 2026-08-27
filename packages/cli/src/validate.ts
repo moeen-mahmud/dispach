@@ -170,6 +170,25 @@ export function validateCommand(options: ValidateOptions): number {
                         ? "none — nothing is retrieved across sessions"
                         : `${manifest.memory.retriever} at ${manifest.memory.dir}, maxActive=${manifest.memory.maxActive}, threshold=${manifest.memory.threshold}, budget=${manifest.memory.budget}, history=${manifest.memory.includeHistory}`
                 }\n` +
+                // Disabled schedules are counted here rather than hidden — decision 9.4, and the
+                // same reasoning as the `none` above: a row that omits them makes a switched-off
+                // schedule indistinguishable from one that was never written.
+                `  schedules    ${
+                    manifest.schedules.length === 0
+                        ? "none"
+                        : manifest.schedules
+                              .map(
+                                  (schedule) =>
+                                      `${schedule.id} (${schedule.kind} ${schedule.expr}${
+                                          schedule.timezone === undefined
+                                              ? ""
+                                              : ` ${schedule.timezone}`
+                                      }${schedule.role === undefined ? "" : ` role=${schedule.role}`}${
+                                          schedule.enabled ? "" : ", disabled"
+                                      })`,
+                              )
+                              .join(" ")
+                }\n` +
                 `  limits       maxSteps=${manifest.limits.maxSteps} turnTimeoutMs=${manifest.limits.turnTimeoutMs}\n` +
                 [
                     ...workspaceWarnings,

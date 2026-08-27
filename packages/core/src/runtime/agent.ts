@@ -163,6 +163,16 @@ export interface AgentSendOptions {
     readonly source?: string
     /** Supply a turn id to hand a client its handle before the turn starts. */
     readonly turnId?: string
+    /**
+     * A model role to run this turn on instead of `main`.
+     *
+     * Exists for schedules: a heartbeat every fifteen minutes and a weekly report have very
+     * different worth-paying-for, and expressing that by duplicating an endpoint per schedule is
+     * how a base URL comes to be wrong in one place. Resolved through `roles.byName`, which throws
+     * on a name the manifest never declared rather than falling back — a silent fallback here means
+     * a schedule quietly running on the expensive model forever.
+     */
+    readonly role?: string
 }
 
 export interface AgentDescription {
@@ -293,6 +303,7 @@ export class Agent {
      */
     #configSummary: string | undefined
     #channelsStarted = false
+    #schedulerStarted = false
     #serverListening = false
     /** Absolute path, or `(object)` for the programmatic path — which has no file to watch. */
     readonly #manifestPath: string
@@ -591,7 +602,7 @@ export class Agent {
                   }),
             ...(remembered.length === 0 ? {} : { memory: remembered }),
             ...(skills.length === 0 ? {} : { skills }),
-            role: this.roles.main,
+            role: options.role === undefined ? this.roles.main : this.roles.byName(options.role),
             window: this.window,
             reserveOutput: this.manifest.context.reserveOutput,
             // Named field by field rather than spread, so the compiler names anything the manifest
@@ -859,6 +870,7 @@ export class Agent {
      */
     reportRuntimeState(state: {
         readonly channelsStarted?: boolean
+        readonly schedulerStarted?: boolean
         readonly serverListening?: boolean
     }): void {
         if (this.#configSummary !== undefined) {
@@ -868,6 +880,7 @@ export class Agent {
             )
         }
         if (state.channelsStarted !== undefined) this.#channelsStarted = state.channelsStarted
+        if (state.schedulerStarted !== undefined) this.#schedulerStarted = state.schedulerStarted
         if (state.serverListening !== undefined) this.#serverListening = state.serverListening
     }
 
@@ -1192,6 +1205,7 @@ export class Agent {
                 tools: this.tools.specs().map((spec) => spec.slug),
                 providers: resolveProviders(this.manifest.tools).selections.map((s) => s.id),
                 channelsStarted: this.#channelsStarted,
+                schedulerStarted: this.#schedulerStarted,
                 serverListening: this.#serverListening,
                 // Absent, not zero, when no block is configured — the row distinguishes "off" from
                 // "no such concept", and only this side knows which it is.

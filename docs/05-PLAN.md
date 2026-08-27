@@ -2141,8 +2141,9 @@ Both halves of the phase come out of that table. Decisions 12.1–12.12.
   exceed the endpoint's own is a second number to get wrong, and the ratio of one hung request to the
   turn's budget is unchanged by `maxSteps` moving. Left as a known looseness rather than a guessed
   default.
-- The NLT heredoc leak in milo's transcript (`exec` with `<<'PY'` put script text in the reply). Real,
-  separate, needs its own eval.
+- The NLT heredoc leak in milo's transcript. **Real, high urgency, and worse than this line said** —
+  see *Carried backlog* at the end of this document. It is not only that script text reaches the reply:
+  the truncated command **executes**, and nothing anywhere reports it.
 
 ---
 
@@ -2150,28 +2151,113 @@ Both halves of the phase come out of that table. Decisions 12.1–12.12.
 
 **Goal.** Cron, interval, and one-shot schedules that survive restart.
 
-**Deliverables**
+Split into **8A — core** and **8B — surfaces**, both built 2026-08-25.
 
-- `schedule/kinds.ts` — cron (5/6 field), every (duration), at (ISO, ≤10y), lossless round-trip
-- `schedule/scheduler.ts` — single timer to nearest due across all agents
-- Migration 005: `schedules`
-- Write-time validation with specific errors
-- Isolated vs `shared:<key>` session modes
-- Manifest reconciliation: manifest owns manifest schedules; API-created ones untouched
-- Schedule endpoints; `dispach schedules` — table entry plus a plain writer
+### Decisions (Moeen, 2026-08-25, binding)
 
-**Files.** `packages/core/src/schedule/`, `packages/server/`, `packages/cli/`
+Recorded in full as `00-DECISIONS.md` §9.6–9.16. In short: one timer clamped to a 30 s horizon;
+recurring schedules skip after downtime while an `at` fires late once; overlap **defers to a turn
+boundary**, at most one deep; jitter is **derived from the schedule id**; an isolated run gets a
+**fresh session per run**; `model:` is **open to named roles** and a schedule names one with `role:`.
 
-**Acceptance**
+Decision **9.1's rationale was corrected** in the same commit: it cited Cloudflare Durable Objects as
+precedent for multiplexing N schedules onto one timer, and Cloudflare does the opposite — one alarm
+per schedule, with an explicit rule against a single global object. The decision stands on a better
+reason (libuv already collapses every JS timer into one poll wait), but the citation was load-bearing
+and wrong, and nothing downstream could tell.
 
-- [ ] All three kinds fire correctly; timezone honoured
-- [ ] Restart preserves schedules; missed fires handled per policy (skip, not stampede)
-- [ ] Missing delivery target rejected at write with the documented error
-- [ ] `GET /schedules` includes disabled by default
-- [ ] Isolated runs do not pollute the live session
-- [ ] Removing a manifest schedule removes it on reload; API-created survives
-- [ ] 100 schedules across 10 agents: one timer, drift under 1 s
-- [ ] Idle agent with schedules makes zero model calls until a schedule fires
+### 8A — built
+
+- `packages/core/src/schedule/` — `duration.ts` (lossless round-trip), `zone.ts` (cached
+  `Intl.DateTimeFormat`, DST by construction), `cron.ts` (5/6 field, vixie OR semantics, calendar
+  descent, 1462-day horizon), `kinds.ts` (the three kinds, catch-up policy, jitter), `scheduler.ts`
+  (the clamped timer, deferral, events).
+- **Migration 8**, not 005 — the plan's number predated the migrations Phases 3, 4 and 7C added.
+  `ScheduleStore` with `due`/`nextDue` **scoped to agent ids**, the same hazard `recoverInflight` is
+  scoped against.
+- Reconciliation at load, manifest-owned rows only. Slot 2 gains a `schedules` row reporting
+  **runtime state**. `serve` starts the scheduler; `run` does not.
+- `schedules` removed from `UNSUPPORTED_SECTIONS`; `validate` reports schedules including disabled.
+- The role map opened, with `roles.byName` throwing on an unknown name and `validate` warning about a
+  declared role nothing references — the pair that catches a misspelled `compactor`.
+- `examples/reference/agent.yaml` uncommented, with a `cheap` custom role.
+
+### 8B — built
+
+- **Endpoints** per `04-SPEC-WIRE.md`: list (disabled included by default, `?enabled=` filters),
+  create, read, patch, delete, and `POST …/:sid/run` for an out-of-band fire that deliberately does
+  **not** move the schedule's own next run. Write-time validation is core's `prepareScheduleWrite`,
+  shared with reconciliation's parse — a check only one of two writers performs is a check they
+  disagree about. A PATCH revalidates the **whole** schedule rather than the fragment, because a
+  changed `expr` can make a previously-fine `timezone` unsatisfiable and a fragment cannot see that.
+  An API row is always `origin: "api"`, so a reload never deletes something no file describes.
+- **`schedules` CLI** — list, `--id`, `--enable`/`--disable`, `--json`. It reads and toggles but
+  never *writes* a schedule: a third writer beside the manifest and the API is three ideas of a valid
+  expression. `--disable` on a manifest-owned schedule is **refused**, naming the exact line to edit —
+  writing the store there reported success on a change the next boot silently undid.
+- **`sessions` folds** `schedule:<id>:*` into one row with a run count. A 15-minute schedule writes
+  ~35,000 sessions a year and unfolded they bury every real conversation; the individual keys stay
+  addressable with `--session`.
+- **An `init` question** with a `--schedules none|daily|hourly` flag. `none` still writes the block,
+  commented, with the field names in it — a switch that is off wants to exist.
+- `validate` reports schedules including disabled; the serving banner names the count.
+
+### Deviations from the plan as written
+
+- **No row-level `UPDATE … RETURNING` claim.** The plan called for one. Working through it, that
+  pattern solves several workers competing for one row, which the lease already prevents — and a
+  claim that clears the due time mid-run leaves it NULL forever if the process dies. In-memory
+  in-flight state plus a durable due time is crash-safe by construction: a crash leaves the row
+  overdue and the boot recompute reports it as a miss.
+- **`validate` reporting schedules** landed in 8A rather than 8B: without it, 8A's acceptance was not
+  observable from outside the process.
+
+### Acceptance
+
+- [x] All three kinds fire correctly; timezone honoured
+- [x] DST: spring-forward skipped, fall-back once, both hemispheres — written **before** the code
+- [x] `0 3 29 2 *` resolves to 2028-02-29; red at a 366-day horizon
+- [x] Restart preserves schedules; missed fires skip rather than stampede, and say how many
+- [x] An `at` ten years out does **not** fire at boot — red with the clamp reverted
+- [x] A wall-clock jump causes no miss
+- [x] Missing delivery target rejected at write with the documented error
+- [x] Isolated runs do not pollute the live session — fresh key per run
+- [x] Removing a manifest schedule removes it on reload; API-created survives
+- [x] **100 schedules across 10 agents: one timer, worst drift 21 ms** (`bun run bench:schedule`)
+- [x] Idle agent with schedules makes zero model calls until a schedule fires
+- [x] Live: a real `at` fired once on a real endpoint, 13 ms drift, reply `SCHEDULED`, one session
+- [x] `bun test` 2817 · `test:node` 1245 · typecheck clean · lint at the 6 pre-existing warnings
+- [x] `bun run bench:boot` ok (96.7 ms median)
+- [x] **8B** — round-trip create / list / patch / delete / run through the API
+- [x] `schedule_missing_delivery` and the unknown-channel and unknown-role refusals fire at write time
+- [x] An API-created schedule survives a reload that reconciles the manifest ones
+- [x] `init --schedules daily|hourly|none` reaches the generated manifest — asserted on the **file**
+
+### Four bugs only live running found
+
+- **A schedule fired twice, 852 ms apart, in one process.** The row's due time was advanced at
+  *completion*, so it stayed due for the whole turn: the timer re-armed at zero, woke, found the same
+  row, and — correctly, by the overlap policy — deferred it, and the deferral fired it again. Every
+  piece behaved as designed. Advancing at **dispatch** is the fix; the in-flight set prevents
+  concurrency, not due-ness.
+- **A disabled schedule kept a due time in the past**, because the boot recompute skipped it — so
+  enabling it would have fired it immediately rather than at its next occurrence.
+- **Every restart skipped an occurrence.** `anchorAt` names the boundary the *pending* `nextRunAt`
+  belongs to, and the boot recompute treated it as already fired — so it asked for the occurrence
+  after the one still waiting. Live across two starts: a daily brief went "in 4h" → "in 28h" and a
+  leap-year schedule 2028 → 2032, on schedules that had never run. Invisible to every test, because
+  it needs two process lifetimes with something pending in between. The fix also had to make
+  consumption **explicit** — dispatch and boot want different answers from the same anchor, and
+  inferring it from `from >= at` marked an overdue one-shot spent without ever firing it.
+- **`init --schedules daily` was accepted and silently dropped**, in *two* object-literal funnels:
+  the answers literal in `init.ts` — three lines above its own comment describing exactly this
+  defect — and the flag dispatch in `index.ts`. Both type-checked. The fifth instance of this shape
+  recorded in the repo, and the guard is the same one every time: a test at the far end that reads
+  the value out of the generated file.
+
+And one bad test: the overlong-`at` guard **passed with the clamp reverted**, because injecting
+`setTimer` means the real `setTimeout` never runs and the 32-bit coercion cannot happen. It asserts
+the requested delay now.
 
 **Non-goals.** Distributed scheduling. Retry policies beyond fire-and-log.
 
@@ -2928,3 +3014,63 @@ is told rather than charged, and `--yes` is the scripted way through.
 - Provenance for capability fields other than `contextWindow`. Every field in a registry row has the
   same problem; the window is the one a budget divides by.
 
+
+---
+
+## Carried backlog
+
+Two findings that belong to no phase, recorded here so a session with no context still finds them.
+Both were reproduced rather than reasoned about.
+
+### The NLT heredoc leak — **high urgency**, documented not fixed *(recorded 2026-08-25)*
+
+A model writes a multi-line shell script as an `exec` argument without wrapping it in NLT's
+`<<<` / `>>>` heredoc. `consumeLine` extends an open field across bare continuation lines — but a
+**blank line clears `openKey`**, deliberately ("models put blank lines between fields, and gluing
+whatever follows onto the last value is how prose ends up in an argument"). The next line then has a
+block open, no `openKey`, and no key match, so it falls to the last branch —
+`closeBlock(state); state.text.push(line)` — and the rest of the script becomes the reply.
+
+Reproduced against the real `parseNlt`:
+
+```
+ACTION: exec                     intents:   1 ["exec"]
+command: python3 <<PY            args:      {"command":"python3 <<PY\nimport sys"}
+import sys                       text:      "print(...)\nPY\nEND"   <- shown as the reply
+                 <- blank line   malformed: undefined  <- no repair, no event, nothing reported
+print("hello")
+PY
+END
+```
+
+The truncated command is a **valid string**, so `coerceArgs` raises no field error. The shell then
+sees an unterminated heredoc, reads to EOF, and **runs half the script**. The turn is recorded as a
+clean answer, and exits 0.
+
+This is precisely the shape the XML tolerance was written to prevent — *"the markup became the reply,
+no repair was asked for, no event fired, and the turn was recorded as a clean answer"* — alive today,
+in the default dialect, on the most-used tool, on the most idiomatic content a shell tool receives.
+
+A bare `word:` line inside an unwrapped value (`try:`, `else:`, `finally:`, any YAML key) is the
+**loud** variant: `try` becomes a field, `coerceArgs` reports *"try is not a field of this tool"*, and
+the model earns a repair. That one is survivable. The blank-line case is not.
+
+**Why it is not fixed here.** It needs `evals/nlt-heredoc/` with the shapes a real model actually
+produces, because this repo's own rule is that the set of malformations is not enumerable — so adding
+one tolerance for blank lines is the wrong instinct and would invite the belief the class is handled.
+The likely direction is a **backstop**: set `ParsedOutput.malformed` when a block closes into prose
+that reads as a continuation of the value it just abandoned, earning the one repair the parser already
+grants. Do not "simplify" it into a tolerance.
+
+### `deepseek-v4-pro*` context window — **low urgency** *(recorded 2026-08-25)*
+
+The registry row says `contextWindow: 393_216`, traceable to a test comment recording it as *"a proven
+floor: max_tokens=393216 beside an 85-token prompt was accepted"* — a **floor**, published as a window.
+Its sibling `deepseek-v4-flash*` carried the same inherited number and measured **1_048_576** when
+probed, so the registry had been publishing 37.5% of the real window.
+
+`model probe <agent> --window --price <rate>` does the measurement; it costs roughly **$0.30**.
+
+Low urgency, and the reason is worth keeping: **a floor is the safe direction.** An under-reported
+window over-compacts and wastes tokens; it never overflows an endpoint. A cost bug, not a correctness
+one.

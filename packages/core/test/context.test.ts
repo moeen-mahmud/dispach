@@ -262,6 +262,7 @@ describe("the configuration block", () => {
         tools: ["now", "config_read", "config_set"],
         providers: ["system", "web"],
         channelsStarted: false,
+        schedulerStarted: false,
         serverListening: false,
     }
 
@@ -276,6 +277,7 @@ describe("the configuration block", () => {
                 untrusted: { onMutate: "refuse" },
             },
             channels: [],
+            schedules: [],
             server: { enabled: false, host: "127.0.0.1", port: 7420 },
             ...over,
         } as never
@@ -348,6 +350,7 @@ describe("the configuration block", () => {
         const text = renderConfigSummary({
             ...base,
             channelsStarted: true,
+            schedulerStarted: false,
             serverListening: true,
             manifest: manifestFor({
                 channels: [{ id: "tg", type: "telegram", enabled: true }],
@@ -366,6 +369,7 @@ describe("the configuration block", () => {
         const text = renderConfigSummary({
             ...base,
             channelsStarted: false,
+            schedulerStarted: false,
             serverListening: false,
             manifest: manifestFor({
                 channels: [{ id: "tg", type: "telegram", enabled: true }],

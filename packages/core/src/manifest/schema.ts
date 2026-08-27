@@ -99,7 +99,22 @@ export const ModelSchema = z
         /** Cheap model for summarisation. Falls back to `main`. */
         compactor: ModelRoleSchema.optional(),
     })
-    .strict()
+    /**
+     * Any other key is a **custom role**, which a schedule may name with `role:`.
+     *
+     * This is what makes "a cheap model for the heartbeat, an expensive one for the weekly report"
+     * expressible without duplicating an endpoint per schedule, and it is the general form the three
+     * reserved names were always a special case of.
+     *
+     * **The cost is that a typo in a reserved name becomes a custom role rather than an error.**
+     * `model.compacter:` parses cleanly, `compactor` silently falls back to `main`, and a configured
+     * cheap compactor stops being used with nothing reporting it — the silent-degradation shape rule
+     * 8 exists to prevent. Two things catch it, and both are required: `validate` warns about a
+     * declared role that nothing references (a misspelled `compacter` is referenced by nothing), and
+     * `resolveRoles(...).byName` throws on an unknown name rather than falling back, the same rule as
+     * `ToolRegistry.resolve` throwing on an unknown slug and for the same reason.
+     */
+    .catchall(ModelRoleSchema)
 
 /**
  * Compaction ladder trigger fractions of the *prompt budget* — `window` minus `reserveOutput` — not
@@ -448,6 +463,15 @@ export const ScheduleSchema = z
         /** Required at write time — `{channel,to}` or the literal `"none"`. */
         deliver: z.union([z.literal("none"), DeliveryTargetSchema]),
         session: z.string().min(1).default("isolated"),
+        /**
+         * A model role this run uses instead of `main`.
+         *
+         * Names an entry under `model:` — one of the reserved three, or a custom one. Absent is
+         * `main`, which is why it is optional rather than defaulted to the string: "unset" and
+         * "explicitly main" are the same behaviour, and a default would make a listing claim the
+         * author wrote something they did not.
+         */
+        role: slug.optional(),
         enabled: z.boolean().default(true),
         /** IANA name. Defaults to `TZ`, then UTC. */
         timezone: z.string().min(1).optional(),
@@ -560,6 +584,20 @@ export type LimitsConfig = z.infer<typeof LimitsSchema>
 export type ServerConfig = z.infer<typeof ServerSchema>
 export type AgentManifest = z.infer<typeof AgentManifestSchema>
 
-/** The role names a manifest may configure. */
+/**
+ * The role names the runtime itself uses. A manifest may declare others beside them.
+ *
+ * `main` is required and is the fallback for the other two. Anything else under `model:` is a custom
+ * role, reachable only by a schedule naming it — the runtime never selects one on its own.
+ */
 export const MODEL_ROLES = ["main", "selector", "compactor"] as const
 export type ModelRole = (typeof MODEL_ROLES)[number]
+
+export function isReservedRole(name: string): name is ModelRole {
+    return (MODEL_ROLES as readonly string[]).includes(name)
+}
+
+/** Role names declared beside the reserved three, in manifest order. */
+export function customRoleNames(model: AgentManifest["model"]): readonly string[] {
+    return Object.keys(model).filter((name) => !isReservedRole(name))
+}

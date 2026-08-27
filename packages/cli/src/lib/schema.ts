@@ -198,6 +198,18 @@ export interface MemoryOptions {
     readonly json?: boolean
 }
 
+export interface SchedulesOptions {
+    readonly manifestPath: string
+    /** Show one schedule in full instead of the list. */
+    readonly id?: string
+    /** Switch a schedule on. It fires at its next occurrence, never immediately. */
+    readonly enable?: string
+    /** Switch a schedule off. It stays listed — decision 9.4. */
+    readonly disable?: string
+    readonly store?: string
+    readonly json?: boolean
+}
+
 export interface SessionsOptions {
     readonly manifestPath: string
     /** Inspect this session instead of listing them. */
@@ -237,6 +249,8 @@ export interface InitOptions {
     readonly telegramAllow?: string
     /** `none` or `local` — whether to serve the HTTP API on loopback. */
     readonly server?: string
+    /** `none`, `daily` or `hourly` — what the agent runs on a schedule. */
+    readonly schedules?: string
     /** `none` or `starter` — whether to scaffold a skills directory, and whether to seed it. */
     readonly skills?: string
     readonly daemon?: string

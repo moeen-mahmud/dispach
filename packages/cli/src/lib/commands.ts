@@ -142,6 +142,13 @@ export const COMMANDS: readonly CommandSpec[] = [
                 defaultHelp: "none",
             },
             {
+                name: "schedules",
+                kind: "string",
+                placeholder: "what",
+                help: "run something on a schedule: none | daily | hourly",
+                defaultHelp: "none",
+            },
+            {
                 name: "skills",
                 kind: "string",
                 placeholder: "level",
@@ -218,6 +225,43 @@ export const COMMANDS: readonly CommandSpec[] = [
                 kind: "boolean",
                 help: "no-op: reasoning is shown by default when the model has any",
             },
+        ],
+    },
+    {
+        // Reading, enabling and disabling — but never *writing* a schedule.
+        //
+        // Creating one from the CLI would be a third writer beside the manifest and the API, each
+        // with its own idea of what a valid expression is; the manifest is where a schedule belongs,
+        // because it is the thing that survives a rebuild and shows up in a diff. What the CLI adds
+        // is the two questions a file cannot answer: when does this actually fire next, and did the
+        // last run work.
+        name: "schedules",
+
+        // A view: a list somebody reads and then acts on, like `sessions`.
+        inSession: "view",
+        summary: "list schedules, when they next fire, and how the last run went",
+        args: [MANIFEST],
+        flags: [
+            {
+                name: "id",
+                kind: "string",
+                placeholder: "schedule",
+                help: "show one schedule in full instead of the list",
+            },
+            {
+                name: "enable",
+                kind: "string",
+                placeholder: "schedule",
+                help: "switch an API-created schedule on; a manifest one is enabled in agent.yaml",
+            },
+            {
+                name: "disable",
+                kind: "string",
+                placeholder: "schedule",
+                help: "switch an API-created schedule off; a manifest one is disabled in agent.yaml",
+            },
+            STORE,
+            JSON_FLAG,
         ],
     },
     {

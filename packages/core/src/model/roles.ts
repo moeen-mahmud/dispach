@@ -7,8 +7,10 @@
  * cost win.
  */
 
+import { unknownModelRole } from "../errors.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { AgentManifest, ModelRole, ModelRoleConfig } from "../manifest/schema.ts"
+import { customRoleNames, MODEL_ROLES } from "../manifest/schema.ts"
 import {
     type ModelCapabilities,
     resolveCapabilities,
@@ -36,7 +38,24 @@ export interface ResolvedRole {
     readonly provider: ModelProvider
 }
 
-export type ResolvedRoles = Readonly<Record<ModelRole, ResolvedRole>>
+/**
+ * The three reserved roles, plus any custom ones a manifest declared.
+ *
+ * The reserved three stay named properties so `roles.main` type-checks without a lookup and cannot
+ * be misspelled. Custom roles are reachable only through `byName`, which **throws** on a name that
+ * was never declared — the same rule as `ToolRegistry.resolve` throwing on an unknown tool slug, and
+ * for the same reason: silently falling back to `main` turns a config typo into a schedule that runs
+ * on the expensive model forever with nothing saying so.
+ */
+export interface ResolvedRoles {
+    readonly main: ResolvedRole
+    readonly selector: ResolvedRole
+    readonly compactor: ResolvedRole
+    /** Declared beside the reserved three. Empty for a manifest that declares none. */
+    readonly custom: ReadonlyMap<string, ResolvedRole>
+    /** Resolve by name, reserved or custom. Throws if the manifest never declared it. */
+    byName(name: string): ResolvedRole
+}
 
 /** One role's model and window provenance, derived from the manifest alone. */
 export interface RoleWindow {
@@ -100,7 +119,32 @@ export function resolveRoles(
         return buildRole(role, role, config, options)
     }
 
-    return { main, selector: derive("selector"), compactor: derive("compactor") }
+    const custom = new Map<string, ResolvedRole>()
+    for (const name of customRoleNames(manifest.model)) {
+        const config = manifest.model[name]
+        if (config === undefined) continue
+        // A custom role never falls back, because it was written down: `configuredAs` is its own
+        // name, so a window report shows its endpoint rather than main's.
+        custom.set(name, buildRole(name as ModelRole, name as ModelRole, config, options))
+    }
+
+    const selector = derive("selector")
+    const compactor = derive("compactor")
+
+    return {
+        main,
+        selector,
+        compactor,
+        custom,
+        byName(name: string): ResolvedRole {
+            if (name === "main") return main
+            if (name === "selector") return selector
+            if (name === "compactor") return compactor
+            const found = custom.get(name)
+            if (found !== undefined) return found
+            throw unknownModelRole(name, [...MODEL_ROLES, ...custom.keys()])
+        },
+    }
 }
 
 /** Effective sampling parameters for a role, as sent on the wire. */
@@ -157,11 +201,16 @@ export function requestParamsFor(
  * rather than repeating the number three times.
  */
 export function windowReport(manifest: AgentManifest): readonly RoleWindow[] {
-    return (["main", "selector", "compactor"] as const).map((role) => {
-        const config = manifest.model[role] ?? manifest.model.main
-        const configuredAs: ModelRole = manifest.model[role] === undefined ? "main" : role
+    // Reads the declared keys rather than a hardcoded tuple, so a custom role appears in `validate`,
+    // `/context` and `model probe` with nothing further to change. The tuple was the drift this
+    // repo keeps finding: a second hand-kept list of the same names.
+    const names: string[] = [...MODEL_ROLES, ...customRoleNames(manifest.model)]
+    return names.map((role) => {
+        const declared = manifest.model[role]
+        const config = declared ?? manifest.model.main
+        const configuredAs: ModelRole = (declared === undefined ? "main" : role) as ModelRole
         return {
-            role,
+            role: role as ModelRole,
             configuredAs,
             modelId: config.id,
             window: windowProvenance(config.id, config.capabilities),

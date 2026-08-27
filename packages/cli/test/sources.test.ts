@@ -495,6 +495,7 @@ describe("init --skills find", () => {
         web: "none",
         composio: "none",
         telegram: "none",
+        schedules: "none",
         server: "none",
         daemon: "none",
         dir: "./t",

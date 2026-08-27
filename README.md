@@ -18,11 +18,10 @@ see Status. Bun-first TypeScript, Apache-2.0.
 Built and in use: the manifest and agent loop, the store and sessions, tools with the NLT and
 native dialects, the tiered workspace, system and web tool providers with a policy engine, the
 Telegram channel, the HTTP/SSE server, an idempotent outbox, launchd services, skills with two
-catalogues, the full-screen TUI, the compaction ladder, phase-scoped tools, and memory that
-carries across sessions.
+catalogues, the full-screen TUI, the compaction ladder, phase-scoped tools, memory that carries
+across sessions, and scheduling — cron, interval and one-shot, DST-correct, on one timer.
 
-Not built yet: scheduling, the plugin API, WhatsApp, multi-agent delegation, and the Docker
-image. `docs/05-PLAN.md` has every phase with its acceptance criteria and what is ticked.
+Not built yet: the plugin API, WhatsApp, multi-agent delegation, and the Docker image. `docs/05-PLAN.md` has every phase with its acceptance criteria and what is ticked.
 
 ## Scope
 
@@ -238,6 +237,7 @@ bun run lint         # biome, not eslint or prettier
 bun run typecheck
 bun run check:deps   # core imports nothing from a sibling package
 bun run bench:boot   # must stay under 1000 ms
+bun run bench:schedule  # 100 schedules on one timer — reports drift, does not assert it
 ```
 
 Requires Bun. Node 24+ is supported as a soft goal, tested in CI, never a merge blocker.

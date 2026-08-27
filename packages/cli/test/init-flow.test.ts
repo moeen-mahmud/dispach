@@ -33,6 +33,7 @@ const ANSWERS: InitAnswers = {
     web: "none",
     composio: "none",
     telegram: "none",
+    schedules: "none",
     server: "none",
     skills: "starter",
     daemon: "none",
@@ -77,6 +78,7 @@ describe("nextQuestion", () => {
             "composio",
             "telegram",
             "server",
+            "schedules",
             "skills",
             "dir",
         ])
@@ -618,5 +620,41 @@ describe("the Composio question", () => {
 
     test("the key is a secret step, so no renderer can echo it back", () => {
         expect(SECRET_STEPS.has("composioKey")).toBe(true)
+    })
+})
+
+describe("the schedules question", () => {
+    /** The generated `agent.yaml`, which is the only place the answer can be checked honestly. */
+    const manifest = (schedules: string): string => {
+        const file = planFiles({ ...ANSWERS, schedules }).find((f) => f.relPath === "agent.yaml")
+        return file?.contents ?? ""
+    }
+
+    test("each answer reaches the manifest, read out of the file rather than the layer that set it", () => {
+        // **Asserted at the far end on purpose.** `init`'s answer funnel is an object literal, so a
+        // step it does not list is silently dropped — and this went wrong twice while being written:
+        // once in the funnel inside `init.ts` (whose own comment describes exactly this defect,
+        // three lines below where it happened) and once in the flag dispatch in `index.ts`. Both
+        // type-checked. A test at either of those layers would have passed.
+        expect(manifest("daily")).toContain("id: morning-brief")
+        expect(manifest("daily")).toContain('expr: "0 8 * * *"')
+        expect(manifest("hourly")).toContain("id: hourly-check")
+        expect(manifest("hourly")).toContain("expr: 1h")
+    })
+
+    test("`none` still writes the block, commented, with the field names in it", () => {
+        // A switch that is off wants to exist — the standing rule after the web provider shipped
+        // commented out. What `none` must not do is invent a schedule nobody asked for.
+        const off = manifest("none")
+        expect(off).toContain("# schedules:")
+        expect(off).toContain("#     kind: cron               # cron | every | at")
+        expect(off).not.toContain("\nschedules:")
+    })
+
+    test("every answer names only serve as the thing that fires them", () => {
+        // The gap slot 2 and `status` both exist to close: configured is not running.
+        for (const answer of ["none", "daily", "hourly"]) {
+            expect(manifest(answer)).toContain("serve` fires these")
+        }
     })
 })

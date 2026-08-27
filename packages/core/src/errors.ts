@@ -866,6 +866,26 @@ export function modelWindowUnknown(
  * agent that boots, answers, and silently remembers nothing — the failure has no symptom at all, because
  * an empty slot 7 looks exactly like a turn with nothing relevant to say.
  */
+/**
+ * A schedule named a model role the manifest never declared.
+ *
+ * Throws rather than falling back to `main`, which is the same rule `unknownToolAtRuntime` follows:
+ * a silent fallback turns a one-character typo into a schedule quietly running on the expensive
+ * model forever, and nothing anywhere reports it.
+ */
+export function unknownModelRole(name: string, known: readonly string[]): ConfigError {
+    const suggestion = nearest(name, known)
+    return new ConfigError({
+        code: "model_role_unknown",
+        message: `No model role named "${name}" is declared. Declared: ${known.join(", ")}.`,
+        hint:
+            suggestion === undefined
+                ? `Add a "${name}" entry under model: in the manifest, or point the schedule at one of the declared roles.`
+                : `Did you mean ${suggestion}?`,
+        field: "schedules.role",
+    })
+}
+
 export function unknownRetriever(name: string): ConfigError {
     return new ConfigError({
         code: "memory_unknown_retriever",

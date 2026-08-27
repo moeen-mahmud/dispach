@@ -443,6 +443,70 @@ CREATE INDEX turns_by_session ON turns (agent_id, session_key, started_at DESC);
 CREATE INDEX turns_running ON turns (status) WHERE status = 'running';
 `,
     },
+    {
+        version: 8,
+        name: "schedules",
+        /**
+         * Durable schedules. `05-PLAN.md` calls this "migration 005" — that number was written
+         * before Phases 3, 4 and 7C each added one, and the list is contiguous by position.
+         *
+         * **`schedules_due` is deliberately not keyed on `agent_id`, and it is the only index here
+         * that is not.** Every other table in this store is queried per agent, because isolation is
+         * a property of the queries rather than of the file. The scheduler is the one component that
+         * is cross-agent by design: a single multiplexed timer asks "what is due anywhere" once,
+         * rather than asking N times and taking the minimum. An agent-first index would make that
+         * question a scan per agent, which is the shape the single timer exists to avoid.
+         *
+         * `anchor_at` and `next_run_at` are two different instants and both are needed. `next_run_at`
+         * is jittered and is what the tick compares against; `anchor_at` is the nominal boundary the
+         * *following* run is computed from. Persisting only the jittered one makes the offset
+         * compound — measured at 16m19s between fires of a 15-minute schedule — which is the
+         * cumulative drift the whole design exists to prevent, reintroduced by the mechanism meant to
+         * spread load.
+         *
+         * `next_run_at` is nullable, and NULL is a real state rather than a missing value: it means
+         * *never again*, which is what a spent one-shot is. The partial index excludes those rows, so
+         * a store full of fired `at` schedules costs the tick nothing.
+         *
+         * `origin` is what makes reconciliation safe. A manifest owns the rows it declared and
+         * nothing else, so a schedule created through the API survives a reload that removes every
+         * manifest schedule around it.
+         */
+        sql: `
+CREATE TABLE schedules (
+    agent_id        TEXT NOT NULL,
+    id              TEXT NOT NULL,
+    kind            TEXT NOT NULL CHECK (kind IN ('cron', 'every', 'at')),
+    expr            TEXT NOT NULL,
+    timezone        TEXT,
+    task            TEXT NOT NULL,
+    -- Both NULL together means deliver: "none" — results reach the event stream only.
+    deliver_channel TEXT,
+    deliver_to      TEXT,
+    session_mode    TEXT NOT NULL DEFAULT 'isolated',
+    -- Model role override. NULL is main, which is why it is not defaulted to the string.
+    role            TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    origin          TEXT NOT NULL CHECK (origin IN ('manifest', 'api')),
+    anchor_at       TEXT NOT NULL,
+    next_run_at     TEXT,
+    last_fired_at   TEXT,
+    last_status     TEXT CHECK (last_status IN ('ok', 'error', 'skipped')),
+    last_error      TEXT,
+    runs            INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (agent_id, id)
+);
+
+-- The tick's only query. Not agent-scoped, on purpose — see above.
+CREATE INDEX schedules_due ON schedules (next_run_at)
+    WHERE enabled = 1 AND next_run_at IS NOT NULL;
+
+-- Reconciliation reads one agent's manifest-owned rows to diff them against the manifest.
+CREATE INDEX schedules_by_origin ON schedules (agent_id, origin);
+`,
+    },
 ]
 
 export interface MigrationReport {

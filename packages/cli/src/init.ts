@@ -74,6 +74,7 @@ const FLAG_FOR: Record<InitStep, string> = {
     telegramAllow: "--telegram-allow",
     // No flag, same reason as every other secret: a token on a command line lands in history.
     telegramToken: "(asked at the prompt only)",
+    schedules: "--schedules",
     server: "--server",
     skills: "--skills",
     skillsSearch: "--skills",
@@ -318,6 +319,7 @@ function fromFlags(options: InitOptions): Partial<Record<InitStep, string>> {
         ["telegram", options.telegram],
         ["telegramAllow", options.telegramAllow],
         ["server", options.server],
+        ["schedules", options.schedules],
         // `--skills` takes a choice name *or* the words to search for, and the sugar is here rather than
         // in `validateAnswer` so the per-step validation stays strict — a flag that quietly accepted
         // anything is a flag that mistypes `startr` into a search query for "startr".
@@ -481,6 +483,7 @@ function complete(partial: Partial<Record<InitStep, string>>): InitAnswers {
         ...(answers.telegramAllow === undefined || answers.telegramAllow === ""
             ? {}
             : { telegramAllow: answers.telegramAllow }),
+        schedules: answers.schedules,
         server: answers.server,
         skills: answers.skills,
         // Carried explicitly. This funnel is a literal, not a spread, so a step that is collected and not

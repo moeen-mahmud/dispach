@@ -35,6 +35,7 @@
         "verify:endpoints": "bun scripts/verify-endpoints.ts",
         "eval:memory": "bun scripts/eval-memory.ts",
         "eval:skills": "bun scripts/eval-skills.ts",
+        "bench:schedule": "bun scripts/bench-schedule.ts",
         "prepare": "husky"
     },
     "devDependencies": {

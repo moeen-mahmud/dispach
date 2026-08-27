@@ -329,6 +329,51 @@ export interface EventDataMap {
      * load average of 351 and made `runtime.ready` take 132 seconds.
      */
     "runtime.released": { provider: string; released: string[] }
+    /** Manifest schedules brought in line with the store at load. API-created rows are untouched. */
+    "schedules.reconciled": {
+        created: number
+        updated: number
+        removed: number
+        total: number
+    }
+    /**
+     * A schedule came due and a turn started.
+     *
+     * `driftMs` is measured against the row's own `nextRunAt`, so it reports the **scheduler's**
+     * lateness and not the jitter — jitter is a deliberate, reproducible displacement and folding it
+     * into drift would make a healthy schedule look permanently late by its own offset.
+     */
+    "schedule.fired": {
+        scheduleId: string
+        kind: "cron" | "every" | "at"
+        driftMs: number
+        /** A one-shot firing after its moment, because nothing was running when it came due. */
+        late: boolean
+    }
+    /**
+     * Occurrences that came due with nothing running, and were not replayed.
+     *
+     * A recurring schedule skips to the next occurrence after downtime rather than firing the whole
+     * backlog. Emitted so the skip is visible: a schedule that silently drops fires is
+     * indistinguishable from one that is working, which is the failure this event exists to prevent.
+     */
+    "schedule.skipped": {
+        scheduleId: string
+        kind: "cron" | "every" | "at"
+        reason: "downtime"
+        missed: number
+        /** The count hit its cap and the real figure is higher. */
+        missedAtLeast: boolean
+    }
+    /** A fire arrived while the previous run of the same schedule was still going. */
+    "schedule.deferred": { scheduleId: string; kind: "cron" | "every" | "at" }
+    /**
+     * A schedule could not be read, or the turn it started failed.
+     *
+     * Never thrown, on purpose: one unreadable expression must not stop the timer for every other
+     * schedule in the process.
+     */
+    "schedule.error": { scheduleId: string; code: string; message: string; hint: string }
     "turn.end": {
         reason: TurnEndReason
         steps: number

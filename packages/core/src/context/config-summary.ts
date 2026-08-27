@@ -60,6 +60,15 @@ export interface ConfigSummaryInput {
      */
     readonly channelsStarted: boolean
     /**
+     * Whether the *scheduler* is running in this process, not whether schedules are configured.
+     *
+     * The same distinction `channelsStarted` carries, and it has to be stated separately because
+     * schedules are reconciled under `run` as well — so "this agent has three schedules" is true of
+     * the manifest and says nothing about whether anything will fire them. An agent told it has a
+     * morning brief, in a process with no timer, would reasonably report that its brief is set up.
+     */
+    readonly schedulerStarted: boolean
+    /**
      * The generated compaction notice, when `context.compactionNotice` is on.
      *
      * Passed in rather than rendered here: whether `artifact_read` is in the catalogue is the notice's
@@ -112,6 +121,7 @@ export function renderConfigSummary(input: ConfigSummaryInput): string {
         ["skills", describeSkills(manifest, input.skillNames)],
         ["memory", describeMemory(manifest)],
         ["channels", describeChannels(manifest, input.channelsStarted)],
+        ["schedules", describeSchedules(manifest, input.schedulerStarted)],
         ["http api", describeServer(manifest, input.serverListening)],
         ["permissions", describePermissions(manifest)],
     ]
@@ -239,6 +249,31 @@ function describeMemory(manifest: AgentManifest): string {
  * stop the runtime lying about its own state. The current phase lives in `phase_set`'s description
  * instead, which is slot 1, already rebuilt per phase, and therefore cannot go stale.
  */
+
+/**
+ * The schedules row.
+ *
+ * Named as `none` rather than omitted when there are none, for the reason every row here follows: a
+ * missing row reads as "no such concept" and sends an agent off to invent one, while a `none` row
+ * reads as a switch that is off. Trimmed hard — slot 2 is billed on every turn of every session, so
+ * a new capability earns a row and a wordier sentence does not.
+ */
+function describeSchedules(manifest: AgentManifest, started: boolean): string {
+    const schedules = manifest.schedules.filter((schedule) => schedule.enabled)
+    if (manifest.schedules.length === 0) return "none"
+
+    const named = schedules
+        .slice(0, 3)
+        .map((schedule) => `${schedule.id} (${schedule.kind} ${schedule.expr})`)
+        .join(", ")
+    const rest = schedules.length > 3 ? `, +${schedules.length - 3} more` : ""
+    const disabled = manifest.schedules.length - schedules.length
+    const off = disabled === 0 ? "" : `; ${disabled} disabled`
+
+    return started
+        ? `${named}${rest}${off}`
+        : `${named}${rest}${off} — configured but NOT running in this session; only \`serve\` starts the scheduler, \`run\` does not`
+}
 
 function describeChannels(manifest: AgentManifest, started: boolean): string {
     const enabled = manifest.channels.filter((channel) => channel.enabled)

@@ -196,6 +196,12 @@ export interface InitAnswers {
      * `local` binds loopback. A public bind is a deliberate edit afterwards, and it refuses to
      * start without a token — which is why the generated `.env` gets one rather than an empty line.
      */
+    /**
+     * What the agent runs on a schedule: `none`, `daily` or `hourly`.
+     *
+     * `none` still writes the block, commented — see `SCHEDULE_CHOICES`.
+     */
+    readonly schedules: string
     readonly server: string
     /**
      * The API token, generated rather than asked. Not a third-party credential and not a choice —
@@ -251,6 +257,34 @@ export interface InitAnswers {
  * no account anywhere, and `web_search` needs a key from a third party. Collapsing them would force
  * anyone who wants to hand their agent a URL to go and sign up for something first.
  */
+/**
+ * Whether the agent runs anything on a schedule, and what the generated manifest shows.
+ *
+ * A capability reachable only by somebody who already knows the field names is one the generated
+ * file is hiding — the standing rule after the web provider shipped commented out. So this is a
+ * question rather than a block someone has to discover.
+ *
+ * `none` still writes a commented `schedules:` block with a worked example, for the same reason
+ * `--system none` still names the provider: a switch that is off wants to *exist*. What it does not
+ * do is invent a schedule nobody asked for.
+ *
+ * `daily` is offered because it is what almost everyone means the first time, and because a cron
+ * expression is exactly the kind of thing people get wrong once and then avoid. Only `serve` fires
+ * them, which the generated comments say.
+ */
+export const SCHEDULE_CHOICES: readonly {
+    readonly value: string
+    readonly label: string
+}[] = [
+    { value: "none", label: "no — the block is written commented, with an example" },
+    { value: "daily", label: "a daily briefing at 08:00" },
+    { value: "hourly", label: "an hourly check" },
+]
+
+function scheduleChoice(value: string): { readonly value: string } | undefined {
+    return SCHEDULE_CHOICES.find((choice) => choice.value === value)
+}
+
 export const WEB_CHOICES: readonly {
     readonly value: string
     readonly label: string
@@ -555,6 +589,7 @@ const STEP_ORDER: readonly InitStep[] = [
     "telegramAllow",
     "telegramToken",
     "server",
+    "schedules",
     "skills",
     "daemon",
     "dir",
@@ -797,6 +832,16 @@ export function nextQuestion(
                         label: choice.label,
                     })),
                 }
+            case "schedules":
+                return {
+                    step,
+                    prompt: "Run anything on a schedule?",
+                    fallback: "1",
+                    options: SCHEDULE_CHOICES.map((choice) => ({
+                        value: choice.value,
+                        label: choice.label,
+                    })),
+                }
             case "skills":
                 return {
                     step,
@@ -960,6 +1005,17 @@ export function validateAnswer(step: InitStep, raw: string): Answered {
                 ? {
                       ok: false,
                       reason: `pick 1-${SERVER_CHOICES.length}, or a name: ${SERVER_CHOICES.map((c) => c.value).join(", ")}.`,
+                  }
+                : { ok: true, value: chosen.value }
+        }
+
+        case "schedules": {
+            const byNumber = SCHEDULE_CHOICES[Number(value) - 1]
+            const chosen = byNumber ?? scheduleChoice(value.toLowerCase())
+            return chosen === undefined
+                ? {
+                      ok: false,
+                      reason: `pick 1-${SCHEDULE_CHOICES.length}, or a name: ${SCHEDULE_CHOICES.map((c) => c.value).join(", ")}.`,
                   }
                 : { ok: true, value: chosen.value }
         }
@@ -1584,6 +1640,77 @@ function serverBlock(answers: InitAnswers): readonly string[] {
     ]
 }
 
+/**
+ * The `schedules` section.
+ *
+ * Written either way, like `server` and unlike `channels` — the commented form carries a worked
+ * example so the field names are discoverable without opening the spec, which is the whole reason
+ * this became a question instead of a block somebody had to find.
+ *
+ * Only `serve` fires them, and the comment says so: a schedule that exists and never runs because
+ * the process was started with `run` is exactly the "configured but not working" gap slot 2 and
+ * `status` were both built to close.
+ */
+function schedulesBlock(answers: InitAnswers): readonly string[] {
+    const head = [
+        rule("schedules"),
+        `# Only \`${BRAND.slug} serve\` fires these. \`run\` reconciles them so they are listed and`,
+        `# validated, and starts no timer.`,
+        `#`,
+        `# cron observes DST: an occurrence whose local time does not exist on a spring-forward day`,
+        `# is SKIPPED, and a repeated fall-back hour fires ONCE. Avoid 00:00-03:00 and neither`,
+        `# applies. every is interval-anchored and ignores DST. Each fire carries a fixed offset`,
+        `# derived from the id — at most a tenth of the interval, capped at 15 minutes — so many`,
+        `# schedules do not hit one endpoint at the same instant.`,
+        `#`,
+        `# deliver is required: { channel, to }, or the literal "none" for the event stream only.`,
+    ]
+
+    if (answers.schedules === "daily") {
+        return [
+            ...head,
+            `schedules:`,
+            `  - id: morning-brief`,
+            `    kind: cron`,
+            `    expr: "0 8 * * *"        # 08:00 in the timezone below`,
+            `    timezone: ${hostZoneName()}`,
+            `    task: "Summarise what is on today and anything left over from yesterday."`,
+            `    deliver: none            # or { channel: tg, to: "@your-handle" } once a channel exists`,
+            ``,
+        ]
+    }
+
+    if (answers.schedules === "hourly") {
+        return [
+            ...head,
+            `schedules:`,
+            `  - id: hourly-check`,
+            `    kind: every`,
+            `    expr: 1h`,
+            `    task: "Check for anything that needs attention and say nothing if all is well."`,
+            `    deliver: none            # or { channel: tg, to: "@your-handle" } once a channel exists`,
+            ``,
+        ]
+    }
+
+    return [
+        ...head,
+        `# schedules:`,
+        `#   - id: morning-brief`,
+        `#     kind: cron               # cron | every | at`,
+        `#     expr: "0 8 * * *"        # cron: 5 or 6 field | every: "15m" | at: ISO 8601`,
+        `#     timezone: ${hostZoneName()}`,
+        `#     task: "Summarise the day ahead."`,
+        `#     deliver: none`,
+        ``,
+    ]
+}
+
+/** The host's own zone, so the generated example means what it looks like it means. */
+function hostZoneName(): string {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+}
+
 function manifestFor(answers: InitAnswers): string {
     const slug = slugify(answers.name)
 
@@ -1790,14 +1917,7 @@ function manifestFor(answers: InitAnswers): string {
         `  #                      # never activate, and silently unreachable is the wrong answer.`,
         `  #                      # Matching is whole-word and case-insensitive against the input`,
         ``,
-        `# Phase 8 — schedules`,
-        `# schedules:`,
-        `#   - id: morning-brief`,
-        `#     kind: cron`,
-        `#     expr: "0 8 * * *"`,
-        `#     task: "Summarise the day ahead."`,
-        `#     deliver: { channel: tg, to: "@your-handle" }`,
-        ``,
+        ...schedulesBlock(answers),
         `# Phase 9 — plugins`,
         `# plugins:`,
         `#   - "${BRAND.packageScope}/channel-telegram"`,

@@ -52,6 +52,19 @@ async function populate(store: Store, agentId: string, key = "local:aaa111"): Pr
             nextAttemptAt: NOW,
         },
     ])
+    await store.schedules.upsert({
+        agentId,
+        id: `brief-${agentId}`,
+        kind: "cron",
+        expr: "0 8 * * *",
+        task: `a daily brief for ${agentId}`,
+        sessionMode: "isolated",
+        enabled: true,
+        origin: "manifest",
+        anchorAt: NOW,
+        nextRunAt: NOW,
+        now: NOW,
+    })
     await store.memory.replaceSource(
         agentId,
         "2026-08.md",
@@ -96,6 +109,7 @@ describe("agentFootprint", () => {
         expect(alpha.outboxPending).toBe(1)
         expect(alpha.passages).toBe(1)
         expect(alpha.memorySources).toBe(1)
+        expect(alpha.schedules).toBe(1)
         expect(alpha.lease).toBe(true)
 
         // Two sessions, so a count that quietly returned the whole table would read 3 here.
@@ -137,6 +151,7 @@ describe("purgeAgent", () => {
             artifacts: 0,
             outbox: 0,
             outboxPending: 0,
+            schedules: 0,
             passages: 0,
             memorySources: 0,
             lease: false,
@@ -147,6 +162,9 @@ describe("purgeAgent", () => {
         expect((await store.messages.history("beta", "local:aaa111")).length).toBe(2)
         expect((await store.memory.stats("beta")).passages).toBe(1)
         expect(await store.leases.get("beta")).not.toBe(undefined)
+        // A schedule that survived a sibling's removal is the case a DELETE with no WHERE would
+        // silently break — and every test that only ever puts one agent in the store would pass.
+        expect((await store.schedules.list("beta")).length).toBe(1)
         await store.close()
     })
 

@@ -91,6 +91,10 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         channels: CHANNELS,
         // The one call site that passes this. See the file comment.
         startChannels: true,
+        // Same rule and the same reason: `serve` is the only command that fires schedules. A REPL
+        // that started firing them while somebody typed at it would be a surprise, and a one-shot
+        // `run --input` that armed a timer would not exit.
+        startSchedules: true,
         // `run` and `sessions` have resolved this default since the sandbox landed; `serve` never
         // did, so it silently took core's `":memory:"` — correct as a *library* default, since
         // constructing a Runtime must not create a directory in someone's working tree, and wrong
@@ -168,7 +172,19 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                 channels.length === 0
                     ? "no channels"
                     : channels.map((c) => `${c.id} (${c.type})`).join(", ")
-            process.stdout.write(`  ${agent.id} — ${suffix}\n`)
+            // Schedules named on the banner for the reason the 57 MB log taught: this is the last
+            // place a person looks before walking away, and "it is set up" is exactly the belief a
+            // schedule that never fires depends on going unchecked.
+            const enabled = agent.manifest.schedules.filter((schedule) => schedule.enabled)
+            const scheduled =
+                agent.manifest.schedules.length === 0
+                    ? ""
+                    : `, ${enabled.length} schedule${enabled.length === 1 ? "" : "s"}${
+                          agent.manifest.schedules.length > enabled.length
+                              ? ` (+${agent.manifest.schedules.length - enabled.length} disabled)`
+                              : ""
+                      }`
+            process.stdout.write(`  ${agent.id} — ${suffix}${scheduled}\n`)
         }
         if (token === undefined || token === "") {
             // Loopback-only, or `serve` would have refused to bind. Said out loud anyway: someone

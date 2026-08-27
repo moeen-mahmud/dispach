@@ -233,7 +233,11 @@ interface Event {
 | `delivery.retry` | retryable send failed | `channelId`, `chunkIndex`, `attempts`, `delayMs`, `error` |
 | `delivery.failed` | chunk abandoned | `channelId`, `chunkIndex`, `chunkTotal`, `attempts`, `exhausted`, `abandoned`, `error` |
 | `delivery.uncertain` | in-flight row recovered at boot | `channelId`, `chunkIndex`, `chunkTotal`, `attempts`, `idempotentSend` |
-| `schedule.fired` | timer | `scheduleId`, `kind`, `drift Ms` |
+| `schedules.reconciled` | per agent at load | `created`, `updated`, `removed`, `total` |
+| `schedule.fired` | timer | `scheduleId`, `kind`, `driftMs`, `late` |
+| `schedule.skipped` | occurrences passed with nothing running | `scheduleId`, `kind`, `reason`, `missed`, `missedAtLeast` |
+| `schedule.deferred` | a fire arrived mid-run | `scheduleId`, `kind` |
+| `schedule.error` | unreadable schedule, or the turn it started failed | `scheduleId`, `code`, `message`, `hint` |
 | `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs` |
 | `error` | anything uncaught | `code`, `message`, `hint`, `stack?` |
 

@@ -21,6 +21,7 @@ import type { EnvSource } from "../manifest/env.ts"
 import { type LoadedManifest, loadManifest, loadManifestFromObject } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
 import type { FetchLike } from "../model/provider.ts"
+import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams } from "../store/buffer.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
 import type { RuntimeMode, Store } from "../store/store.ts"
@@ -29,6 +30,7 @@ import type { ScriptRunner, ToolProvider, ToolProviderFactory } from "../tools/t
 import { Agent } from "./agent.ts"
 import { type ChannelFactory, ChannelHub } from "./channels.ts"
 import { claimLeases, LEASE_BEAT_MS } from "./lease.ts"
+import { reconcileSchedules, scheduleRunner } from "./schedules.ts"
 
 export type AgentSource = string | Record<string, unknown>
 
@@ -96,6 +98,16 @@ export interface RuntimeOptions {
      */
     readonly startChannels?: boolean
     /**
+     * Start the scheduler as part of `create`, after `runtime.ready` has fired.
+     *
+     * Off by default, and for the same reasons `startChannels` is: a REPL that quietly began firing
+     * schedules while somebody typed at it would be a surprise, and a one-shot `run --input` that
+     * armed a timer would not exit. `serve` passes true; `run` does not. Schedules are still
+     * *reconciled* either way, so `schedules` can list them without the timer running — the flag
+     * decides whether they fire, never whether they exist.
+     */
+    readonly startSchedules?: boolean
+    /**
      * How this process was started, recorded on the runtime lease.
      *
      * Only ever read back to phrase a refusal — "already served by pid 4711 as a background
@@ -136,6 +148,7 @@ export class Runtime {
     readonly streams: TurnStreams
     /** Channel bindings and the delivery queue. Empty when no agent configures a channel. */
     readonly channels: ChannelHub
+    readonly scheduler: Scheduler
 
     /**
      * Every tool provider constructed, flattened. Held so `stop` can tell each one to let go.
@@ -161,6 +174,7 @@ export class Runtime {
         store: Store
         streams: TurnStreams
         channels: ChannelHub
+        scheduler: Scheduler
         ownsStore: boolean
         owned: readonly string[]
     }) {
@@ -170,6 +184,7 @@ export class Runtime {
         this.store = init.store
         this.streams = init.streams
         this.channels = init.channels
+        this.scheduler = init.scheduler
         this.#ownsStore = init.ownsStore
         this.#owned = init.owned
     }
@@ -317,6 +332,17 @@ export class Runtime {
         //    that is called after readiness, below.
         const hub = new ChannelHub({ bus, outboxStore: store.outbox })
 
+        // Built before the runtime so it can be handed in, but it arms nothing until `start()` and
+        // reads its agent list lazily — the runtime's own map is populated a few lines below this.
+        const scheduler = new Scheduler({
+            store: store.schedules,
+            bus,
+            // `agents` is already built at this point; read lazily anyway so the scheduler and the
+            // runtime cannot come to disagree about which agents exist.
+            agentIds: () => agents.map((agent) => agent.id),
+            run: scheduleRunner({ agents: () => agents, hub }),
+        })
+
         const runtime = new Runtime({
             runtimeId,
             bus,
@@ -324,6 +350,7 @@ export class Runtime {
             store,
             streams,
             channels: hub,
+            scheduler,
             ownsStore,
             owned: leases.owned,
         })
@@ -388,6 +415,43 @@ export class Runtime {
         // start reports through the bus and leaves the rest of the runtime serving.
         if (options.startChannels === true) await hub.start()
 
+        // Schedules are reconciled whether or not the timer runs, so `schedules` lists what the
+        // manifest declares even under `run`. Nothing fires here: the acceptance criterion is that
+        // an idle agent with schedules makes zero model calls until one comes due, and a catch-up
+        // inside boot would break it on every start.
+        for (const [index, entry] of loaded.entries()) {
+            const agent = agents[index]
+            if (agent === undefined) continue
+            if (entry.manifest.schedules.length === 0) {
+                // Still reconciled, so removing the last schedule from a manifest removes its row.
+                await reconcileSchedules({
+                    agentId: agent.id,
+                    schedules: [],
+                    store: store.schedules,
+                    now: Date.now(),
+                })
+                continue
+            }
+            const report = await reconcileSchedules({
+                agentId: agent.id,
+                schedules: entry.manifest.schedules,
+                store: store.schedules,
+                now: Date.now(),
+            })
+            bus.emit(
+                "schedules.reconciled",
+                {
+                    created: report.created.length,
+                    updated: report.updated.length,
+                    removed: report.removed.length,
+                    total: entry.manifest.schedules.length,
+                },
+                { agentId: agent.id },
+            )
+        }
+
+        if (options.startSchedules === true) await scheduler.start()
+
         // After readiness, so a timer never delays boot. `unref` because a heartbeat must not be
         // the reason a one-shot command fails to exit — the lease going stale is exactly the
         // recoverable state it is designed for, whereas a process that will not end is not.
@@ -404,6 +468,11 @@ export class Runtime {
             // decision 5.17 was written to stop it saying.
             agent.reportRuntimeState({
                 channelsStarted: hub.started && hub.statusOf(agent.id).length > 0,
+                // Same distinction as `channelsStarted`, and the same trap: a schedule is
+                // *reconciled* under `run` as well, so "does this agent have schedules" and "is
+                // anything going to fire them" are different questions and slot 2 answers the
+                // second. Decision 5.17, whose own fix had to be fixed for exactly this reason.
+                schedulerStarted: scheduler.started,
             })
         }
 
@@ -485,6 +554,9 @@ export class Runtime {
         // Their rows stay `running` and the next boot reaps them, which is the honest record of
         // what happened: the process went away mid-generation.
         this.streams.close()
+        // Before the channels, because a schedule firing mid-shutdown would enqueue a delivery into
+        // an outbox that is about to stop draining.
+        await this.scheduler.stop()
         // Before the store closes, because stopping a transport can flush a final delivery and a
         // closed database would turn that into an exception during shutdown.
         await this.channels.stop()

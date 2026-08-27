@@ -54,6 +54,7 @@ describe("the happy path", () => {
         state = commit(state) // composio: select step, default "no other apps"
         state = commit(state) // telegram: select step, default "not on Telegram"
         state = commit(state) // server: select step, default "no HTTP API"
+        state = commit(state) // schedules default
         state = commit(state) // skills: select step, index 0 opens the catalogue picker after the wizard
         state = commit(state) // dir: derived from name
         expect(state.phase).toBe("confirm")
@@ -85,6 +86,7 @@ describe("the happy path", () => {
         state = commit(state) // composio default
         state = commit(state) // telegram default
         state = commit(state) // server default
+        state = commit(state) // schedules default
         state = commit(state) // skills — index 0 opens the catalogue picker after the wizard
         state = commit(state) // dir — apiKeyEnv was skipped
         expect(state.phase).toBe("confirm")
@@ -140,6 +142,7 @@ describe("back navigation", () => {
         state = commit(state) // composio
         state = commit(state) // telegram
         state = commit(state) // server
+        state = commit(state) // schedules default
         state = commit(state) // skills — index 0 opens the catalogue picker after the wizard
         state = commit(state) // dir
         expect(state.phase).toBe("confirm")
@@ -176,6 +179,7 @@ describe("flags answering everything", () => {
         composio: "none",
         telegram: "none",
         server: "none",
+        schedules: "none",
         skills: "starter",
         dir: "./milo",
     }
@@ -228,6 +232,7 @@ describe("the skills question never becomes a text box", () => {
         state = commit(state) // composio
         state = commit(state) // telegram
         state = commit(state) // server
+        state = commit(state) // schedules default
         expect(currentQuestion(state)?.step).toBe("skills")
         state = commit(state) // index 0 is `find`
         expect(partialOf(state).skills).toBe("find")

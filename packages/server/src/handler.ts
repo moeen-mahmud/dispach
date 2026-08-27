@@ -17,8 +17,12 @@ import {
     type AnyEvent,
     type ErrorDetail,
     HarnessError,
+    newRunId,
     newTurnId,
+    prepareScheduleWrite,
     type Runtime,
+    type ScheduleRecord,
+    scheduleSessionKey,
     VERSION,
 } from "@dispach/core"
 import { Router } from "./router.ts"
@@ -306,6 +310,116 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
 
     // ─── Introspection ───────────────────────────────────────────────────────────────────
 
+    // ── Schedules ────────────────────────────────────────────────────────────────────────
+    //
+    // Listing includes disabled by default — decision 9.4, and the reason is that hiding a
+    // switched-off schedule makes it indistinguishable from one that was never written. `?enabled=`
+    // filters when somebody actually wants that.
+    router.add("GET", "/v1/agents/:id/schedules", (context) =>
+        withAgent(runtime, context, async (agent) => {
+            const enabled = context.url.searchParams.get("enabled")
+            const rows = await agent.store.schedules.list(
+                agent.id,
+                enabled === null ? {} : { enabled: enabled === "true" },
+            )
+            return json({ schedules: rows })
+        }),
+    )
+
+    router.add("POST", "/v1/agents/:id/schedules", (context) =>
+        withAgent(runtime, context, async (agent) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            return writeSchedule(runtime, agent, body.value, undefined)
+        }),
+    )
+
+    router.add("GET", "/v1/agents/:id/schedules/:sid", (context) =>
+        withAgent(runtime, context, async (agent) => {
+            const sid = context.params.sid ?? ""
+            const row = await agent.store.schedules.get(agent.id, sid)
+            return row === undefined ? notFound("schedule", sid) : json(row)
+        }),
+    )
+
+    router.add("PATCH", "/v1/agents/:id/schedules/:sid", (context) =>
+        withAgent(runtime, context, async (agent) => {
+            const sid = context.params.sid ?? ""
+            const existing = await agent.store.schedules.get(agent.id, sid)
+            if (existing === undefined) return notFound("schedule", sid)
+
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const patch =
+                body.value === null || typeof body.value !== "object" || Array.isArray(body.value)
+                    ? {}
+                    : (body.value as Record<string, unknown>)
+
+            // The whole schedule is revalidated, never the patch alone: a change to `expr` can make
+            // a previously-fine `timezone` unsatisfiable, and validating a fragment cannot see that.
+            const { id: _ignoredId, ...fields } = patch
+            const merged: Record<string, unknown> = {
+                kind: existing.kind,
+                expr: existing.expr,
+                task: existing.task,
+                deliver:
+                    existing.deliverChannel === undefined || existing.deliverTo === undefined
+                        ? "none"
+                        : { channel: existing.deliverChannel, to: existing.deliverTo },
+                session: existing.sessionMode,
+                enabled: existing.enabled,
+                ...(existing.timezone === undefined ? {} : { timezone: existing.timezone }),
+                ...(existing.role === undefined ? {} : { role: existing.role }),
+                ...fields,
+                // The id is the row's identity and the key reconciliation matches on, so a patch
+                // that renamed it would create a second schedule and orphan the first. Dropped from
+                // the incoming fields above rather than overwritten after them, which TypeScript
+                // rejects as a duplicate key — and rightly: two spellings of the same intent in one
+                // literal is how the wrong one eventually wins.
+                id: existing.id,
+            }
+            return writeSchedule(runtime, agent, merged, existing)
+        }),
+    )
+
+    router.add("DELETE", "/v1/agents/:id/schedules/:sid", (context) =>
+        withAgent(runtime, context, async (agent) => {
+            const sid = context.params.sid ?? ""
+            const removed = await agent.store.schedules.remove(agent.id, sid)
+            if (!removed) return notFound("schedule", sid)
+            runtime.scheduler.changed()
+            return json({ removed: sid })
+        }),
+    )
+
+    // Out of band: fires now, and does **not** move the schedule's own next run. Someone testing a
+    // schedule at 15:00 must not find that its 08:00 slot has moved.
+    router.add("POST", "/v1/agents/:id/schedules/:sid/run", (context) =>
+        withAgent(runtime, context, async (agent) => {
+            const sid = context.params.sid ?? ""
+            const row = await agent.store.schedules.get(agent.id, sid)
+            if (row === undefined) return notFound("schedule", sid)
+
+            const runId = newRunId()
+            const sessionKey = scheduleSessionKey(row.sessionMode, row.id, runId)
+            const turnId = newTurnId()
+            // Detached, like every other turn on this surface: the client gets a handle and reads
+            // the stream, and a disconnect never cancels the work.
+            void agent
+                .send(row.task, {
+                    sessionKey,
+                    turnId,
+                    source: `schedule:${row.id}:manual`,
+                    ...(row.role === undefined ? {} : { role: row.role }),
+                })
+                .catch(() => {
+                    // Reported on the bus by the turn itself; swallowed here so an unhandled
+                    // rejection cannot take the server down.
+                })
+            return json({ scheduleId: row.id, turnId, sessionKey, outOfBand: true }, 202)
+        }),
+    )
+
     router.add("GET", "/v1/agents/:id/tools", (context) =>
         withAgent(runtime, context, (agent) =>
             json(
@@ -456,6 +570,60 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One write path for POST and PATCH.
+ *
+ * The validation itself is core's `prepareScheduleWrite`, so the API and the manifest reconciler
+ * accept and refuse exactly the same things — a check only one of two writers performs is a check
+ * they disagree about.
+ */
+async function writeSchedule(
+    runtime: Runtime,
+    agent: Agent,
+    body: unknown,
+    existing: ScheduleRecord | undefined,
+): Promise<Response> {
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return fail(
+            {
+                code: "schedule_invalid",
+                message: "A schedule must be a JSON object.",
+                hint: "Send { id, kind, expr, task, deliver } — see docs/02-SPEC-MANIFEST.md.",
+            },
+            400,
+        )
+    }
+
+    try {
+        const row = prepareScheduleWrite({
+            agentId: agent.id,
+            body: body as Record<string, unknown>,
+            channelIds: agent.manifest.channels.map((channel) => channel.id),
+            roleNames: Object.keys(agent.manifest.model),
+            now: Date.now(),
+            // Never `manifest`: a row written here must survive a reload, and marking it as the
+            // manifest's would let the next reconciliation delete something no file describes.
+            origin: "api",
+            ...(existing === undefined ? {} : { existing }),
+        })
+        const saved = await agent.store.schedules.upsert(row)
+        // The timer is armed to the nearest due time, so a new schedule sooner than that would
+        // otherwise wait out the current horizon before being noticed.
+        runtime.scheduler.changed()
+        return json(saved, existing === undefined ? 201 : 200)
+    } catch (error) {
+        const detail =
+            error instanceof HarnessError
+                ? error.toDetail()
+                : {
+                      code: "schedule_invalid",
+                      message: error instanceof Error ? error.message : String(error),
+                      hint: "See docs/02-SPEC-MANIFEST.md for the schedule fields.",
+                  }
+        return fail(detail, 400)
+    }
+}
 
 function json(body: unknown, status = 200): Response {
     return new Response(JSON.stringify(body), {

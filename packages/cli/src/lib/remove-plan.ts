@@ -186,6 +186,14 @@ export function renderRemoval(facts: RemovalFacts): string {
                 ...(f.outboxPending === 0 ? {} : { note: "abandoned" }),
             },
             {
+                label: "schedules",
+                value: f.schedules === 0 ? "none" : plural(f.schedules, "schedule"),
+                // A schedule is the one thing here that would keep *firing* if it survived, so its
+                // removal is the part of this listing least likely to be regretted and most likely
+                // to be missed if it were absent.
+                ...(f.schedules === 0 ? {} : { note: "stops firing" }),
+            },
+            {
                 label: "logs",
                 value:
                     facts.logs.length === 0
@@ -230,6 +238,7 @@ export function renderOrphans(orphans: readonly Orphan[]): string {
             }
             if (f.passages > 0) parts.push(`${plural(f.passages, "memory passage")}`)
             if (f.outbox > 0) parts.push(`${plural(f.outbox, "queued delivery")}`)
+            if (f.schedules > 0) parts.push(`${plural(f.schedules, "schedule")}`)
             if (f.lease) parts.push("a stale lease")
             if (orphan.logs.length > 0) {
                 parts.push(

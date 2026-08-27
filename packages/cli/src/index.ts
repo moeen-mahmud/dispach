@@ -38,6 +38,7 @@ import { memoryCommand } from "#memory"
 import { modelCommand } from "#model"
 import { removeCommand } from "#remove"
 import { runCommand } from "#run"
+import { schedulesCommand } from "#schedules"
 import { serveCommand } from "#serve"
 import { sessionsCommand } from "#sessions"
 import { skillsCommand } from "#skills"
@@ -111,6 +112,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
             const telegram = flags.str("telegram")
             const telegramAllow = flags.str("telegram-allow")
             const server = flags.str("server")
+            const schedules = flags.str("schedules")
             const skills = flags.str("skills")
             const daemon = flags.str("daemon")
             return await initCommand({
@@ -127,6 +129,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 ...(webBackend === undefined ? {} : { webBackend }),
                 ...(composio === undefined ? {} : { composio }),
                 ...(telegram === undefined ? {} : { telegram }),
+                ...(schedules === undefined ? {} : { schedules }),
                 ...(telegramAllow === undefined ? {} : { telegramAllow }),
                 ...(server === undefined ? {} : { server }),
                 ...(skills === undefined ? {} : { skills }),
@@ -155,6 +158,21 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 // passing that would turn "no opinion" into "definitely on" and override the env var.
                 ...(flags.bool("no-enhanced-keys") ? { noEnhancedKeys: true } : {}),
                 plain: flags.bool("plain"),
+            })
+        }
+
+        case "schedules": {
+            const store = flags.str("store")
+            const id = flags.str("id")
+            const enable = flags.str("enable")
+            const disable = flags.str("disable")
+            return await schedulesCommand({
+                manifestPath: resolved(),
+                ...(store === undefined ? {} : { store }),
+                ...(id === undefined ? {} : { id }),
+                ...(enable === undefined ? {} : { enable }),
+                ...(disable === undefined ? {} : { disable }),
+                json: flags.bool("json"),
             })
         }
 

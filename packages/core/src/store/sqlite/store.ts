@@ -30,6 +30,10 @@ import type {
     MessageStore,
     OutboxStore,
     RuntimeMode,
+    ScheduleOrigin,
+    ScheduleRecord,
+    ScheduleRunStatus,
+    ScheduleStore,
     SessionRecord,
     SessionStore,
     SessionSummary,
@@ -390,6 +394,62 @@ function toDelivery(row: DeliveryRow): DeliveryRecord {
     }
 }
 
+interface ScheduleRow {
+    agent_id: string
+    id: string
+    kind: string
+    expr: string
+    timezone: string | null
+    task: string
+    deliver_channel: string | null
+    deliver_to: string | null
+    session_mode: string
+    role: string | null
+    enabled: number
+    origin: string
+    anchor_at: string
+    next_run_at: string | null
+    last_fired_at: string | null
+    last_status: string | null
+    last_error: string | null
+    runs: number
+    created_at: string
+    updated_at: string
+}
+
+/**
+ * Nullable columns become `undefined` by assignment, not by a conditional spread.
+ *
+ * `ScheduleRecord` declares them as `string | undefined` rather than optional for the reason this
+ * repo has now paid for six times: a conditional spread is not excess-property-checked, so a field
+ * dropped from one of these objects type-checks and arrives nowhere. Required-but-undefined makes
+ * the compiler name it.
+ */
+function toSchedule(row: ScheduleRow): ScheduleRecord {
+    return {
+        agentId: row.agent_id,
+        id: row.id,
+        kind: row.kind as ScheduleRecord["kind"],
+        expr: row.expr,
+        timezone: row.timezone ?? undefined,
+        task: row.task,
+        deliverChannel: row.deliver_channel ?? undefined,
+        deliverTo: row.deliver_to ?? undefined,
+        sessionMode: row.session_mode,
+        role: row.role ?? undefined,
+        enabled: row.enabled !== 0,
+        origin: row.origin as ScheduleOrigin,
+        anchorAt: row.anchor_at,
+        nextRunAt: row.next_run_at ?? undefined,
+        lastFiredAt: row.last_fired_at ?? undefined,
+        lastStatus: (row.last_status ?? undefined) as ScheduleRunStatus | undefined,
+        lastError: row.last_error ?? undefined,
+        runs: row.runs,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+    }
+}
+
 interface LeaseRow {
     agent_id: string
     runtime_id: string
@@ -421,6 +481,7 @@ export class SqliteStore implements Store {
     readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
+    readonly schedules: ScheduleStore
     readonly location: string
     /** What `migrate` did at open. Reported by boot rather than logged and forgotten. */
     readonly migrations: MigrationReport
@@ -1258,6 +1319,168 @@ export class SqliteStore implements Store {
             },
         }
 
+        const scheduleQ = {
+            get: db.prepare("SELECT * FROM schedules WHERE agent_id = ? AND id = ?"),
+            upsert: db.prepare(
+                `INSERT INTO schedules (
+                     agent_id, id, kind, expr, timezone, task, deliver_channel, deliver_to,
+                     session_mode, role, enabled, origin, anchor_at, next_run_at, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (agent_id, id) DO UPDATE SET
+                     kind = excluded.kind,
+                     expr = excluded.expr,
+                     timezone = excluded.timezone,
+                     task = excluded.task,
+                     deliver_channel = excluded.deliver_channel,
+                     deliver_to = excluded.deliver_to,
+                     session_mode = excluded.session_mode,
+                     role = excluded.role,
+                     enabled = excluded.enabled,
+                     origin = excluded.origin,
+                     anchor_at = excluded.anchor_at,
+                     next_run_at = excluded.next_run_at,
+                     updated_at = excluded.updated_at`,
+            ),
+            list: db.prepare("SELECT * FROM schedules WHERE agent_id = ? ORDER BY id"),
+            markFired: db.prepare(
+                `UPDATE schedules
+                    SET last_fired_at = ?, anchor_at = ?, next_run_at = ?, last_status = ?,
+                        last_error = ?, runs = runs + 1, updated_at = ?
+                  WHERE agent_id = ? AND id = ?`,
+            ),
+            reschedule: db.prepare(
+                `UPDATE schedules SET anchor_at = ?, next_run_at = ?, updated_at = ?
+                  WHERE agent_id = ? AND id = ?`,
+            ),
+            setEnabled: db.prepare(
+                "UPDATE schedules SET enabled = ?, updated_at = ? WHERE agent_id = ? AND id = ?",
+            ),
+            remove: db.prepare("DELETE FROM schedules WHERE agent_id = ? AND id = ?"),
+            manifestIds: db.prepare(
+                "SELECT id FROM schedules WHERE agent_id = ? AND origin = 'manifest'",
+            ),
+            countSchedules: db.prepare("SELECT COUNT(*) AS c FROM schedules WHERE agent_id = ?"),
+            deleteAll: db.prepare("DELETE FROM schedules WHERE agent_id = ?"),
+        }
+
+        /**
+         * `due` and `nextDue` take a variable-length agent list, so their SQL cannot be prepared once.
+         *
+         * Prepared per call rather than through `json_each`, because JSON1 is only guaranteed built in
+         * from SQLite 3.38 while the rest of this file needs 3.35 — and a store that works on one
+         * driver and not another is the failure mode `test:node` exists to catch. The cost is a parse
+         * every scheduler tick, which is once per horizon at most, not a hot loop.
+         */
+        const placeholders = (count: number): string => new Array(count).fill("?").join(", ")
+
+        this.schedules = {
+            upsert: async (schedule) => {
+                scheduleQ.upsert.run(
+                    schedule.agentId,
+                    schedule.id,
+                    schedule.kind,
+                    schedule.expr,
+                    schedule.timezone ?? null,
+                    schedule.task,
+                    schedule.deliverChannel ?? null,
+                    schedule.deliverTo ?? null,
+                    schedule.sessionMode,
+                    schedule.role ?? null,
+                    schedule.enabled ? 1 : 0,
+                    schedule.origin,
+                    schedule.anchorAt,
+                    schedule.nextRunAt ?? null,
+                    schedule.now,
+                    schedule.now,
+                )
+                const row = scheduleQ.get.get<ScheduleRow>(schedule.agentId, schedule.id)
+                if (row === undefined) {
+                    throw new Error(
+                        `Schedule "${schedule.id}" vanished immediately after being written. ` +
+                            "hint: this means the store is not durable — check that the database file is writable and not on a filesystem that discards writes.",
+                    )
+                }
+                return toSchedule(row)
+            },
+            get: async (agentId, id) => {
+                const row = scheduleQ.get.get<ScheduleRow>(agentId, id)
+                return row === undefined ? undefined : toSchedule(row)
+            },
+            list: async (agentId, options = {}) => {
+                let rows = scheduleQ.list.all<ScheduleRow>(agentId).map(toSchedule)
+                if (options.enabled !== undefined) {
+                    rows = rows.filter((row) => row.enabled === options.enabled)
+                }
+                if (options.origin !== undefined) {
+                    rows = rows.filter((row) => row.origin === options.origin)
+                }
+                return rows
+            },
+            due: async (agentIds, now, limit = 100) => {
+                if (agentIds.length === 0) return []
+                const statement = this.#db.prepare(
+                    `SELECT * FROM schedules
+                      WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+                        AND agent_id IN (${placeholders(agentIds.length)})
+                      ORDER BY next_run_at ASC
+                      LIMIT ?`,
+                )
+                return statement.all<ScheduleRow>(now, ...agentIds, limit).map(toSchedule)
+            },
+            nextDue: async (agentIds) => {
+                if (agentIds.length === 0) return undefined
+                const statement = this.#db.prepare(
+                    `SELECT MIN(next_run_at) AS soonest FROM schedules
+                      WHERE enabled = 1 AND next_run_at IS NOT NULL
+                        AND agent_id IN (${placeholders(agentIds.length)})`,
+                )
+                const row = statement.get<{ soonest: string | null }>(...agentIds)
+                return row?.soonest ?? undefined
+            },
+            markFired: async (agentId, id, fired) => {
+                scheduleQ.markFired.run(
+                    fired.firedAt,
+                    fired.anchorAt,
+                    fired.nextRunAt ?? null,
+                    fired.status,
+                    fired.error ?? null,
+                    fired.firedAt,
+                    agentId,
+                    id,
+                )
+            },
+            reschedule: async (agentId, id, next) => {
+                scheduleQ.reschedule.run(
+                    next.anchorAt,
+                    next.nextRunAt ?? null,
+                    next.now,
+                    agentId,
+                    id,
+                )
+            },
+            setEnabled: async (agentId, id, enabled, now) => {
+                scheduleQ.setEnabled.run(enabled ? 1 : 0, now, agentId, id)
+            },
+            remove: async (agentId, id) => {
+                const before = scheduleQ.get.get<ScheduleRow>(agentId, id)
+                if (before === undefined) return false
+                scheduleQ.remove.run(agentId, id)
+                return true
+            },
+            removeManifestExcept: async (agentId, keep) => {
+                const kept = new Set(keep)
+                const stale = scheduleQ.manifestIds
+                    .all<{ id: string }>(agentId)
+                    .map((row) => row.id)
+                    .filter((id) => !kept.has(id))
+                if (stale.length === 0) return []
+                this.#db.transaction(() => {
+                    for (const id of stale) scheduleQ.remove.run(agentId, id)
+                })
+                return stale
+            },
+        }
+
         const count = (statement: SqlStatement, agentId: string): number =>
             statement.get<{ c: number }>(agentId)?.c ?? 0
 
@@ -1268,6 +1491,7 @@ export class SqliteStore implements Store {
             artifacts: count(q.countArtifacts, agentId),
             outbox: count(q.countOutbox, agentId),
             outboxPending: count(q.countOutboxPending, agentId),
+            schedules: count(scheduleQ.countSchedules, agentId),
             passages: q.memoryStats.get<{ passages: number }>(agentId)?.passages ?? 0,
             memorySources: count(q.countMemorySources, agentId),
             lease: q.leaseGet.get(agentId) !== undefined,
@@ -1287,6 +1511,7 @@ export class SqliteStore implements Store {
                 q.memoryDeleteAll.run(agentId)
                 q.memorySourceDeleteAll.run(agentId)
                 q.leaseDeleteAll.run(agentId)
+                scheduleQ.deleteAll.run(agentId)
                 return went
             })
 

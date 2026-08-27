@@ -294,6 +294,7 @@ export interface AgentFootprint {
     readonly outbox: number
     /** Deliveries not yet sent. Worth naming separately: removing the agent abandons them. */
     readonly outboxPending: number
+    readonly schedules: number
     readonly passages: number
     readonly memorySources: number
     /** A live lease means a process is running under this id right now. */
@@ -467,6 +468,153 @@ export interface OutboxStore {
     prune(before: string): Promise<number>
 }
 
+/** Where a schedule row came from, and therefore who is allowed to remove it. */
+export type ScheduleOrigin = "manifest" | "api"
+
+/** How the last run ended. `skipped` covers a fire the overlap policy deferred and then dropped. */
+export type ScheduleRunStatus = "ok" | "error" | "skipped"
+
+export interface ScheduleRecord {
+    readonly agentId: string
+    readonly id: string
+    readonly kind: "cron" | "every" | "at"
+    readonly expr: string
+    /** Absent means the host zone, resolved at parse time. */
+    readonly timezone: string | undefined
+    readonly task: string
+    /** Absent together means `deliver: "none"` — the reply reaches the event stream only. */
+    readonly deliverChannel: string | undefined
+    readonly deliverTo: string | undefined
+    /** `isolated`, or `shared:<key>`. */
+    readonly sessionMode: string
+    /** Model role override. Absent is `main`. */
+    readonly role: string | undefined
+    readonly enabled: boolean
+    readonly origin: ScheduleOrigin
+    /**
+     * The un-jittered boundary that **`nextRunAt` belongs to** — the occurrence that has not
+     * happened yet, never the one before it.
+     *
+     * Two things depend on getting this right, and both were bugs first.
+     *
+     * Jitter must not compound: anchoring the following run on a *jittered* instant adds the offset
+     * once per fire, measured at 16m19s between fires of a 15-minute schedule.
+     *
+     * And it must name the **pending** occurrence rather than the last one. Treating it as
+     * already-fired makes the boot recompute ask for the occurrence *after* the pending one, which
+     * skips one per restart — measured live, a daily brief went from "in 4h" to "in 28h" and a
+     * leap-year schedule from 2028 to 2032. Whether that pending occurrence has been consumed is
+     * therefore not inferable from the anchor, and `decideDue` takes it as an argument.
+     */
+    readonly anchorAt: string
+    /** When it fires next, jitter included. `undefined` means never again — a spent one-shot. */
+    readonly nextRunAt: string | undefined
+    readonly lastFiredAt: string | undefined
+    readonly lastStatus: ScheduleRunStatus | undefined
+    readonly lastError: string | undefined
+    readonly runs: number
+    readonly createdAt: string
+    readonly updatedAt: string
+}
+
+/** What a caller supplies to create or replace a schedule. Timestamps are the caller's. */
+export interface UpsertSchedule {
+    readonly agentId: string
+    readonly id: string
+    readonly kind: "cron" | "every" | "at"
+    readonly expr: string
+    readonly timezone?: string
+    readonly task: string
+    readonly deliverChannel?: string
+    readonly deliverTo?: string
+    readonly sessionMode: string
+    readonly role?: string
+    readonly enabled: boolean
+    readonly origin: ScheduleOrigin
+    readonly anchorAt: string
+    readonly nextRunAt: string | undefined
+    readonly now: string
+}
+
+export interface ScheduleFired {
+    readonly firedAt: string
+    /** The un-jittered boundary this fire belonged to — the anchor for the run after it. */
+    readonly anchorAt: string
+    readonly nextRunAt: string | undefined
+    readonly status: ScheduleRunStatus
+    readonly error?: string
+}
+
+/**
+ * Durable schedules.
+ *
+ * **Every read is scoped to a list of agent ids, and `due` is the reason.** One store file serves
+ * every agent in a sandbox root, and two runtimes may share it while the lease guarantees only that
+ * each *agent* has one owner. An unscoped due query therefore hands this process another live
+ * process's schedules to fire — the same hazard `OutboxStore.recoverInflight` is scoped against, and
+ * with the same consequence: work performed twice by a process that had no claim on it.
+ *
+ * **There is no row-level claim, deliberately.** A transactional `UPDATE … WHERE status='pending' …
+ * RETURNING` is the right pattern when several workers compete for one row; here the lease makes one
+ * process the only writer for a given agent, so the claim would guard a race that cannot happen. It
+ * would also introduce one that can: a claim that clears `nextRunAt` while the run is in flight
+ * leaves it NULL forever if the process dies mid-run, and the schedule stops with nothing reporting
+ * it. Keeping `nextRunAt` durable means a crash leaves the row simply overdue, and the boot recompute
+ * treats it as a missed fire and says so. In-flight state is in memory, where it belongs.
+ */
+export interface ScheduleStore {
+    /** Create or replace. Reconciliation and the API both land here. */
+    upsert(schedule: UpsertSchedule): Promise<ScheduleRecord>
+    get(agentId: string, id: string): Promise<ScheduleRecord | undefined>
+    /** Every schedule, **including disabled** — decision 9.4. `enabled` filters when asked. */
+    list(
+        agentId: string,
+        options?: { readonly enabled?: boolean; readonly origin?: ScheduleOrigin },
+    ): Promise<readonly ScheduleRecord[]>
+    /** Enabled rows due at or before `now`, soonest first. Scoped — see the interface comment. */
+    due(
+        agentIds: readonly string[],
+        now: string,
+        limit?: number,
+    ): Promise<readonly ScheduleRecord[]>
+    /**
+     * The soonest `nextRunAt` across the given agents, for arming the timer.
+     *
+     * `undefined` when nothing is scheduled, which the scheduler reads as "sleep the full horizon"
+     * rather than "sleep forever" — a schedule can be created while the timer is idle.
+     */
+    nextDue(agentIds: readonly string[]): Promise<string | undefined>
+    /**
+     * Record a completed run and the following due time, in one write.
+     *
+     * Increments `runs` and sets `lastStatus`, so it is **only** for a run that actually happened.
+     * Moving a due time for any other reason — the boot recompute, a deferral the overlap policy
+     * held — goes through `reschedule`, because counting those as runs makes the two figures a
+     * person reads to judge a schedule's health both wrong in the same direction.
+     */
+    markFired(agentId: string, id: string, fired: ScheduleFired): Promise<void>
+    /** Move the due time without recording a run. See `markFired`. */
+    reschedule(
+        agentId: string,
+        id: string,
+        next: {
+            readonly anchorAt: string
+            readonly nextRunAt: string | undefined
+            readonly now: string
+        },
+    ): Promise<void>
+    setEnabled(agentId: string, id: string, enabled: boolean, now: string): Promise<void>
+    remove(agentId: string, id: string): Promise<boolean>
+    /**
+     * Drop manifest-owned rows this agent no longer declares.
+     *
+     * Scoped to `origin = 'manifest'` because the manifest owns manifest schedules only: one created
+     * through the API and absent from the file is left alone, which `02-SPEC-MANIFEST.md` states and
+     * a reload would otherwise quietly violate.
+     */
+    removeManifestExcept(agentId: string, keep: readonly string[]): Promise<readonly string[]>
+}
+
 export interface ArtifactRecord {
     /** Derived from the content by `compaction/stages.ts`. Printable ASCII: it is a bound key. */
     readonly id: string
@@ -597,6 +745,7 @@ export interface Store {
     readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
+    readonly schedules: ScheduleStore
     /** Human-readable location, for `store.ready` and the `sessions` command. */
     readonly location: string
     /**

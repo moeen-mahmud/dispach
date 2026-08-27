@@ -77,7 +77,7 @@ export type {
     EventType,
     TurnEndReason,
 } from "./events/types.ts"
-export { newStepId, newTurnId } from "./loop/ids.ts"
+export { newRunId, newStepId, newTurnId } from "./loop/ids.ts"
 export { runStep, type StepInput, type StepResult } from "./loop/step.ts"
 export {
     runTurn,
@@ -143,7 +143,12 @@ export type {
     ThresholdsConfig,
     ToolsConfig,
 } from "./manifest/schema.ts"
-export { AgentManifestSchema, MODEL_ROLES } from "./manifest/schema.ts"
+export {
+    AgentManifestSchema,
+    customRoleNames,
+    isReservedRole,
+    MODEL_ROLES,
+} from "./manifest/schema.ts"
 export {
     AGENT_SETTABLE_PATHS,
     PERSON_SETTABLE_PATHS,
@@ -243,6 +248,24 @@ export {
     type RuntimeOptions,
     type StoreSource,
 } from "./runtime/runtime.ts"
+export type { ReconcileReport } from "./runtime/schedules.ts"
+export {
+    prepareScheduleWrite,
+    reconcileSchedules,
+    scheduleRunner,
+    scheduleSessionKey,
+} from "./runtime/schedules.ts"
+export type { CronSpec } from "./schedule/cron.ts"
+// ── schedule ─────────────────────────────────────────────────────────────────────────────
+export { CRON_HORIZON_DAYS, cronSatisfiable, nextCron, parseCron } from "./schedule/cron.ts"
+export type { Duration } from "./schedule/duration.ts"
+export { formatDuration, parseDuration } from "./schedule/duration.ts"
+export type { DueDecision, ParsedSchedule, ScheduleKind } from "./schedule/kinds.ts"
+export { decideDue, jitterFor, MAX_JITTER_MS, parseSchedule } from "./schedule/kinds.ts"
+export type { SchedulerOptions } from "./schedule/scheduler.ts"
+export { SCHEDULER_HORIZON_MS, Scheduler } from "./schedule/scheduler.ts"
+export type { ZonedFields } from "./schedule/zone.ts"
+export { assertZone, fieldsAt, hostZone, instantFrom, offsetAt } from "./schedule/zone.ts"
 export { checkSkillAuthoring } from "./skills/authoring.ts"
 export {
     isSkillName,
@@ -323,6 +346,11 @@ export type {
     MessagePage,
     MessageStore,
     OutboxStore,
+    ScheduleFired,
+    ScheduleOrigin,
+    ScheduleRecord,
+    ScheduleRunStatus,
+    ScheduleStore,
     SessionRecord,
     SessionStore,
     SessionSummary,
@@ -331,6 +359,7 @@ export type {
     TurnRecord,
     TurnStatus,
     TurnStore,
+    UpsertSchedule,
 } from "./store/store.ts"
 export {
     type Coercion,
