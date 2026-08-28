@@ -151,6 +151,7 @@ export interface TurnInput {
         readonly source: string
         readonly at: string
         readonly text: string
+        readonly because?: string
     }[]
     readonly skills?: readonly {
         readonly name: string
@@ -1003,7 +1004,13 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
 
     const durationMs = Math.round(performance.now() - started)
 
-    if (pendingProse !== "") trace.push({ role: "assistant", content: pendingProse })
+    if (pendingProse !== "") {
+        trace.push({
+            role: "assistant",
+            content: pendingProse,
+            ...(untrustedSeen ? { tainted: true } : {}),
+        })
+    }
 
     // Partial content is kept on an explicit stop and on a timeout, both of which are decisions
     // someone made. It is never persisted for a disconnect, which cannot reach this code at all.

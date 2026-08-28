@@ -289,11 +289,10 @@ CREATE TABLE artifacts (
         /**
          * The memory corpus: what the agent knows about the person, across sessions.
          *
-         * **Not scoped to a session, and with no foreign key to one.** Every other per-conversation
-         * table here cascades from `sessions`; this one deliberately does not, which is what makes
-         * "deleting a session leaves memory untouched" a property of the schema rather than a promise
-         * in a docstring. A memory is a fact about the person, and the conversation it was learned in
-         * is an implementation detail of how it arrived.
+         * **Not scoped to a session, and with no foreign key to one.** Canonical file passages must
+         * survive deleting any conversation, so a cascade cannot express the ownership correctly.
+         * Conversation projections are distinguished by the `session:<key>` source namespace and
+         * removed explicitly in the session store's transaction.
          *
          * `id` is content-derived (`derivedId("mem", text)`, see `ids.ts`) and printable ASCII, for the
          * same two reasons artifacts are: the duplicate that happens is a re-index of unchanged text,
@@ -441,6 +440,22 @@ ALTER TABLE turns_new RENAME TO turns;
 
 CREATE INDEX turns_by_session ON turns (agent_id, session_key, started_at DESC);
 CREATE INDEX turns_running ON turns (status) WHERE status = 'running';
+`,
+    },
+    {
+        version: 8,
+        name: "message_taint",
+        /**
+         * Whether assistant prose was generated after untrusted tool output entered its turn.
+         *
+         * `origin` cannot carry this fact: origin answers who wrote a message, while this prose was
+         * genuinely written by the model. Persisting the separate bit lets conversation memory refuse
+         * the laundering path after a restart. Existing rows default clean because the old store did
+         * not preserve enough lineage to classify them honestly.
+         */
+        sql: `
+ALTER TABLE messages
+    ADD COLUMN tainted INTEGER NOT NULL DEFAULT 0 CHECK (tainted IN (0, 1));
 `,
     },
 ]

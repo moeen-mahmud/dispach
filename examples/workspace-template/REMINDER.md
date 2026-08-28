@@ -7,7 +7,7 @@ budget: 500
 <!--
 REMINDER.md — one or two rules, re-asserted where attention is strongest.
 
-TIER 2. Injected AFTER the conversation history, immediately before the current input.
+TIER 2. Injected AFTER the conversation history, before retrieved memory and the current input.
 Budget: 500 tokens — and using a fraction of it is the point.
 
 Rule adherence decays over a conversation and compaction does not reliably reset it.

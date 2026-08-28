@@ -585,10 +585,10 @@ carried, and one from June is found by searching. Nothing is deleted at either s
 | --- | --- | --- |
 | `retriever` | `fts5` | The seam. `fts5` is the only implementation; an unknown name is refused at load rather than retrieving nothing. |
 | `dir` | `./memory` | Where eviction files older notes, relative to the manifest. Monthly `YYYY-MM.md`. Indexed, never carried. |
-| `maxActive` | 5 | Passages injected in one turn, into slot 7. `0` switches injection off while leaving `memory search` working. |
-| `threshold` | 0.20 | Normalised score floor, on the same scale as `skills.threshold`. |
+| `maxActive` | 5 | Passages injected in one turn, into slot 10. `0` switches injection off while leaving `memory search` working. |
+| `threshold` | 0.20 | Score floor after original-query coverage and recency. `memory search` exposes all three terms. |
 | `budget` | 2000 | Total tokens across injected passages. Outside the workspace cap — this tier is retrieved, not carried. |
-| `includeHistory` | true | Index the person's messages and the agent's replies as well as the notes, under the source `session:<key>`. **Never tool observations, and never anything else the runtime authored, at any setting.** |
+| `includeHistory` | true | Index the person's messages and clean agent replies as well as the notes, under `session:<key>`. Never tool observations, runtime-authored messages, or tainted assistant prose. |
 
 **`maxActive` and `budget` were raised from 3 and 600 when `includeHistory` was implemented**, and the
 change was required rather than generous. Those numbers were sized for note bullets, which are one
@@ -600,12 +600,14 @@ and never skips past it, so one oversized exchange does not merely go uninjected
 of the ranking and blocks everything behind it.
 
 **What `includeHistory` indexes is an allowlist of prose, not a blocklist of tool output.** Only a
-message with no `origin` is indexed; the runtime sets that field on everything it authored itself
+message with no `origin` and no persisted `tainted` bit is indexed; the runtime sets `origin` on everything it authored itself
 (`observation`, `call`, `repair`, `digest`), so a fifth kind added in a later phase is excluded by
 default. The direction matters because of what `observation` holds — text a stranger wrote, fetched
 from a page or returned by a provider. Indexing it would make prompt injection **durable**: retrieved
-into slot 7 in a later session, long after the write gate that fenced it stopped applying. A blocklist
-that forgot one origin would open that hole with nothing failing.
+into slot 10 in a later session, long after the write gate that fenced it stopped applying. A blocklist
+that forgot one origin would open that hole with nothing failing. When an untrusted result entered a
+turn, its final assistant prose is tainted too: the model wrote it, but untrusted evidence drove it, so
+indexing the reply would launder the same injection through a clean-looking role.
 
 Conversations are indexed **at turn end**, not during retrieval — the exchange being asked about does
 not exist yet when recall runs — and they are reconciled in their own namespace, separately from the
@@ -619,33 +621,35 @@ The conversation being had is excluded from its own prompt, for the reason the c
 already there, as history. Excluded at *retrieval* rather than left out of the index, so `memory search`
 can still find what was said a minute ago.
 
-Omitting the section switches memory off entirely: no slot 7, no index, and `memory search` reports
+Omitting the section switches memory off entirely: no slot 10, no index, and `memory search` reports
 that the agent has none configured rather than that it remembers nothing. `memory: {}` is enough to
 turn it on, since every field has a default.
 
-**`threshold` is lower than `skills.threshold` on purpose.** Both go through `rank/bm25.ts`, so the
-numbers are directly comparable — and the two want opposite errors. A wrong skill *displaces* the
-right one at `maxActive: 1`, so routing pays for precision; an extra remembered passage costs about
-twenty tokens under a budget that already caps the slot, so retrieval pays for recall. Measured: the
-note "the deploy pipeline waits for a manual approval gate" scores **0.284** against "how does the
-deploy approval work" — it matches two of the query's three informative terms and the normalisation
-divides by all three. Correct arithmetic, and a good answer that `0.35` withholds. A full match at
-average document length is about `0.45`.
+**`threshold` is lower than `skills.threshold` on purpose.** Both use the same BM25 implementation for
+the lexical term, but memory then multiplies by original-query coverage and recency. Coverage retains
+informative terms absent from the corpus in its denominator: a lone `1998` match in a four-term
+question scores 0.123, while the one-term query `frankfurt` has coverage 1. `memory search` prints
+lexical and coverage separately so a withheld result remains explainable.
+
+Headings and tags are weighted fields in the indexed document, each at 2× body weight before BM25's
+term-frequency saturation. A weak current query — at most two informative terms and no result already
+clearing the floor — may add up to 600 characters from the previous clean assistant reply. A specific
+or already-successful query never inherits that context.
 
 **Retrieval is per turn, never per step**, like `knowledge`: two steps of one turn must not argue
-from different remembered facts. Slot 7 is **not pinned** — this tier is retrieved rather than
+from different remembered facts. Slot 10 is **not pinned** — this tier is retrieved rather than
 carried, so compaction may drop it. A fact that must always hold belongs in the carried file.
 
 **Tool observations are never indexed.** That is where untrusted text lives, and indexing it would
-make prompt injection durable: text a stranger wrote, retrieved into slot 7 in a later session, long
+make prompt injection durable: text a stranger wrote, retrieved into slot 10 in a later session, long
 after the write gate that fenced it stopped applying. `ChatMessage.origin` is what makes the
 distinction reliable — under a text dialect an observation returns as a `user` message and the role
 does not say.
 
-**Deleting a session leaves memory untouched**, structurally: `memory_passages` carries no session
-column and no foreign key, unlike `artifacts`, which cascade with theirs.
+**Deleting or clearing a session removes its derived `session:<key>` source in the same transaction.**
+Canonical `MEMORY.md` and archive files, and every other session source, remain untouched.
 
-`dispach memory search <agent> "<words>"` ranks the corpus exactly as a turn would but applies no
+`dispach memory search <agent> "<words>"` ranks the corpus exactly as a direct turn query would but applies no
 threshold and does not exclude the carried file, because the question it exists to answer is usually
 "why was that *not* recalled". `dispach memory rebuild <agent>` forgets the index and re-reads every
 file — staleness is detected from mtime **and** size, and an edit preserving both is a real blind

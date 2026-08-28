@@ -43,6 +43,7 @@ import {
     type IndexReport,
     type MemoryRetriever,
     type RetrievedPassage,
+    retrieveWithContext,
     selectPassages,
     sessionSource,
     syncFiles,
@@ -529,7 +530,7 @@ export class Agent {
         return this.store.turns.list(this.id, sessionKey, limit === undefined ? {} : { limit })
     }
 
-    /** Drops history and turn records. Memory files on disk are untouched. */
+    /** Drops history, turns, and their derived index source. Memory files on disk are untouched. */
     clearSession(sessionKey = Agent.DEFAULT_SESSION): Promise<void> {
         return this.store.sessions.clear(this.id, sessionKey)
     }
@@ -560,7 +561,7 @@ export class Agent {
 
         const active = this.knowledge === undefined ? [] : activateKnowledge(input, this.knowledge)
         const skills = this.#activateSkills(input, history)
-        const remembered = await this.#recall(input, sessionKey)
+        const remembered = await this.#recall(input, sessionKey, history)
 
         const result = await runTurn({
             agentId: this.id,
@@ -813,7 +814,7 @@ export class Agent {
                 ? []
                 : activateKnowledge(input, this.knowledge)
         const skills = input === "" ? [] : this.#activateSkills(input, history)
-        const remembered = await this.#recall(input, sessionKey)
+        const remembered = await this.#recall(input, sessionKey, history)
         const tools = this.#toolRuntime
 
         const assembled = assembleContext({
@@ -904,16 +905,28 @@ export class Agent {
     async #recall(
         input: string,
         sessionKey: string,
-    ): Promise<readonly { source: string; at: string; text: string }[]> {
+        history: readonly ChatMessage[],
+    ): Promise<readonly { source: string; at: string; text: string; because?: string }[]> {
         const memory = this.#memory
         if (memory === undefined || memory.maxActive === 0 || input === "") return []
 
         try {
             await this.#syncMemory(memory.dir)
 
-            const ranked = await memory.retrieve({
+            const previousAssistant = [...history]
+                .reverse()
+                .find((message) => message.role === "assistant")
+            const cleanPreviousAssistant =
+                previousAssistant?.origin === undefined && previousAssistant?.tainted !== true
+                    ? previousAssistant
+                    : undefined
+            const ranked = await retrieveWithContext(memory.retrieve, {
                 input,
                 now: new Date(),
+                minimumScore: memory.threshold,
+                ...(cleanPreviousAssistant === undefined
+                    ? {}
+                    : { previousAssistant: cleanPreviousAssistant.content }),
                 // Over-fetch relative to `maxActive`: the retriever re-ranks by recency and drops
                 // excluded sources, so asking for exactly the cap would lose both effects.
                 limit: Math.max(memory.maxActive * 4, 12),
@@ -936,6 +949,7 @@ export class Agent {
                 source: hit.passage.source,
                 at: hit.passage.at,
                 text: hit.passage.text,
+                ...(hit.because === undefined ? {} : { because: hit.because }),
             }))
         } catch (error) {
             this.#bus.emit("agent.warning", {

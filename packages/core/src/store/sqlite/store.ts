@@ -11,6 +11,7 @@
  * ones, so mapping is also where the two runtimes stop being distinguishable.
  */
 
+import { sessionSource } from "../../memory/conversation.ts"
 import type { ChatMessage, ToolCallRequest } from "../../model/provider.ts"
 import { parseSessionKey } from "../session-key.ts"
 import type {
@@ -73,6 +74,7 @@ interface MessageRow {
     tool_call_id: string | null
     /** Who wrote it, when the harness did. Null for anything written before migration 005. */
     origin: string | null
+    tainted: number
     created_at: string
 }
 
@@ -85,7 +87,7 @@ interface MessageRow {
  * nothing failing.
  */
 const MESSAGE_COLUMNS =
-    "id, session_key, turn_id, role, content, tool_calls, tool_call_id, origin, created_at"
+    "id, session_key, turn_id, role, content, tool_calls, tool_call_id, origin, tainted, created_at"
 
 /**
  * The origin union without `undefined`.
@@ -226,6 +228,7 @@ function toMessage(row: MessageRow): StoredMessage {
         ...(calls === undefined ? {} : { toolCalls: calls }),
         ...(row.tool_call_id === null ? {} : { toolCallId: row.tool_call_id }),
         ...(row.origin === null ? {} : { origin: row.origin as MessageOrigin }),
+        ...(row.tainted === 0 ? {} : { tainted: true }),
         createdAt: row.created_at,
     }
 }
@@ -247,6 +250,7 @@ function toChatMessage(row: MessageRow): ChatMessage {
         // Compaction reads this to tell a tool observation from a human message, so a history that
         // came back without it would be silently uncompactable in two of five stages.
         ...(row.origin === null ? {} : { origin: row.origin as MessageOrigin }),
+        ...(row.tainted === 0 ? {} : { tainted: true }),
     }
 }
 
@@ -326,6 +330,9 @@ export const MEMORY_CANDIDATES_SQL = `SELECT p.id, p.source, p.heading, p.text, 
   WHERE memory_fts MATCH ? AND +p.agent_id = ?
   ORDER BY bm25(memory_fts)
   LIMIT ?`
+
+/** Distinct from the FTS path: we want the `agent_id` index, so this one is not pinned with `+`. */
+export const MEMORY_VOCABULARY_SQL = `SELECT terms FROM memory_passages WHERE agent_id = ?`
 
 function matchExpression(terms: readonly string[]): string {
     return terms.map((term) => `"${term}"`).join(" OR ")
@@ -477,8 +484,8 @@ export class SqliteStore implements Store {
             messageInsert: db.prepare(
                 `INSERT INTO messages
                      (agent_id, session_key, turn_id, role, content, tool_calls, tool_call_id,
-                      origin, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                      origin, tainted, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ),
             messageById: db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`),
             artifactPut: db.prepare(
@@ -548,6 +555,7 @@ export class SqliteStore implements Store {
             // a cached statement rather than being rebuilt per query.
             memoryDf: db.prepare(MEMORY_DF_SQL),
             memoryCandidates: db.prepare(MEMORY_CANDIDATES_SQL),
+            memoryVocabulary: db.prepare(MEMORY_VOCABULARY_SQL),
             historyAll: db.prepare(
                 `SELECT ${MESSAGE_COLUMNS} FROM messages
                   WHERE agent_id = ? AND session_key = ? ORDER BY id ASC`,
@@ -810,16 +818,23 @@ export class SqliteStore implements Store {
                 q.sessionSetPhase.run(phase, nowIso(), agentId, sessionKey)
             },
             clear: async (agentId, sessionKey) => {
-                // Rows only, never files: memory markdown is canonical on disk and clearing a
-                // conversation must not delete what the agent learned.
+                // Files remain canonical and untouched. The session projection is derived from the
+                // rows being cleared, so keeping it would make deleted prose retrievable until a
+                // later reconciliation happened to notice.
                 db.transaction(() => {
                     q.messagesDelete.run(agentId, sessionKey)
                     q.turnsDelete.run(agentId, sessionKey)
+                    q.memoryDeleteSource.run(agentId, sessionSource(sessionKey))
+                    q.memorySourceDelete.run(agentId, sessionSource(sessionKey))
                     q.sessionTouch.run(nowIso(), agentId, sessionKey)
                 })
             },
             delete: async (agentId, sessionKey) => {
-                q.sessionDelete.run(agentId, sessionKey)
+                db.transaction(() => {
+                    q.sessionDelete.run(agentId, sessionKey)
+                    q.memoryDeleteSource.run(agentId, sessionSource(sessionKey))
+                    q.memorySourceDelete.run(agentId, sessionSource(sessionKey))
+                })
             },
         }
 
@@ -846,6 +861,7 @@ export class SqliteStore implements Store {
                                 : JSON.stringify(message.toolCalls),
                             message.toolCallId ?? null,
                             message.origin ?? null,
+                            message.tainted === true,
                             ts,
                         )
                         const row = q.messageById.get<MessageRow>(result.lastInsertRowid)
@@ -1255,6 +1271,16 @@ export class SqliteStore implements Store {
                 return q.memoryCandidates
                     .all<MemoryPassageRow>(matchExpression(terms), agentId, limit)
                     .map(toMemoryPassage)
+            },
+            vocabulary: async (agentId) => {
+                const out = new Set<string>()
+                for (const row of q.memoryVocabulary.all<{ terms: string }>(agentId)) {
+                    if (row.terms === "") continue
+                    for (const term of row.terms.split(" ")) {
+                        if (term !== "") out.add(term)
+                    }
+                }
+                return out
             },
         }
 
