@@ -399,13 +399,121 @@ describe("SkillBrowser", () => {
 })
 
 describe("WizardApp", () => {
+    /**
+     * The location menu, at the widths a terminal actually is.
+     *
+     * Its first row carries an absolute path *and* a reason, and the first version folded both into one
+     * label — 79 columns, which fitted the 100-column terminal it was checked at and **wrapped at 80**
+     * onto a continuation line with no pointer and no number. That is a broken list, and it is exactly
+     * the "a height check at one width is a height check that passes at one width" failure this repo
+     * already records for the status line. So this loops.
+     */
+    for (const columns of [60, 80, 100]) {
+        test(`the location menu fits ${columns} columns`, async () => {
+            const harness = mount(
+                h(WizardApp, {
+                    title: "Setup",
+                    given: {
+                        user: "Moeen",
+                        name: "milo",
+                        purpose: "x",
+                        preset: "ollama",
+                        model: "qwen3.5:9b",
+                        baseUrl: "http://localhost:11434/v1",
+                        system: "none",
+                        web: "none",
+                        composio: "none",
+                        telegram: "none",
+                        server: "none",
+                        skills: "none",
+                        daemon: "none",
+                    },
+                    defaults: { agentDirBase: "/home/moeen/.brand/agents" },
+                    onDone: () => {},
+                }),
+                { columns },
+            )
+            const frame = harness.frame()
+            harness.unmount()
+            expect(frame.text).toContain("Where should it live?")
+            expect(overflowing(frame, columns)).toEqual([])
+
+            // `overflowing` alone is NOT the guard, and believing it was cost a round: Ink *wraps*
+            // rather than overflowing, so every continuation line is within the width and the check
+            // is green on a visibly broken list. The invariant is that each option is one line — so
+            // count what is inside the border. Four: the prompt and three rows.
+            const border = frame.lines
+                .map((line, at) => ({ line, at }))
+                .filter(({ line }) => /^[╭╰]/.test(line.trim()))
+            const [top, bottom] = [border[0]?.at ?? 0, border[1]?.at ?? 0]
+            const content = frame.lines
+                .slice(top + 1, bottom)
+                .map((line) => line.replace(/[│]/g, "").trim())
+                .filter((line) => line !== "")
+            expect(content).toHaveLength(4)
+            expect(content[0]).toBe("Where should it live?")
+            // Numbered in order, one per line, none of them an orphaned continuation. The pointer
+            // sits on the selected row, so the number is read past it rather than by position.
+            const numbers = content.slice(1).map((line) => /^(?:\u276f\s*)?(\d)\./.exec(line)?.[1])
+            expect(numbers).toEqual(["1", "2", "3"])
+        })
+    }
+
+    /**
+     * The row carries the path *and* its reason at 80 columns.
+     *
+     * `wrap="truncate"` is what stops a long row wrapping; it is not what makes the row readable. With
+     * the reason folded back into the label the row is 75 columns before the pointer and number, so at
+     * 80 truncate simply eats "run it by name from anywhere" — one line, and the half that explains the
+     * choice gone. Splitting label from `hint` is what buys the room, and this is the assertion that
+     * notices if they are folded together again.
+     */
+    test("the sandbox row is first and names its resolved path", async () => {
+        const harness = mount(
+            h(WizardApp, {
+                title: "Setup",
+                given: {
+                    user: "Moeen",
+                    name: "milo",
+                    purpose: "x",
+                    preset: "ollama",
+                    model: "qwen3.5:9b",
+                    baseUrl: "http://localhost:11434/v1",
+                    system: "none",
+                    web: "none",
+                    composio: "none",
+                    telegram: "none",
+                    server: "none",
+                    skills: "none",
+                    daemon: "none",
+                },
+                defaults: { agentDirBase: "/home/moeen/.brand/agents" },
+                onDone: () => {},
+            }),
+            { columns: 80 },
+        )
+        const frame = harness.frame()
+        harness.unmount()
+        // Not "the sandbox": a word is not a directory, and this is the screen where the choice is made.
+        const row = frame.lines.find((line) => line.includes("1.")) ?? ""
+        expect(row).toContain("/home/moeen/.brand/agents/milo")
+        // Both halves on the one row, uncut, at the width a terminal usually is.
+        expect(row).toContain("run it by name from anywhere")
+        expect(frame.text).toContain("2. ./milo")
+    })
+
     test("a long answer wraps inside the box instead of running off it", async () => {
         // Not a regression guard for the truncation bug — this passes with that fix reverted, because the
         // bordered frame bounds the text whatever the field passes. Kept as a guard on the *box*: it is
         // what makes the field's own width unnecessary here, and if the border ever goes this is the test
         // that notices. Checking it is what stopped a claim that the wizard was equally broken.
         const harness = mount(
-            h(WizardApp, { title: "Setup", given: {}, defaults: {}, onDone: () => {} }),
+            h(WizardApp, {
+                title: "Setup",
+                given: {},
+                defaults: { agentDirBase: "/home/x/.brand/agents" },
+                onDone: () => {},
+            }),
             { columns: 80 },
         )
         await harness.press(
@@ -421,7 +529,12 @@ describe("WizardApp", () => {
 
     test("asks the first question and counts the steps honestly", () => {
         const harness = mount(
-            h(WizardApp, { title: "Setup", given: {}, defaults: {}, onDone: () => {} }),
+            h(WizardApp, {
+                title: "Setup",
+                given: {},
+                defaults: { agentDirBase: "/home/x/.brand/agents" },
+                onDone: () => {},
+            }),
             { columns: 80 },
         )
         const frame = harness.frame()
@@ -439,7 +552,12 @@ describe("WizardApp", () => {
         // is that it draws at all and that it gives way on a terminal too short for it — a picture is never
         // worth a question that has scrolled off the screen.
         const tall = mount(
-            h(WizardApp, { title: "Setup", given: {}, defaults: {}, onDone: () => {} }),
+            h(WizardApp, {
+                title: "Setup",
+                given: {},
+                defaults: { agentDirBase: "/home/x/.brand/agents" },
+                onDone: () => {},
+            }),
             { columns: 100, rows: 30 },
         )
         const drawn = tall.frame()
@@ -449,7 +567,12 @@ describe("WizardApp", () => {
         expect(drawn.text).toMatch(/\d+ of \d+/)
 
         const short = mount(
-            h(WizardApp, { title: "Setup", given: {}, defaults: {}, onDone: () => {} }),
+            h(WizardApp, {
+                title: "Setup",
+                given: {},
+                defaults: { agentDirBase: "/home/x/.brand/agents" },
+                onDone: () => {},
+            }),
             { columns: 100, rows: 16 },
         )
         const plain = short.frame()
@@ -461,7 +584,12 @@ describe("WizardApp", () => {
 
     test("typing an answer and pressing enter advances", async () => {
         const harness = mount(
-            h(WizardApp, { title: "Setup", given: {}, defaults: {}, onDone: () => {} }),
+            h(WizardApp, {
+                title: "Setup",
+                given: {},
+                defaults: { agentDirBase: "/home/x/.brand/agents" },
+                onDone: () => {},
+            }),
             { columns: 80 },
         )
         const before = harness.frame().text

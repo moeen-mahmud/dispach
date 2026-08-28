@@ -61,13 +61,12 @@ export const COMMANDS: readonly CommandSpec[] = [
 
         inSession: "hidden",
         summary: "create a new agent: manifest, workspace, and env files",
-        args: [
-            {
-                name: "dir",
-                required: false,
-                help: "target directory (default: ./<agent-name-slug>)",
-            },
-        ],
+        // No positional. It used to be the target *directory*, which read as the agent's name and
+        // was not — `init milo` silently wrote ./milo into whatever checkout you were standing in,
+        // and an agent outside the sandbox has no bare name, so every later command needed a path.
+        args: [],
+        unexpectedArgHint:
+            "init takes no positional argument. To name the agent, --name <name>; to place it somewhere other than the sandbox, --dir <path>.",
         flags: [
             { name: "user", kind: "string", placeholder: "name", help: "your name" },
             { name: "name", kind: "string", placeholder: "name", help: "the agent's name" },
@@ -163,6 +162,13 @@ export const COMMANDS: readonly CommandSpec[] = [
                 placeholder: "level",
                 help: "keep it running in the background: none | service",
                 defaultHelp: "none",
+            },
+            {
+                name: "dir",
+                kind: "string",
+                placeholder: "path",
+                help: "write the agent here instead of the sandbox",
+                defaultHelp: `~/${BRAND.stateDir}/agents/<agent-name-slug>`,
             },
             {
                 name: "yes",

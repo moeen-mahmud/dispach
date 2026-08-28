@@ -55,6 +55,41 @@ export function logPaths(
     return { out: join(dir, `${agentId}.out.log`), err: join(dir, `${agentId}.err.log`) }
 }
 
+/**
+ * Is this path inside the sandbox's agents directory?
+ *
+ * Both sides are resolved first, for the reason `root.ts` already records: an unresolved
+ * `<base>/../../elsewhere` passes a prefix test while landing nowhere near the base. The `sep`
+ * suffix is what stops `~/.brand/agents-backup` reading as inside `~/.brand/agents`.
+ */
+export function insideSandbox(
+    targetDir: string,
+    env?: Readonly<Record<string, string | undefined>>,
+): boolean {
+    const base = resolve(agentsDir(env))
+    const target = resolve(targetDir)
+    return target === base || target.startsWith(base + sep)
+}
+
+/**
+ * The one-line note an out-of-sandbox target earns, or `undefined` when it is inside.
+ *
+ * A note rather than a refusal: `init --dir ./examples/scout` is a legitimate thing to want, and a
+ * command that refuses it would be one people work around with `mv`. What is *not* legitimate is
+ * doing it silently — an agent outside the sandbox has no bare name, so every later `run`, `config`,
+ * `daemon` and `schedules` call needs a path, and the reason for that is only obvious at the moment
+ * the directory is chosen.
+ *
+ * Pure and separate from the write so the sentence can be asserted without a filesystem.
+ */
+export function outsideSandboxNote(
+    targetDir: string,
+    env?: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+    if (insideSandbox(targetDir, env)) return undefined
+    return `note: ${resolve(targetDir)} is outside the sandbox (${agentsDir(env)}) — this agent has no bare name, so every later command needs its path. Omit --dir to put it in the sandbox.`
+}
+
 export interface SandboxAgent {
     /** The directory name — what `run <ref>` takes. Filesystem-unique by construction. */
     readonly ref: string

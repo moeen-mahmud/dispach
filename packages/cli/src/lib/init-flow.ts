@@ -244,7 +244,29 @@ export interface InitAnswers {
      * the answer here — which keeps the reducer static-option-only while the flow still contains the list.
      */
     readonly skillsPick?: string
-    /** Target directory, as given — the command resolves it against the cwd. */
+    /**
+     * Where the agent lives: `sandbox`, `here`, or `custom`.
+     *
+     * A menu rather than a prefilled path, because "somewhere else" was reachable only by clearing a
+     * 37-character absolute path and retyping it — and because a menu puts the *cost* on the label at
+     * the moment of choosing, where a note printed afterwards cannot. `custom` is the only answer that
+     * asks a follow-up, exactly as `web: search` is the only one that asks for a backend.
+     *
+     * Optional, and only because the reverse implication has to hold too: `--dir` answers the question,
+     * so asking it would be asking something whose answer the funnel then ignores. Absence is safe here
+     * in the way `agentDirBase`'s was not — it means `dir` was given, and if somehow neither yields a
+     * path `complete()` throws rather than guessing.
+     */
+    readonly dirChoice?: string
+    /**
+     * Target directory, as given — the command resolves it against the cwd.
+     *
+     * **Asked only when `dirChoice` is `custom`**, and otherwise derived at the `complete()` funnel.
+     * That derivation is load-bearing rather than convenient: a step that stops being asked without
+     * its default moving to the funnel is how `apiKeyEnv` once vanished from generated manifests
+     * entirely, so `dirFor` is one function and the guard is a test reading the path back out of a
+     * real run.
+     */
     readonly dir: string
 }
 
@@ -290,6 +312,53 @@ export const SCHEDULE_CHOICES: readonly {
 
 function scheduleChoice(value: string): { readonly value: string } | undefined {
     return SCHEDULE_CHOICES.find((choice) => choice.value === value)
+}
+
+/**
+ * Where a new agent's directory goes.
+ *
+ * The labels carry the whole trade-off, because this is the only moment it is cheap to reconsider: an
+ * agent inside the sandbox is reachable by bare name from anywhere, and one outside is reachable only
+ * by path — `run`, `config`, `daemon`, `schedules`, every one of them, forever. That sentence used to
+ * be a note printed *after* the choice was made.
+ *
+ * `custom` is the escape hatch and stays: a project-local agent is a real thing to want, and a wizard
+ * that refuses it is one people work around with `mv`.
+ */
+export const DIR_CHOICES: readonly {
+    readonly value: string
+    /** Only for the row that has no path to show; the other two are labelled by their directory. */
+    readonly label: string
+    readonly hint: string
+}[] = [
+    { value: "sandbox", label: "the sandbox", hint: "run it by name from anywhere" },
+    { value: "here", label: "the current directory", hint: "every later command needs its path" },
+    { value: "custom", label: "somewhere else", hint: "type a path" },
+]
+
+function dirChoice(value: string): { readonly value: string } | undefined {
+    return DIR_CHOICES.find((choice) => choice.value === value)
+}
+
+/**
+ * The directory a non-`custom` answer means.
+ *
+ * One function, called by the confirm screen and by `complete()`, because two derivations of "where
+ * is this going" is how a summary comes to describe a path other than the one written — and this is
+ * the one screen whose whole job is to be believed before anything exists on disk.
+ *
+ * Returns `undefined` for `custom`: there is nothing to derive, the `dir` question was asked.
+ */
+export function dirFor(
+    choice: string | undefined,
+    name: string | undefined,
+    defaults: QuestionDefaults,
+): string | undefined {
+    if (name === undefined) return undefined
+    // Plain "/" concatenation, as everywhere in this module: a PURE module cannot import node:path.
+    if (choice === "sandbox") return `${defaults.agentDirBase}/${slugify(name)}`
+    if (choice === "here") return `./${slugify(name)}`
+    return undefined
 }
 
 export const WEB_CHOICES: readonly {
@@ -598,6 +667,7 @@ const STEP_ORDER: readonly InitStep[] = [
     "server",
     "skills",
     "daemon",
+    "dirChoice",
     "dir",
 ]
 
@@ -637,7 +707,19 @@ export interface Question {
      * cursor-prefill in three separate places. A second select had to either repeat all three or
      * generalise them, and generalising is what stops a third one repeating them again.
      */
-    readonly options?: readonly { readonly value: string; readonly label: string }[]
+    readonly options?: readonly {
+        readonly value: string
+        readonly label: string
+        /**
+         * The dim half of the row — a reason, not a second label.
+         *
+         * `SelectList.hint` has existed since the component did and no question ever supplied one, so
+         * every option had to fold its rationale into the label. That produced a 79-column row for the
+         * location question, which **wrapped at 80** onto a continuation line with no pointer and no
+         * number — a broken list, and invisible at the 100 columns it was first checked at.
+         */
+        readonly hint?: string
+    }[]
 }
 
 /**
@@ -667,13 +749,21 @@ export interface QuestionDefaults {
      * Where agents live when nobody says otherwise — the command layer passes the sandbox's
      * agents directory. Passed in rather than computed because this module is PURE: it may not
      * touch the filesystem, the home directory, or the environment.
+     *
+     * **Required, and that is the whole point.** It was optional, and absence fell back to a
+     * cwd-relative `./<slug>` — a live second default that put agents in whatever checkout you
+     * happened to be standing in, guarded by nothing but every caller remembering to pass this.
+     * The repo has paid for that shape six times (`apiKeyEnv`, `ChatMessage.toolCalls`,
+     * `TurnInput.skills`, `ToolContext.readArtifact`, `ToolContext.memoryDir`,
+     * `init --schedules`); an optional field whose absence is legal *and* silent is the trap, so
+     * there is now one default and no branch that can reach the other one.
      */
-    readonly agentDirBase?: string
+    readonly agentDirBase: string
 }
 
 export function nextQuestion(
     partial: PartialAnswers,
-    defaults: QuestionDefaults = {},
+    defaults: QuestionDefaults,
 ): Question | undefined {
     const preset = partial.preset === undefined ? undefined : presetById(partial.preset)
 
@@ -687,6 +777,14 @@ export function nextQuestion(
         // The backend and its key are only questions for someone who asked for search. Skipped
         // rather than asked-and-ignored: an answer the flow discards is a question that lies.
         if ((step === "webBackend" || step === "webKey") && partial.web !== "search") continue
+        // Same rule: only "somewhere else" has a path to type. The other two answers derive their
+        // directory at the `complete()` funnel, which is where a no-longer-asked step's default has
+        // to live — the alternative is the manifest arriving with the field simply absent.
+        if (step === "dir" && partial.dirChoice !== "custom") continue
+        // ...and the question is not worth asking at all when `--dir` already answered it. Structural
+        // rather than a courtesy from `fromFlags`: a caller that assembles `given` by hand — the
+        // wizard's own tests do — would otherwise ask where to put an agent whose path is decided.
+        if (step === "dirChoice" && partial.dir !== undefined) continue
         // Same rule: nobody who said no to Composio is asked for a Composio key.
         if (step === "composioKey" && partial.composio !== "connected") continue
         // And nobody who said no to Telegram is asked for a bot token or an allowlist.
@@ -864,18 +962,29 @@ export function nextQuestion(
                         label: choice.label,
                     })),
                 }
+            case "dirChoice":
+                return {
+                    step,
+                    prompt: "Where should it live?",
+                    fallback: "1",
+                    options: DIR_CHOICES.map((choice) => ({
+                        value: choice.value,
+                        // The resolved path *is* the label where there is one: "the sandbox" is a word,
+                        // and what a person needs to recognise is the directory. The path goes first so
+                        // that when the row is too narrow it is the reason that clips, not the path.
+                        label: dirFor(choice.value, partial.name, defaults) ?? choice.label,
+                        hint: choice.hint,
+                    })),
+                }
             case "dir":
                 return {
                     step,
-                    prompt: "Directory to create",
-                    // Plain "/" concatenation is deliberate: node's fs accepts it on every
-                    // platform, and a PURE module cannot import node:path to join.
-                    fallback:
-                        partial.name === undefined
-                            ? ""
-                            : defaults.agentDirBase === undefined
-                              ? `./${slugify(partial.name)}`
-                              : `${defaults.agentDirBase}/${slugify(partial.name)}`,
+                    // Reached only after "somewhere else", so there is nothing honest to prefill —
+                    // and a fallback here would be a third directory default arriving by the back
+                    // door, which is the whole class 11.141 exists to close. Empty is refused by
+                    // `validateAnswer`, so enter alone cannot pick a path nobody typed.
+                    prompt: "Path to create it at",
+                    fallback: "",
                 }
         }
     }
@@ -1103,6 +1212,17 @@ export function validateAnswer(step: InitStep, raw: string): Answered {
                 ? {
                       ok: false,
                       reason: `pick 1-${SYSTEM_CHOICES.length}, or a name: ${SYSTEM_CHOICES.map((c) => c.value).join(", ")}.`,
+                  }
+                : { ok: true, value: chosen.value }
+        }
+
+        case "dirChoice": {
+            const byNumber = DIR_CHOICES[Number(value) - 1]
+            const chosen = byNumber ?? dirChoice(value.toLowerCase())
+            return chosen === undefined
+                ? {
+                      ok: false,
+                      reason: `pick 1-${DIR_CHOICES.length}, or a name: ${DIR_CHOICES.map((c) => c.value).join(", ")}.`,
                   }
                 : { ok: true, value: chosen.value }
         }

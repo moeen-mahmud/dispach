@@ -398,11 +398,13 @@ export function parse(argv: readonly string[]): ParseResult {
             ),
         )
     } else if (!variadic && positionals.length > command.args.length) {
+        const extra = positionals.slice(command.args.length)
         errors.push(
             detail(
                 "cli_unexpected_argument",
                 `${command.name} takes ${command.args.length} argument(s), got ${positionals.length}.`,
-                `Unexpected: ${positionals.slice(command.args.length).join(" ")}. Quote a value containing spaces.`,
+                command.unexpectedArgHint ??
+                    `Unexpected: ${extra.join(" ")}. Quote a value containing spaces.`,
             ),
         )
     }

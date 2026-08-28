@@ -97,7 +97,9 @@ async function dispatch(argv: readonly string[]): Promise<number> {
 
     switch (command.name) {
         case "init": {
-            const dir = positionals[0]
+            // `--dir`, never a positional: `init milo` read as the agent's name and meant the
+            // directory. The parser refuses a positional now, with the spec's own two-readings hint.
+            const dir = flags.str("dir")
             const user = flags.str("user")
             const name = flags.str("name")
             const purpose = flags.str("purpose")

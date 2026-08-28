@@ -56,7 +56,15 @@ export function SelectList({ items, index, numbered, maxRows }: SelectListProps)
                 const selected = at === index
                 const number = numbered === true ? `${at + 1}. ` : ""
                 return (
-                    <Text key={`row-${at}`} {...(selected ? { color: THEME.accent } : {})}>
+                    // `wrap="truncate"` is the backstop, not the layout: a row wider than the frame
+                    // otherwise wraps onto a continuation line carrying no pointer and no number,
+                    // which reads as an extra list item. Label before hint, so what clips is the
+                    // reason rather than the thing being named.
+                    <Text
+                        key={`row-${at}`}
+                        wrap="truncate"
+                        {...(selected ? { color: THEME.accent } : {})}
+                    >
                         {selected ? GLYPH.pointer : "  "}
                         <Text bold={selected}>
                             {number}

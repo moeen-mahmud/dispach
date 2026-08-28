@@ -15,6 +15,7 @@
 import { applyIntent, EMPTY_EDITOR } from "#editor"
 import type { ListIntent } from "#keymap"
 import {
+    dirFor,
     type InitStep,
     nextQuestion,
     type PartialAnswers,
@@ -84,9 +85,11 @@ export function isSelectStep(state: WizardState): boolean {
 }
 
 /** The choices on screen, empty when the question is a text field. */
-export function selectOptions(
-    state: WizardState,
-): readonly { readonly value: string; readonly label: string }[] {
+export function selectOptions(state: WizardState): readonly {
+    readonly value: string
+    readonly label: string
+    readonly hint?: string
+}[] {
     return currentQuestion(state)?.options ?? []
 }
 
@@ -251,7 +254,14 @@ export function summaryRows(
         { label: "agent", value: partial.name ?? "" },
         { label: "for", value: `${partial.user ?? ""} — ${partial.purpose ?? ""}` },
         { label: "endpoint", value: `${endpoint}${key}` },
-        { label: "directory", value: partial.dir ?? "" },
+        // Derived when the answer was `sandbox` or `here`, because the `dir` question is not asked
+        // then — and this row is the last thing read before anything is written, so it has to name
+        // the directory that will actually exist. `dirFor` is the same function `complete()` calls;
+        // a second derivation here is how a confirm screen comes to describe a different path.
+        {
+            label: "directory",
+            value: partial.dir ?? dirFor(partial.dirChoice, partial.name, state.defaults) ?? "",
+        },
     ]
 }
 
@@ -286,6 +296,7 @@ export function answeredRows(
         daemon: "Background service",
         serverToken: "API token",
         composioKey: "Composio key",
+        dirChoice: "Location",
         dir: "Directory",
     }
     return state.log.map((entry) => ({

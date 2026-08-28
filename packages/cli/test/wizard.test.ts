@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
+import { dirFor } from "#lib/init-flow"
 import {
     currentQuestion,
     isSelectStep,
@@ -16,6 +17,13 @@ import {
     summaryRows,
     type WizardState,
 } from "#lib/wizard"
+
+/**
+ * `agentDirBase` is required, so every wizard test has to state it. That is the guard working: the
+ * field used to be optional and its absence silently produced a cwd-relative `./<slug>` default,
+ * which is how agents ended up in whatever checkout the command was run from.
+ */
+const DEFAULTS = { agentDirBase: "/home/x/.brand/agents" }
 
 function type(state: WizardState, text: string): WizardState {
     return [...text].reduce(
@@ -35,7 +43,7 @@ function answer(state: WizardState, text: string): WizardState {
 
 describe("the happy path", () => {
     test("answers every step, reaches confirm, and yields the collected answers", () => {
-        let state = startWizard({}, {})
+        let state = startWizard({}, DEFAULTS)
         state = answer(state, "Moeen") // user
         state = answer(state, "Milo") // name
         state = commit(state) // purpose: empty commit takes the fallback
@@ -62,7 +70,10 @@ describe("the happy path", () => {
         expect(partial.user).toBe("Moeen")
         expect(partial.preset).toBe("deepseek")
         expect(partial.model).toBe("deepseek-v4-flash")
-        expect(partial.dir).toBe("./milo")
+        // The wizard collects the *choice*; the path is derived at the `complete()` funnel, which is
+        // where a no-longer-asked step's default has to live.
+        expect(partial.dirChoice).toBe("sandbox")
+        expect(dirFor(partial.dirChoice, partial.name, DEFAULTS)).toBe("/home/x/.brand/agents/milo")
 
         // Confirm: index 0 is yes.
         state = commit(state)
@@ -70,7 +81,7 @@ describe("the happy path", () => {
     })
 
     test("a keyless preset skips the key question and the step total shrinks", () => {
-        let state = startWizard({ user: "M", name: "Pip", purpose: "x" }, {})
+        let state = startWizard({ user: "M", name: "Pip", purpose: "x" }, DEFAULTS)
         const totalBefore = stepCounts(state).total
         state = reduceWizard(state, {
             kind: "list",
@@ -94,7 +105,10 @@ describe("the happy path", () => {
 
 describe("validation", () => {
     test("an invalid answer sets the error and stays on the question", () => {
-        let state = startWizard({ user: "M", name: "Pip", purpose: "x", preset: "custom" }, {})
+        let state = startWizard(
+            { user: "M", name: "Pip", purpose: "x", preset: "custom" },
+            DEFAULTS,
+        )
         state = answer(state, "some-model") // model (custom has no default)
         state = answer(state, "https://x.example/v1/chat/completions") // baseUrl — the classic mistake
         expect(state.error).toContain("version segment")
@@ -107,7 +121,7 @@ describe("validation", () => {
 
 describe("back navigation", () => {
     test("esc pops the last wizard answer; flag-given answers are never poppable", () => {
-        let state = startWizard({ user: "Moeen" }, {})
+        let state = startWizard({ user: "Moeen" }, DEFAULTS)
         state = answer(state, "Milo") // name (wizard-asked)
         expect(currentQuestion(state)?.step).toBe("purpose")
         state = reduceWizard(state, { kind: "back" })
@@ -119,7 +133,7 @@ describe("back navigation", () => {
     })
 
     test("re-answering the preset re-derives the downstream defaults", () => {
-        let state = startWizard({ user: "M", name: "Pip", purpose: "x" }, {})
+        let state = startWizard({ user: "M", name: "Pip", purpose: "x" }, DEFAULTS)
         state = commit(state) // preset: default index 0 = openai
         expect(currentQuestion(state)?.fallback).toBe("gpt-5-6-sol")
         state = reduceWizard(state, { kind: "back" }) // back onto preset
@@ -132,7 +146,10 @@ describe("back navigation", () => {
     })
 
     test("declining the confirm screen reopens the last question", () => {
-        let state = startWizard({ user: "M", name: "Pip", purpose: "x", preset: "ollama" }, {})
+        let state = startWizard(
+            { user: "M", name: "Pip", purpose: "x", preset: "ollama" },
+            DEFAULTS,
+        )
         state = commit(state) // model
         state = commit(state) // baseUrl
         state = commit(state) // system
@@ -149,13 +166,13 @@ describe("back navigation", () => {
         })
         state = commit(state) // "no, go back"
         expect(state.phase).toBe("asking")
-        expect(currentQuestion(state)?.step).toBe("dir")
+        expect(currentQuestion(state)?.step).toBe("dirChoice")
     })
 })
 
 describe("abort", () => {
     test("abort works from any phase and is terminal", () => {
-        let state = startWizard({}, {})
+        let state = startWizard({}, DEFAULTS)
         state = reduceWizard(state, { kind: "abort" })
         expect(state.phase).toBe("aborted")
         expect(reduceWizard(state, { kind: "commit" }).phase).toBe("aborted")
@@ -185,13 +202,13 @@ describe("flags answering everything", () => {
         // Deliberate: a key passed on the command line lands in shell history, so at a terminal it
         // is asked for even when every other answer arrived as a flag. The alternative was writing
         // an empty MODEL_API_KEY= and producing an agent that cannot run.
-        const state = startWizard(ALL_FLAGS, {})
+        const state = startWizard(ALL_FLAGS, DEFAULTS)
         expect(state.phase).toBe("asking")
         expect(currentQuestion(state)?.step).toBe("apiKey")
     })
 
     test("answering it reaches confirm, and the key is never shown back", () => {
-        let state = startWizard(ALL_FLAGS, {})
+        let state = startWizard(ALL_FLAGS, DEFAULTS)
         state = reduceWizard(state, { kind: "edit", intent: { kind: "insert", text: "sk-secret" } })
         state = reduceWizard(state, { kind: "commit" })
 
@@ -202,7 +219,7 @@ describe("flags answering everything", () => {
     })
 
     test("a keyless preset asks nothing and opens on confirm", () => {
-        const state = startWizard({ ...ALL_FLAGS, preset: "ollama" }, {})
+        const state = startWizard({ ...ALL_FLAGS, preset: "ollama" }, DEFAULTS)
         expect(state.phase).toBe("confirm")
         expect(summaryRows(state).map((row) => row.label)).toEqual([
             "agent",
@@ -221,7 +238,10 @@ describe("the skills question never becomes a text box", () => {
      * The answer opens the picker after the wizard; the wizard itself asks nothing more.
      */
     test("choosing `find` asks no follow-up question", () => {
-        let state = startWizard({ user: "M", name: "Pip", purpose: "x", preset: "ollama" }, {})
+        let state = startWizard(
+            { user: "M", name: "Pip", purpose: "x", preset: "ollama" },
+            DEFAULTS,
+        )
         state = commit(state) // model
         state = commit(state) // baseUrl
         state = commit(state) // system
@@ -233,7 +253,7 @@ describe("the skills question never becomes a text box", () => {
         state = commit(state) // index 0 is `find`
         expect(partialOf(state).skills).toBe("find")
         // Straight to the next real question. A `skillsSearch` step here is the defect.
-        expect(currentQuestion(state)?.step).toBe("dir")
+        expect(currentQuestion(state)?.step).toBe("dirChoice")
         expect(partialOf(state).skillsSearch).toBe(undefined)
     })
 
@@ -241,8 +261,8 @@ describe("the skills question never becomes a text box", () => {
         // If one answer added a step, the step counter would jump mid-flow — and the reason it used to was
         // that the expensive answer asked for words it did not need.
         const base = { user: "M", name: "Pip", purpose: "x", preset: "ollama" } as const
-        const withFind = stepCounts(startWizard({ ...base, skills: "find" }, {})).total
-        const withStarter = stepCounts(startWizard({ ...base, skills: "starter" }, {})).total
+        const withFind = stepCounts(startWizard({ ...base, skills: "find" }, DEFAULTS)).total
+        const withStarter = stepCounts(startWizard({ ...base, skills: "starter" }, DEFAULTS)).total
         expect(withFind).toBe(withStarter)
     })
 })

@@ -348,6 +348,7 @@ export function WizardApp({ title, given, defaults, onDone }: WizardAppProps) {
                                 <SelectList
                                     items={selectOptions(state).map((option) => ({
                                         label: option.label,
+                                        ...(option.hint === undefined ? {} : { hint: option.hint }),
                                     }))}
                                     index={state.select.index}
                                     numbered
