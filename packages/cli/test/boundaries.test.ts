@@ -353,6 +353,67 @@ describe("exactly one module may spawn a subprocess", () => {
     })
 })
 
+describe("a generated session key has one derivation", () => {
+    /**
+     * `sessionKeyFrom` turns bytes into `local:xxxxxx`. `resolveSession` called it inline, and `/new`
+     * needed the same call — at which point "what a generated conversation is called" would have existed
+     * in two places, which is how two surfaces come to disagree about it. Same reasoning that moved
+     * `logPaths` into `lib/sandbox.ts` rather than letting `remove` keep a copy.
+     *
+     * Structural rather than a unit test, because `resolveSession` is private to `run.ts` and exporting it
+     * to prove this would be a change made only for the test. What the rule actually says is: outside the
+     * module that owns keys, the only route to a fresh one is `newSessionKey`.
+     */
+    const OWNER = "lib/session-key.ts"
+
+    test("only the key module calls sessionKeyFrom", () => {
+        const offenders = FILES.filter(
+            (file) => file.path !== OWNER && /\bsessionKeyFrom\s*\(/.test(file.text),
+        ).map((file) => file.path)
+        expect(offenders).toEqual([])
+    })
+
+    test("and it really does call it — otherwise this test proves nothing", () => {
+        const owner = FILES.find((file) => file.path === OWNER)?.text ?? ""
+        expect(/\bsessionKeyFrom\s*\(/.test(owner)).toBe(true)
+    })
+})
+
+describe("both renderers open a new conversation the same way", () => {
+    /**
+     * Structural, and it says so: the plain path's dispatch is private to `runPlain` and needs a live
+     * agent and a store to reach, so the honest proof is running the binary. What this *can* pin is the
+     * regression that would otherwise be silent — `/new` returning the restart outcome without putting a
+     * key in the box, which turns it into `/restart` with a different name, on one path only.
+     *
+     * Two sites, because there are two renderers and the whole point of `session-commands.ts` is that
+     * they cannot answer one keystroke differently. One `switch` site, because a `/sessions` move must not
+     * quietly become a `/new` — that would discard the conversation somebody chose.
+     */
+    const RUN = FILES.find((file) => file.path === "run.ts")?.text ?? ""
+
+    test("run.ts is where this lives — otherwise the counts below prove nothing", () => {
+        expect(RUN).not.toBe("")
+    })
+
+    // The trailing brace is what makes these count *assignments*. Without it the union in the box's own
+    // type declaration matches too, which is how the first version of this test reported three writes
+    // where there is one — a count is only a count of the thing you meant if the pattern excludes the
+    // declaration of it.
+    const assigned = (reason: string) =>
+        [...RUN.matchAll(new RegExp(`reason:\\s*"${reason}"\\s*}`, "g"))].length
+
+    test("each path mints a key and marks the reason", () => {
+        expect(assigned("new")).toBe(2)
+        // Twice for `/new`, once for `resolveSession`'s fresh path — the shared derivation.
+        expect([...RUN.matchAll(/newSessionKey\(/g)]).toHaveLength(3)
+    })
+
+    test("moving to a chosen conversation stays its own reason", () => {
+        expect(assigned("switch")).toBe(1)
+    })
+})
+
 describe("help lists everything a command accepts", () => {
     /**
      * The flag half of this has been pinned since Phase 2.5. The *action* half had no check at

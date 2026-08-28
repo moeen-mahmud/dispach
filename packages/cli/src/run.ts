@@ -56,7 +56,7 @@ import { ENABLE_MOUSE } from "#lib/mouse"
 import { resolveModeFromProcess } from "#lib/output"
 import { CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { keyValue } from "#lib/render"
-import { priorMessages, resumeNotice } from "#lib/resume"
+import { priorMessages, reopenNote, resumeNotice } from "#lib/resume"
 import { listAgents, storePath } from "#lib/sandbox"
 import type { RunOptions } from "#lib/schema"
 import { screenColumns } from "#lib/screen"
@@ -68,7 +68,7 @@ import {
     toolsView,
     unknownCommandText,
 } from "#lib/session-commands"
-import { SESSION_KEY_LENGTH, sessionKeyFrom } from "#lib/session-key"
+import { newSessionKey } from "#lib/session-key"
 import type { CatalogueEntry } from "#lib/source-cache"
 import { openTap } from "#lib/stdin-tap"
 import type { RenderMode } from "#lib/types"
@@ -84,14 +84,25 @@ async function bannerLines(
     /**
      * Why this banner is being printed.
      *
-     * A boolean answered "is this the first one" and there are now three answers: a `/restart` rebuilt the
-     * agent, and a session switch rebuilt it to move conversations. They need different sentences — the
-     * restart note is about configuration and would be a lie about a switch — and they agree about the
-     * boot number, because in both cases the process has been alive for however long the last conversation
-     * lasted and time-since-process-start has stopped meaning anything.
+     * A boolean answered "is this the first one" and there are now four answers: a `/restart` rebuilt the
+     * agent, a session switch rebuilt it to move conversations, and `/new` rebuilt it onto a conversation
+     * that did not exist a moment ago. They need different sentences — the restart note is about
+     * configuration and would be a lie about a switch — and they agree about the boot number, because in
+     * every case the process has been alive for however long the last conversation lasted and
+     * time-since-process-start has stopped meaning anything.
+     *
+     * Closed on purpose: a new reason cannot be added without the compiler demanding a sentence for it.
      */
-    reopened: "first" | "restart" | "switch",
+    reopened: "first" | "restart" | "switch" | "new",
     demoted: readonly string[] = [],
+    /**
+     * The conversation being left behind, for the one sentence that has to name it.
+     *
+     * Last, after the defaulted `demoted`: inserted next to `reopened` where it reads best, it would
+     * have silently taken the argument the existing call site passes for `demoted`. A positional
+     * parameter is added at the end or every caller is re-read.
+     */
+    previousKey?: string,
 ) {
     const described = agent.describe()
     const [turns, resumed] = await Promise.all([
@@ -111,18 +122,11 @@ async function bannerLines(
         `ready in ${bootMs.toFixed(0)} ms · /help for commands and keys · /exit to leave`,
     ]
 
-    if (reopened === "restart") {
-        lines.push(
-            "restarted — the configuration on disk is now the one in force; the conversation continues from the store.",
-        )
-    }
-    if (reopened === "switch") {
-        // What was left behind is worth naming: the previous conversation is still in the store, and the
-        // key above is the one that reaches this one again.
-        lines.push(
-            "switched conversation — the one you left is still in the store, under its own key.",
-        )
-    }
+    // One function decides the sentence, and it is pure — see `lib/resume.ts`. Written inline here it
+    // needed a live agent and a store to reach, so the only part of this banner a person reads was the
+    // only part nothing could check.
+    const note = reopenNote(reopened, previousKey)
+    if (note !== undefined) lines.push(note)
 
     // Naming a reaped turn is the point of reaping it: the previous run died mid-generation, and the
     // person restarting is the one who needs to know.
@@ -208,14 +212,24 @@ export async function runCommand(options: RunOptions): Promise<number> {
     // Whether the splash stands in for the transcript. Carried beside the key, and both survive a
     // `/restart` — which is not new, so the restarted session goes straight to the conversation.
     const freshSession = { current: false }
+    /** The key the last iteration was on, for the `/new` banner. Undefined on the first. */
+    const leaving: { current: string | undefined } = { current: undefined }
     const quiet = options.quiet === true
     // Why the loop is on this iteration. `switch` is set by the in-session picker, which reaches the loop
     // the same way `/restart` does — by unmounting — because `useReducer`'s initial state only seeds on
     // mount, so a transcript cannot be re-keyed in place. Rebuilding is a hundred and fifty milliseconds
     // and it re-reads the store, which is exactly what moving to another conversation wants.
-    let reopened: "first" | "restart" | "switch" = "first"
-    /** A conversation the running session asked to move to. Applied at the top of the next iteration. */
-    const switchTo: { current: string | undefined } = { current: undefined }
+    let reopened: "first" | "restart" | "switch" | "new" = "first"
+    /**
+     * A conversation the running session asked to move to. Applied at the top of the next iteration.
+     *
+     * Carries its *reason* rather than sitting beside a second `mintedNew` boolean: two pieces of state
+     * answering one question is how they come to disagree, and `reopened` is a closed union, so a reason
+     * with no banner sentence is a compile error rather than a silent rebuild nobody explains.
+     */
+    const switchTo: { current: { key: string; reason: "switch" | "new" } | undefined } = {
+        current: undefined,
+    }
 
     // `/restart` rebuilds the agent in this process rather than replacing the process.
     //
@@ -286,6 +300,7 @@ export async function runCommand(options: RunOptions): Promise<number> {
                       reopened === "first" ? runtime.boot.processMs : runtime.boot.bootMs,
                       reopened,
                       demotedKeys([options.manifestPath]),
+                      leaving.current,
                   )
 
         // The conversation so far, for the rich path only. `history` is the same read `send` performs, so
@@ -312,6 +327,7 @@ export async function runCommand(options: RunOptions): Promise<number> {
             showReasoning,
             freshSession: freshSession.current,
             switchTo,
+            random: randomBytes,
         }
         const outcome = mode === "rich" ? await runRich(wired) : await runPlain(wired)
 
@@ -320,8 +336,11 @@ export async function runCommand(options: RunOptions): Promise<number> {
         if (switchTo.current === undefined) {
             reopened = "restart"
         } else {
-            reopened = "switch"
-            session.current = switchTo.current
+            reopened = switchTo.current.reason
+            // Read before the key is replaced: the sentence a `/new` prints is about the conversation
+            // being left, which is the one thing the next banner cannot derive from its own state.
+            leaving.current = sessionKey
+            session.current = switchTo.current.key
             switchTo.current = undefined
         }
         // The splash does not come back after a rebuild, even when the key is unchanged and nothing has
@@ -490,7 +509,7 @@ async function resolveSession(input: {
     readonly random: (count: number) => Uint8Array
 }): Promise<ResolvedSession | number> {
     const fresh = (): ResolvedSession => ({
-        sessionKey: sessionKeyFrom(input.random(SESSION_KEY_LENGTH)),
+        sessionKey: newSessionKey(input.random),
         fresh: true,
     })
 
@@ -610,8 +629,15 @@ interface Wired extends RunOptions {
      * and a piped REPL replaying its own history would change what every existing script reads.
      */
     readonly prior: readonly PriorMessage[]
-    /** Where the in-session picker asked to move to. Read by the loop, not by the renderer. */
-    readonly switchTo: { current: string | undefined }
+    /**
+     * Where the running session asked to move to, and why. Read by the loop, not by the renderer.
+     *
+     * The reason rides with the key because the loop has to tell a `/sessions` switch from a `/new`, and
+     * a second boolean beside this box would be a second answer to one question.
+     */
+    readonly switchTo: { current: { key: string; reason: "switch" | "new" } | undefined }
+    /** Six bytes, injected so a test gets the key it asked for. `randomBytes` in production. */
+    readonly random: (count: number) => Uint8Array
     /**
      * The line reader, owned by `runCommand` so it survives a `/restart`.
      *
@@ -675,7 +701,15 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
                 // The same route a `/restart` takes, for the reason stated at `reopened`: a transcript
                 // cannot be re-keyed in place, so the conversation moves by rebuilding.
                 restart = true
-                wired.switchTo.current = sessionKey
+                wired.switchTo.current = { key: sessionKey, reason: "switch" }
+                wired.draft.current = draft
+            },
+            onNew: (draft: string) => {
+                // Identical to `onSwitch` but for a key that did not exist a moment ago. Minted here
+                // rather than in the component: `run.ts` owns the randomness and its injection point,
+                // and a component that reaches for crypto is one no test can pin to a known key.
+                restart = true
+                wired.switchTo.current = { key: newSessionKey(wired.random), reason: "new" }
                 wired.draft.current = draft
             },
             sessions: async () => {
@@ -883,6 +917,12 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
             case "exit":
                 return "exit"
             case "restart":
+                return "restart"
+            case "new":
+                // The same outcome `/restart` returns, with a key in the box — which is exactly what the
+                // rich path's `onNew` does. No new outcome value: the loop below already turns "restart"
+                // into `RESTART`, and the box is what makes this a move rather than a rebuild in place.
+                wired.switchTo.current = { key: newSessionKey(wired.random), reason: "new" }
                 return "restart"
             case "help":
                 row(sessionHelpText())

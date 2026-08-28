@@ -386,6 +386,15 @@ export interface AppProps {
      */
     readonly onSwitch?: (sessionKey: string, draft: string) => void
     /**
+     * Open a conversation that does not exist yet.
+     *
+     * The same unmount-and-reopen route as `onSwitch`, and deliberately *not* a call to it with a key the
+     * component minted: the key is generated from `randomBytes`, which the host owns and injects, so a
+     * component that produced its own would be one no test could pin to a known key. It takes no key for
+     * the same reason — there is nothing for the screen to decide.
+     */
+    readonly onNew?: (draft: string) => void
+    /**
      * The stored conversations, for the `/sessions` switcher.
      *
      * A function rather than an array, because the list is only wanted when the pane opens and it is a

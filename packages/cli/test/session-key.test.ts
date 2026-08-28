@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test"
 import {
     isGeneratedSessionKey,
     LOCAL_SESSION_PREFIX,
+    newSessionKey,
     SESSION_KEY_LENGTH,
     sessionKeyFrom,
 } from "#lib/session-key"
@@ -81,5 +82,32 @@ describe("isGeneratedSessionKey", () => {
 
     test("a confusable symbol is not one of ours", () => {
         expect(isGeneratedSessionKey("local:abciii")).toBe(false)
+    })
+})
+
+describe("newSessionKey", () => {
+    test("is sessionKeyFrom over the bytes it asked for", () => {
+        const asked: number[] = []
+        const key = newSessionKey((count) => {
+            asked.push(count)
+            return bytes(0, 1, 2, 3, 4, 5)
+        })
+        expect(asked).toEqual([SESSION_KEY_LENGTH])
+        expect(key).toBe(sessionKeyFrom(bytes(0, 1, 2, 3, 4, 5)))
+        expect(isGeneratedSessionKey(key)).toBe(true)
+    })
+
+    /**
+     * The whole reason this function exists rather than the expression being written twice.
+     *
+     * `resolveSession` computed the key inline and `/new` needed the same one; two derivations of "what a
+     * generated conversation is called" is how two surfaces come to disagree about it. Asserted by giving
+     * both the same bytes and requiring the same key — which is a claim about them *sharing* the
+     * derivation, not about each being individually correct.
+     */
+    test("the same bytes give the same key, whichever surface asks", () => {
+        const fixed = () => bytes(31, 30, 29, 28, 27, 26)
+        expect(newSessionKey(fixed)).toBe(newSessionKey(fixed))
+        expect(newSessionKey(fixed)).toBe(sessionKeyFrom(fixed()))
     })
 })

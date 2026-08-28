@@ -78,3 +78,40 @@ export function resumeNotice(input: {
     // The reset precedes the last newline so the prompt after it is not faint.
     return `\n${DIM_STYLE}Resume this session with:\n${command}${RESET_STYLE}\n`
 }
+
+/**
+ * Why a banner is being printed, as the one sentence a person reads.
+ *
+ * Four answers, and they are genuinely different things to say: a `/restart` is about *configuration*
+ * and would be a lie about a switch; a `/new` opened a conversation that did not exist a moment ago,
+ * and the only thing worth saying about it is what happened to the one being left.
+ *
+ * Extracted from `bannerLines` because that function needs a live agent and a store to call, so the
+ * sentence selection — the only part a person actually reads — could not be checked without resuming a
+ * real session and looking. Exactly the reason `priorMessages` above lives here.
+ *
+ * The return is `undefined` for a first run: nothing has happened yet that needs explaining.
+ */
+export function reopenNote(
+    reopened: "first" | "restart" | "switch" | "new",
+    previousKey?: string,
+): string | undefined {
+    switch (reopened) {
+        case "first":
+            return undefined
+        case "restart":
+            return "restarted — the configuration on disk is now the one in force; the conversation continues from the store."
+        case "switch":
+            // What was left behind is worth naming: the previous conversation is still in the store, and
+            // the key in the banner above is the one that reaches this one again.
+            return "switched conversation — the one you left is still in the store, under its own key."
+        case "new":
+            // By name, unlike the switch sentence. After a `/new` the conversation you left is on screen
+            // nowhere — the picker lists it, but only once you know to go looking — and the whole promise
+            // of the command is that nothing was destroyed. Claiming that without naming the key is
+            // asking to be taken on trust.
+            return previousKey === undefined
+                ? "new conversation — the one you left is still in the store, under its own key."
+                : `new conversation — the one you left is ${previousKey}, still in the store. /sessions goes back to it.`
+    }
+}

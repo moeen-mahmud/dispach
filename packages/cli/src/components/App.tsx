@@ -133,6 +133,7 @@ export function App({
     quiet,
     onRestart,
     onSwitch,
+    onNew,
     sessions,
     initialDraft,
     manifestPath,
@@ -362,6 +363,13 @@ export function App({
                     // pick up a settings change; throwing away a half-written message on the way is a
                     // second, unasked-for consequence of asking for the first.
                     onRestart?.(draft)
+                    exit()
+                    return
+                case "new":
+                    // The same unmount-and-reopen route `/restart` and `/sessions` take, for the same
+                    // reason: a transcript cannot be re-keyed in place. Nothing is destroyed — the
+                    // conversation being left keeps its key, and the next banner names it.
+                    onNew?.(draft)
                     exit()
                     return
                 case "help":

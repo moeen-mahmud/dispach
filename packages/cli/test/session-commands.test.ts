@@ -46,6 +46,30 @@ describe("recognising a command", () => {
     })
 })
 
+describe("/new and /reset are the pair a person picks between", () => {
+    /**
+     * They read as synonyms and are not: one keeps the conversation and one destroys it. The names cannot
+     * carry that — "new" and "reset" both mean "start over" in ordinary use — so the summaries have to,
+     * and this is the only place a person sees them side by side.
+     */
+    const summaryOf = (kind: string) =>
+        SESSION_COMMANDS.find((spec) => spec.kind === kind)?.summary ?? ""
+
+    test("the destructive one says it clears in place, keeping the key", () => {
+        expect(summaryOf("reset")).toContain("in place")
+        expect(summaryOf("reset")).toContain("key")
+    })
+
+    test("the other says the conversation survives, and how to get back to it", () => {
+        expect(summaryOf("new")).toContain("stays in the store")
+        expect(summaryOf("new")).toContain("/sessions")
+    })
+
+    test("and they do not read the same", () => {
+        expect(summaryOf("new")).not.toBe(summaryOf("reset"))
+    })
+})
+
 describe("what is a prompt and not a command", () => {
     // Each of these is a thing someone genuinely says to an agent. Refusing any of them would cost
     // a real message to save a typo.

@@ -24,6 +24,7 @@ export type SessionCommandKind =
     | "status"
     | "context"
     | "restart"
+    | "new"
     | "tools"
     | "reset"
     | "exit"
@@ -72,10 +73,21 @@ export const SESSION_COMMANDS: readonly SessionCommandSpec[] = [
         summary: "what the model may call, and what the catalogue costs every turn",
     },
     {
+        // Next to `/reset` deliberately: they are the pair a person picks between, and picking wrong
+        // is destructive in one direction only. The summaries carry the distinction rather than the
+        // names, because "new" and "reset" do not tell you which one keeps the conversation.
+        kind: "new",
+        word: "/new",
+        aliases: [],
+        summary:
+            "start a fresh conversation — this one stays in the store under its own key, and /sessions goes back to it",
+    },
+    {
         kind: "reset",
         word: "/reset",
         aliases: [],
-        summary: "clear this session's history — memory files on disk are untouched",
+        summary:
+            "clear this conversation's history in place, keeping its key — memory files on disk are untouched",
     },
     {
         kind: "exit",

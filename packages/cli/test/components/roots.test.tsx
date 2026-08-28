@@ -891,6 +891,44 @@ describe("App, restarting", () => {
     })
 })
 
+describe("App, opening a new conversation", () => {
+    test("/new asks the host for one, and does not go through the switcher", async () => {
+        // The two are one keystroke apart in the palette and take the same route out of the component, so
+        // the assertion is that they stay distinguishable: `onSwitch` moves to a conversation that exists
+        // and `onNew` opens one that does not. Calling `onSwitch` with a key the component minted would
+        // look identical here and be untestable — the key would be random.
+        const news: string[] = []
+        const switches: string[] = []
+        const harness = mount(
+            h(App, {
+                ...stubAppProps(),
+                onNew: (draft: string) => news.push(draft),
+                onSwitch: (key: string) => switches.push(key),
+            }),
+            { columns: 100, rows: 24 },
+        )
+        await harness.press("/new", KEY.enter)
+        harness.unmount()
+        expect(news).toEqual([""])
+        expect(switches).toEqual([])
+    })
+
+    test("the command that asked for it does not come back as the draft", async () => {
+        // The `/restart` bug, which this command reaches by the same route: a handler reading
+        // `editor.value` sees the buffer from *before* the submit, so `/new` would arrive as the draft of
+        // the conversation it just opened.
+        const news: string[] = []
+        const harness = mount(
+            h(App, { ...stubAppProps(), onNew: (draft: string) => news.push(draft) }),
+            { columns: 100, rows: 24 },
+        )
+        await harness.press("/new", KEY.enter)
+        harness.unmount()
+        expect(news).toEqual([""])
+        expect(news[0]).not.toContain("/new")
+    })
+})
+
 describe("App, leaving", () => {
     test("^C at an idle prompt arms, and says so before the second press", async () => {
         const harness = mount(h(App, stubAppProps()), { columns: 100 })
