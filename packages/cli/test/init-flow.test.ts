@@ -78,7 +78,6 @@ describe("nextQuestion", () => {
             "composio",
             "telegram",
             "server",
-            "schedules",
             "skills",
             "dir",
         ])
@@ -623,19 +622,21 @@ describe("the Composio question", () => {
     })
 })
 
-describe("the schedules question", () => {
+describe("schedules, which is a flag and not a question", () => {
     /** The generated `agent.yaml`, which is the only place the answer can be checked honestly. */
     const manifest = (schedules: string): string => {
         const file = planFiles({ ...ANSWERS, schedules }).find((f) => f.relPath === "agent.yaml")
         return file?.contents ?? ""
     }
 
-    test("each answer reaches the manifest, read out of the file rather than the layer that set it", () => {
-        // **Asserted at the far end on purpose.** `init`'s answer funnel is an object literal, so a
-        // step it does not list is silently dropped — and this went wrong twice while being written:
-        // once in the funnel inside `init.ts` (whose own comment describes exactly this defect,
-        // three lines below where it happened) and once in the flag dispatch in `index.ts`. Both
-        // type-checked. A test at either of those layers would have passed.
+    test("each answer reaches the generated manifest", () => {
+        // This covers the *generator* only — `planFiles` is handed answers, so neither of the two
+        // object-literal funnels that dropped `--schedules` (the one in `init.ts`, three lines below
+        // its own comment describing this defect, and the flag dispatch in `index.ts`) is on this
+        // path. The comment here used to claim otherwise. The funnel guard is
+        // `initCommand runs the whole funnel` in `init.test.ts`, which reads the written file — and
+        // it matters more now than it did, because with the wizard step gone the flag is the only
+        // route a value takes.
         expect(manifest("daily")).toContain("id: morning-brief")
         expect(manifest("daily")).toContain('expr: "0 8 * * *"')
         expect(manifest("hourly")).toContain("id: hourly-check")

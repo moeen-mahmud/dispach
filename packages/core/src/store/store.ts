@@ -512,7 +512,22 @@ export interface ScheduleRecord {
     readonly lastFiredAt: string | undefined
     readonly lastStatus: ScheduleRunStatus | undefined
     readonly lastError: string | undefined
+    /**
+     * The run whose outcome `lastStatus` describes, so a late report can tell whether it still does.
+     *
+     * A delivery failure surfaces after the turn has finished — `hub.deliver` enqueues and the
+     * outbox sends on a later tick — so by the time it arrives the schedule may have fired again.
+     * Matching on the id is what stops that report landing on the wrong run.
+     */
+    readonly lastRunId: string | undefined
     readonly runs: number
+    /**
+     * The manifest that wrote this row, or `''` for unknown provenance.
+     *
+     * Rows are keyed by agent `id`, which two directories may share; this is what stops one
+     * manifest's reconciliation deleting the other's schedules. See migration 9.
+     */
+    readonly sourcePath: string
     readonly createdAt: string
     readonly updatedAt: string
 }
@@ -533,6 +548,14 @@ export interface UpsertSchedule {
     readonly origin: ScheduleOrigin
     readonly anchorAt: string
     readonly nextRunAt: string | undefined
+    /**
+     * The manifest writing this row. Required rather than optional, and `''` for an API write.
+     *
+     * Not optional on purpose: a conditional spread onto an object literal is not
+     * excess-property-checked, and a provenance field that silently defaults is a field that
+     * silently stops protecting anything.
+     */
+    readonly sourcePath: string
     readonly now: string
 }
 
@@ -543,6 +566,8 @@ export interface ScheduleFired {
     readonly nextRunAt: string | undefined
     readonly status: ScheduleRunStatus
     readonly error?: string
+    /** Identifies this run, so an outcome reported after it finishes can be matched to it. */
+    readonly runId?: string
 }
 
 /**
@@ -612,7 +637,32 @@ export interface ScheduleStore {
      * through the API and absent from the file is left alone, which `02-SPEC-MANIFEST.md` states and
      * a reload would otherwise quietly violate.
      */
-    removeManifestExcept(agentId: string, keep: readonly string[]): Promise<readonly string[]>
+    removeManifestExcept(
+        agentId: string,
+        keep: readonly string[],
+        sourcePath: string,
+    ): Promise<readonly string[]>
+    /**
+     * Record that a finished run's delivery did not arrive.
+     *
+     * **The one thing `markFired` cannot know.** It writes `ok` when the turn completes, which is
+     * true and is not the question `dispach schedules` is asked — the reply is handed to
+     * `hub.deliver`, which *enqueues*; the send happens on a later outbox tick and can fail
+     * permanently. Before this existed a schedule delivering to an unroutable recipient reported
+     * `ok just now` forever, with `err.log` at zero bytes: the exact shape the listing's own
+     * docstring says it exists to prevent.
+     *
+     * Applies only when `runId` matches `lastRunId`, so a report that arrives after the schedule has
+     * fired again is dropped rather than written onto the following run. Returns whether it applied,
+     * which is the difference between "recorded" and "too late" and is worth being able to assert.
+     */
+    markDeliveryFailed(
+        agentId: string,
+        id: string,
+        runId: string,
+        error: string,
+        now: string,
+    ): Promise<boolean>
 }
 
 export interface ArtifactRecord {

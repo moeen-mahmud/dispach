@@ -159,6 +159,7 @@ export {
 export {
     assertApiVersion,
     scanForLiteralSecrets,
+    scheduleDeliveryWarnings,
     type ValidateOptions,
     validateManifest,
 } from "./manifest/validate.ts"

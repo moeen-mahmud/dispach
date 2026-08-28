@@ -26,6 +26,7 @@
  */
 
 import type { EventBus } from "../events/bus.ts"
+import { newRunId } from "../loop/ids.ts"
 import type { ScheduleRecord, ScheduleStore } from "../store/store.ts"
 import { decideDue, parseSchedule } from "./kinds.ts"
 
@@ -38,7 +39,7 @@ export interface SchedulerOptions {
     /** The agents this runtime hosts. Read per wake, because an agent can be added after start. */
     readonly agentIds: () => readonly string[]
     /** Runs one schedule to completion. Supplied by the runtime; core starts no turns of its own. */
-    readonly run: (schedule: ScheduleRecord) => Promise<void>
+    readonly run: (schedule: ScheduleRecord, runId: string) => Promise<void>
     /** Injected so a test is not a function of the wall clock. */
     readonly now?: () => number
     readonly horizonMs?: number
@@ -77,7 +78,7 @@ export class Scheduler {
     readonly #store: ScheduleStore
     readonly #bus: EventBus
     readonly #agentIds: () => readonly string[]
-    readonly #run: (schedule: ScheduleRecord) => Promise<void>
+    readonly #run: (schedule: ScheduleRecord, runId: string) => Promise<void>
     readonly #now: () => number
     readonly #horizonMs: number
     readonly #setTimer: (fire: () => void, ms: number) => () => void
@@ -307,6 +308,10 @@ export class Scheduler {
 
     async #fire(schedule: ScheduleRecord, dueAt: number, key: string): Promise<void> {
         const started = this.#now()
+        // Minted here rather than inside the runner because this is what owns a run's lifetime: the
+        // id has to reach `markFired`, so that a delivery failure arriving minutes later can be
+        // matched to the run it belongs to instead of to whichever run is current when it lands.
+        const runId = newRunId(started)
         this.#bus.emit(
             "schedule.fired",
             {
@@ -323,7 +328,7 @@ export class Scheduler {
         let status: "ok" | "error" = "ok"
         let error: string | undefined
         try {
-            await this.#run(schedule)
+            await this.#run(schedule, runId)
         } catch (cause) {
             status = "error"
             error = cause instanceof Error ? cause.message : String(cause)
@@ -339,7 +344,7 @@ export class Scheduler {
             )
         }
 
-        await this.#record(schedule.agentId, schedule.id, this.#now(), status, error)
+        await this.#record(schedule.agentId, schedule.id, this.#now(), status, error, runId)
 
         const entry = this.#inFlight.get(key)
         this.#inFlight.delete(key)
@@ -389,7 +394,8 @@ export class Scheduler {
         id: string,
         now: number,
         status: "ok" | "error",
-        error?: string,
+        error: string | undefined,
+        runId: string,
     ): Promise<void> {
         const schedule = await this.#store.get(agentId, id)
         if (schedule === undefined) return
@@ -400,6 +406,7 @@ export class Scheduler {
             nextRunAt: schedule.nextRunAt,
             status,
             ...(error === undefined ? {} : { error }),
+            runId,
         })
     }
 }

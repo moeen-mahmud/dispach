@@ -260,6 +260,14 @@ export const COMMANDS: readonly CommandSpec[] = [
                 placeholder: "schedule",
                 help: "switch an API-created schedule off; a manifest one is disabled in agent.yaml",
             },
+            {
+                name: "recipients",
+                kind: "boolean",
+                // The question a manifest cannot answer and this command is already holding the
+                // store to answer: what do I put in `deliver.to`. A handle is the form a person
+                // knows and the form that fails.
+                help: "list the addresses this agent can deliver to — what deliver.to takes",
+            },
             STORE,
             JSON_FLAG,
         ],

@@ -199,7 +199,9 @@ export interface InitAnswers {
     /**
      * What the agent runs on a schedule: `none`, `daily` or `hourly`.
      *
-     * `none` still writes the block, commented — see `SCHEDULE_CHOICES`.
+     * Not asked. Set by `--schedules` or defaulted to `none` in `complete()` — see
+     * `SCHEDULE_CHOICES` for why this capability has no question, and `apiKeyEnv` for why the
+     * default lives at that funnel rather than as a step fallback.
      */
     readonly schedules: string
     readonly server: string
@@ -260,17 +262,22 @@ export interface InitAnswers {
 /**
  * Whether the agent runs anything on a schedule, and what the generated manifest shows.
  *
- * A capability reachable only by somebody who already knows the field names is one the generated
- * file is hiding — the standing rule after the web provider shipped commented out. So this is a
- * question rather than a block someone has to discover.
+ * **Flag-only: `--schedules`, and no wizard step.** The standing rule is that every capability the
+ * runtime has is a question in `init`, and the exception it already carries is the one that applies
+ * here — *not every hidden capability wants a question; a switch that is off wants to exist*, which
+ * is how `knowledge:` shipped with scaffolding and a commented block instead of a screen. A schedule
+ * is not a thing anyone knows they want at minute two of setting an agent up; it is a thing they want
+ * three days later, and by then the answer is `config_set` from a conversation or an edit to the file
+ * the commented block is already sitting in.
  *
- * `none` still writes a commented `schedules:` block with a worked example, for the same reason
- * `--system none` still names the provider: a switch that is off wants to *exist*. What it does not
- * do is invent a schedule nobody asked for.
+ * So `none` — the value every interactive and every `--yes` run takes — writes the commented
+ * `schedules:` block with a worked example, for the same reason `--system none` still names the
+ * provider. The flag survives because a scripted setup has no other route, exactly as
+ * `--skills "<phrase>"` survives a picker that cannot run in CI.
  *
- * `daily` is offered because it is what almost everyone means the first time, and because a cron
- * expression is exactly the kind of thing people get wrong once and then avoid. Only `serve` fires
- * them, which the generated comments say.
+ * `daily` and `hourly` stay offered by the flag because a cron expression is exactly the kind of
+ * thing people get wrong once and then avoid. Only `serve` fires them, which the generated comments
+ * say.
  */
 export const SCHEDULE_CHOICES: readonly {
     readonly value: string
@@ -589,7 +596,6 @@ const STEP_ORDER: readonly InitStep[] = [
     "telegramAllow",
     "telegramToken",
     "server",
-    "schedules",
     "skills",
     "daemon",
     "dir",
@@ -828,16 +834,6 @@ export function nextQuestion(
                     prompt: "Serve the HTTP API?",
                     fallback: "1",
                     options: SERVER_CHOICES.map((choice) => ({
-                        value: choice.value,
-                        label: choice.label,
-                    })),
-                }
-            case "schedules":
-                return {
-                    step,
-                    prompt: "Run anything on a schedule?",
-                    fallback: "1",
-                    options: SCHEDULE_CHOICES.map((choice) => ({
                         value: choice.value,
                         label: choice.label,
                     })),

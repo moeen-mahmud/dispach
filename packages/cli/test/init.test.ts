@@ -40,6 +40,39 @@ const FLAGS = {
 // way init's own validate step stubs it, because the generated .env leaves it empty on purpose.
 const STUB_ENV = { MODEL_API_KEY: "(pending)" }
 
+describe("initCommand runs the whole funnel", () => {
+    // The real guard for a flag-only answer, and the one the `planFiles` tests cannot be. Between a
+    // flag and the file sit `fromFlags`, `validateAnswer`, `complete`'s object literal and
+    // `planFiles`; the literal is not excess-property-checked, so a field it fails to carry is
+    // dropped with no type error. `--schedules` has already been lost that way twice, and now that
+    // the wizard step is gone there is no second route for the value to arrive by.
+
+    test("--schedules daily reaches the written agent.yaml", async () => {
+        const dir = scratch()
+        expect(await initCommand({ ...FLAGS, dir, schedules: "daily" })).toBe(EXIT_OK)
+        const yaml = readFileSync(join(dir, "agent.yaml"), "utf8")
+        expect(yaml).toContain("id: morning-brief")
+        expect(yaml).toMatch(/\nschedules:/)
+    })
+
+    test("no flag writes the block commented, and nothing is scheduled", async () => {
+        // The default every interactive run and every `--yes` run takes, now that nobody is asked.
+        // A switch that is off wants to exist: the field names are in the file for whoever wants
+        // them later, and no schedule was invented.
+        const dir = scratch()
+        expect(await initCommand({ ...FLAGS, dir })).toBe(EXIT_OK)
+        const yaml = readFileSync(join(dir, "agent.yaml"), "utf8")
+        expect(yaml).toContain("# schedules:")
+        expect(yaml).not.toMatch(/\nschedules:/)
+
+        const loaded = loadManifest(join(dir, "agent.yaml"), {
+            env: STUB_ENV,
+            knownProviders: PROVIDER_IDS,
+        })
+        expect(loaded.manifest.schedules).toEqual([])
+    })
+})
+
 describe("initCommand", () => {
     test("writes a starter agent the real loader accepts", async () => {
         const dir = scratch()

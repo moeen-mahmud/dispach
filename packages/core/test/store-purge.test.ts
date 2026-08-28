@@ -61,6 +61,7 @@ async function populate(store: Store, agentId: string, key = "local:aaa111"): Pr
         sessionMode: "isolated",
         enabled: true,
         origin: "manifest",
+        sourcePath: `/agents/${agentId}/agent.yaml`,
         anchorAt: NOW,
         nextRunAt: NOW,
         now: NOW,

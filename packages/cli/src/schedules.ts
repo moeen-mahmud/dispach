@@ -109,6 +109,91 @@ function printOne(schedule: ScheduleRecord): void {
     }
 }
 
+/** One address this agent has actually been reached on, and can therefore deliver to. */
+export interface Recipient {
+    readonly channelId: string
+    readonly address: string
+    readonly lastSeen: string
+}
+
+/**
+ * Addresses `deliver.to` can name, derived from sessions this agent has actually had.
+ *
+ * **Observed, never guessed.** The alternative — asking the transport to resolve a handle — is the
+ * thing that cannot work: Telegram will not tell a bot the chat id behind an `@name`, and a private
+ * chat has no other address. What the store holds is the id a real inbound message arrived on, which
+ * is the one value known to route.
+ *
+ * Filtered to *declared channel ids*, so `local`, `api` and `schedule` sessions are left out. They
+ * are sessions and they are not places a reply can be sent, and listing them under a heading that
+ * says "what deliver.to takes" would be four wrong answers beside one right one.
+ *
+ * Pure, and takes plain rows rather than a store, so the shaping is testable without a runtime.
+ */
+export function recipientsFrom(
+    sessions: readonly {
+        readonly channel: string
+        readonly peerId: string
+        readonly lastActivityAt: string
+    }[],
+    channelIds: readonly string[],
+): readonly Recipient[] {
+    const declared = new Set(channelIds)
+    const latest = new Map<string, Recipient>()
+
+    for (const session of sessions) {
+        if (!declared.has(session.channel)) continue
+        const key = `${session.channel}\u0000${session.peerId}`
+        const seen = latest.get(key)
+        // One row per address, carrying the most recent contact: the same peer opens a new session
+        // per thread, and three rows for one person is a list that has to be read twice.
+        if (seen !== undefined && seen.lastSeen >= session.lastActivityAt) continue
+        latest.set(key, {
+            channelId: session.channel,
+            address: session.peerId,
+            lastSeen: session.lastActivityAt,
+        })
+    }
+
+    return [...latest.values()].sort((a, b) =>
+        a.channelId === b.channelId
+            ? b.lastSeen.localeCompare(a.lastSeen)
+            : a.channelId.localeCompare(b.channelId),
+    )
+}
+
+function printRecipients(recipients: readonly Recipient[], now: number): void {
+    if (recipients.length === 0) {
+        // Exit 0 and say why it is empty. "None" on its own reads as a broken query, and the real
+        // cause is almost always that nobody has messaged the agent yet.
+        process.stdout.write(
+            "no addresses yet — this agent has had no conversation on a declared channel.\n" +
+                "  An address appears here once a first message arrives on one.\n",
+        )
+        return
+    }
+
+    const channelWidth = Math.max(7, ...recipients.map((r) => r.channelId.length))
+    const addressWidth = Math.max(7, ...recipients.map((r) => r.address.length))
+    process.stdout.write(
+        `${pad("CHANNEL", channelWidth)}  ${pad("ADDRESS", addressWidth)}  LAST SEEN\n`,
+    )
+    for (const recipient of recipients) {
+        process.stdout.write(
+            `${pad(recipient.channelId, channelWidth)}  ${pad(recipient.address, addressWidth)}  ` +
+                `${ago(recipient.lastSeen, now)}\n`,
+        )
+    }
+
+    // The whole reason the listing exists, so it is not left to be inferred from the shape of the
+    // values. A handle is what `allowFrom` holds and what a person recognises, and for a private
+    // chat it is the one thing that cannot work.
+    process.stdout.write(
+        "\nUse an ADDRESS in deliver.to. On Telegram an @name addresses a channel and\n" +
+            "never a person — a private chat is reached by the numeric id above.\n",
+    )
+}
+
 export async function schedulesCommand(options: SchedulesOptions): Promise<number> {
     const runtime = await Runtime.create({
         agents: [options.manifestPath],
@@ -172,6 +257,19 @@ export async function schedulesCommand(options: SchedulesOptions): Promise<numbe
                 ? `${id} enabled — it fires at its next occurrence, not now\n`
                 : `${id} disabled — still listed, and it keeps its place in the sequence\n`,
         )
+    }
+
+    if (options.recipients === true) {
+        const recipients = recipientsFrom(
+            await agent.store.sessions.list(agent.id),
+            agent.manifest.channels.map((channel) => channel.id),
+        )
+        if (options.json === true) {
+            process.stdout.write(`${JSON.stringify({ recipients }, null, 2)}\n`)
+            return EXIT_OK
+        }
+        printRecipients(recipients, now)
+        return EXIT_OK
     }
 
     const schedules = await agent.store.schedules.list(agent.id)

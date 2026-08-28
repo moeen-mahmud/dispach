@@ -7,6 +7,7 @@
  * writers with three different guarantees is what this replaced.
  */
 
+import { parse } from "yaml"
 import {
     AGENT_SETTABLE_PATHS,
     BRAND,
@@ -240,5 +241,28 @@ describe("a rendering that would not parse", () => {
         expect(setInSource("server:\n  host: x\n", ["server", "host"], "127.0.0.1")).toContain(
             "host: 127.0.0.1",
         )
+    })
+
+    test("a string that YAML would read back as something else is quoted", () => {
+        // The character classes decide whether text can be written bare; they say nothing about what
+        // it comes back **as**. `"1"` passes both and parses as the number 1 — and a Telegram chat
+        // id is exactly that shape, so the first schedule delivering to one was refused with
+        // `schedules.0.deliver: Invalid input`, a schema error pointing nowhere near the renderer.
+        const written = (value: unknown): string =>
+            setInSource(
+                "delivery:\n  targets: {}\n  default: x\n",
+                ["delivery", "default"],
+                value,
+            ) ?? ""
+        expect(written("1")).toContain('default: "1"')
+        expect(written("true")).toContain('default: "true"')
+        expect(written("null")).toContain('default: "null"')
+        expect(written("0x10")).toContain('default: "0x10"')
+
+        // The property, rather than the four cases: whatever is written must read back identical.
+        for (const value of ["1", "true", "null", "0x10", "tg", "./skills", "127.0.0.1", "no"]) {
+            const source = written(value)
+            expect(parse(source).delivery.default).toBe(value)
+        }
     })
 })

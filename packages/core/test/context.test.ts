@@ -264,6 +264,7 @@ describe("the configuration block", () => {
         channelsStarted: false,
         schedulerStarted: false,
         serverListening: false,
+        servedElsewhere: false,
     }
 
     function manifestFor(over: Record<string, unknown> = {}) {
@@ -379,6 +380,44 @@ describe("the configuration block", () => {
         expect(text).toContain("NOT running in this session")
         expect(text).toContain("`serve` starts channels")
         expect(text).toContain("NOT listening in this session")
+    })
+
+    test("another live process serving this agent is the third state, not the second", () => {
+        // Measured, in a real chat: told its channel and its scheduler were "NOT running in this
+        // session; only `serve` starts them", the agent told its owner to run `serve` — which was
+        // already running in the next terminal, holding the lease, polling Telegram and firing the
+        // schedules. Every sentence was true of the process rendering it. `run`'s `/status` had the
+        // fact from the same lease rows all along; slot 2 had never been given it, and `declined`,
+        // which is exactly this, was computed by `claimLeases` and read by nothing.
+        const text = renderConfigSummary({
+            ...base,
+            channelsStarted: false,
+            schedulerStarted: false,
+            serverListening: false,
+            servedElsewhere: true,
+            manifest: manifestFor({
+                channels: [{ id: "tg", type: "telegram", enabled: true }],
+                server: { enabled: true, host: "127.0.0.1", port: 7420 },
+                schedules: [
+                    {
+                        id: "brief",
+                        kind: "cron",
+                        expr: "0 8 * * *",
+                        task: "t",
+                        deliver: "none",
+                        enabled: true,
+                        session: "isolated",
+                    },
+                ],
+            }),
+        })
+        expect(text).toContain("connected in another process serving me")
+        expect(text).toContain("armed in another process serving me")
+        expect(text).toContain("on at 127.0.0.1:7420 in another process serving me")
+        // And it must not also carry the sentence that sends them to start it again.
+        expect(text).not.toContain("NOT running in this session")
+        expect(text).not.toContain("`serve` starts channels")
+        expect(text).not.toContain("NOT listening in this session")
     })
 
     test("a disabled channel is not reported as reachable", () => {

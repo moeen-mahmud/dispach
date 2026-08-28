@@ -99,6 +99,20 @@ export interface ConfigSummaryInput {
     readonly skillNames?: readonly string[]
     /** Whether the HTTP surface is actually bound, for the same reason. */
     readonly serverListening: boolean
+    /**
+     * Another live process holds this agent's serving lease.
+     *
+     * The third state the three flags above cannot express between them, and its absence was a
+     * measured failure: told only that its channel and its scheduler were "NOT running in this
+     * session; only `serve` starts them", an agent in a REPL sent its owner off to run `serve` — a
+     * command already running in the next terminal, doing both. Every sentence was true of the
+     * process rendering it and the conclusion drawn from them was wrong, which is decision 5.17's
+     * failure one process boundary out.
+     *
+     * No pid here, on purpose. Slot 2 is frozen at first use, so a pid is a fact at boot and a guess
+     * by turn forty; `run`'s `/status` reads the lease live and names it there, where it is current.
+     */
+    readonly servedElsewhere: boolean
 }
 
 /**
@@ -120,9 +134,9 @@ export function renderConfigSummary(input: ConfigSummaryInput): string {
         ["tools", describeTools(input)],
         ["skills", describeSkills(manifest, input.skillNames)],
         ["memory", describeMemory(manifest)],
-        ["channels", describeChannels(manifest, input.channelsStarted)],
-        ["schedules", describeSchedules(manifest, input.schedulerStarted)],
-        ["http api", describeServer(manifest, input.serverListening)],
+        ["channels", describeChannels(manifest, input.channelsStarted, input.servedElsewhere)],
+        ["schedules", describeSchedules(manifest, input.schedulerStarted, input.servedElsewhere)],
+        ["http api", describeServer(manifest, input.serverListening, input.servedElsewhere)],
         ["permissions", describePermissions(manifest)],
     ]
 
@@ -258,7 +272,7 @@ function describeMemory(manifest: AgentManifest): string {
  * reads as a switch that is off. Trimmed hard — slot 2 is billed on every turn of every session, so
  * a new capability earns a row and a wordier sentence does not.
  */
-function describeSchedules(manifest: AgentManifest, started: boolean): string {
+function describeSchedules(manifest: AgentManifest, started: boolean, elsewhere: boolean): string {
     const schedules = manifest.schedules.filter((schedule) => schedule.enabled)
     if (manifest.schedules.length === 0) return "none"
 
@@ -270,12 +284,15 @@ function describeSchedules(manifest: AgentManifest, started: boolean): string {
     const disabled = manifest.schedules.length - schedules.length
     const off = disabled === 0 ? "" : `; ${disabled} disabled`
 
-    return started
-        ? `${named}${rest}${off}`
-        : `${named}${rest}${off} — configured but NOT running in this session; only \`serve\` starts the scheduler, \`run\` does not`
+    if (started) return `${named}${rest}${off}`
+    // The three-way split every state row here now makes. "Not in this session" alone is true and
+    // sends the reader to start something that is already started — see `ConfigSummaryInput.servedElsewhere`.
+    if (elsewhere)
+        return `${named}${rest}${off} — armed in another process serving me, not in this one`
+    return `${named}${rest}${off} — configured but NOT running in this session; only \`serve\` starts the scheduler, \`run\` does not`
 }
 
-function describeChannels(manifest: AgentManifest, started: boolean): string {
+function describeChannels(manifest: AgentManifest, started: boolean, elsewhere: boolean): string {
     const enabled = manifest.channels.filter((channel) => channel.enabled)
     if (enabled.length === 0) {
         // Named as absent rather than omitted. A missing row reads as "this agent has no such
@@ -287,16 +304,18 @@ function describeChannels(manifest: AgentManifest, started: boolean): string {
     // State, not configuration. Told only the configuration, an agent under `run` reported that the
     // Telegram runtime was not up — from inside the running process — and offered to write a
     // LaunchAgent. The clause is what stops that: it is not broken, it is not started here.
-    return started
-        ? `${list} — connected in this session`
-        : `${list} — configured but NOT running in this session; only \`serve\` starts channels, \`run\` does not`
+    if (started) return `${list} — connected in this session`
+    if (elsewhere) return `${list} — connected in another process serving me, not in this one`
+    return `${list} — configured but NOT running in this session; only \`serve\` starts channels, \`run\` does not`
 }
 
-function describeServer(manifest: AgentManifest, listening: boolean): string {
+function describeServer(manifest: AgentManifest, listening: boolean, elsewhere: boolean): string {
     if (!manifest.server.enabled) return "off"
-    return listening
-        ? `on, ${manifest.server.host}:${manifest.server.port}`
-        : `enabled in config but NOT listening in this session; only \`serve\` binds it`
+    if (listening) return `on, ${manifest.server.host}:${manifest.server.port}`
+    if (elsewhere) {
+        return `on at ${manifest.server.host}:${manifest.server.port} in another process serving me, not in this one`
+    }
+    return `enabled in config but NOT listening in this session; only \`serve\` binds it`
 }
 
 function describePermissions(manifest: AgentManifest): string {

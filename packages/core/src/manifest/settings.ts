@@ -153,6 +153,31 @@ export const SETTINGS: readonly Setting[] = [
         agentListed: true,
     },
     {
+        // Settable for the same reason `channels` is: asked to run something every morning, an agent
+        // that cannot write this can only describe the YAML and hand it back — which is the "make
+        // your owner do the tedious half" failure `config_read` exists to end. Measured live before
+        // this row existed: asked to send a message every five minutes, the agent correctly reported
+        // that `schedules` was "not one of the settings I can change from a conversation", and there
+        // the request stopped.
+        //
+        // `deliver.to` is deliberately NOT floored, and it is the one field here worth a second
+        // thought: it is the first place the agent chooses a *recipient* rather than a channel. It
+        // stays open because a schedule with no addressee is not a feature, and because the message
+        // still leaves through a channel a person configured with a token only a person can supply —
+        // but if that ever needs closing, it closes the way `allowFrom` did, by key inside the value.
+        path: "schedules",
+        means: 'what runs unattended, as a list — [{id, kind: cron|every|at, expr, task, deliver}]. expr is a 5- or 6-field cron, a duration like 15m, or an ISO instant; deliver is {channel, to} or the literal "none"',
+        // `deliver.to` gets a sentence of its own, next to the field being filled in, because that
+        // is where a small model looks. Measured: an agent copied the @handle out of `allowFrom` —
+        // the obvious move, since that is the recognisable form — and every scheduled send came back
+        // `Bad Request: chat not found` while the schedule itself fired perfectly every 15 minutes.
+        // Naming the failing form is what makes the right one findable; describing only the right
+        // one leaves the wrong one looking equally plausible.
+        toAgent:
+            "Only `serve` fires these; under `run` they are validated and listed and no timer starts. deliver.to is the address a reply is *sent* to — on Telegram the numeric chat id, never an @handle, which addresses a channel and not a person. It is the id inbound messages arrive on, so read it off your own session keys (tg:<id>); allowFrom holds handles and confers nothing here. Set role to name a model other than main. The whole list is replaced, so read it first",
+        agentListed: true,
+    },
+    {
         path: "server.enabled",
         means: "true | false — serve the HTTP API on 127.0.0.1",
         toAgent: "host and tokenEnv are refused: binding anywhere reachable is not yours to decide",

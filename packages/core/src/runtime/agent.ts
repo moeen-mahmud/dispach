@@ -36,6 +36,7 @@ import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from 
 import type { LoadedManifest } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
 import type { AgentManifest } from "../manifest/schema.ts"
+import { scheduleDeliveryWarnings } from "../manifest/validate.ts"
 import {
     enumerateFiles,
     enumerateSessions,
@@ -304,6 +305,7 @@ export class Agent {
     #configSummary: string | undefined
     #channelsStarted = false
     #schedulerStarted = false
+    #servedElsewhere = false
     #serverListening = false
     /** Absolute path, or `(object)` for the programmatic path — which has no file to watch. */
     readonly #manifestPath: string
@@ -514,6 +516,13 @@ export class Agent {
                 ...warnings,
                 ...providerWarnings,
                 ...overrides,
+                // Same function `validate` calls. A deliverability check only one of them performs
+                // is a check the two disagree about, and this one is about a schedule that fires
+                // perfectly and reaches nobody — the surface where nothing else would say so.
+                ...scheduleDeliveryWarnings(loaded.manifest),
+                // Same function `validate` calls. A deliverability check only one of them performs
+                // is a check the two disagree about, and this one is about a schedule that fires
+                // perfectly and reaches nobody — the surface where nothing else would say so.
                 ...(unknownWindows.length === 0 ? [] : [modelWindowUnknown(unknownWindows)]),
             ],
             bus,
@@ -872,6 +881,14 @@ export class Agent {
         readonly channelsStarted?: boolean
         readonly schedulerStarted?: boolean
         readonly serverListening?: boolean
+        /**
+         * Another live process holds this agent's serving lease.
+         *
+         * Separate from the three above because it is not about *this* process at all, and without
+         * it the other three are true and misleading together: "not running in this session" is what
+         * a REPL says while a `serve` in the next terminal is running the lot.
+         */
+        readonly servedElsewhere?: boolean
     }): void {
         if (this.#configSummary !== undefined) {
             throw new Error(
@@ -882,6 +899,7 @@ export class Agent {
         if (state.channelsStarted !== undefined) this.#channelsStarted = state.channelsStarted
         if (state.schedulerStarted !== undefined) this.#schedulerStarted = state.schedulerStarted
         if (state.serverListening !== undefined) this.#serverListening = state.serverListening
+        if (state.servedElsewhere !== undefined) this.#servedElsewhere = state.servedElsewhere
     }
 
     /** Slot 2's text. Rendered on first use, then frozen — see `#configSummary`. */
@@ -1207,6 +1225,7 @@ export class Agent {
                 channelsStarted: this.#channelsStarted,
                 schedulerStarted: this.#schedulerStarted,
                 serverListening: this.#serverListening,
+                servedElsewhere: this.#servedElsewhere,
                 // Absent, not zero, when no block is configured — the row distinguishes "off" from
                 // "no such concept", and only this side knows which it is.
                 ...(this.skills === undefined

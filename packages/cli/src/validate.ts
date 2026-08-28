@@ -18,6 +18,7 @@ import {
     resolveCapabilities,
     resolveWorkspace,
     ruleBudgetFailure,
+    scheduleDeliveryWarnings,
     windowReport,
 } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
@@ -61,6 +62,18 @@ export function validateCommand(options: ValidateOptions): number {
         const ruleFailure = ruleBudgetFailure(workspace, manifest.context.rules)
         if (ruleFailure !== undefined && manifest.context.rules.onExceed === "fail")
             throw ruleFailure
+
+        // Assembled once and rendered twice. Held apart from the findings that *fail* the load:
+        // whether a recipient is reachable is a judgement about another service's addressing rules,
+        // and one of those refusing to load a manifest is a heuristic nobody keeps.
+        //
+        // `scheduleDeliveryWarnings` is the same function `Agent.create` puts on `agent.warnings`,
+        // for the standing reason that a check only one of them performs is one they disagree about.
+        const findings = [
+            ...workspaceWarnings,
+            ...scheduleDeliveryWarnings(manifest),
+            ...(ruleFailure === undefined ? [] : [ruleFailure.toDetail()]),
+        ]
 
         // Tier 3 loads exactly as `run` loads it, so a bad entry — no keywords, over the
         // activation budget — is a validation failure rather than a first-turn surprise.
@@ -115,10 +128,7 @@ export function validateCommand(options: ValidateOptions): number {
                                       keywords: entry.keywords,
                                       tokens: entry.tokens,
                                   })),
-                        warnings: [
-                            ...workspaceWarnings,
-                            ...(ruleFailure === undefined ? [] : [ruleFailure.toDetail()]),
-                        ],
+                        warnings: findings,
                     },
                     null,
                     2,
@@ -190,12 +200,7 @@ export function validateCommand(options: ValidateOptions): number {
                               .join(" ")
                 }\n` +
                 `  limits       maxSteps=${manifest.limits.maxSteps} turnTimeoutMs=${manifest.limits.turnTimeoutMs}\n` +
-                [
-                    ...workspaceWarnings,
-                    ...(ruleFailure === undefined ? [] : [ruleFailure.toDetail()]),
-                ]
-                    .map((warning) => `  warning      ${warning.message}\n`)
-                    .join(""),
+                findings.map((warning) => `  warning      ${warning.message}\n`).join(""),
         )
         return EXIT_OK
     } catch (error) {

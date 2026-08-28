@@ -30,7 +30,7 @@ import type { ScriptRunner, ToolProvider, ToolProviderFactory } from "../tools/t
 import { Agent } from "./agent.ts"
 import { type ChannelFactory, ChannelHub } from "./channels.ts"
 import { claimLeases, LEASE_BEAT_MS } from "./lease.ts"
-import { reconcileSchedules, scheduleRunner } from "./schedules.ts"
+import { reconcileSchedules, scheduleRunner, scheduleRunOfSession } from "./schedules.ts"
 
 export type AgentSource = string | Record<string, unknown>
 
@@ -423,12 +423,15 @@ export class Runtime {
             const agent = agents[index]
             if (agent === undefined) continue
             if (entry.manifest.schedules.length === 0) {
-                // Still reconciled, so removing the last schedule from a manifest removes its row.
+                // Still reconciled, so removing the last schedule from a manifest removes its row —
+                // its own row. `sourcePath` is what keeps this from also removing a same-id agent's
+                // schedules from another directory, which is exactly what an empty list would do.
                 await reconcileSchedules({
                     agentId: agent.id,
                     schedules: [],
                     store: store.schedules,
                     now: Date.now(),
+                    sourcePath: entry.path,
                 })
                 continue
             }
@@ -437,6 +440,7 @@ export class Runtime {
                 schedules: entry.manifest.schedules,
                 store: store.schedules,
                 now: Date.now(),
+                sourcePath: entry.path,
             })
             bus.emit(
                 "schedules.reconciled",
@@ -449,6 +453,41 @@ export class Runtime {
                 { agentId: agent.id },
             )
         }
+
+        // A scheduled run's delivery fails *after* the run finished — `hub.deliver` enqueues and the
+        // outbox sends on a later tick — so the only status the scheduler can write at the time is
+        // `ok`. Subscribed unconditionally, not behind `startSchedules`: the outbox drains under
+        // `run` too, and a failure recorded nowhere is the whole defect this closes.
+        bus.on("delivery.failed", (event) => {
+            if (event.type !== "delivery.failed") return
+            const agentId = event.agentId
+            const sessionKey = event.sessionKey
+            if (agentId === undefined || sessionKey === undefined) return
+            const run = scheduleRunOfSession(sessionKey)
+            if (run === undefined) return
+            const detail = event.data.error
+            void store.schedules
+                .markDeliveryFailed(
+                    agentId,
+                    run.id,
+                    run.runId,
+                    `${detail.code}: ${detail.message}`,
+                    new Date().toISOString(),
+                )
+                .catch((cause: unknown) => {
+                    // Never swallowed. The delivery has already failed; losing the record of *why*
+                    // is what leaves `schedules` reporting `ok` on a schedule that delivers nothing.
+                    bus.emit(
+                        "agent.warning",
+                        {
+                            code: "schedule_delivery_status_unwritten",
+                            message: `Delivery for schedule "${run.id}" failed and the outcome could not be recorded: ${cause instanceof Error ? cause.message : String(cause)}`,
+                            hint: "`schedules` will still report the run as ok. The delivery failure itself is on the bus as delivery.failed and in the outbox row.",
+                        },
+                        { agentId },
+                    )
+                })
+        })
 
         if (options.startSchedules === true) await scheduler.start()
 
@@ -468,6 +507,21 @@ export class Runtime {
             // decision 5.17 was written to stop it saying.
             agent.reportRuntimeState({
                 channelsStarted: hub.started && hub.statusOf(agent.id).length > 0,
+                // The third state, and the reason the other two read as a lie without it.
+                //
+                // "Not in this session" is true of a REPL and says nothing about the `serve` running
+                // in the next terminal — so an agent asked to schedule something answered, correctly
+                // and uselessly, that only `serve` starts the scheduler. It was already being served.
+                // `declined` is exactly this fact and had been computed and read by *nothing* since
+                // leases landed: it holds the leases another **live** process is holding, and it is
+                // only ever populated here because a runtime that is about to open a channel refuses
+                // instead. `run.ts`'s `supervision()` reaches the same conclusion from the same rows
+                // for `/status`, which is how the gap was visible there and invisible here.
+                //
+                // No pid, deliberately. Slot 2 is frozen at first use, so a pid is a fact at boot and
+                // a guess by turn forty — and a dead pid presented as live is the looks-live-and-is-not
+                // failure the rest of this block exists to prevent.
+                servedElsewhere: leases.declined.some((held) => held.agentId === agent.id),
                 // Same distinction as `channelsStarted`, and the same trap: a schedule is
                 // *reconciled* under `run` as well, so "does this agent have schedules" and "is
                 // anything going to fire them" are different questions and slot 2 answers the

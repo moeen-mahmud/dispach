@@ -374,7 +374,13 @@ Never claim a performance property without a number in `evals/` and a script to 
 - **A check that only `run` performs is a check `validate` disagrees with.** The rule guard first
   lived in `Agent.create` alone, and `validate` reported ok on a manifest `run` refused. Anything
   load-bearing goes in one function both call — `ruleBudgetFailure` returns the finding rather than
-  throwing it, so each caller applies its own `onExceed`.
+  throwing it, so each caller applies its own `onExceed`. Second instance, measured: a cron `expr`
+  was parsed only by reconciliation, so `validate` **exited 0** on `expr: "not a cron at all"` *and
+  printed it in its own report* as `schedules  broken (cron not a cron at all UTC)`, while `run`
+  refused to boot. Harmless while nothing could write one; a trap the moment `config_set` could,
+  because the edit reports success and the next boot fails. `validateSchedules` calls `parseSchedule`
+  and `prepareManifestEdit` calls `validateSchedules` — the same shape as `resolveProviders` being
+  called there rather than reimplemented.
 - **The renderer never rewrites a sentence.** `promptStyle` transforms delimiters and structure —
   `<example>` and `<rules>` markers, heading syntax — and nothing else. `intensity` varies one
   generated line in front of an author-marked `<rules>` block. Automatic rewriting of an instruction
@@ -916,7 +922,13 @@ Never claim a performance property without a number in `evals/` and a script to 
   capability wants a question; a switch that is off wants to *exist*. The trap that decides the shape:
   every `*.md` under `knowledge/` is an entry and must declare frontmatter `keywords`, so a `README.md`
   explaining how to author one **fails the load it was written to help with** — the guidance goes in the
-  manifest comments, which nothing scans.
+  manifest comments, which nothing scans. `schedules` is the fourth, and the first to be *withdrawn*: it
+  shipped as a question and was removed after use (Moeen, 2026-08-27), because nobody knows they want a
+  schedule at minute two of setting an agent up — they want one three days later, by which point the
+  route is `config_set` from a conversation or the block already commented in the file. The flag stays,
+  the step does not, and `InitAnswers.schedules` is defaulted **in `complete()`**, which is where the
+  comment about `apiKeyEnv` already explains why: a question removed without moving its default is how
+  `init` once generated agents with no key configuration at all.
 - **Only secrets go through `${VAR}`; a generated manifest writes the model id and base URL
   literally.** A model name is not a secret, and hard rule 10 governs secrets. Behind a variable the
   id cost three things: `readManifestHeader` does not expand — deliberately, so a listing never needs
@@ -1003,6 +1015,16 @@ Never claim a performance property without a number in `evals/` and a script to 
 - **A slow boot is a symptom before it is a bug.** `ready in 132647 ms` and an earlier `ready in
   100339 ms` were both the machine being saturated, not the runtime being slow. `bench:boot` passes
   at 27 ms on an idle machine. Check `uptime` before profiling.
+- **"Not running in this session" is a fact about a process, and slot 2 needs the third state.** The
+  rows read *"configured but NOT running in this session; only `serve` starts channels"* — true of the
+  process rendering them — so an agent asked to schedule something sent its owner off to run `serve`,
+  which was running in the next terminal holding the lease, polling Telegram and arming the schedules.
+  Decision 5.17's failure one process boundary out. `claimLeases` returns `declined` — the leases a
+  **live** other process holds, populated only under `run`, since a runtime about to open a channel
+  refuses instead — and it had been computed and read by *nothing* since leases landed, the
+  `includeHistory` shape again. `run.ts`'s `supervision()` had the same fact from the same rows for
+  `/status`, which is exactly why the gap was visible there and invisible here. No pid in slot 2: it is
+  frozen at first use, so a pid is a fact at boot and a guess by turn forty.
 - **Slot 2 reports runtime state, not the manifest.** An agent told "channels: tg (telegram)" while
   running under `run` concluded the Telegram runtime had died and reported that nothing was
   listening on 7420 — from inside the running process. Every statement was true of the manifest and
@@ -1033,6 +1055,19 @@ Never claim a performance property without a number in `evals/` and a script to 
   and a third time in `config_read`'s summary, which stringifies list entries separately. The schema
   then rejects the result with a message pointing nowhere near the cause. Check the renderer whenever
   a new path's value is not a scalar.
+- **`renderScalar`'s character classes say whether text can be written bare, never what it comes back
+  *as*.** `"1"` passes both and is written unquoted, so YAML reads it back as the **number** 1 — and a
+  Telegram chat id is exactly that shape, so the first schedule delivering to one was refused with
+  `schedules.0.deliver: Invalid input`, a schema message pointing nowhere near the renderer. `"true"`,
+  `"null"` and `"0x10"` are the same bug in other clothes, and the fix is not to enumerate YAML's
+  resolvers: write it bare, `parse` it back with the same library `parseDocument` uses, and quote
+  unless the identical string returns. Asking the parser cannot go stale; a list of prefixes can.
+- **`editorRows` emitted a heading when the block *changed*, which `renderSettings` documents as the
+  wrong thing and had already fixed for itself.** The person-only rows sit at the end of `SETTINGS`,
+  so `server.host`/`server.tokenEnv` were a second `server` section all along — invisible until a row
+  was inserted between them and `server.port`, at which point the settings editor drew two `server`
+  headings. Collect by block; never emit on change. The heading-uniqueness test is what caught it, and
+  it will catch the next insertion too.
 - **`.env` is a protected path, so the agent cannot supply its own secrets — and must say so.** A
   `config_set` that names a new `tokenEnv` reports that the agent will not start until the variable
   is filled in. Without that the agent writes a channel, reports success, asks for a restart, and
@@ -1875,6 +1910,42 @@ Never claim a performance property without a number in `evals/` and a script to 
   the schedules it declares, `enabled` included. It refuses now and names the line to edit. Naming an
   edit beats performing one here: `manifest/edit.ts` is deliberately the one writer, and a schedule
   lives in a sequence whose index the command has no business knowing.
+- **The store is keyed by agent `id`, so one agent's *load* can destroy another's durable state.** Two
+  `milo` directories declared `id: milo`; reconciliation ends with `removeManifestExcept`, so loading
+  the sandbox copy — which declares no schedules — deleted the repo copy's row, and the next load
+  re-created it with a fresh anchor because `unchanged` requires `existing !== undefined`. Three
+  commands against the real pair: `in 3m`, gone, `in 16m`. A 15-minute schedule reloaded every few
+  minutes never fires, and nothing reports a fault, because each manifest is *correct about the rows
+  it can see*. `source_path` (migration 9) scopes that one delete; `''` is unknown provenance and is
+  adoptable once. Two edges worth keeping: a bare ref from the agent's own directory resolves to the
+  **sandbox** copy with no ambiguity note, so the agent diagnosing "why hasn't it fired" was the thing
+  resetting it; and the note that *does* print elsewhere says "run it from elsewhere", which was the
+  destructive advice. `remove` refusing and `listAgents` warning were already recorded — the lesson is
+  that a warning is not a guard when the damage is done by an ordinary read-only-looking command.
+- **`markFired` records the turn, not the delivery, and `ok` was every surface's answer for a schedule
+  that delivered nothing.** `hub.deliver` enqueues; the send happens on a later outbox tick and can
+  fail permanently. Measured: fired correctly every 15 minutes, `Bad Request: chat not found` every
+  time, and `dispach schedules` printed **`ok just now`** while `err.log` sat at **0 bytes** and
+  `daemon status` exited 0. `delivery.failed` was emitted and **nothing anywhere subscribed to it** —
+  the boot-warnings empty room again, and `schedules.ts`'s own docstring says the listing exists to
+  catch exactly this. The subscription is unconditional rather than behind `startSchedules` (the
+  outbox drains under `run` too) and matches on a **run id**, so a report landing after the schedule
+  has fired again is discarded instead of blamed on the wrong run. `shared:<key>` sessions carry no
+  schedule id and are therefore out of scope — a real limit, stated rather than guessed at.
+- **`deliver.to` is not `allowFrom` vocabulary, and Telegram's `@name` addresses a channel only.** A
+  private chat has no address but its numeric id — the one inbound messages arrive on. The handle is
+  the recognisable form, so copying it across is the obvious move and produces a schedule that fires
+  perfectly and reaches nobody. It **warns and never refuses**, because `@somechannel` is legitimate.
+  The useful half is not the warning: `schedules --recipients` lists addresses **observed** in the
+  sessions table, because a bot cannot ask Telegram for the id behind a handle, so the only
+  trustworthy value is one a real message already arrived on. It stays a reader — creating a schedule
+  there would be a third writer beside the manifest and the API.
+- **A declared CLI flag that nothing reads is accepted, documented, and inert.** Sixth instance of the
+  object-literal funnel (`apiKeyEnv`, `ChatMessage.toolCalls`, `TurnInput.skills`,
+  `ToolContext.readArtifact`, `ToolContext.memoryDir`, `init --schedules daily`). The cure is finally
+  structural rather than one test per field: `boundaries.test.ts` walks every `CommandSpec` flag and
+  requires it to be named inside that command's **own** `case` block in `index.ts`. One guard, and a
+  new flag is covered with nothing to remember.
 - **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
   under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
   builds running beside it — which is a shared 2-core runner every time. Its own comment says the

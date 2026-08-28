@@ -24,6 +24,8 @@
  * wrong one.
  */
 
+import { parse } from "yaml"
+
 /**
  * How a value is written into the file. Nothing else is settable, so nothing else is handled.
  *
@@ -41,12 +43,30 @@
  * ruled out here is merely *quoted*, never rejected.
  */
 function renderScalar(value: unknown): string {
-    if (typeof value === "string") {
-        const safeThroughout = /^[A-Za-z0-9_./@~-]+$/.test(value)
-        const safeOpener = /^[A-Za-z0-9_./]/.test(value)
-        return safeThroughout && safeOpener ? value : JSON.stringify(value)
+    if (typeof value !== "string") return String(value)
+
+    const safeThroughout = /^[A-Za-z0-9_./@~-]+$/.test(value)
+    const safeOpener = /^[A-Za-z0-9_./]/.test(value)
+    if (!safeThroughout || !safeOpener) return JSON.stringify(value)
+
+    // The character classes above decide whether the text can be written bare *as text*. They say
+    // nothing about what it comes back **as**, and that is a separate failure: `"1"` passes both,
+    // is written bare, and parses back as the number 1. Measured — a schedule delivering to a
+    // Telegram chat id, which is the normal value for that field, was refused with
+    // `schedules.0.deliver: Invalid input`, a schema message pointing nowhere near the renderer that
+    // caused it. `"true"`, `"null"` and `"0x10"` are the same bug wearing different clothes.
+    //
+    // So the question is asked of the parser rather than answered from a table of YAML's resolvers:
+    // write it bare, read it back, and quote unless the identical string returns. The same library
+    // with the same options that `parseDocument` uses two functions down, which is what makes this
+    // the real question rather than an approximation of it — and it cannot go stale the way an
+    // enumerated list of "0b, 0o, 0x, yes, no, on, off" would, which is the shape of mistake this
+    // file's own history warns about.
+    try {
+        return parse(value) === value ? value : JSON.stringify(value)
+    } catch {
+        return JSON.stringify(value)
     }
-    return String(value)
 }
 
 function indentOf(line: string): number {

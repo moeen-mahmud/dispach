@@ -12,6 +12,7 @@ import { isAbsolute, resolve } from "node:path"
 import { BRAND } from "../brand.ts"
 import { STAGE_ORDER, type StageName } from "../context/compaction/stages.ts"
 import { apiVersionMismatch, type ErrorDetail, HarnessError } from "../errors.ts"
+import { parseSchedule } from "../schedule/kinds.ts"
 import { planWorkspace, type WorkspaceFileRef } from "../workspace/load.ts"
 import { planSoul } from "../workspace/soul.ts"
 import type { AgentManifest } from "./schema.ts"
@@ -517,7 +518,54 @@ const UNSUPPORTED_SECTIONS: readonly { key: string; feature: string; phase: stri
  * role that no schedule references is exactly the shape that typo makes, so warning about it catches
  * the case that the schema no longer can.
  */
-function validateSchedules(raw: Record<string, unknown>, manifest: AgentManifest): ErrorDetail[] {
+/**
+ * Exported because `prepareManifestEdit` has to run it too.
+ *
+ * The schema is not the whole load — the comment beside `resolveProviders` in `edit.ts` records why,
+ * and schedules are the second field with that property: `expr`, `deliver.channel` and `role` are all
+ * strings the schema accepts and the runtime refuses. Writing one through `config_set` without this
+ * produces an agent that boots today and not tomorrow, reported as a successful edit.
+ */
+/**
+ * Deliverability findings that are **warnings, never refusals**.
+ *
+ * Separate from `validateSchedules` because the two answer different questions. That one asks
+ * whether the manifest can load and fails when it cannot; this asks whether a target that loads
+ * fine can actually be reached, and the answer is a judgement about another service's addressing
+ * rules. A heuristic that refuses to load a file is a heuristic nobody keeps.
+ *
+ * The case worth catching: Telegram's `chat_id` takes `@name` for a **channel** and nothing else, so
+ * a private recipient must be the numeric chat id. `allowFrom` holds handles, they are the form a
+ * person recognises, and copying one into `deliver.to` is the obvious move — measured on a real
+ * agent, the schedule fired correctly every 15 minutes and every send came back `Bad Request: chat
+ * not found`. It cannot be an error, because `@somechannel` is a legitimate target.
+ */
+export function scheduleDeliveryWarnings(manifest: AgentManifest): ErrorDetail[] {
+    const found: ErrorDetail[] = []
+    const typeOf = new Map(manifest.channels.map((channel) => [channel.id, channel.type]))
+
+    for (const [index, schedule] of manifest.schedules.entries()) {
+        const deliver = schedule.deliver
+        if (deliver === "none") continue
+        if (typeOf.get(deliver.channel) !== "telegram") continue
+        if (!deliver.to.startsWith("@")) continue
+
+        found.push({
+            code: "schedule_delivery_handle",
+            message: `Schedule "${schedule.id}" delivers to "${deliver.to}", which Telegram accepts only if it names a channel.`,
+            hint: "A private chat is addressed by its numeric chat id — the same id inbound messages arrive on, which `sessions` lists as tg:<id>. allowFrom is inbound-only and confers nothing on delivery. Ignore this if the target really is a channel.",
+            field: `schedules[${index}].deliver.to`,
+        })
+    }
+
+    return found
+}
+
+export function validateSchedules(
+    raw: Record<string, unknown>,
+    manifest: AgentManifest,
+    now: number,
+): ErrorDetail[] {
     const found: ErrorDetail[] = []
     const entries = Array.isArray(raw.schedules) ? raw.schedules : []
 
@@ -586,6 +634,37 @@ function validateSchedules(raw: Record<string, unknown>, manifest: AgentManifest
                     hint: "Add the role under model:, or point the schedule at one of the declared roles. Omit role entirely to use main.",
                     field: `schedules[${index}].role`,
                 })
+            }
+        }
+
+        // The expression, through the same function reconciliation calls.
+        //
+        // It was not checked here, and the gap was the recorded one: *a check that only `run`
+        // performs is a check `validate` disagrees with*. Measured on a real agent — `expr: "not a
+        // cron at all"` made `validate` **exit 0** and print `schedules  broken (cron not a cron at
+        // all UTC)` in its own report, as though the schedule were fine, while `run` refused to
+        // start at all with `schedule_cron_malformed`. `config_set` writing schedules makes that
+        // worse rather than merely inconsistent: the agent would report a successful edit and the
+        // next boot would fail, which is the *boots today and not tomorrow* shape the providers
+        // check three rules down exists to prevent.
+        //
+        // `parseSchedule`, not a second parser, for the same reason `resolveProviders` is called
+        // rather than reimplemented — two implementations of "is this expression legal" is how the
+        // validator comes to disagree with the runtime again.
+        const declared = manifest.schedules[index]
+        if (declared !== undefined) {
+            try {
+                parseSchedule({
+                    id: declared.id,
+                    kind: declared.kind,
+                    expr: declared.expr,
+                    timezone: declared.timezone,
+                    now,
+                    field: `schedules[${index}].expr`,
+                })
+            } catch (cause) {
+                if (!(cause instanceof HarnessError)) throw cause
+                found.push(cause.toDetail())
             }
         }
     }
@@ -742,6 +821,16 @@ export interface ValidateOptions {
      * library caller that registers nothing genuinely cannot serve that manifest.
      */
     knownChannels?: readonly string[]
+    /**
+     * The clock the schedule checks read.
+     *
+     * Injected so a test is not a function of the day it runs on, defaulted so no caller has to know
+     * this rule exists. Two of the checks are genuinely time-dependent — a cron expression is
+     * satisfiable *within the horizon from some instant*, and an `at` more than ten years out is
+     * refused — and both are checks `run` already performs, so agreeing with it means reading the
+     * same clock it does.
+     */
+    now?: number
 }
 
 /** Every rule this build can enforce. Returns all failures; the caller decides how to report. */
@@ -755,7 +844,7 @@ export function validateManifest(manifest: AgentManifest, options: ValidateOptio
         ...validateBaseUrls(manifest),
         ...validateApiKeyEnv(manifest, options.env),
         ...validateDialectSupport(manifest, options.capabilities),
-        ...validateSchedules(options.raw, manifest),
+        ...validateSchedules(options.raw, manifest, options.now ?? Date.now()),
         ...validateSupportedSections(
             options.raw,
             options.knownProviders ?? [],

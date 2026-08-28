@@ -433,9 +433,15 @@ function complete(partial: Partial<Record<InitStep, string>>): InitAnswers {
             | "composioKey"
             | "skillsSearch"
             | "skillsPick"
+            | "schedules"
         >,
         string
     > & {
+        /**
+         * Undefined unless `--schedules` was passed: this capability has no wizard step at all.
+         * Defaulted below, at the funnel, for the reason `apiKeyEnv` is.
+         */
+        schedules?: string
         /** Undefined unless the skills answer was `find`; its question is skipped otherwise. */
         skillsSearch?: string
         /** Undefined unless the wizard's catalogue step ran and something was ticked. */
@@ -483,7 +489,11 @@ function complete(partial: Partial<Record<InitStep, string>>): InitAnswers {
         ...(answers.telegramAllow === undefined || answers.telegramAllow === ""
             ? {}
             : { telegramAllow: answers.telegramAllow }),
-        schedules: answers.schedules,
+        // `none` writes the commented block with its worked example — see SCHEDULE_CHOICES. Defaulted
+        // here rather than as a step fallback because there is no step: this funnel is the one place
+        // both the wizard and `--schedules daily` pass through, which is the lesson `apiKeyEnv` above
+        // records from the last time a question was removed and its field silently went missing.
+        schedules: answers.schedules ?? "none",
         server: answers.server,
         skills: answers.skills,
         // Carried explicitly. This funnel is a literal, not a spread, so a step that is collected and not

@@ -35,6 +35,7 @@ import { isMap, isSeq, parseDocument } from "yaml"
 import { HarnessError } from "../errors.ts"
 import { resolveProviders } from "./providers.ts"
 import { AgentManifestSchema } from "./schema.ts"
+import { validateSchedules } from "./validate.ts"
 import { setInSource, uncommentInSource } from "./yaml-edit.ts"
 
 export interface ManifestEdit {
@@ -133,6 +134,19 @@ export function prepareManifestEdit(
             dotted,
             `${first?.path.join(".") ?? dotted}: ${first?.message ?? "does not fit the schema"}`,
         )
+    }
+
+    // Same rule as the providers check below, and schedules are the field it applies to second:
+    // `expr`, `deliver.channel` and `role` are strings the schema accepts and the runtime refuses. A
+    // `config_set schedules` without this reports a successful edit and the next boot fails.
+    const scheduleFindings = validateSchedules(
+        document.toJS() as Record<string, unknown>,
+        parsed.data,
+        Date.now(),
+    )
+    const firstSchedule = scheduleFindings[0]
+    if (firstSchedule !== undefined) {
+        throw manifestEditInvalid(dotted, `${firstSchedule.message} ${firstSchedule.hint}`)
     }
 
     // The schema alone is not the whole load. Writing `tools.providers` into a manifest that still

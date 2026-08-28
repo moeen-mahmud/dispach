@@ -172,6 +172,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 ...(id === undefined ? {} : { id }),
                 ...(enable === undefined ? {} : { enable }),
                 ...(disable === undefined ? {} : { disable }),
+                recipients: flags.bool("recipients"),
                 json: flags.bool("json"),
             })
         }

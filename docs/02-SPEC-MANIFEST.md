@@ -695,7 +695,7 @@ API-initiated turns.
 | `kind` | yes | `cron` \| `every` \| `at` |
 | `expr` | yes | cron: 5 or 6 field. every: duration (`15m`, `2h`). at: ISO 8601, max +10 years. |
 | `task` | yes | Prompt text for the run. |
-| `deliver` | yes | `{ channel, to }` or the literal `none`. **Validated at write time** with a specific error naming what's missing. |
+| `deliver` | yes | `{ channel, to }` or the literal `none`. **Validated at write time** with a specific error naming what's missing. `to` is the address a reply is *sent* to — see **Addressing** below; it is not the same vocabulary as `allowFrom`. |
 | `session` | no | `isolated` (default) or `shared:<key>`. `isolated` is a **fresh session per run** — `schedule:<id>:<runId>` — so a daily brief never accumulates history it was not asked to carry, and every run stays in the store as its own conversation. |
 | `enabled` | no | Default true. Disabled schedules are listed by default. |
 | `timezone` | no | IANA name. Defaults to `TZ` then UTC. Applies to `cron` only: `every` is interval-anchored and does not participate in DST. |
@@ -717,9 +717,33 @@ it dropped; it never replays a backlog. An `at` whose moment passed fires **once
 nothing else will ever fire it. A fire arriving while the previous run of the same schedule is still
 going is held until that run finishes, at most one deep.
 
+**Addressing.** `deliver.to` is an address the channel can route to, which is **not** the vocabulary
+`allowFrom` uses. On Telegram, `chat_id` accepts `@name` only when it names a *channel*; a private
+chat has no address but its numeric id — so `to: "@someone"` produces a schedule that fires perfectly
+and returns `Bad Request: chat not found` on every send. Loading a manifest with that shape **warns
+and still loads**, because `@somechannel` is a legitimate target and a heuristic that refuses to load
+a file is a heuristic nobody keeps. `dispach schedules <agent> --recipients` lists the addresses this
+agent has actually been reached on, which is the only trustworthy source: a bot cannot ask Telegram
+for the chat id behind a handle.
+
 Schedules declared in the manifest are reconciled into the store at load: created,
 updated, or removed to match. Schedules created through the API and absent from the
 manifest are left alone — the manifest owns manifest schedules only.
+
+Reconciliation is scoped to the **manifest that wrote each row**, not merely to `origin: manifest`.
+The store is keyed by agent `id`, and `id` need not equal the directory name — so two directories
+declaring the same `id` share every row, and without that scope each one's load deleted the other's
+schedules and the next load re-created them with a fresh anchor. A schedule reloaded more often than
+its own interval then never fires at all, silently.
+
+`schedules` is writable by the agent through `config_set`, for the same reason `channels` and
+`delivery` are: "remind me every morning" is a capability request, and an agent that can only describe
+the YAML makes its owner do the tedious half. `deliver.to` is settable with it — the first field where
+the agent names a recipient rather than a channel — because a schedule with no addressee is not a
+feature, and the message still leaves through a channel a person configured with a token only a person
+can supply. The write is validated the way the runtime validates it, not merely against the schema:
+`expr` is parsed, `deliver.channel` is checked against the declared channels and `role` against the
+declared roles, so an edit that would be refused at the next boot is refused where it is made.
 
 ### `plugins`
 

@@ -2198,8 +2198,15 @@ and wrong, and nothing downstream could tell.
 - **`sessions` folds** `schedule:<id>:*` into one row with a run count. A 15-minute schedule writes
   ~35,000 sessions a year and unfolded they bury every real conversation; the individual keys stay
   addressable with `--session`.
-- **An `init` question** with a `--schedules none|daily|hourly` flag. `none` still writes the block,
-  commented, with the field names in it — a switch that is off wants to exist.
+- **A `--schedules none|daily|hourly` flag and no `init` question** (revised 2026-08-27, Moeen).
+  Shipped as a wizard step; removed after using it. The standing directive is that every capability
+  gets a question, and the exception it already carries is the one that applies here — *not every
+  hidden capability wants a question; a switch that is off wants to exist* — which is how `knowledge:`
+  shipped as scaffolding plus a commented block. A schedule is not something anyone knows they want
+  at minute two of setting an agent up; it is something they want three days later, by which point
+  the route is `config_set` from a conversation or an edit to the block already in the file. The flag
+  survives because a scripted setup has no other route, exactly as `--skills "<phrase>"` does. `none`
+  still writes the block, commented, with the field names in it.
 - `validate` reports schedules including disabled; the serving banner names the count.
 
 ### Deviations from the plan as written
@@ -2259,7 +2266,63 @@ And one bad test: the overlong-`at` guard **passed with the clamp reverted**, be
 `setTimer` means the real `setTimeout` never runs and the 32-bit coercion cannot happen. It asserts
 the requested delay now.
 
-**Non-goals.** Distributed scheduling. Retry policies beyond fire-and-log.
+### Phase 8C — what using it found (2026-08-27)
+
+All from one real conversation: asked to send a Telegram message every five minutes, the agent
+declined for two reasons, both accurate and neither actionable — it could not write `schedules`, and
+its channel was "not running in this session" while a `serve` was running it in the next terminal.
+
+- **`schedules` was not in `SETTINGS`**, so `config_set` refused it — decision 9.17. `channels`,
+  `delivery` and `server.*` all became settable in Phase 4; this field predated the table and was
+  never added to it. `deliver.to` is settable with it, deliberately and with a note in the code: it is
+  the first field where the agent chooses a recipient rather than a channel.
+- **`validate` accepted a cron expression `run` refused** — decision 9.18. Exit 0, and the broken
+  schedule *printed in the report* as though it worked. Only reconciliation parsed `expr`.
+- **`renderScalar` lost a string's type.** `"1"` written bare parses back as the number 1, so the
+  first schedule delivering to a Telegram chat id was refused with a schema error naming
+  `deliver`. Now round-tripped through the same parser rather than checked against a list of
+  prefixes.
+- **Slot 2 had no way to say "another process is serving me"** — decision 9.19. `claimLeases`
+  returns `declined` and nothing had ever read it.
+- **`editorRows` drew two `server` headings** once a row was inserted between `server.port` and the
+  person-only `server.*` rows. It emitted a heading when the block changed; `renderSettings` records
+  that as the wrong thing and had already fixed it for itself.
+- **The `init` schedules question is gone**, flag kept — decision 9.17.
+
+Verified live across a process boundary: with `serve` holding the lease, a second runtime's prompt
+reads `channels  tg (telegram) — connected in another process serving me, not in this one`; with the
+`serve` stopped, the same probe returns to `configured but NOT running in this session`.
+
+### Phase 8D — the schedule that fired and delivered nothing (2026-08-27)
+
+The same agent, one conversation later: *"I haven't got any messages and it's more than 15 minutes."*
+Three defects, and they compose — each one hid the next, which is why no surface reported a fault.
+
+- **Two directories declared `id: milo`**, one in the repo and one in the sandbox, and the store is
+  keyed by `id`. Every load of either reconciled `schedules` for `milo`, and the sandbox copy declares
+  none — so it deleted the row, and the next load of the real one re-created it with a fresh anchor.
+  Reproduced with three commands against the real pair: `in 3m`, row gone, `in 16m`. Decision 9.20 and
+  migration 9 (`source_path`). The sharp edge: a bare `milo` ref from the agent's own directory
+  resolves to the *sandbox* copy with **no ambiguity note**, so the agent's own investigation
+  (`dispach schedules milo`) was what kept resetting the clock — and from the repo root the note that
+  does print says *"run it from elsewhere"*, which is the destructive advice.
+- **`deliver.to: "@moeen_mahmud"` can never work.** Telegram's `chat_id` takes `@name` only for a
+  channel. Observed: the schedule fired at 20:25:31 and the outbox row read
+  `telegram_refused: Bad Request: chat not found`, while the one delivery that had ever succeeded used
+  the numeric `1195568132`. Decision 9.22 — a warning at load, never a refusal, plus
+  `schedules --recipients` to answer the question it raises.
+- **Every operator surface reported success.** `schedules` printed `ok just now`, `err.log` was
+  **0 bytes**, `daemon status` exited 0. `markFired` writes the *turn's* outcome and `hub.deliver` only
+  enqueues, so `ok` was all the scheduler could know; `delivery.failed` was emitted and **nothing
+  subscribed to it**. Decision 9.21.
+
+Verified live with the built binary: the three-command repro now reads `in 8m` / `in 8m` / `in 8m`;
+`schedules --recipients` prints `tg  1195568132  59m ago`; `validate` prints the handle warning and
+still exits `ok`. Every new guard was revert-checked — six of them, each red with its fix removed.
+
+**Non-goals.** Distributed scheduling. Retry policies beyond fire-and-log. Making two directories with
+one `id` safe in general — only the schedule delete is scoped; sessions, memory and turns are still
+shared by design (11.100).
 
 ---
 

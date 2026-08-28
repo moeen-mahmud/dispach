@@ -496,3 +496,53 @@ test("config_read lists the new settings and renders a channel list readably", a
     expect(summary).toContain("telegram")
     expect(summary).not.toContain("[object Object]")
 })
+
+test("config_set writes a schedule, and config_read renders it readably", async () => {
+    const { set, read } = fixture()
+    await set(
+        { path: "channels", value: '[{"type":"telegram","id":"tg","tokenEnv":"TG_TOKEN"}]' },
+        toolContext({}),
+    )
+    // The request that could not be answered before this row existed: asked to send something on a
+    // timer, the agent reported `schedules` was "not one of the settings I can change from a
+    // conversation" and stopped there.
+    await set(
+        {
+            path: "schedules",
+            value: '[{"id":"hi","kind":"every","expr":"5m","task":"Say hi.","deliver":{"channel":"tg","to":"123456789"}}]',
+        },
+        toolContext({}),
+    )
+    const summary = String(await read({}, toolContext({})))
+    expect(summary).toContain("schedules =")
+    expect(summary).toContain("hi")
+    // Fourth appearance of one bug: a value shape the renderer has not seen writes `[object Object]`
+    // and the schema then refuses it with a message pointing nowhere near the cause.
+    expect(summary).not.toContain("[object Object]")
+})
+
+test("a schedule the runtime would refuse is refused at the edit, not at the next boot", async () => {
+    const { set } = fixture()
+    // The schema takes `expr` as any non-empty string, so without the shared check this writes
+    // cleanly and the agent fails to start — an edit reported as a success that bricks the next boot.
+    await expect(
+        set(
+            {
+                path: "schedules",
+                value: '[{"id":"x","kind":"cron","expr":"not a cron","task":"t","deliver":"none"}]',
+            },
+            toolContext({}),
+        ),
+    ).rejects.toThrow(/not a valid cron expression/)
+
+    // And a delivery target naming a channel this agent does not declare.
+    await expect(
+        set(
+            {
+                path: "schedules",
+                value: '[{"id":"x","kind":"every","expr":"5m","task":"t","deliver":{"channel":"nope","to":"1"}}]',
+            },
+            toolContext({}),
+        ),
+    ).rejects.toThrow(/not a channel id on this agent/)
+})

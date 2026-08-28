@@ -206,6 +206,8 @@ export interface SchedulesOptions {
     readonly enable?: string
     /** Switch a schedule off. It stays listed — decision 9.4. */
     readonly disable?: string
+    /** List deliverable addresses instead of schedules — what `deliver.to` takes. */
+    readonly recipients?: boolean
     readonly store?: string
     readonly json?: boolean
 }

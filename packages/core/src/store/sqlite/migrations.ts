@@ -507,6 +507,38 @@ CREATE INDEX schedules_due ON schedules (next_run_at)
 CREATE INDEX schedules_by_origin ON schedules (agent_id, origin);
 `,
     },
+    {
+        version: 9,
+        name: "schedule_provenance",
+        /**
+         * Who wrote a schedule row, and which run last touched it.
+         *
+         * **`source_path` exists because the store is keyed by manifest `id` and nothing else.** Two
+         * directories may declare the same `id` — usually equal to the directory name and not
+         * required to be — and they then share one store. Reconciliation ends by dropping the
+         * manifest-owned rows the manifest no longer declares, so loading the *other* manifest
+         * deleted the first one's schedules and the next load re-created them with a fresh anchor.
+         * Measured on a real pair: `in 3m` before, row gone, `in 16m` after. A 15-minute schedule
+         * whose owner was reloaded every few minutes never reached its own due time, and neither
+         * side reported anything, because each was correct about the rows it could see.
+         *
+         * `''` is a real value and means *unknown provenance*: a row written before this column
+         * existed. `removeManifestExcept` matches it as well as the caller's path, so the transition
+         * cleans up after itself — a legacy row is adopted by the first manifest to reconcile it, and
+         * is protected from every other manifest from that moment on. API-created rows carry `''`
+         * too and are never eligible: that delete is scoped to `origin = 'manifest'`.
+         *
+         * `last_run_id` is what lets a delivery failure find the run it belongs to. The scheduler
+         * records `ok` when the *turn* finishes, which is honest and is not the question an operator
+         * asks — `hub.deliver` only enqueues, so the send fails later, in the outbox, on another
+         * tick. Matching the id means a failure arriving after the schedule has already fired again
+         * is discarded rather than written onto the wrong run.
+         */
+        sql: `
+ALTER TABLE schedules ADD COLUMN source_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedules ADD COLUMN last_run_id TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

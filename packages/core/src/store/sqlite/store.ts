@@ -412,7 +412,9 @@ interface ScheduleRow {
     last_fired_at: string | null
     last_status: string | null
     last_error: string | null
+    last_run_id: string | null
     runs: number
+    source_path: string
     created_at: string
     updated_at: string
 }
@@ -444,7 +446,9 @@ function toSchedule(row: ScheduleRow): ScheduleRecord {
         lastFiredAt: row.last_fired_at ?? undefined,
         lastStatus: (row.last_status ?? undefined) as ScheduleRunStatus | undefined,
         lastError: row.last_error ?? undefined,
+        lastRunId: row.last_run_id ?? undefined,
         runs: row.runs,
+        sourcePath: row.source_path,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     }
@@ -1324,8 +1328,9 @@ export class SqliteStore implements Store {
             upsert: db.prepare(
                 `INSERT INTO schedules (
                      agent_id, id, kind, expr, timezone, task, deliver_channel, deliver_to,
-                     session_mode, role, enabled, origin, anchor_at, next_run_at, created_at, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     session_mode, role, enabled, origin, anchor_at, next_run_at, source_path,
+                     created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (agent_id, id) DO UPDATE SET
                      kind = excluded.kind,
                      expr = excluded.expr,
@@ -1339,14 +1344,23 @@ export class SqliteStore implements Store {
                      origin = excluded.origin,
                      anchor_at = excluded.anchor_at,
                      next_run_at = excluded.next_run_at,
+                     source_path = excluded.source_path,
                      updated_at = excluded.updated_at`,
             ),
             list: db.prepare("SELECT * FROM schedules WHERE agent_id = ? ORDER BY id"),
             markFired: db.prepare(
                 `UPDATE schedules
                     SET last_fired_at = ?, anchor_at = ?, next_run_at = ?, last_status = ?,
-                        last_error = ?, runs = runs + 1, updated_at = ?
+                        last_error = ?, last_run_id = ?, runs = runs + 1, updated_at = ?
                   WHERE agent_id = ? AND id = ?`,
+            ),
+            // Scoped to the run it reports on. A delivery failure for a run the schedule has already
+            // moved past updates nothing, which is the honest outcome: the row is describing a
+            // later run and overwriting it would report the wrong one as broken.
+            markDeliveryFailed: db.prepare(
+                `UPDATE schedules
+                    SET last_status = 'error', last_error = ?, updated_at = ?
+                  WHERE agent_id = ? AND id = ? AND last_run_id = ?`,
             ),
             reschedule: db.prepare(
                 `UPDATE schedules SET anchor_at = ?, next_run_at = ?, updated_at = ?
@@ -1356,8 +1370,13 @@ export class SqliteStore implements Store {
                 "UPDATE schedules SET enabled = ?, updated_at = ? WHERE agent_id = ? AND id = ?",
             ),
             remove: db.prepare("DELETE FROM schedules WHERE agent_id = ? AND id = ?"),
+            // `source_path = ''` is a row written before migration 9, or by a programmatic
+            // manifest that had no path. Matching it keeps the transition self-cleaning: the first
+            // manifest to reconcile such a row stamps its own path on it, and every other manifest
+            // is locked out from that moment on.
             manifestIds: db.prepare(
-                "SELECT id FROM schedules WHERE agent_id = ? AND origin = 'manifest'",
+                `SELECT id FROM schedules
+                  WHERE agent_id = ? AND origin = 'manifest' AND (source_path = ? OR source_path = '')`,
             ),
             countSchedules: db.prepare("SELECT COUNT(*) AS c FROM schedules WHERE agent_id = ?"),
             deleteAll: db.prepare("DELETE FROM schedules WHERE agent_id = ?"),
@@ -1390,6 +1409,7 @@ export class SqliteStore implements Store {
                     schedule.origin,
                     schedule.anchorAt,
                     schedule.nextRunAt ?? null,
+                    schedule.sourcePath,
                     schedule.now,
                     schedule.now,
                 )
@@ -1444,10 +1464,15 @@ export class SqliteStore implements Store {
                     fired.nextRunAt ?? null,
                     fired.status,
                     fired.error ?? null,
+                    fired.runId ?? null,
                     fired.firedAt,
                     agentId,
                     id,
                 )
+            },
+            markDeliveryFailed: async (agentId, id, runId, error, now) => {
+                const result = scheduleQ.markDeliveryFailed.run(error, now, agentId, id, runId)
+                return (result.changes ?? 0) > 0
             },
             reschedule: async (agentId, id, next) => {
                 scheduleQ.reschedule.run(
@@ -1467,10 +1492,10 @@ export class SqliteStore implements Store {
                 scheduleQ.remove.run(agentId, id)
                 return true
             },
-            removeManifestExcept: async (agentId, keep) => {
+            removeManifestExcept: async (agentId, keep, sourcePath) => {
                 const kept = new Set(keep)
                 const stale = scheduleQ.manifestIds
-                    .all<{ id: string }>(agentId)
+                    .all<{ id: string }>(agentId, sourcePath)
                     .map((row) => row.id)
                     .filter((id) => !kept.has(id))
                 if (stale.length === 0) return []

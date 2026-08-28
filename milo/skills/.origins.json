@@ -1,0 +1,61 @@
+{
+    "version": 1,
+    "origins": {
+        "pdf": {
+            "source": "anthropic",
+            "url": "https://github.com/anthropics/skills",
+            "repoPath": "skills/pdf",
+            "commit": "3b3fad9",
+            "installedAt": "2026-08-27T13:22:38.930Z"
+        },
+        "doc-coauthoring": {
+            "source": "anthropic",
+            "url": "https://github.com/anthropics/skills",
+            "repoPath": "skills/doc-coauthoring",
+            "commit": "3b3fad9",
+            "installedAt": "2026-08-27T18:39:24.895Z"
+        },
+        "frontend-design": {
+            "source": "anthropic",
+            "url": "https://github.com/anthropics/skills",
+            "repoPath": "skills/frontend-design",
+            "commit": "3b3fad9",
+            "installedAt": "2026-08-27T18:39:24.910Z"
+        },
+        "mcp-builder": {
+            "source": "anthropic",
+            "url": "https://github.com/anthropics/skills",
+            "repoPath": "skills/mcp-builder",
+            "commit": "3b3fad9",
+            "installedAt": "2026-08-27T18:39:24.925Z"
+        },
+        "pptx": {
+            "source": "anthropic",
+            "url": "https://github.com/anthropics/skills",
+            "repoPath": "skills/pptx",
+            "commit": "3b3fad9",
+            "installedAt": "2026-08-27T18:39:24.965Z"
+        },
+        "skill-creator": {
+            "source": "anthropic",
+            "url": "https://github.com/anthropics/skills",
+            "repoPath": "skills/skill-creator",
+            "commit": "3b3fad9",
+            "installedAt": "2026-08-27T18:39:24.981Z"
+        },
+        "web-artifacts-builder": {
+            "source": "anthropic",
+            "url": "https://github.com/anthropics/skills",
+            "repoPath": "skills/web-artifacts-builder",
+            "commit": "3b3fad9",
+            "installedAt": "2026-08-27T18:39:24.993Z"
+        },
+        "autoresearch": {
+            "source": "github",
+            "url": "https://github.com/github/awesome-copilot",
+            "repoPath": "skills/autoresearch",
+            "commit": "634b92f",
+            "installedAt": "2026-08-27T18:39:25.120Z"
+        }
+    }
+}

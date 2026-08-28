@@ -390,6 +390,47 @@ describe("help lists everything a command accepts", () => {
         // the other fails here rather than at the moment somebody types it.
         expect(listed).toEqual([...DAEMON_ACTIONS])
     })
+
+    /**
+     * A declared flag that nothing reads is accepted, documented, and does nothing.
+     *
+     * This is the repo's most expensive recurring shape, and it has cost a debugging round six
+     * times — `apiKeyEnv`, `ChatMessage.toolCalls`, `TurnInput.skills`, `ToolContext.readArtifact`,
+     * `ToolContext.memoryDir`, and `init --schedules daily`, which was parsed and silently dropped
+     * by an object literal three lines below its own comment describing the defect. Every instance
+     * type-checks, because a conditional spread onto an object literal is not
+     * excess-property-checked.
+     *
+     * The recorded cure is "a test at the far end that reads the value out". This is the structural
+     * form of it: one guard for every flag rather than one per flag, so a new one is covered with
+     * nothing to remember. Scoped to the command's own `case` block, so a name that happens to
+     * appear under a *different* command does not stand in for the wiring.
+     *
+     * Deliberately a source-text check. It cannot prove the value reaches the command's options —
+     * only that the dispatch names it, which is where every one of these has actually gone missing.
+     */
+    test("every declared flag is read in its own command's dispatch", () => {
+        const source = readFileSync(join(SRC, "index.ts"), "utf8")
+        const dispatch = (name: string): string | undefined => {
+            const start = source.indexOf(`case "${name}":`)
+            if (start === -1) return undefined
+            const next = source.indexOf("\n        case ", start + 1)
+            return source.slice(start, next === -1 ? source.length : next)
+        }
+
+        const unread: string[] = []
+        for (const command of COMMANDS) {
+            const block = dispatch(command.name)
+            // A command with no case block is its own failure, and a louder one.
+            expect(block).toBeDefined()
+            for (const flag of command.flags ?? []) {
+                if (block?.includes(`"${flag.name}"`) !== true) {
+                    unread.push(`${command.name} --${flag.name}`)
+                }
+            }
+        }
+        expect(unread).toEqual([])
+    })
 })
 
 describe("only the rich path moves a cursor", () => {

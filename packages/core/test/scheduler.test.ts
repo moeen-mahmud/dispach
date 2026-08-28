@@ -125,6 +125,7 @@ async function seed(
         sessionMode: "isolated",
         enabled: true,
         origin: "manifest",
+        sourcePath: "/agents/scheduler-test/agent.yaml",
         now: "2026-08-24T08:00:00.000Z",
         ...over,
         // After the spread, and derived rather than overridable: a test that sets `nextRunAt` means
@@ -172,6 +173,7 @@ describe("the store keeps schedules", () => {
             sessionMode: "isolated",
             enabled: true,
             origin: "manifest",
+            sourcePath: "/agents/other/agent.yaml",
             // Anchor equals the pending next run — the invariant both real writers maintain.
             anchorAt: "2026-08-25T08:00:00.000Z",
             nextRunAt: "2026-08-25T08:00:00.000Z",
@@ -187,7 +189,11 @@ describe("the store keeps schedules", () => {
         await seed(store, { id: "dropped", origin: "manifest" })
         await seed(store, { id: "by-api", origin: "api" })
 
-        const removed = await store.schedules.removeManifestExcept(AGENT, ["kept"])
+        const removed = await store.schedules.removeManifestExcept(
+            AGENT,
+            ["kept"],
+            "/agents/scheduler-test/agent.yaml",
+        )
         expect(removed).toEqual(["dropped"])
         const left = (await store.schedules.list(AGENT)).map((row) => row.id).sort()
         expect(left).toEqual(["by-api", "kept"])
@@ -231,6 +237,7 @@ describe("the store keeps schedules", () => {
             sessionMode: "isolated",
             enabled: true,
             origin: "api",
+            sourcePath: "",
             // Anchor equals the pending next run — the invariant both real writers maintain.
             anchorAt: "2026-08-25T08:00:00.000Z",
             nextRunAt: "2026-08-25T08:00:00.000Z",
@@ -421,6 +428,7 @@ describe("overlap", () => {
             task: "poll",
             sessionMode: "isolated",
             enabled: true,
+            sourcePath: "/agents/scheduler-test/agent.yaml",
             origin: "manifest",
             anchorAt: "2026-08-25T00:00:00.000Z",
             nextRunAt: "2026-08-25T00:15:00.000Z",
@@ -462,6 +470,7 @@ describe("overlap", () => {
             task: "poll",
             sessionMode: "isolated",
             enabled: true,
+            sourcePath: "/agents/scheduler-test/agent.yaml",
             origin: "manifest",
             anchorAt: "2026-08-25T00:00:00.000Z",
             nextRunAt: "2026-08-25T00:15:00.000Z",
@@ -567,6 +576,7 @@ describe("a run in flight", () => {
             task: "poll",
             sessionMode: "isolated",
             enabled: true,
+            sourcePath: "/agents/scheduler-test/agent.yaml",
             origin: "manifest",
             anchorAt: "2026-08-25T00:00:00.000Z",
             nextRunAt: "2026-08-25T00:15:00.000Z",

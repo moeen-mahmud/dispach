@@ -287,16 +287,25 @@ export function editorRows(
     },
 ): readonly EditorRow[] {
     const out: EditorRow[] = []
-    let block: string | undefined
 
+    // Collected by block, not emitted when the block *changes* — the same distinction `renderSettings`
+    // records above, which this renderer had never been given. The two are not equivalent: the
+    // person-only rows sit at the end of the catalogue, so `server.host` and `server.tokenEnv` were
+    // already a second `server` section here, and inserting any row between `server.port` and them
+    // made it visible. `schedules` was that row. Grouping keeps the render correct whatever order the
+    // catalogue arrives in, which is the property worth having and the reason not to fix it by
+    // reordering the table.
+    const blocks = new Map<string, SettingValue[]>()
     for (const row of settings) {
         if (row.setting.via !== undefined || /[[<]/.test(row.setting.path)) continue
-        const group = row.setting.path.split(".")[0] ?? row.setting.path
-        if (group !== block) {
-            out.push({ kind: "heading", label: group })
-            block = group
+        const key = row.setting.path.split(".")[0] ?? row.setting.path
+        blocks.set(key, [...(blocks.get(key) ?? []), row])
+    }
+    for (const [label, members] of blocks) {
+        out.push({ kind: "heading", label })
+        for (const row of members) {
+            out.push({ kind: "setting", setting: row.setting, value: row.value })
         }
-        out.push({ kind: "setting", setting: row.setting, value: row.value })
     }
 
     if (input.channels.length > 0) {

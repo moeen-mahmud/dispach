@@ -54,6 +54,10 @@ for (const agentId of agentIds) {
             sessionMode: "isolated",
             enabled: true,
             origin: "manifest",
+            // `scripts/` is outside the tsconfig projects, so a required field going missing here
+            // is a runtime failure rather than a type error — which is how this line came to be
+            // needed. Any non-empty path works: reconciliation never runs in this benchmark.
+            sourcePath: "/bench/agent.yaml",
             anchorAt: new Date(start).toISOString(),
             nextRunAt: new Date(start + 300).toISOString(),
             now: new Date(start).toISOString(),

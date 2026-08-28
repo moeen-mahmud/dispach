@@ -15,11 +15,10 @@
  */
 
 import { ConfigError } from "../errors.ts"
-import { newRunId } from "../loop/ids.ts"
 import type { ScheduleConfig } from "../manifest/schema.ts"
 import { ScheduleSchema } from "../manifest/schema.ts"
 import { decideDue, parseSchedule } from "../schedule/kinds.ts"
-import { formatSessionKey } from "../store/session-key.ts"
+import { formatSessionKey, isSessionKey, parseSessionKey } from "../store/session-key.ts"
 import type {
     ScheduleOrigin,
     ScheduleRecord,
@@ -49,6 +48,24 @@ export function scheduleSessionKey(sessionMode: string, scheduleId: string, runI
     return formatSessionKey({ channel: SCHEDULE_CHANNEL, peerId: scheduleId, thread: runId })
 }
 
+/**
+ * The schedule run a session key belongs to, or `undefined` when it is not a scheduled session.
+ *
+ * The inverse of `scheduleSessionKey`, and it only answers for `isolated` runs — which is the whole
+ * set it can answer for. A `shared:<key>` schedule deliberately writes into a session named by the
+ * author, so its key carries no schedule id and nothing can be recovered from it. That is a real
+ * limit rather than an oversight: continuity was the thing asked for, and the cost of it is that a
+ * late report about one run cannot be told apart from a late report about another.
+ */
+export function scheduleRunOfSession(
+    sessionKey: string,
+): { readonly id: string; readonly runId: string } | undefined {
+    if (!isSessionKey(sessionKey)) return undefined
+    const parts = parseSessionKey(sessionKey)
+    if (parts.channel !== SCHEDULE_CHANNEL || parts.thread === undefined) return undefined
+    return { id: parts.peerId, runId: parts.thread }
+}
+
 export interface ReconcileReport {
     readonly created: readonly string[]
     readonly updated: readonly string[]
@@ -66,12 +83,24 @@ export interface ReconcileReport {
  * changed**, so a reload does not reset a schedule's place in its own sequence — restarting the
  * process twice in a minute must not make an hourly schedule wait another hour each time. An edited
  * expression does reset, because the old anchor describes a sequence that no longer exists.
+ *
+ * **Scoped to `sourcePath` as well, because that guarantee was only ever true of one manifest.** A
+ * store is keyed by agent `id`, and two directories may declare the same one; the removal below then
+ * deleted the other manifest's rows, and the next reconcile re-created them — `existing` undefined,
+ * so `unchanged` false, so a fresh anchor. Measured on a real pair of manifests: `in 3m`, deleted,
+ * `in 16m`. The schedule never reached its own due time and nothing anywhere reported a fault,
+ * because each manifest was correct about the rows it could see.
  */
 export async function reconcileSchedules(input: {
     readonly agentId: string
     readonly schedules: readonly ScheduleConfig[]
     readonly store: ScheduleStore
     readonly now: number
+    /**
+     * Absolute path of the manifest doing the reconciling — `LoadedManifest.path`, which is
+     * `"(object)"` for a programmatic manifest and is a stable identity for that case too.
+     */
+    readonly sourcePath: string
 }): Promise<ReconcileReport> {
     const created: string[] = []
     const updated: string[] = []
@@ -129,6 +158,7 @@ export async function reconcileSchedules(input: {
             // Keeping the anchor is what stops a restart resetting the sequence.
             anchorAt: unchanged ? existing.anchorAt : fresh.anchorAt,
             nextRunAt: unchanged ? existing.nextRunAt : fresh.nextRunAt,
+            sourcePath: input.sourcePath,
             now: nowIso,
         })
 
@@ -139,6 +169,7 @@ export async function reconcileSchedules(input: {
     const removed = await input.store.removeManifestExcept(
         input.agentId,
         input.schedules.map((schedule) => schedule.id),
+        input.sourcePath,
     )
 
     return { created, updated, removed }
@@ -236,6 +267,9 @@ export function prepareScheduleWrite(input: {
         anchorAt: decision.anchor === undefined ? nowIso : new Date(decision.anchor).toISOString(),
         nextRunAt:
             decision.runAt === undefined ? undefined : new Date(decision.runAt).toISOString(),
+        // No manifest wrote this. `''` is the unknown-provenance value, and it is never consulted
+        // for an API row anyway: `removeManifestExcept` is scoped to `origin = 'manifest'`.
+        sourcePath: "",
         now: nowIso,
     }
 }
@@ -253,7 +287,7 @@ export interface ScheduleRunnerOptions {
  * tested against a fake run function with no model, no channels and no store beyond the schedules.
  */
 export function scheduleRunner(options: ScheduleRunnerOptions) {
-    return async (schedule: ScheduleRecord): Promise<void> => {
+    return async (schedule: ScheduleRecord, runId: string): Promise<void> => {
         const agent = options.agents().find((candidate) => candidate.id === schedule.agentId)
         if (agent === undefined) {
             throw new Error(
@@ -262,7 +296,7 @@ export function scheduleRunner(options: ScheduleRunnerOptions) {
             )
         }
 
-        const sessionKey = scheduleSessionKey(schedule.sessionMode, schedule.id, newRunId())
+        const sessionKey = scheduleSessionKey(schedule.sessionMode, schedule.id, runId)
         const result = await agent.send(schedule.task, {
             sessionKey,
             source: `schedule:${schedule.id}`,
