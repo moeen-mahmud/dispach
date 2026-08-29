@@ -103,7 +103,42 @@ interface DeltaShape {
         finish_reason?: unknown
     }[]
     /** `null` on every chunk but the last, when `stream_options.include_usage` is set. */
-    usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } | null
+    usage?: {
+        prompt_tokens?: unknown
+        completion_tokens?: unknown
+        /** OpenAI, and everything that copies it. */
+        prompt_tokens_details?: { cached_tokens?: unknown } | null
+        /** DeepSeek reports the split directly rather than nesting it. */
+        prompt_cache_hit_tokens?: unknown
+        prompt_cache_miss_tokens?: unknown
+        /** Anthropic through an OpenAI-shaped shim. Reads are what were served; creation was billed. */
+        cache_read_input_tokens?: unknown
+    } | null
+}
+
+/**
+ * Prompt tokens the endpoint served from cache, and which field said so.
+ *
+ * Three spellings because the runtime is model-agnostic and the providers did not agree: OpenAI nests
+ * it under `prompt_tokens_details`, DeepSeek reports a hit/miss pair at the top level, and an
+ * Anthropic-shaped shim calls reads something else again. Checked in that order and the first hit
+ * wins; an endpoint that reports none returns `undefined`, which is deliberately not zero — see
+ * `StreamEvent`'s `cachedPromptTokens`.
+ *
+ * The field name is carried back with the number. A cache ratio is the kind of figure that gets
+ * disbelieved, and "which field is this" is the first question anyone asks of a surprising one.
+ */
+function cacheUsage(
+    usage: NonNullable<DeltaShape["usage"]>,
+): { readonly cached: number; readonly source: string } | undefined {
+    const nested = asNumber(usage.prompt_tokens_details?.cached_tokens)
+    if (nested !== undefined)
+        return { cached: nested, source: "prompt_tokens_details.cached_tokens" }
+    const hit = asNumber(usage.prompt_cache_hit_tokens)
+    if (hit !== undefined) return { cached: hit, source: "prompt_cache_hit_tokens" }
+    const read = asNumber(usage.cache_read_input_tokens)
+    if (read !== undefined) return { cached: read, source: "cache_read_input_tokens" }
+    return undefined
 }
 
 /**
@@ -299,10 +334,14 @@ function* chunksFromPayload(payload: DeltaShape, calls: ToolCallBuffer): Generat
     // written for this phase and had never been exercised, so the bug shipped behind an unused option.
     const usage = payload.usage
     if (usage !== undefined && usage !== null) {
+        const cache = cacheUsage(usage)
         yield {
             type: "usage",
             promptTokens: asNumber(usage.prompt_tokens) ?? 0,
             completionTokens: asNumber(usage.completion_tokens) ?? 0,
+            ...(cache === undefined
+                ? {}
+                : { cachedPromptTokens: cache.cached, cacheSource: cache.source }),
         }
     }
 

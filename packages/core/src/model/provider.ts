@@ -105,6 +105,17 @@ export type ChatChunk =
           readonly type: "usage"
           readonly promptTokens: number
           readonly completionTokens: number
+          /**
+           * Prompt tokens the endpoint served from its cache, when it says so.
+           *
+           * `undefined` means *not reported*, which is a different fact from zero and must stay
+           * distinguishable: an endpoint that caches nothing and an endpoint that declines to talk
+           * about caching produce the same bill and want opposite conclusions. Every consumer of this
+           * field has to carry the third state rather than defaulting it to 0.
+           */
+          readonly cachedPromptTokens?: number
+          /** Which wire field the figure came from, so a surprising ratio can be traced to its source. */
+          readonly cacheSource?: string
       }
     | { readonly type: "finish"; readonly reason: string }
 

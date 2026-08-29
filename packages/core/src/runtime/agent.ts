@@ -14,7 +14,7 @@
 
 import { statSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
-import { assembleContext, slotReport } from "../context/assemble.ts"
+import { assembleContext, historyReport, slotReport } from "../context/assemble.ts"
 import { type Calibration, UNCALIBRATED } from "../context/budget.ts"
 import { renderCompactionNotice } from "../context/compaction-notice.ts"
 import { renderConfigSummary } from "../context/config-summary.ts"
@@ -210,6 +210,15 @@ export interface AgentDescription {
      */
     readonly catalogueTokens: number
 }
+
+/**
+ * How many recent turns the cache report reads.
+ *
+ * Bounded because this runs on every `/context` and a long session's turn list is unbounded, and 50 is
+ * enough for a ratio to be stable while staying one indexed read. A session's *whole* history is a
+ * question for an eval with a query, not for a status command.
+ */
+const CACHE_REPORT_TURNS = 50
 
 export class Agent {
     readonly id: string
@@ -676,6 +685,12 @@ export class Agent {
             steps: result.steps,
             promptTokens: result.tokens.prompt,
             outputTokens: result.tokens.output,
+            ...(result.tokens.cachedPrompt === undefined
+                ? {}
+                : { cachedPromptTokens: result.tokens.cachedPrompt }),
+            ...(result.tokens.cacheSource === undefined
+                ? {}
+                : { cacheSource: result.tokens.cacheSource }),
             durationMs: result.durationMs,
             ...(result.error === undefined
                 ? {}
@@ -802,6 +817,15 @@ export class Agent {
         options: { readonly sessionKey?: string; readonly input?: string } = {},
     ): Promise<{
         readonly slots: readonly { slot: number; label: string; tokens: number; pinned: boolean }[]
+        /**
+         * What the history slot is made of, largest first.
+         *
+         * The slot total is the number that hides the answer — on a real agent it was 85% of the turn
+         * with nothing able to say what was in it, and the owner's own agent, asked directly, blamed
+         * its instruction files instead. Composition is the difference between a runtime that can be
+         * diagnosed and one that has to be measured by hand.
+         */
+        readonly history: readonly { label: string; tokens: number; messages: number }[]
         readonly total: number
         readonly window: number
         /**
@@ -824,6 +848,21 @@ export class Agent {
         readonly calibration: Calibration
         /** Compaction stages run in this session so far. Zero on a conversation under no pressure. */
         readonly compactions: number
+        /**
+         * What this session's endpoints actually served from cache, across the turns that said so.
+         *
+         * `undefined` when no turn reported a figure — most endpoints do not, and that is a different
+         * statement from "nothing was cached". Read from the stored turns rather than kept in memory,
+         * so a resumed session reports the conversation's history and not this process's slice of it.
+         */
+        readonly cache:
+            | {
+                  readonly cached: number
+                  readonly prompt: number
+                  readonly turns: number
+                  readonly source: string
+              }
+            | undefined
     }> {
         const sessionKey = options.sessionKey ?? Agent.DEFAULT_SESSION
         const input = options.input ?? ""
@@ -861,13 +900,49 @@ export class Agent {
 
         return {
             slots: slotReport(assembled.blocks),
+            history: historyReport(assembled.blocks),
             total: assembled.totalTokens,
             window: this.window,
             wireTokens: tools?.wireTokens ?? 0,
             reserveOutput: this.manifest.context.reserveOutput,
             calibration: this.#calibrations.get(sessionKey) ?? UNCALIBRATED,
             compactions: this.#compactions.get(sessionKey) ?? 0,
+            cache: await this.#cacheReport(sessionKey),
         }
+    }
+
+    /**
+     * The session's cache ratio, summed over the turns whose endpoint reported one.
+     *
+     * Only reporting turns are counted, in both numerator and denominator. Including a silent turn's
+     * prompt in the denominator would quietly dilute the ratio toward zero and read as a cache that
+     * is failing, which is the opposite of the truth: it is a cache nobody asked about.
+     */
+    async #cacheReport(sessionKey: string): Promise<
+        | {
+              readonly cached: number
+              readonly prompt: number
+              readonly turns: number
+              readonly source: string
+          }
+        | undefined
+    > {
+        const turns = await this.store.turns.list(this.id, sessionKey, {
+            limit: CACHE_REPORT_TURNS,
+        })
+        let cached = 0
+        let prompt = 0
+        let counted = 0
+        let source: string | undefined
+        for (const turn of turns) {
+            if (turn.cachedPromptTokens === undefined) continue
+            cached += turn.cachedPromptTokens
+            prompt += turn.promptTokens
+            counted += 1
+            source ??= turn.cacheSource
+        }
+        if (counted === 0 || source === undefined) return undefined
+        return { cached, prompt, turns: counted, source }
     }
 
     /**

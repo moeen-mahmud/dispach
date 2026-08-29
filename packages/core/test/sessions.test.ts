@@ -16,6 +16,7 @@ import { BRAND } from "../src/brand.ts"
 import { EventBus } from "../src/events/bus.ts"
 import type { AnyEvent } from "../src/events/types.ts"
 import type { FetchLike } from "../src/model/provider.ts"
+import { Agent } from "../src/runtime/agent.ts"
 import { Runtime } from "../src/runtime/runtime.ts"
 import { TurnStreams } from "../src/store/buffer.ts"
 import { describe, expect, test } from "./_harness.ts"
@@ -106,6 +107,76 @@ function gatedFetch(release: Promise<void>): FetchLike {
         )
     }
 }
+
+/**
+ * A reply that reports usage with a cache figure, the way DeepSeek's endpoint does.
+ *
+ * `stream_options: {include_usage: true}` is on by default since Phase 7A, so a real endpoint sends
+ * `usage` on the final chunk only — which is what this reproduces, cache field included.
+ */
+const cachingFetch: FetchLike = async () =>
+    sse([
+        delta("Hello"),
+        `data: ${JSON.stringify({
+            choices: [{ delta: {}, finish_reason: "stop" }],
+            usage: {
+                prompt_tokens: 1024,
+                completion_tokens: 2,
+                prompt_cache_hit_tokens: 896,
+                prompt_cache_miss_tokens: 128,
+            },
+        })}\n\n`,
+        "data: [DONE]\n\n",
+    ])
+
+describe("cache accounting reaches the stored turn", () => {
+    /**
+     * The far-end guard, and it exists because the near-end ones could not fail.
+     *
+     * The path is chunk → `StepResult` → `TurnResult.tokens` → `Agent.send` → `turns.finish` → column,
+     * with a conditional spread at four of those hops. A spread is not excess-property-checked, so a
+     * layer that forgets to forward the field compiles and reports nothing — and deleting the forward
+     * from `step.ts` left both the transport test and the store test green, which is precisely the
+     * six-times-recorded failure this repo keeps paying for. Only a real turn, read back out of the
+     * database, covers the middle.
+     */
+    test("a real turn records what the endpoint said it cached", async () => {
+        const dir = workspace()
+        try {
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: ENV,
+                fetch: cachingFetch,
+            })
+            const agent = runtime.agent("test")
+            await agent.send("hello")
+            const [turn] = await agent.turns(Agent.DEFAULT_SESSION, 1)
+            expect(turn?.cachedPromptTokens).toBe(896)
+            expect(turn?.cacheSource).toBe("prompt_cache_hit_tokens")
+            await runtime.stop()
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
+    test("an endpoint that says nothing about caching leaves the row absent, not zero", async () => {
+        const dir = workspace()
+        try {
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: ENV,
+                fetch: replyFetch,
+            })
+            const agent = runtime.agent("test")
+            await agent.send("hello")
+            const [turn] = await agent.turns(Agent.DEFAULT_SESSION, 1)
+            expect(turn?.cachedPromptTokens).toBeUndefined()
+            await runtime.stop()
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+})
 
 describe("session persistence", () => {
     test("history survives a restart against the same file", async () => {

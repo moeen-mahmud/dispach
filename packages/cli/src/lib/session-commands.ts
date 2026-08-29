@@ -485,6 +485,12 @@ export interface ContextView {
         readonly tokens: number
         readonly pinned: boolean
     }[]
+    /** What the history slot is made of, largest first. Empty on a conversation with no history. */
+    readonly history: readonly {
+        readonly label: string
+        readonly tokens: number
+        readonly messages: number
+    }[]
     readonly total: number
     readonly window: number
     /** Already rendered by `describeWindowSource` — the CLI owns no second wording for it. */
@@ -494,6 +500,15 @@ export interface ContextView {
     readonly calibration: { readonly ratio: number; readonly samples: number }
     /** The last compaction stage this session ran, if any. */
     readonly lastCompaction: string | undefined
+    /** Undefined when no turn's endpoint reported a cache figure — not the same as nothing cached. */
+    readonly cache:
+        | {
+              readonly cached: number
+              readonly prompt: number
+              readonly turns: number
+              readonly source: string
+          }
+        | undefined
 }
 
 /**
@@ -526,6 +541,17 @@ export function contextReport(view: ContextView): string {
         (entry) =>
             `    ${String(entry.slot).padStart(2)}  ${entry.label.padEnd(pad)}  ${String(entry.tokens).padStart(6)}${entry.pinned ? "  pinned" : ""}`,
     )
+    // Indented under the history slot it decomposes, and only when there is something to decompose:
+    // a fresh session's empty breakdown would be a heading with nothing under it.
+    const historyPad = view.history.reduce((longest, e) => Math.max(longest, e.label.length), 0)
+    const historyRows =
+        view.history.length === 0
+            ? []
+            : view.history.map(
+                  (entry) =>
+                      `        ${entry.label.padEnd(historyPad)}  ${String(entry.tokens).padStart(6)}  ${percentOf(entry.tokens, view.total).padStart(6)}  ${String(entry.messages).padStart(3)} msg`,
+              )
+
     return [
         keyValue([
             { label: "window", value: `${view.window} (${view.windowSource})` },
@@ -542,9 +568,31 @@ export function contextReport(view: ContextView): string {
                 label: "compaction",
                 value: view.lastCompaction ?? "none this session",
             },
+            // Absent rather than "0%" when nothing reported: an endpoint that caches nothing and one
+            // that declines to say are the same bill and opposite conclusions, and only one of them
+            // is a reason to go looking at the prefix.
+            {
+                label: "cache",
+                value:
+                    view.cache === undefined
+                        ? "not reported by this endpoint"
+                        : `${view.cache.cached} of ${view.cache.prompt} prompt tokens (${percentOf(view.cache.cached, view.cache.prompt)}) over ${view.cache.turns} turn${view.cache.turns === 1 ? "" : "s"} · ${view.cache.source}`,
+            },
         ]),
         "",
         "  slots",
         ...slots,
+        // The heading names the denominator, because these are shares of the *whole prompt* and not of
+        // the history — so they do not sum to 100 and, unlabelled, read as an arithmetic bug. Total is
+        // the right denominator anyway: the question is what fraction of the bill each kind is, which
+        // makes these directly comparable with the slot figures above.
+        ...(historyRows.length === 0
+            ? []
+            : ["", "  history, by kind — share of the whole prompt", ...historyRows]),
     ].join("\n")
+}
+
+/** A share, to one decimal, with the degenerate denominator handled rather than printed as NaN. */
+function percentOf(part: number, whole: number): string {
+    return whole <= 0 ? "—" : `${((part / whole) * 100).toFixed(1)}%`
 }

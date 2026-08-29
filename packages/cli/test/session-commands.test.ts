@@ -328,6 +328,8 @@ describe("contextReport", () => {
         reserveOutput: 8192,
         calibration: { ratio: 1, samples: 0 },
         lastCompaction: undefined,
+        history: [],
+        cache: undefined,
     }
 
     test("the budget is written as its subtraction, not as a result", () => {

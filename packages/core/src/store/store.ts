@@ -91,6 +91,16 @@ export interface TurnRecord {
     readonly steps: number
     readonly promptTokens: number
     readonly outputTokens: number
+    /**
+     * Prompt tokens the endpoint served from cache, when it reported a figure.
+     *
+     * `undefined` is *not reported*, distinct from a reported zero — see migration 10. Every reader
+     * has to carry the third state; defaulting it to 0 makes an endpoint that says nothing
+     * indistinguishable from one that cached nothing, and those want opposite conclusions.
+     */
+    readonly cachedPromptTokens?: number
+    /** The wire field the figure came from, so a surprising ratio is traceable. */
+    readonly cacheSource?: string
     readonly errorCode?: string
     readonly errorMessage?: string
     readonly errorHint?: string
@@ -163,6 +173,9 @@ export interface TurnStore {
             readonly steps: number
             readonly promptTokens: number
             readonly outputTokens: number
+            /** Omitted when the endpoint reported no cache figure. Never defaulted to zero. */
+            readonly cachedPromptTokens?: number
+            readonly cacheSource?: string
             readonly durationMs: number
             readonly errorCode?: string
             readonly errorMessage?: string

@@ -1176,6 +1176,8 @@ async function sessionContext(wired: Wired, sessionKey: string): Promise<string>
     const [main] = windowReport(wired.agent.manifest)
     return contextReport({
         slots: preview.slots,
+        history: preview.history,
+        cache: preview.cache,
         total: preview.total,
         window: preview.window,
         windowSource: describeWindowSource(main?.window),

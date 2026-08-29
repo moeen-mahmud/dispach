@@ -396,6 +396,78 @@ describe("turns", () => {
         await store.close()
     })
 
+    /**
+     * Cache accounting, at the far end of the pipeline.
+     *
+     * Written as a store test rather than beside the parser because this repo has been caught six
+     * times by a field that every layer handled and one layer failed to forward — `apiKeyEnv`,
+     * `ChatMessage.toolCalls`, `TurnInput.skills`, `ToolContext.readArtifact`, `ToolContext.memoryDir`,
+     * `StoredMessage.origin`. The path here is chunk → step → turn → agent → `finish` → column, with a
+     * conditional spread at four of those hops, and a conditional spread is not
+     * excess-property-checked. Reading the value back out of the row is the only assertion that
+     * covers all of it.
+     */
+    test("a reported cache figure reaches the row with the field that produced it", async () => {
+        const store = await openMemoryStore()
+        await store.turns.start({
+            turnId: "t_cache",
+            agentId: AGENT,
+            sessionKey: KEY,
+            source: "repl",
+            input: "x",
+        })
+        await store.turns.finish("t_cache", {
+            status: "final",
+            text: "ok",
+            reasoning: "",
+            steps: 1,
+            promptTokens: 1024,
+            outputTokens: 8,
+            cachedPromptTokens: 900,
+            cacheSource: "prompt_cache_hit_tokens",
+            durationMs: 5,
+        })
+        const row = await store.turns.get("t_cache")
+        expect(row?.cachedPromptTokens).toBe(900)
+        expect(row?.cacheSource).toBe("prompt_cache_hit_tokens")
+        await store.close()
+    })
+
+    test("an unreported figure round-trips as absent, and a reported zero as zero", async () => {
+        // The distinction the nullable column exists for. `NOT NULL DEFAULT 0` would have collapsed
+        // these two rows into the same one on the way in, and no later query could tell them apart:
+        // an endpoint that caches nothing and one that never mentions caching are the same bill and
+        // opposite conclusions.
+        const store = await openMemoryStore()
+        for (const [id, cached] of [
+            ["t_silent", undefined],
+            ["t_zero", 0],
+        ] as const) {
+            await store.turns.start({
+                turnId: id,
+                agentId: AGENT,
+                sessionKey: KEY,
+                source: "repl",
+                input: "x",
+            })
+            await store.turns.finish(id, {
+                status: "final",
+                text: "",
+                reasoning: "",
+                steps: 1,
+                promptTokens: 10,
+                outputTokens: 1,
+                ...(cached === undefined
+                    ? {}
+                    : { cachedPromptTokens: cached, cacheSource: "prompt_cache_hit_tokens" }),
+                durationMs: 1,
+            })
+        }
+        expect((await store.turns.get("t_silent"))?.cachedPromptTokens).toBeUndefined()
+        expect((await store.turns.get("t_zero"))?.cachedPromptTokens).toBe(0)
+        await store.close()
+    })
+
     test("timeout and max_steps survive as themselves", async () => {
         // The loop deliberately keeps these distinct from `error`; flattening them here would
         // discard the diagnosis one layer below where it was made.

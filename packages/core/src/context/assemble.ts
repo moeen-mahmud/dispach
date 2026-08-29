@@ -385,4 +385,58 @@ export function slotReport(
     return [...bySlot.values()].sort((a, b) => a.slot - b.slot)
 }
 
+/**
+ * What the history slot is *made of*, by kind, largest first.
+ *
+ * `slotReport` collapses the history into one number, which is the number that hides the answer: on a
+ * real agent, slot 9 was 85% of a 60,973-token turn and nothing could say what was in it. The person
+ * looking at that had to measure by hand, and their agent — asked the same question — blamed its
+ * instruction files, which are read once at load and cost 885 tokens. A total with no composition is
+ * how a runtime lets its owner misdiagnose it.
+ *
+ * Grouped by `ChatMessage.origin`, which the runtime already stamps on everything it authored, falling
+ * back to the role for the messages nobody stamped — those are the conversation itself, and telling a
+ * person's words apart from a model's reply is exactly the distinction worth drawing here.
+ *
+ * Pure, and reading the same blocks the prompt was built from, so this cannot describe a history the
+ * model did not receive.
+ */
+export function historyReport(
+    blocks: readonly ContextBlock[],
+): { label: string; tokens: number; messages: number }[] {
+    const byKind = new Map<string, { label: string; tokens: number; messages: number }>()
+    for (const b of blocks) {
+        if (b.slot !== SLOT.history) continue
+        const label = historyKind(b)
+        const existing = byKind.get(label)
+        if (existing === undefined) {
+            byKind.set(label, { label, tokens: b.tokens, messages: 1 })
+        } else {
+            existing.tokens += b.tokens
+            existing.messages += 1
+        }
+    }
+    // Largest first: the question this answers is "where did it go", and the answer is the top row.
+    return [...byKind.values()].sort((a, b) => b.tokens - a.tokens)
+}
+
+/**
+ * One history message's kind.
+ *
+ * `origin` wins where it is set, because it is what the runtime recorded at the time rather than what
+ * the shape suggests now. Under `native` a tool result is a `tool`-role message and under `nlt` it is a
+ * `user` message carrying a fence — same thing, two shapes — so reading the role alone would split one
+ * kind in two and name neither correctly.
+ */
+function historyKind(block: ContextBlock): string {
+    const origin = block.message?.origin
+    if (origin === "observation") return "tool results"
+    if (origin === "call") return "tool calls"
+    if (origin === "repair") return "repairs"
+    if (origin === "digest") return "digests"
+    if (block.role === "tool") return "tool results"
+    if (block.role === "user") return "what you said"
+    return "assistant replies"
+}
+
 export { estimateTokens }

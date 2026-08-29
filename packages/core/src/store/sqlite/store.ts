@@ -157,6 +157,8 @@ interface TurnRow {
     steps: number
     prompt_tokens: number
     output_tokens: number
+    cached_prompt_tokens: number | null
+    cache_source: string | null
     error_code: string | null
     error_message: string | null
     error_hint: string | null
@@ -359,6 +361,12 @@ function toTurn(row: TurnRow): TurnRecord {
         steps: row.steps,
         promptTokens: row.prompt_tokens,
         outputTokens: row.output_tokens,
+        // Null stays absent rather than becoming 0: "the endpoint said nothing" and "the endpoint
+        // said nothing was cached" are different facts and the second is a real measurement.
+        ...(row.cached_prompt_tokens === null
+            ? {}
+            : { cachedPromptTokens: row.cached_prompt_tokens }),
+        ...(row.cache_source === null ? {} : { cacheSource: row.cache_source }),
         ...(row.error_code === null ? {} : { errorCode: row.error_code }),
         ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
         ...(row.error_hint === null ? {} : { errorHint: row.error_hint }),
@@ -648,7 +656,8 @@ export class SqliteStore implements Store {
             turnFinish: db.prepare(
                 `UPDATE turns
                     SET status = ?, text = ?, reasoning = ?, steps = ?,
-                        prompt_tokens = ?, output_tokens = ?, duration_ms = ?,
+                        prompt_tokens = ?, output_tokens = ?,
+                        cached_prompt_tokens = ?, cache_source = ?, duration_ms = ?,
                         error_code = ?, error_message = ?, error_hint = ?, ended_at = ?
                   WHERE turn_id = ?`,
             ),
@@ -983,6 +992,8 @@ export class SqliteStore implements Store {
                     outcome.steps,
                     outcome.promptTokens,
                     outcome.outputTokens,
+                    outcome.cachedPromptTokens ?? null,
+                    outcome.cacheSource ?? null,
                     outcome.durationMs,
                     outcome.errorCode,
                     outcome.errorMessage,

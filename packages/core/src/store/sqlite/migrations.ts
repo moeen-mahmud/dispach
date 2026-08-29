@@ -539,6 +539,36 @@ ALTER TABLE schedules ADD COLUMN source_path TEXT NOT NULL DEFAULT '';
 ALTER TABLE schedules ADD COLUMN last_run_id TEXT;
 `,
     },
+    {
+        version: 10,
+        name: "turn_cache_accounting",
+        /**
+         * How many of a turn's prompt tokens the endpoint served from its cache.
+         *
+         * **Nullable, and the null is the point.** Three states, not two: a number means the endpoint
+         * reported a figure, `0` means it reported that nothing was cached, and `NULL` means it said
+         * nothing at all — which is what every endpoint says today, because until this migration
+         * nothing asked. An endpoint that caches nothing and an endpoint that declines to discuss
+         * caching produce identical bills and want opposite conclusions, so a `NOT NULL DEFAULT 0`
+         * here would erase the distinction on the way in and no later query could recover it.
+         *
+         * Recorded rather than merely displayed because the question it answers is about a *session*,
+         * not a turn. Published cost comparisons for context-management strategies — masking against
+         * summarisation against doing nothing — are measured with input caching switched off, which
+         * biases against the do-nothing arm precisely because that arm is the one prefix caching
+         * helps most. Deciding whether any of that transfers to this runtime needs the cache ratio
+         * over a real conversation, and a figure that lives only in a terminal frame is one somebody
+         * has to go and rebuild the instrumentation for later.
+         *
+         * `cache_source` carries the wire field the number came from — `prompt_tokens_details.
+         * cached_tokens`, `prompt_cache_hit_tokens`, `cache_read_input_tokens`. Three providers spell
+         * it three ways, and a ratio nobody can trace to a field is a ratio nobody believes.
+         */
+        sql: `
+ALTER TABLE turns ADD COLUMN cached_prompt_tokens INTEGER;
+ALTER TABLE turns ADD COLUMN cache_source TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

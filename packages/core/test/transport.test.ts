@@ -288,6 +288,115 @@ describe("streaming", () => {
         expect(chunks).toContainEqual({ type: "finish", reason: "stop" })
     })
 
+    /**
+     * Three providers, three spellings, one number.
+     *
+     * The runtime is model-agnostic and the vendors did not agree: OpenAI nests it under
+     * `prompt_tokens_details`, DeepSeek reports a hit/miss pair at the top level, and an
+     * Anthropic-shaped shim calls reads something else again. Reading only one of the three would
+     * report "no cache" on two providers out of three — which is the reading that makes a
+     * cache-stable prefix look like it is not working.
+     */
+    const CACHE_SHAPES: readonly {
+        readonly label: string
+        readonly extra: Record<string, unknown>
+        readonly source: string
+    }[] = [
+        {
+            label: "OpenAI, nested",
+            extra: { prompt_tokens_details: { cached_tokens: 900 } },
+            source: "prompt_tokens_details.cached_tokens",
+        },
+        {
+            label: "DeepSeek, hit/miss pair",
+            extra: { prompt_cache_hit_tokens: 900, prompt_cache_miss_tokens: 124 },
+            source: "prompt_cache_hit_tokens",
+        },
+        {
+            label: "Anthropic-shaped shim",
+            extra: { cache_read_input_tokens: 900 },
+            source: "cache_read_input_tokens",
+        },
+    ]
+
+    // A plain loop, not `describe.each`: `_harness.ts` is a shim so the same file runs under Node's
+    // runner as well as Bun's, and it declares only the two-argument `describe`. `.each` type-checks
+    // against Bun's globals and is absent at runtime under Node.
+    for (const { label, extra, source } of CACHE_SHAPES) {
+        test(`a cache figure is read from ${label}, and names its field`, async () => {
+            const provider = createChatCompletionsProvider({
+                baseUrl: "https://x/v1",
+                fetch: async () =>
+                    sseResponse([
+                        `data: ${JSON.stringify({
+                            choices: [{ delta: {}, finish_reason: "stop" }],
+                            usage: { prompt_tokens: 1024, completion_tokens: 3, ...extra },
+                        })}\n\n`,
+                        "data: [DONE]\n\n",
+                    ]),
+            })
+            const chunks = await drain(provider.chat(REQUEST, new AbortController().signal))
+            expect(chunks).toContainEqual({
+                type: "usage",
+                promptTokens: 1024,
+                completionTokens: 3,
+                cachedPromptTokens: 900,
+                cacheSource: source,
+            })
+        })
+    }
+
+    /**
+     * The third state, and the reason every layer carries it rather than defaulting to zero.
+     *
+     * An endpoint that caches nothing and an endpoint that declines to discuss caching produce an
+     * identical bill and want opposite conclusions — one is a prefix worth investigating, the other is
+     * a provider that never said. Reported-zero must therefore survive as a number.
+     */
+    test("an endpoint that reports no cache field leaves the number absent, not zero", async () => {
+        const provider = createChatCompletionsProvider({
+            baseUrl: "https://x/v1",
+            fetch: async () =>
+                sseResponse([
+                    `data: ${JSON.stringify({
+                        choices: [{ delta: {}, finish_reason: "stop" }],
+                        usage: { prompt_tokens: 12, completion_tokens: 3 },
+                    })}\n\n`,
+                    "data: [DONE]\n\n",
+                ]),
+        })
+        const chunks = await drain(provider.chat(REQUEST, new AbortController().signal))
+        const usage = chunks.find((c) => c.type === "usage")
+        expect(usage).toEqual({ type: "usage", promptTokens: 12, completionTokens: 3 })
+        expect("cachedPromptTokens" in (usage ?? {})).toBe(false)
+    })
+
+    test("a reported zero is a measurement and survives as one", async () => {
+        const provider = createChatCompletionsProvider({
+            baseUrl: "https://x/v1",
+            fetch: async () =>
+                sseResponse([
+                    `data: ${JSON.stringify({
+                        choices: [{ delta: {}, finish_reason: "stop" }],
+                        usage: {
+                            prompt_tokens: 12,
+                            completion_tokens: 3,
+                            prompt_cache_hit_tokens: 0,
+                        },
+                    })}\n\n`,
+                    "data: [DONE]\n\n",
+                ]),
+        })
+        const chunks = await drain(provider.chat(REQUEST, new AbortController().signal))
+        expect(chunks).toContainEqual({
+            type: "usage",
+            promptTokens: 12,
+            completionTokens: 3,
+            cachedPromptTokens: 0,
+            cacheSource: "prompt_cache_hit_tokens",
+        })
+    })
+
     test("a null usage on every chunk but the last is not a usage chunk", async () => {
         // What `stream_options: {include_usage: true}` actually looks like on the wire: every
         // intermediate chunk carries `"usage": null`, and only the final one carries the counts. The

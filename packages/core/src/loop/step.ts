@@ -49,6 +49,15 @@ export interface StepResult {
      * is why this is keyed on a positive count rather than on the chunk's arrival.
      */
     readonly promptTokensReported: boolean
+    /**
+     * Prompt tokens the endpoint served from cache, when it said so.
+     *
+     * Undefined means the endpoint reported no figure — which is most of them, and is deliberately
+     * distinct from a reported zero. Unlike `promptTokens` this is never seeded with an estimate:
+     * there is nothing to estimate it from, and a guessed cache ratio is worse than none.
+     */
+    readonly cachedPromptTokens?: number
+    readonly cacheSource?: string
     readonly outputTokens: number
     readonly latencyMs: number
     /**
@@ -82,6 +91,8 @@ export async function runStep(input: StepInput): Promise<StepResult> {
     let finishReason = ""
     let promptTokens = input.promptTokens
     let promptTokensReported = false
+    let cachedPromptTokens: number | undefined
+    let cacheSource: string | undefined
     let reportedOutputTokens: number | undefined
     const calls: ToolCallRequest[] = []
 
@@ -125,6 +136,12 @@ export async function runStep(input: StepInput): Promise<StepResult> {
                     promptTokens = chunk.promptTokens
                     promptTokensReported = chunk.promptTokens > 0
                     reportedOutputTokens = chunk.completionTokens
+                    // Assigned only when present, so an endpoint that reports usage without a cache
+                    // field leaves this undefined rather than claiming a measured zero.
+                    if (chunk.cachedPromptTokens !== undefined) {
+                        cachedPromptTokens = chunk.cachedPromptTokens
+                        cacheSource = chunk.cacheSource
+                    }
                     break
                 case "finish":
                     finishReason = chunk.reason
@@ -161,6 +178,8 @@ export async function runStep(input: StepInput): Promise<StepResult> {
         finishReason,
         promptTokens,
         promptTokensReported,
+        ...(cachedPromptTokens === undefined ? {} : { cachedPromptTokens }),
+        ...(cacheSource === undefined ? {} : { cacheSource }),
         outputTokens,
         latencyMs,
         calls,
