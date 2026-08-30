@@ -96,6 +96,34 @@ const CONSERVATIVE: RegistryCapabilities = {
 /**
  * Ordered for readability only — resolution picks the most specific match, not the first.
  */
+/**
+ * What every Claude row shares, because every one of them describes the **OpenAI-compatible**
+ * endpoint rather than the native Messages API.
+ *
+ * Two fields turn on that distinction. `strict` is accepted and not honoured, so the coercion layer
+ * runs regardless of dialect. And **prompt caching is not supported at all** on that endpoint —
+ * Anthropic's compatibility page says so outright and lists `usage.prompt_tokens_details` as
+ * "Always empty" — so `promptCache` is `none` here. That is a statement about the transport, not
+ * about Anthropic's caching, which is first-class on `/v1/messages`; sending `cache_control` through
+ * this endpoint would not help. The consequence worth writing down: the cache-stable prefix ordering
+ * this runtime is built around buys nothing on Claude models, measured at 89.4% on a DeepSeek
+ * endpoint and structurally 0% here.
+ *
+ * The row this replaced declared `promptCache: "anthropic"` directly beneath a comment reading
+ * "Anthropic, via its OpenAI-compatible endpoint" — and directly beneath `strictSchema: false`,
+ * whose comment had already made this exact argument for the field above it.
+ */
+const CLAUDE_BASE = {
+    nativeTools: true,
+    strictSchema: false,
+    thinking: "anthropic",
+    promptCache: "none",
+    parallelToolCalls: true,
+} as const
+
+const CLAUDE_NOTE =
+    "Thinking blocks must be replayed with tool results or multi-step reasoning degrades silently. Prompt caching is unavailable on the OpenAI-compatible endpoint; the native Messages API is the only route to it."
+
 export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     // ── OpenAI ─────────────────────────────────────────────────────────────────────────────
     {
@@ -197,20 +225,51 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
 
     // ── Anthropic, via its OpenAI-compatible endpoint ──────────────────────────────────────
+    //
+    // Every row here describes that endpoint, not the native Messages API, and the difference is
+    // load-bearing for two fields. `strict` is accepted and not honoured; **prompt caching is not
+    // supported at all** — Anthropic's own compatibility page says so, and lists
+    // `usage.prompt_tokens_details` as "Always empty". So `promptCache` is `none` on every Claude
+    // row: not a statement about Anthropic's caching, which is excellent, but about this transport,
+    // which cannot reach it. Sending `cache_control` would not help. The cache-stable prefix
+    // ordering therefore buys nothing here — measured at 89.4% on a DeepSeek endpoint and
+    // structurally 0% on this one — and the only route to it is a native `/v1/messages` transport
+    // this runtime does not have.
+    //
+    // The window rows split deliberately. `claude-*` is a catch-all that also matches Sonnet 4.5,
+    // Opus 4.5 and the 3.x line, all of which are 200K — so it keeps the conservative number and
+    // the 1M models are named. Under-reporting a window over-compacts and wastes tokens; over-
+    // reporting one overflows the endpoint, and only the second is unrecoverable.
+    // The 1M-window generation, one row each. `globToRegExp` escapes braces, so `{a,b}` would be a
+    // literal and match nothing — a brace group here is a silent no-match, not a shorthand.
+    ...(
+        [
+            "claude-fable-5*",
+            "claude-opus-5*",
+            "claude-opus-4-8*",
+            "claude-opus-4-7*",
+            "claude-opus-4-6*",
+            "claude-sonnet-5*",
+            "claude-sonnet-4-6*",
+        ] as const
+    ).map((pattern) => ({
+        // 1M context, 128K output — Anthropic's model comparison table, read 2026-08-29.
+        pattern,
+        capabilities: { ...CLAUDE_BASE, contextWindow: 1_000_000, maxOutput: 128_000 },
+        note: CLAUDE_NOTE,
+    })),
     {
+        // 200K context, 64K output — same table, same date.
+        pattern: "claude-haiku-*",
+        capabilities: { ...CLAUDE_BASE, contextWindow: 200_000, maxOutput: 64_000 },
+        note: CLAUDE_NOTE,
+    },
+    {
+        // The catch-all, deliberately conservative: it matches every Claude model not named above,
+        // including the 200K-window generations, and 8192 is a floor every one of them clears.
         pattern: "claude-*",
-        capabilities: {
-            nativeTools: true,
-            // Not a typo. The compat endpoint accepts `strict` and does not honour it, so the
-            // coercion layer runs regardless of dialect.
-            strictSchema: false,
-            thinking: "anthropic",
-            promptCache: "anthropic",
-            parallelToolCalls: true,
-            contextWindow: 200_000,
-            maxOutput: 8192,
-        },
-        note: "Thinking blocks must be replayed with tool results or multi-step reasoning degrades silently.",
+        capabilities: { ...CLAUDE_BASE, contextWindow: 200_000, maxOutput: 8192 },
+        note: CLAUDE_NOTE,
     },
 
     // ── Google, via its OpenAI-compatible endpoint ─────────────────────────────────────────

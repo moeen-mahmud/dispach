@@ -166,6 +166,11 @@ export function validateCommand(options: ValidateOptions): number {
                           )
                           .join("")}`) +
                 `  capabilities thinking=${capabilities.thinking} promptCache=${capabilities.promptCache} nativeTools=${capabilities.nativeTools} strictSchema=${capabilities.strictSchema}\n` +
+                // A bare value is what let a false one sit unread for phases: the Claude rows declared
+                // `promptCache: "anthropic"` directly beneath a comment saying they describe the
+                // OpenAI-compatible endpoint, which does not support caching at all. This line is the
+                // field's *only* consumer, so if it does not explain the value nothing does.
+                cacheNote(capabilities.promptCache, manifest.model.main.id) +
                 `  dialect      ${manifest.tools.dialect}\n` +
                 `  workspace    ${tiers === "" ? "(none)" : tiers}\n` +
                 (knowledge === undefined
@@ -214,4 +219,29 @@ export function validateCommand(options: ValidateOptions): number {
         }
         throw error
     }
+}
+
+/**
+ * What `promptCache` means for the prompt this runtime actually sends.
+ *
+ * The field says what the runtime **sends**, not what the endpoint **does**, and `none` therefore has
+ * two causes that want opposite conclusions. On DeepSeek it means no cache directives are sent and the
+ * endpoint caches automatically regardless — measured at 89.4% on a real session, so a note reading
+ * "no caching here" would be plainly false. On Claude it means the OpenAI-compatible transport cannot
+ * cache at all, and no request field would change that.
+ *
+ * So the sentence is keyed on the model, and the general half points at the measurement rather than
+ * asserting anything: `/context` reports the ratio the endpoint actually charged. The first draft of
+ * this function did assert, fired on DeepSeek, and contradicted a measurement taken an hour earlier —
+ * the same "accurate about the wrong scope" failure the Claude row itself was guilty of.
+ */
+export function cacheNote(promptCache: string, modelId: string): string {
+    if (promptCache !== "none") return ""
+    const claude = /(^|\/)claude-/i.test(modelId)
+    return claude
+        ? "               promptCache none — Anthropic's OpenAI-compatible endpoint does not support\n" +
+              "               caching at all, so no request field reaches it. Caching lives on the native\n" +
+              "               Messages API, which this runtime does not speak.\n"
+        : "               promptCache none — this runtime sends no cache directives. Many endpoints cache\n" +
+              "               a stable prefix anyway; `/context` reports what was actually charged.\n"
 }
