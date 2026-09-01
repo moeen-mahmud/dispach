@@ -31,7 +31,15 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { estimateTokens } from "../context/tokens.ts"
-import { ceiling, counted, informative, score, TOKENISER_VERSION, terms } from "../rank/bm25.ts"
+import {
+    ceiling,
+    counted,
+    discriminating,
+    informative,
+    score,
+    TOKENISER_VERSION,
+    terms,
+} from "../rank/bm25.ts"
 import type {
     MemoryPassageRecord,
     MemoryStore,
@@ -39,6 +47,7 @@ import type {
     SessionStore,
 } from "../store/store.ts"
 import { isSessionSource, renderConversation, sessionSource } from "./conversation.ts"
+import { correctTerms } from "./correct.ts"
 import { document, type Passage, splitPassages } from "./passages.ts"
 import { boosted, type MemoryRetriever, type RetrievedPassage } from "./retriever.ts"
 
@@ -90,13 +99,27 @@ export function fts5Retriever(options: Fts5Options): MemoryRetriever {
         const candidateTerms = [...new Set(terms(request.input))]
         if (candidateTerms.length === 0) return []
 
-        const df = await store.frequencies(agentId, candidateTerms)
+        let df = await store.frequencies(agentId, candidateTerms)
         // `informative` re-tokenises the input, which is deliberate duplication of a few microseconds:
         // it keeps "which terms count" in one place, and a term dropped here must also be absent from
         // the MATCH expression — a term FTS5 scored that the denominator did not divide by would push a
         // score above 1 and stop the threshold bounding anything.
-        const query = informative(request.input, df, stats.passages)
-        if (query.length === 0) return []
+        let query = informative(request.input, df, stats.passages)
+        // Coverage keeps original terms, including ones the corpus does not hold — that is 5.45.
+        // Correction replaces that denominator only on the empty-MATCH path, where there is otherwise
+        // nothing to cover.
+        let coverageTerms = candidateTerms
+        if (query.length === 0) {
+            const corrected = correctTerms(candidateTerms, await store.vocabulary(agentId))
+            if (corrected.length === 0) return []
+            df = await store.frequencies(agentId, corrected)
+            // Already stemmed — do not run `terms()` again or `staging` becomes `stag`.
+            query = [
+                ...corrected.filter((term) => discriminating(df.get(term) ?? 0, stats.passages)),
+            ]
+            if (query.length === 0) return []
+            coverageTerms = [...corrected]
+        }
 
         const want = Math.max(MIN_CANDIDATES, request.limit * CANDIDATE_FACTOR)
         const candidates = await store.candidates(agentId, query, want)
@@ -110,8 +133,9 @@ export function fts5Retriever(options: Fts5Options): MemoryRetriever {
         const ranked: RetrievedPassage[] = []
         for (const record of candidates) {
             if (excluded.has(record.source)) continue
+            const recordTerms = record.terms === "" ? [] : record.terms.split(" ")
             const lexical = score({
-                counts: counted(record.terms === "" ? [] : record.terms.split(" ")),
+                counts: counted(recordTerms),
                 length: record.length,
                 averageLength,
                 query,
@@ -119,10 +143,14 @@ export function fts5Retriever(options: Fts5Options): MemoryRetriever {
                 total: stats.passages,
                 denominator,
             })
+            const present = new Set(recordTerms)
+            const coverage =
+                coverageTerms.filter((term) => present.has(term)).length / coverageTerms.length
             ranked.push({
                 passage: toPassage(record),
                 lexical,
-                score: boosted(lexical, record.at, request.now),
+                coverage,
+                score: boosted(lexical, record.at, request.now, coverage),
                 tokens: record.tokens,
             })
         }

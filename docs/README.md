@@ -20,6 +20,7 @@ VelaOps is its first consumer, not its owner.
 | `05-PLAN.md` | Sixteen phases, each with acceptance criteria. The build order. |
 | `06-VELAOPS-INTEGRATION.md` | The compat adapter, migration strategy, and what must never leak into core. |
 | `07-SPEC-WORKSPACE.md` | The tiered agent workspace — the `SOUL.md` identity pair, `AGENTS.md`, `POLICY.md`, `USER.md`, `MEMORY.md`, `REMINDER.md`, budgets, and per-model rendering. Supersedes `context.files` in doc 02, which survives as a deprecated alias. |
+| `08-MEMORY.md` | How memory is stored, retrieved, and injected — Phase 6 through 6.5, with the numbers. |
 
 `CLAUDE.md` lives at the repo root, not here. It is the standing brief for coding agents.
 

@@ -205,11 +205,11 @@ export interface WorkspaceWriteTarget {
      * The file's `eviction:` declaration. **Eviction only runs when this is `oldest`.**
      *
      * Not a convenience — it is what stops the memory tool rewriting the wrong file. `writeTarget`
-     * resolves the first *writable* volatile file, and a workspace that lists `USER.md` before
-     * `MEMORY.md` therefore resolves to `USER.md`: hand-written prose about the person, with no
-     * `eviction` field and no intention of being trimmed. Evicting there would delete an author's
-     * sentences into a dated archive. `eviction: oldest` is the author saying "this file accumulates
-     * notes and may be trimmed", and nothing else grants that.
+     * prefers a writable volatile file that declared `eviction: oldest` over declared order, so a
+     * workspace that lists `USER.md` before `MEMORY.md` still writes notes here: hand-written prose
+     * about the person has no `eviction` field and no intention of being trimmed. Evicting there
+     * would delete an author's sentences into a dated archive. `eviction: oldest` is the author
+     * saying "this file accumulates notes and may be trimmed", and nothing else grants that.
      */
     readonly eviction?: "oldest" | "none"
 }

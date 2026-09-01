@@ -62,6 +62,13 @@ export interface ChatMessage {
      * the ladder reaches for the ones that do not.
      */
     readonly origin?: "observation" | "call" | "repair" | "digest"
+    /**
+     * The model wrote this prose after untrusted tool output entered the turn.
+     *
+     * Harness metadata, never sent to an endpoint. Conversation memory excludes tainted assistant
+     * prose so an indirect prompt injection cannot be laundered into a clean cross-session passage.
+     */
+    readonly tainted?: boolean
 }
 
 export interface ChatRequest {

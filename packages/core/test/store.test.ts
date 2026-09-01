@@ -188,6 +188,36 @@ describe("migrations", () => {
             expect(migration.version).toBe(index + 1)
         }
     })
+
+    test("message taint migration preserves old prose and defaults it clean", async () => {
+        const { path, cleanup } = tempDb()
+        try {
+            // Located by name rather than by position: this migration was renumbered once already,
+            // when the memory work landed on a tree that had added three of its own.
+            const taint = MIGRATIONS.find((migration) => migration.name === "message_taint")
+            if (taint === undefined) throw new Error("message_taint migration is missing")
+            const db = await openDatabase({ path })
+            for (const migration of MIGRATIONS.slice(0, taint.version - 1)) db.exec(migration.sql)
+            db.exec(`PRAGMA user_version = ${taint.version - 1}`)
+            db.prepare(
+                `INSERT INTO sessions
+                     (agent_id, session_key, channel, peer_id, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+            ).run(AGENT, KEY, "local", "default", "2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z")
+            db.prepare(
+                `INSERT INTO messages (agent_id, session_key, role, content, created_at)
+                 VALUES (?, ?, ?, ?, ?)`,
+            ).run(AGENT, KEY, "assistant", "old clean prose", "2026-08-01T00:00:00Z")
+            db.close()
+
+            const store = await SqliteStore.open({ path })
+            expect(store.migrations.applied).toEqual([`${taint.version}_message_taint`])
+            expect((await store.messages.history(AGENT, KEY))[0]?.tainted).toBeUndefined()
+            await store.close()
+        } finally {
+            cleanup()
+        }
+    })
 })
 
 describe("sessions", () => {
@@ -346,6 +376,18 @@ describe("messages", () => {
             "t_7",
         )
         expect(stored[0]?.turnId).toBe("t_7")
+        await store.close()
+    })
+
+    test("taint survives both stored-message and model-history reads", async () => {
+        const store = await openMemoryStore()
+        const stored = await store.messages.append(AGENT, KEY, [
+            { role: "assistant", content: "derived from a page", tainted: true },
+        ])
+
+        expect(stored[0]?.tainted).toBe(true)
+        expect((await store.messages.page(AGENT, KEY)).messages[0]?.tainted).toBe(true)
+        expect((await store.messages.history(AGENT, KEY))[0]?.tainted).toBe(true)
         await store.close()
     })
 })
