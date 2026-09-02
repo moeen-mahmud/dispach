@@ -10,7 +10,8 @@
  * implementation, and which fails the moment somebody adds a second.
  */
 
-import { fts5Retriever, syncFiles } from "../src/memory/fts5.ts"
+import { sessionSource } from "../src/memory/conversation.ts"
+import { fts5Retriever, syncFiles, syncSessions } from "../src/memory/fts5.ts"
 import { document, splitPassages } from "../src/memory/passages.ts"
 import type { RetrievedPassage } from "../src/memory/retriever.ts"
 import {
@@ -18,6 +19,7 @@ import {
     RECENCY_HALF_LIFE_DAYS,
     RECENCY_WEIGHT,
     recencyBoost,
+    retrieveWithContext,
     selectPassages,
 } from "../src/memory/retriever.ts"
 import { TOKENISER_VERSION } from "../src/rank/bm25.ts"
@@ -195,6 +197,124 @@ describe("retrieval", () => {
         }
         await store.close()
     })
+
+    test("coverage rejects a lone accidental match but keeps a genuine one-term query", async () => {
+        const store = await openMemoryStore()
+        await syncFiles({
+            store: store.memory,
+            agentId: AGENT,
+            files: [
+                {
+                    source: "notes.md",
+                    read: () =>
+                        [
+                            "- Note 1998 concerning warehouse stock counts",
+                            "- The staging cluster lives in frankfurt",
+                        ].join("\n"),
+                    mtimeMs: 1,
+                    size: 96,
+                },
+            ],
+            now: NOW,
+        })
+        const retrieve = fts5Retriever({ store: store.memory, agentId: AGENT })
+
+        const accidental = await retrieve({
+            input: "who won the 1998 world cup",
+            now: NOW,
+            limit: 5,
+        })
+        expect(accidental[0]?.coverage).toBe(0.25)
+        expect(selectPassages(accidental, { threshold: 0.2, maxActive: 3, budget: 600 })).toEqual(
+            [],
+        )
+
+        const genuine = await retrieve({ input: "frankfurt", now: NOW, limit: 5 })
+        expect(genuine[0]?.coverage).toBe(1)
+        expect(
+            selectPassages(genuine, { threshold: 0.2, maxActive: 3, budget: 600 })[0]?.passage.text,
+        ).toContain("frankfurt")
+        await store.close()
+    })
+
+    test("a miss-only typo rewrite retrieves, and a partial rewrite does not", async () => {
+        const store = await openMemoryStore()
+        await syncFiles({
+            store: store.memory,
+            agentId: AGENT,
+            files: [
+                {
+                    source: "notes.md",
+                    read: () =>
+                        [
+                            "- Note 1998 concerning warehouse stock counts",
+                            "- The staging cluster lives in frankfurt",
+                            "- Postgres runs on the replica for analytics queries",
+                        ].join("\n"),
+                    mtimeMs: 1,
+                    size: 160,
+                },
+            ],
+            now: NOW,
+        })
+        const retrieve = fts5Retriever({ store: store.memory, agentId: AGENT })
+        const limits = { threshold: 0.2, maxActive: 3, budget: 600 }
+
+        const typo = await retrieve({ input: "where is the stagng cluser", now: NOW, limit: 5 })
+        expect(selectPassages(typo, limits)[0]?.passage.text).toContain("frankfurt")
+
+        const oneTerm = await retrieve({ input: "frankfrut", now: NOW, limit: 5 })
+        expect(selectPassages(oneTerm, limits)[0]?.passage.text).toContain("frankfurt")
+
+        const parking = await retrieve({ input: "where is the parking cluser", now: NOW, limit: 5 })
+        expect(selectPassages(parking, limits)).toEqual([])
+
+        const worldCup = await retrieve({
+            input: "who won the 1998 world cup",
+            now: NOW,
+            limit: 5,
+        })
+        expect(selectPassages(worldCup, limits)).toEqual([])
+
+        const paraphrase = await retrieve({
+            input: "which server carries analytical database traffic",
+            now: NOW,
+            limit: 5,
+        })
+        expect(selectPassages(paraphrase, limits)).toEqual([])
+        await store.close()
+    })
+})
+
+describe("contextual retrieval", () => {
+    test("a weak follow-up borrows one bounded clean prior reply", async () => {
+        const { store, retrieve } = await seeded()
+        const ranked = await retrieveWithContext(retrieve, {
+            input: "where is that hosted",
+            previousAssistant: "We were discussing the sqlite store and its driver.",
+            minimumScore: 0.2,
+            now: NOW,
+            limit: 5,
+        })
+
+        expect(ranked[0]?.passage.text.includes("sqlite The store")).toBe(true)
+        expect(ranked[0]?.because?.includes("sqlite store")).toBe(true)
+        await store.close()
+    })
+
+    test("a specific changed-topic turn does not inherit stale context", async () => {
+        const { store, retrieve } = await seeded()
+        const ranked = await retrieveWithContext(retrieve, {
+            input: "write a haiku about rain",
+            previousAssistant: "We were discussing the sqlite store and its driver.",
+            minimumScore: 0.2,
+            now: NOW,
+            limit: 5,
+        })
+
+        expect(ranked).toEqual([])
+        await store.close()
+    })
 })
 
 describe("the recency boost", () => {
@@ -259,6 +379,7 @@ describe("selectPassages", () => {
             passage: { id, source: "s", text: id, at: NOW.toISOString(), tags: [], stamped: true },
             score,
             lexical: score,
+            coverage: 1,
             tokens,
         }
     }
@@ -409,7 +530,7 @@ describe("syncFiles", () => {
 })
 
 describe("the acceptance criteria that are about the store, not the ranking", () => {
-    test("deleting a session leaves memory untouched", async () => {
+    test("deleting a session removes its projection and leaves canonical memory untouched", async () => {
         const store = await openMemoryStore()
         await store.sessions.ensure(AGENT, "local:abc")
         await syncFiles({
@@ -425,13 +546,62 @@ describe("the acceptance criteria that are about the store, not the ranking", ()
             ],
             now: NOW,
         })
-        expect((await store.memory.stats(AGENT)).passages).toBe(1)
+        await syncSessions({
+            store: store.memory,
+            agentId: AGENT,
+            sessions: [
+                {
+                    sessionKey: "local:abc",
+                    source: sessionSource("local:abc"),
+                    read: () => "- a conversation about a hardware security key",
+                    mtimeMs: 2,
+                    size: 44,
+                },
+            ],
+            now: NOW,
+        })
+        expect((await store.memory.stats(AGENT)).passages).toBe(2)
 
         await store.sessions.delete(AGENT, "local:abc")
 
-        // Structural, not incidental: `memory_passages` carries no session column and no foreign key,
-        // which is the whole reason this holds. Artifacts, by contrast, cascade with their session.
+        const sources = await store.memory.sources(AGENT)
+        expect(sources.map((source) => source.source)).toEqual(["2026-08.md"])
         expect((await store.memory.stats(AGENT)).passages).toBe(1)
+        await store.close()
+    })
+
+    test("clearing a session also removes its projection immediately", async () => {
+        const store = await openMemoryStore()
+        await store.sessions.ensure(AGENT, "local:abc")
+        await store.sessions.ensure(AGENT, "local:other")
+        await syncSessions({
+            store: store.memory,
+            agentId: AGENT,
+            sessions: [
+                {
+                    sessionKey: "local:abc",
+                    source: sessionSource("local:abc"),
+                    read: () => "- a conversation about a hardware security key",
+                    mtimeMs: 2,
+                    size: 44,
+                },
+                {
+                    sessionKey: "local:other",
+                    source: sessionSource("local:other"),
+                    read: () => "- an unrelated conversation about postgres replicas",
+                    mtimeMs: 3,
+                    size: 48,
+                },
+            ],
+            now: NOW,
+        })
+
+        await store.sessions.clear(AGENT, "local:abc")
+
+        expect((await store.memory.sources(AGENT)).map((source) => source.source)).toEqual([
+            sessionSource("local:other"),
+        ])
+        expect(await store.sessions.get(AGENT, "local:abc")).toBeDefined()
         await store.close()
     })
 

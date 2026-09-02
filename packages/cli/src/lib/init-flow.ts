@@ -1635,10 +1635,12 @@ function substitutionsFor(answers: InitAnswers): Record<string, string> {
             `instead of the whole job. Work that touches live systems goes through the ` +
             `confirmation rule in my identity file.`,
         MEMORY_PROCEDURE:
-            `Durable facts about ${user} — names, dates, preferences, decisions — go through ` +
-            `memory_write the moment I learn them, into my workspace files. Those files come ` +
-            `back to me automatically each turn; when a saved note and what ${user} just said ` +
-            `disagree, the person wins and the note gets corrected.`,
+            `USER.md is the standing picture of ${user} — name, role, preferences they wrote. ` +
+            `MEMORY.md is my working notes: when ${user} tells me something worth keeping I ` +
+            `save it with memory_write in the same turn, and those notes come back every turn ` +
+            `until older ones overflow into the memory directory, where they return when the ` +
+            `question matches. Earlier conversations are searched the same way. When a saved ` +
+            `note and what ${user} just said disagree, the person wins and I correct the note.`,
 
         BOUNDARIES:
             `If something involves a person other than ${user}, I ask what they want shared ` +
@@ -2000,18 +2002,18 @@ function manifestFor(answers: InitAnswers): string {
         // field names already. The block it replaced said `k: 6` — a field that does not exist in the
         // schema, so uncommenting it would have failed the load. Nothing checks a comment.
         `# Memory — what carries across sessions. Retrieved per turn and BM25-ranked, never pinned:`,
-        `# slot 7 is retrieved, and compaction may drop it. \`memory search <agent> "..."\` shows what a`,
+        `# slot 10 is retrieved, and compaction may drop it. \`memory search <agent> "..."\` shows what a`,
         `# question would recall; \`memory rebuild <agent>\` re-reads the notes and the conversations.`,
         `memory:`,
         `  retriever: fts5`,
         `  dir: ./memory          # where eviction files older notes. Indexed, never carried;`,
         `  #                      # created on first eviction, so its absence is not an error`,
         `  maxActive: 5`,
-        `  threshold: 0.2         # same scale as skills.threshold — both go through rank/bm25.ts`,
+        `  threshold: 0.2         # lexical relevance × original-query coverage × recency`,
         `  budget: 2000           # a ceiling, not a target. One exchange bills about 370 tokens`,
-        `  includeHistory: true   # index what was said, not only what was deliberately saved.`,
-        `  #                      # Tool output is never indexed at any setting: it is where text a`,
-        `  #                      # stranger wrote lives, and indexing it outlives the write gate`,
+        `  includeHistory: true   # index clean prose, not only what was deliberately saved.`,
+        `  #                      # Tool output and replies derived from it are never indexed: text a`,
+        `  #                      # stranger wrote must not outlive the write gate`,
         ``,
         // Named and switched on for the reason skills above is: `knowledge.dir` naming a path that
         // does not exist is a load failure, so the directory is scaffolded and an empty one is a

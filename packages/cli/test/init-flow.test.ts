@@ -266,11 +266,26 @@ describe("planFiles", () => {
         const ops = files.find((f) => f.relPath === "workspace/AGENTS.md")
         expect(ops?.contents).toContain("# What I do")
         expect(ops?.contents).toContain("memory_write")
+        // The procedure names both halves, or a generated agent treats USER.md as the dump.
+        expect(ops?.contents).toContain("USER.md is the standing picture")
+        expect(ops?.contents).toContain("MEMORY.md is my working notes")
         // Fully filled — the dialogue-example nag lives in the soul, not here.
         expect(ops?.contents.includes("{{")).toBe(false)
         // The whole point of the declarative style: an ops file that reads as zero rules.
         const body = parseWorkspaceFile("workspace/AGENTS.md", ops?.contents ?? "").body
         expect(countRules(body)).toHaveLength(0)
+    })
+
+    test("USER.md is the person's file; MEMORY.md is the write target", () => {
+        const files = planFiles(ANSWERS)
+        const user = files.find((f) => f.relPath === "workspace/USER.md")?.contents ?? ""
+        const memory = files.find((f) => f.relPath === "workspace/MEMORY.md")?.contents ?? ""
+        expect(user).toContain("Moeen is the person I work for.")
+        expect(user).toContain("What they brought me in for:")
+        expect(user).toContain("memory_write does not land")
+        expect(user.includes("the agent appends")).toBe(false)
+        expect(memory).toContain("memory_write lands here")
+        expect(memory.includes("saves land THERE")).toBe(false)
     })
 
     test("both souls are filled; the dialogue examples stay placeholders", () => {

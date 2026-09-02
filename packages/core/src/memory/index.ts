@@ -6,7 +6,7 @@
  *     memory_write ──▶ MEMORY.md          slot 4, carried every turn, budgeted
  *                          │ over budget
  *                          ▼
- *                     memory/YYYY-MM.md   slot 7, retrieved only
+ *                     memory/YYYY-MM.md   slot 10, retrieved only
  *                          │
  *                          ▼
  *                     FTS5 index          migration 6, per agent, no session link
@@ -41,6 +41,7 @@ export {
     SESSION_SOURCE_PREFIX,
     sessionSource,
 } from "./conversation.ts"
+export { correctTerms, editDistance, MAX_CORRECTIONS, MIN_CORRECT_LENGTH } from "./correct.ts"
 export {
     enumerateFiles,
     enumerateSessions,
@@ -63,6 +64,7 @@ export {
     type RetrievedPassage,
     type RetrieveInput,
     recencyBoost,
+    retrieveWithContext,
     selectPassages,
 } from "./retriever.ts"
 export {

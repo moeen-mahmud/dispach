@@ -226,10 +226,10 @@ slot  content                                    pinned  cache          phase
  4    workspace `volatile` tier                    yes
  5    active skill body (0 or 1)                   no      ─ breakpoint B  5
  6    activated knowledge entries                  no
- 7    retrieved memory passages (k)                no                      6
- 8    rolling digest (compaction output)           no                      7
- 9    recent message window                        no
-10    workspace `reminder` tier                    yes
+ 7    rolling digest (compaction output)           no                      7
+ 8    recent message window                        no
+ 9    workspace `reminder` tier                    yes
+10    retrieved memory passages (k)                no                      6
 11    current input + current task line            yes
 12    last error, if any                           yes
 ```
@@ -267,12 +267,15 @@ identity, guardrails, the tool catalogue — lives in slots 0/1 and never in his
 Compaction reliably eats initial instructions; the fix is structural placement, not a
 stronger prompt.
 
-The two workspace tiers are placed by different reasoning, and both are load-bearing. Slot 2
+The two workspace tiers are placed by different reasoning, and both are load-bearing. Slot 4
 sits *after* breakpoint A because its content changes whenever the agent writes to memory, and
 changing content ahead of the breakpoint invalidates the cached prefix on every write — cost
-rises with no error anywhere. Slot 7 sits *after* the history because rule adherence decays
+rises with no error anywhere. Slot 9 sits *after* the history because rule adherence decays
 across a conversation and attention is stronger at both ends of the context than the middle, so
 a rule stated once in slot 0 of a thirty-turn session is effectively in the middle of it.
+Retrieved memory sits in slot 10, after the reminder and immediately before the current input:
+evidence next to the question. Measured on llama3.2:3b, the same correct passage in the old
+slot 7 (ahead of history) was ignored; adjacent to the question it was used.
 
 ### Budget
 

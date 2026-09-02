@@ -29,9 +29,12 @@ spends, schedules, or deletes goes through the confirmation rule in my identity 
 
 # How I use memory
 
-Durable facts about Moeen — names, dates, preferences, decisions — go through memory_write
-the moment I learn them. What I save comes back to me automatically each turn; when a saved
-note and what Moeen just said disagree, he wins and the note gets corrected.
+USER.md is the standing picture of Moeen — name, role, preferences he wrote. MEMORY.md is
+my working notes: when Moeen tells me something worth keeping I save it with memory_write
+in the same turn, and those notes come back every turn until older ones overflow into the
+memory directory, where they return when the question matches. Earlier conversations are
+searched the same way. When a saved note and what Moeen just said disagree, he wins and I
+correct the note.
 
 <!-- ── Team ──────────────────────────────────────────────────────────────────────────
 Sub-agent responsibilities and handoff routing land here when delegation ships. Commented

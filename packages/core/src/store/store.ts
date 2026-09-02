@@ -76,6 +76,8 @@ export interface StoredMessage {
      * would put fetched, untrusted text into a corpus that outlives the gate which fenced it.
      */
     readonly origin?: ChatMessage["origin"]
+    /** True when model prose was produced after untrusted output entered its turn. */
+    readonly tainted?: boolean
     readonly createdAt: string
 }
 
@@ -121,8 +123,9 @@ export interface SessionStore {
     get(agentId: string, sessionKey: string): Promise<SessionRecord | undefined>
     list(agentId: string): Promise<readonly SessionSummary[]>
     setPhase(agentId: string, sessionKey: string, phase: string | undefined): Promise<void>
-    /** Clears history and turns. Memory files are never touched — they are canonical on disk. */
+    /** Clears history, turns, and their derived session-memory source. Canonical files are untouched. */
     clear(agentId: string, sessionKey: string): Promise<void>
+    /** Deletes the session and its derived session-memory source. Canonical files are untouched. */
     delete(agentId: string, sessionKey: string): Promise<void>
 }
 
@@ -749,10 +752,9 @@ export interface MemoryCorpusStats {
 /**
  * The memory corpus. **Not scoped to a session, and that is structural.**
  *
- * Every other per-conversation table cascades from `sessions`; these rows do not reference one at all,
- * which is what makes "deleting a session leaves memory untouched" a property of the schema rather than
- * a promise. A memory is a fact about the person; which conversation carried it is an implementation
- * detail of how it arrived.
+ * Every other per-conversation table cascades from `sessions`; these rows do not reference one at all.
+ * Canonical files therefore survive session deletion structurally. Conversation projections use the
+ * explicit `session:<key>` namespace and the session store removes that source transactionally.
  *
  * The store supplies *candidates and statistics*, never a score. Ranking is `memory/fts5.ts` using the
  * shared BM25 in `rank/bm25.ts`, for the reason migration 6 records: FTS5's own `bm25()` computes its
@@ -797,6 +799,11 @@ export interface MemoryStore {
         terms: readonly string[],
         limit: number,
     ): Promise<readonly MemoryPassageRecord[]>
+    /**
+     * Distinct indexed terms for this agent. Used only on the empty-MATCH path to correct a typo
+     * against the corpus; not a second index.
+     */
+    vocabulary(agentId: string): Promise<ReadonlySet<string>>
 }
 
 export interface Store {

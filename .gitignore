@@ -24,3 +24,9 @@ examples/*/memory/
 
 # os
 .DS_Store
+
+# Local Docker test harness — tooling, the agent it scaffolds, and the secrets beside it.
+# Kept out of the repo entirely: it exists to exercise a build on one machine, and
+# `docker/Dockerfile` is a Phase 11 deliverable that has not started.
+local_test/
+.dockerignore
