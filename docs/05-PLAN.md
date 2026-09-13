@@ -2343,19 +2343,77 @@ shared by design (11.100).
 
 **Files.** `packages/core/src/plugins/`, `packages/channel-whatsapp/`, refactors
 
+**Split into 9A, 9B and 9C (2026-09-14).** Middleware is four new seams in `turn.ts`, context
+assembly and tool execution — the most load-bearing code here — and it is independent of plugin
+identity, loading and registration. WhatsApp is a separate risk again. Each is reviewable alone;
+together they are not.
+
+### 9A — the plugin API, and the first-party packages living on it ✅ *(2026-09-14)*
+
+**Built**
+
+- [x] `plugins/plugin.ts` — `Plugin`, `PluginContext`, `Permission`, `ConfigSchema`
+- [x] `plugins/loader.ts` — built-in registry, dynamic import, version gate, config validation,
+  200 ms budget with `plugin.slow`, `plugin.loaded`
+- [x] `plugins/semver.ts` — the range check, hand-written because core takes no third dependency,
+  and **refusing what it cannot parse rather than assuming satisfied**
+- [x] `agentPluginSupply` — the one function `Runtime.create` and `validate` both call
+- [x] Telegram, Composio, system and web ship a default-export plugin beside their existing factory
+- [x] `@dispach/core/testing` with `conformance(plugin)`, and every first-party plugin runs it
+- [x] `dispach plugins` — table, `--json`, and a listing of what this binary can resolve by name
+- [x] The `plugins` section stops being refused; `examples/reference/agent.yaml` uncomments it
+
 **Acceptance**
 
-- [ ] Telegram and Composio use zero private core APIs — enforced by an export-surface test
-- [ ] A plugin with a mismatched `dispachApi` refuses to load naming both versions
+- [x] First-party packages use zero private core APIs — `boundaries.test.ts` scans them for a deep
+  import past the package root and for a relative reach across packages, and each is asserted to
+  actually *be* a plugin. Verified red by adding `@dispach/core/src/errors.ts` to one.
+- [x] A plugin with a mismatched `dispachApi` refuses naming both versions and the range. Verified
+  against the built binary: `Plugin "metrics" requires host API ^2, and this host is 0.1.0.`
+- [x] An unparseable range is its **own** failure, not a mismatch — the two send a reader to
+  different numbers
+- [x] Conformance passes for all four first-party plugins
+- [x] Boot: `plugins` phase 0.17 ms with none declared; ~3 ms total against a stashed baseline on
+  the same busy machine, almost all of it new modules in the import graph
+
+**Two things found by building it**
+
+- **`validate` and `run` disagreed**, and in the worse direction: `validate` checked provider ids
+  against the binary's static table while `run` checked them against the table *plus* the manifest's
+  plugins, so a manifest naming a third-party provider booted fine and was reported broken. Fixed by
+  `agentPluginSupply`, guarded by `validate-plugins.test.ts`, which is verified red.
+- **The `plugins` phase was the slowest in boot at 5.88 ms on an agent with no plugins**, because
+  the manifest header was parsed three times per agent. One read, reused.
+
+**Non-goals held.** Sandboxing. Enforced permissions. Hot reload.
+
+### 9B — middleware
+
+**Deliverables**
+
+- `plugins/middleware.ts` — composition, all four wrap points
+- `PluginContext.use(middleware)`
+- Retry and approval middleware as the worked examples
+
+**Acceptance**
+
 - [ ] Middleware ordering matches manifest order; a short-circuit returns a well-formed result
 - [ ] Retry middleware demonstrably retries a 429
 - [ ] Approval middleware blocks a mutating tool and the agent adapts rather than crashing
-- [ ] WhatsApp: QR pairing, message round-trip, reconnect after network drop
-- [ ] Revoking the WhatsApp session wipes credentials before re-auth; no stuck no-QR state
-- [ ] Conformance suite passes for all first-party plugins
-- [ ] Boot budget met with 5 plugins
+- [ ] `confirm` as an `onMutate` policy becomes reachable (decision 3.6's deferral)
 
-**Non-goals.** Sandboxing. Enforced permissions. Hot reload. A plugin registry.
+### 9C — WhatsApp
+
+**Deliverables**
+
+- `packages/channel-whatsapp` — Baileys, auth dir, QR, reconnect, credential wipe on `loggedOut`
+- Documented risk note in that package's README
+
+**Acceptance**
+
+- [ ] QR pairing, message round-trip, reconnect after network drop
+- [ ] Revoking the session wipes credentials before re-auth; no stuck no-QR state
+- [ ] Boot budget met with 5 plugins
 
 ---
 

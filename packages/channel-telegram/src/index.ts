@@ -17,7 +17,7 @@
  * ```
  */
 
-import { type ChannelFactory, ConfigError } from "@dispach/core"
+import { type ChannelFactory, ConfigError, type Plugin } from "@dispach/core"
 import { TelegramApi } from "./api.ts"
 import { type TelegramMode, TelegramTransport } from "./transport.ts"
 
@@ -94,3 +94,39 @@ function stringField(config: Readonly<Record<string, unknown>>, key: string): st
     const value = config[key]
     return typeof value === "string" && value !== "" ? value : undefined
 }
+
+/**
+ * Package version, declared to the host and kept in step with `package.json` by a test.
+ *
+ * A constant rather than a `package.json` import: the bundle targets Node with `--packages=external`,
+ * and a JSON import resolves differently under Bun, Node and a bundler. `changeset version` bumps
+ * the manifest and knows nothing about this, which is what the test is for — the same arrangement
+ * `@dispach/core` uses for `VERSION`.
+ */
+export const VERSION = "0.1.0"
+
+/**
+ * This package as a plugin.
+ *
+ * The factory above is unchanged and still exported: `Runtime.create({ channels: { telegram } })`
+ * remains supported for an embedder wiring things up directly, and the plugin is a thin registration
+ * over the same seam rather than a second implementation of it. Two ways in, one code path.
+ *
+ * `setup` registers and does nothing else — no token is read, no socket is opened. The token check
+ * lives in the factory, which runs when an agent's manifest actually declares a Telegram channel;
+ * doing it here would refuse to *load the plugin* on an agent that never uses it.
+ */
+export default {
+    name: "telegram",
+    version: VERSION,
+    dispachApi: "^0.1",
+    permissions: [
+        { kind: "network", hosts: ["api.telegram.org"] },
+        // The default. A manifest naming a different `tokenEnv` is declaring a variable this list
+        // cannot know, which is one honest limit of an advisory vocabulary (decision 7.5).
+        { kind: "env", vars: ["TELEGRAM_BOT_TOKEN"] },
+    ],
+    setup(context) {
+        context.defineChannel("telegram", telegramChannel)
+    },
+} satisfies Plugin

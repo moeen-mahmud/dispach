@@ -591,6 +591,14 @@ export const COMMANDS: readonly CommandSpec[] = [
         ],
     },
     {
+        name: "plugins",
+
+        inSession: "output",
+        summary: "list the plugins this agent loaded, and what each one registered",
+        args: [MANIFEST],
+        flags: [JSON_FLAG],
+    },
+    {
         name: "agents",
 
         inSession: "output",

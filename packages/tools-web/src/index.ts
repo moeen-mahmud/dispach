@@ -7,6 +7,9 @@
  * does not draw — in particular, that none of it binds `exec`.
  */
 
+import type { Plugin } from "@dispach/core"
+import { webFromConfig } from "./provider.ts"
+
 export {
     type AddressKind,
     type AddressVerdict,
@@ -58,3 +61,28 @@ export {
     type SearchOptions,
     searchTool,
 } from "./search.ts"
+
+/** Package version, kept in step with `package.json` by a test. See `@dispach/core`'s `VERSION`. */
+export const VERSION = "0.1.0"
+
+/**
+ * This package as a plugin.
+ *
+ * Two read-only tools whose whole risk surface is which address they can be pointed at. Registered
+ * separately from `system` on purpose: an agent that reads the web and an agent that runs commands
+ * are different grants, and a manifest should be able to make one and not the other.
+ */
+export default {
+    name: "web",
+    version: VERSION,
+    dispachApi: "^0.1",
+    permissions: [
+        // Any host the agent is pointed at, which is the honest declaration for a fetch tool. The
+        // guard that matters is not this list: `web_fetch` refuses a private address outright and
+        // has no setting that permits one.
+        { kind: "network", hosts: ["*"] },
+    ],
+    setup(context) {
+        context.defineToolProvider("web", webFromConfig)
+    },
+} satisfies Plugin

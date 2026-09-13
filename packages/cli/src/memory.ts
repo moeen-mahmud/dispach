@@ -24,7 +24,7 @@
 import { Runtime } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import { CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { keyValue } from "#lib/render"
 import { storePath } from "#lib/sandbox"
 import type { MemoryOptions } from "#lib/schema"
@@ -38,6 +38,7 @@ export async function memoryCommand(options: MemoryOptions): Promise<number> {
         // The sandbox store — the same one `run` writes to, or this searches an index nothing built.
         store: options.store ?? storePath(),
         toolProviders: TOOL_PROVIDERS,
+        builtInPlugins: BUILT_IN_PLUGINS,
         scriptRunner: scriptRunner(),
         channels: CHANNELS,
         env: ambientEnv([options.manifestPath]),

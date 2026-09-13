@@ -295,6 +295,10 @@ Stated plainly, because the alternative is someone assuming otherwise:
 > the startup time and simplicity this project exists to preserve. If you need to run
 > untrusted plugin code, run the whole agent in a container and treat that as the boundary.
 
+`dispach plugins <manifest>` prints what each plugin registered and what it declared, with that
+last sentence repeated above the list. Declaring accurately costs nothing today and is the only
+thing that will distinguish a plugin from a scramble when enforcement lands.
+
 ## Commands
 
 `dispach --help` prints this from the same table the parser uses, so the two cannot drift.

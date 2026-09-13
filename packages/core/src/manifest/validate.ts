@@ -503,7 +503,9 @@ function validateChannels(
  * never looks like a user's intent.
  */
 const UNSUPPORTED_SECTIONS: readonly { key: string; feature: string; phase: string }[] = [
-    { key: "plugins", feature: "plugins", phase: "Phase 9" },
+    // Empty since Phase 9A, and kept rather than deleted: it is the mechanism that makes a
+    // half-implemented section refuse instead of being silently dropped, and the next section to
+    // arrive ahead of its code needs exactly one line here. `plugins` was the last entry.
 ]
 
 /**

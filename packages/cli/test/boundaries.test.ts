@@ -606,3 +606,56 @@ test("a blocked write is reported even when tool rows are suppressed", () => {
     const body = handler.slice(0, handler.indexOf("}),"))
     expect(body.includes("showRows")).toBe(false)
 })
+
+describe("first-party packages use only the public core API", () => {
+    /**
+     * The premise of the plugin API, asserted rather than trusted.
+     *
+     * `03-SPEC-PLUGIN-API.md` opens by saying that if a first-party package needs something the
+     * plugin API cannot express, **the API is wrong and gets fixed** — no private back doors. That
+     * promise is worth exactly as much as the thing checking it: a deep import into `@dispach/core/src`
+     * or a relative reach across package boundaries would keep every test green while quietly making
+     * the first-party packages a privileged class that third-party ones cannot imitate.
+     *
+     * Scanned as text rather than by importing, so a package that would not even compile against the
+     * public surface is still caught.
+     */
+    const PACKAGES = resolve(import.meta.dirname, "..", "..")
+    const FIRST_PARTY = ["channel-telegram", "tools-composio", "tools-system", "tools-web"]
+
+    const EXTERNAL = FIRST_PARTY.flatMap((name) => {
+        const dir = join(PACKAGES, name, "src")
+        return sourceFiles(dir).map((path) => ({
+            package: name,
+            path: relative(PACKAGES, path),
+            text: readFileSync(path, "utf8"),
+        }))
+    })
+
+    test("nothing reaches past the package root of @dispach/core", () => {
+        // `@dispach/core/src/...`, `@dispach/core/dist/...` — anything but the bare specifier.
+        const offenders = EXTERNAL.filter((file) =>
+            /from\s*["']@dispach\/core\/[^"']+["']/.test(file.text),
+        ).map((file) => file.path)
+        expect(offenders).toEqual([])
+    })
+
+    test("nothing reaches into another package by relative path", () => {
+        const offenders = EXTERNAL.filter((file) =>
+            /from\s*["']\.\.\/\.\.\/[^"']*(?:core|channel-|tools-)[^"']*["']/.test(file.text),
+        ).map((file) => file.path)
+        expect(offenders).toEqual([])
+    })
+
+    test("each one is a plugin: a default export the loader can read", () => {
+        // The acceptance criterion is that these packages *live on* the API rather than beside it.
+        // A package that exports a factory and no plugin is still wired the old way.
+        for (const name of FIRST_PARTY) {
+            const index = readFileSync(join(PACKAGES, name, "src", "index.ts"), "utf8")
+            expect({ name, hasPlugin: /export default \{/.test(index) }).toEqual({
+                name,
+                hasPlugin: true,
+            })
+        }
+    })
+})

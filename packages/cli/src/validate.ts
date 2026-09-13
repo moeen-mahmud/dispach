@@ -8,13 +8,16 @@
  * renderer costs ~170-210 ms to import under Node, which would be most of this command's runtime.
  */
 
-import { isAbsolute, resolve } from "node:path"
+import { dirname, isAbsolute, resolve } from "node:path"
 import {
+    agentPluginSupply,
     buildChannels,
     describeWindowSource,
+    EventBus,
     HarnessError,
     loadKnowledge,
     loadManifest,
+    readManifestHeader,
     resolveCapabilities,
     resolveWorkspace,
     ruleBudgetFailure,
@@ -23,14 +26,42 @@ import {
 } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import { CHANNEL_IDS, CHANNELS, PROVIDER_IDS } from "#lib/providers"
+import { BUILT_IN_PLUGINS, CHANNELS, TOOL_PROVIDERS } from "#lib/providers"
 import type { ValidateOptions } from "#lib/schema"
 
-export function validateCommand(options: ValidateOptions): number {
+/**
+ * Async since Phase 9A, and only because plugin resolution is.
+ *
+ * `validate` used to check `tools.providers` and a channel `type` against this binary's static
+ * tables while `run` checked them against those tables *plus* whatever the manifest's plugins
+ * registered. So a manifest naming a third-party provider booted fine and validated as broken —
+ * the recorded asymmetry, in the direction that tells somebody their working agent is
+ * misconfigured. `agentPluginSupply` is the one function both now call.
+ */
+export async function validateCommand(options: ValidateOptions): Promise<number> {
     try {
+        // Read before the load, because the load is what needs the ids. A header parse expands no
+        // environment and needs no credentials, which is what makes it usable here.
+        const header = readManifestHeader(options.manifestPath)
+        const supply = await agentPluginSupply({
+            refs: header.plugins ?? [],
+            agentId: header.id ?? options.manifestPath,
+            paths: {
+                workspace: dirname(resolve(options.manifestPath)),
+                state: dirname(resolve(options.manifestPath)),
+                manifest: resolve(options.manifestPath),
+            },
+            env: ambientEnv([options.manifestPath]),
+            // A fresh bus: `plugin.loaded` during a validation is noise on somebody else's stream,
+            // and nothing is subscribed to this one.
+            bus: new EventBus({ runtimeId: "validate" }),
+            builtIn: BUILT_IN_PLUGINS,
+            base: { toolProviders: TOOL_PROVIDERS, channels: CHANNELS },
+        })
+
         const loaded = loadManifest(options.manifestPath, {
-            knownProviders: PROVIDER_IDS,
-            knownChannels: CHANNEL_IDS,
+            knownProviders: Object.keys(supply.toolProviders),
+            knownChannels: Object.keys(supply.channels),
             // The same environment `run` will use, or this validates a different agent — the
             // failure that rule exists for is a validator that disagrees with the runtime.
             env: ambientEnv([options.manifestPath]),
@@ -55,7 +86,7 @@ export function validateCommand(options: ValidateOptions): number {
         // and those are configuration mistakes knowable without a packet. Skipping this reported
         // ok on a manifest `serve` refused at boot. Constructing a transport opens no socket, so
         // this is the same function `Runtime.create` calls and costs nothing.
-        buildChannels(loaded, { channels: CHANNELS })
+        buildChannels(loaded, { channels: supply.channels })
 
         // The same check `run` applies, applied here for the same reason it exists at all: a
         // validator that accepts a manifest the runtime refuses is worse than no validator.

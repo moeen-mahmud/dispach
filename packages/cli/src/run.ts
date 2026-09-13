@@ -54,7 +54,7 @@ import {
 import { negotiateKeyboard } from "#lib/keyboard"
 import { ENABLE_MOUSE } from "#lib/mouse"
 import { resolveModeFromProcess } from "#lib/output"
-import { CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { keyValue } from "#lib/render"
 import { priorMessages, reopenNote, resumeNotice } from "#lib/resume"
 import { listAgents, storePath } from "#lib/sandbox"
@@ -242,6 +242,7 @@ export async function runCommand(options: RunOptions): Promise<number> {
             agents: [options.manifestPath],
             emitChunks: true,
             toolProviders: TOOL_PROVIDERS,
+            builtInPlugins: BUILT_IN_PLUGINS,
             scriptRunner: scriptRunner(),
             channels: CHANNELS,
             // A `.env` in the directory this was launched from loses to the agent's own. See

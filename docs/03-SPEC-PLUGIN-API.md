@@ -52,26 +52,77 @@ export default {
 
 ## PluginContext
 
+**Built in Phase 9A** — the shipped surface, and the whole of it:
+
 ```ts
 interface PluginContext {
   // registration
-  defineChannel(spec: ChannelSpec): void
-  defineToolProvider(spec: ToolProviderSpec): void
-  defineModelProvider(spec: ModelProviderSpec): void
-  defineStore(spec: StoreSpec): void
-  defineSkillSource(spec: SkillSourceSpec): void
-  defineTools(tools: LocalTool[]): void
-  use(middleware: Middleware): void
+  defineChannel(id: string, factory: ChannelFactory): void
+  defineToolProvider(id: string, factory: ToolProviderFactory): void
+  defineScriptRunner(runner: ScriptRunner): void
 
   // ambient
   readonly config: unknown          // validated against configSchema
   readonly agentId: string
   readonly paths: { workspace: string; state: string; manifest: string }
+  readonly env: EnvSource            // the manifest's .env over the ambient one, as core resolved it
   readonly logger: Logger
-  readonly events: EventBus         // subscribe only; emit is core's
-  readonly brand: Brand
+  readonly events: Pick<EventBus, "on">   // subscribe only; emit is core's
 }
 ```
+
+Two departures from the shape this document first described, both deliberate.
+
+**`define*` takes an id and a factory rather than a spec object.** The id is what a manifest
+*selects* — `tools.provider` names a provider id, a `channels[]` entry names a `type` — so
+registration and selection are the same namespace, and naming a plugin stays separate from granting
+what it offers. The factory is what already existed: `ChannelFactory` and `ToolProviderFactory` are
+the seams `Runtime.create` has taken since Phase 3, and a plugin registering one means core's wiring
+did not change at all. A spec object would have been a second description of the same thing.
+
+**`defineScriptRunner` is unkeyed**, because there is nothing for a manifest to choose between: a
+process can be started or cannot. Last registration wins.
+
+`brand` is not exposed. Nothing needed it, and hard rule 3 makes a brand string in a plugin a
+liability rather than a convenience.
+
+### Not built yet
+
+| Point | Status |
+| --- | --- |
+| `use(middleware)` | **Phase 9B.** The four wrap points are new seams in `turn.ts`, context assembly and tool execution — the most load-bearing code here, and independent of plugin identity and loading. Split out so each is reviewable. |
+| `defineModelProvider` | Deferred. The chat-completions transport is the only one, and a second implementation is what would tell us what the seam needs. |
+| `defineStore` | Deferred with the Postgres driver (open item O.5). The `Store` interface exists; nothing has needed to register one. |
+| `defineSkillSource` | Deferred. Skill sources resolve through `lib/sources.ts` in the CLI, which is a fetch a person triggers rather than something an agent boots with. |
+| `defineTools` | Deferred. `tools.local` covers the built-ins and a plugin wanting to add tools registers a provider, which is the same capability with a name a manifest can select. |
+
+Each is absent rather than stubbed. A `define*` that records something nothing reads is the shape
+this repo keeps finding — declared vocabulary with no consumer — and it reads to an author as a
+capability that exists.
+
+---
+
+## Resolution
+
+A `plugins:` entry resolves in one of two ways, and never by installing anything (hard rule 5).
+
+1. **A built-in registry, keyed by the specifier a manifest writes.** `@dispach/channel-telegram`
+   resolves to the copy the host already bundles, with no import at all.
+2. **A module import** for anything else — a relative path, resolved against the *manifest's*
+   directory rather than the working directory, or a package name resolved from beside the agent.
+
+The registry is not an optimisation. A module imported both statically and dynamically makes
+`bun build --splitting` emit its exports twice and the bundle stops parsing — `SyntaxError:
+Duplicate export`, which `bun test` walks straight past because tests import source and the failure
+is in the bundle. The CLI statically imports the first-party packages to register them, so a loader
+that also `import()`ed them by name would produce a binary that fails to start. The registry keeps
+each module imported exactly one way.
+
+Loading happens **once per agent**, before that agent's manifest is validated. That ordering is
+forced: `loadManifest` checks `tools.provider` and a channel `type` against the ids the host can
+supply, and once plugins exist half of those ids come from the manifest itself. The refs are read
+from a shallow header parse, which needs no credentials and expands no environment — a plugin spec
+is a package name, never a secret.
 
 ---
 
@@ -231,7 +282,10 @@ In-process functions. Same catalogue, same budget, same phase rules as provider 
 
 ---
 
-## Middleware
+## Middleware — Phase 9B, not yet built
+
+Specified here and **not implemented in Phase 9A**. `PluginContext` has no `use()` yet; a plugin
+declaring middleware today registers nothing and the loader warns that it registered nothing.
 
 The wrapping shape, not before/after events. Wrapping permits retry, substitution, and
 short-circuit; events permit only observation. Events are derived from the wrap points, so
@@ -342,6 +396,18 @@ scramble. That trade is stated in the README.
 - [ ] Permissions declared honestly
 - [ ] `bun test` passes against `@dispach/core`'s plugin conformance suite
 
-Core ships `@dispach/core/testing` with `conformance(plugin)` — a suite asserting boot
-budget, version gating, config validation, and, for channels, idempotent send. Every
-first-party plugin runs it in CI.
+Core ships `@dispach/core/testing` with `conformance(plugin)`. It returns findings and throws
+nothing, because a plugin author's test runner is theirs — a suite that assumed one would be
+unusable by most of them.
+
+**It checks the mechanical half only, and says so in its own docstring**: the shape, the version
+range, the setup budget, that `setup` registers something and survives an empty environment with a
+workspace that does not exist. It does **not** check that `send()` is idempotent, that `resolve()`
+throws on an unknown slug, or that the plugin avoids the network — those are properties of code the
+suite calls once, under conditions a conformance run does not create. Passing means *well-formed*,
+not safe. A suite advertised as proving more than it does is worse than none, because it invites the
+belief that passing means the plugin is bounded by what it declared.
+
+Every first-party plugin runs it: `packages/cli/test/plugin-conformance.test.ts`, which lives there
+because the CLI is the package that imports all four — `packages/core` may not (hard rule 2), and a
+package asserting against itself would only ever check itself.

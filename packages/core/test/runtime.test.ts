@@ -79,6 +79,11 @@ describe("boot", () => {
         // Order is the boot sequence, and the list is exhaustive on purpose: a phase appearing
         // without anyone noticing is a phase whose cost nobody is watching.
         expect(Object.keys(runtime.boot.phases)).toEqual([
+            // First, and before `manifest`, because the manifest load validates provider ids and
+            // channel types against what this host can supply — and plugins are half of that.
+            // Present even with no `plugins:` block, which is the point: it reports 0 ms rather
+            // than vanishing, so the phase that could grow is one somebody is already watching.
+            "plugins",
             "manifest",
             "store",
             "tools",

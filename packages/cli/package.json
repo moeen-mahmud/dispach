@@ -24,8 +24,9 @@
         }
     },
     "imports": {
+        "#*": "./src/*.ts",
         "#components/*": "./src/components/*.tsx",
-        "#*": "./src/*.ts"
+        "#plugins": "./src/plugins.ts"
     },
     "scripts": {
         "dev": "bun run ./src/index.ts",

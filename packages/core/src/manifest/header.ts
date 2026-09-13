@@ -8,6 +8,13 @@
  * schema validation, no `extends` resolution, and returns raw strings: `${MODEL_ID}` comes back
  * verbatim, and the caller decides how to display it.
  *
+ * It also reads `plugins`, which is not identity and belongs here anyway. The plugin loader has to
+ * know what to load *before* `loadManifest` runs, because that function validates `tools.provider`
+ * and a channel `type` against the ids this host can supply — and half of those ids come from the
+ * plugins themselves. Reading them here is what breaks that circle without parsing the file twice
+ * or making `loadManifest` async. Every property that makes this reader safe applies: a plugin spec
+ * is a package name or a path, never a secret, and needs no expansion to be actionable.
+ *
  * Lives in core because core owns the YAML dependency — the CLI's runtime dependencies are
  * capped at the renderer pair by decision 11.10.
  */
@@ -27,6 +34,14 @@ export interface ManifestHeader {
      * them apart. A hand-written manifest may still use a variable, and then this is what it says.
      */
     readonly modelId?: string
+    /**
+     * Raw `plugins:` entries, unvalidated.
+     *
+     * Shapes are checked by the schema at load; this only needs enough to resolve modules, so a
+     * malformed entry is passed through and refused later where the error can name the field. Both
+     * spellings survive — the bare string and the `{ spec, config }` form.
+     */
+    readonly plugins?: readonly (string | { spec: string; config?: Record<string, unknown> })[]
 }
 
 export function readManifestHeader(
@@ -67,5 +82,8 @@ export function readManifestHeader(
         ...(typeof record.id === "string" ? { id: record.id } : {}),
         ...(typeof record.name === "string" ? { name: record.name } : {}),
         ...(typeof mainId === "string" ? { modelId: mainId } : {}),
+        ...(Array.isArray(record.plugins)
+            ? { plugins: record.plugins as NonNullable<ManifestHeader["plugins"]> }
+            : {}),
     }
 }

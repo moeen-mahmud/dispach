@@ -16,7 +16,7 @@ import { Runtime, type ScheduleRecord } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { onExit } from "#lib/exit"
-import { CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { ago } from "#lib/render"
 import { storePath } from "#lib/sandbox"
 import type { SchedulesOptions } from "#lib/schema"
@@ -200,6 +200,7 @@ export async function schedulesCommand(options: SchedulesOptions): Promise<numbe
         // The sandbox store — the same one `serve` writes to, or this inspects nothing.
         store: options.store ?? storePath(),
         toolProviders: TOOL_PROVIDERS,
+        builtInPlugins: BUILT_IN_PLUGINS,
         scriptRunner: scriptRunner(),
         channels: CHANNELS,
         env: ambientEnv([options.manifestPath]),
