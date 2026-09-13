@@ -55,6 +55,21 @@ export function sessionKeyFrom(bytes: Uint8Array): string {
 }
 
 /**
+ * A freshly minted key, from an injected source of randomness.
+ *
+ * The one derivation. `resolveSession` computed `sessionKeyFrom(random(SESSION_KEY_LENGTH))` inline and
+ * `/new` needed the same line — two copies of "what a generated session is called" is how two surfaces
+ * come to disagree about it, the same reason `logPaths` moved into `lib/sandbox.ts` rather than being
+ * copied into `remove`.
+ *
+ * `random` is a parameter rather than a `crypto` call so a test gets the key it asked for, and so the
+ * component layer never has to reach for crypto to open a conversation.
+ */
+export function newSessionKey(random: (count: number) => Uint8Array): string {
+    return sessionKeyFrom(random(SESSION_KEY_LENGTH))
+}
+
+/**
  * True for a key this module could have produced.
  *
  * Used to *explain* a key rather than to validate one — a hand-written `--session mine` is perfectly

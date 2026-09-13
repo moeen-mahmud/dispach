@@ -385,19 +385,17 @@ export const MemorySchema = z
          */
         maxActive: z.number().int().nonnegative().default(5),
         /**
-         * Normalised score floor, on exactly the scale `skills.threshold` uses — both go through
-         * `rank/bm25.ts`, so the numbers are comparable and one formula change invalidates both.
+         * Score floor after original-query coverage and recency. The lexical component still uses the
+         * same `rank/bm25.ts` scale as skills; `memory search` exposes both terms.
          *
          * **Lower than skills' 0.35 on purpose, because the two want opposite errors.** A wrong skill
          * *displaces* the right one at `maxActive: 1`, so routing pays for precision; an extra
          * remembered passage costs twenty tokens under a budget that already caps the slot, so
          * retrieval pays for recall.
          *
-         * Measured on a real corpus: the note "the deploy pipeline waits for a manual approval gate"
-         * scored **0.284** against "how does the deploy approval work". It matched two of the query's
-         * three informative terms and the normalisation divides by all three — correct arithmetic, and
-         * a good answer that 0.35 would have withheld. A full match at average length is about 0.45,
-         * so 0.20 admits a two-of-three match and still refuses a one-term coincidence.
+         * Measured over 5,000 passages: the original thirteen direct cases remain green, while a
+         * four-term question sharing only `1998` falls to 0.123. A genuine one-term query has coverage
+         * 1 and remains eligible.
          */
         threshold: z.number().default(0.2),
         /**

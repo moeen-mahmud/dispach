@@ -44,6 +44,7 @@ export {
     type AssembledContext,
     type AssembleInput,
     assembleContext,
+    historyReport,
     slotReport,
 } from "./context/assemble.ts"
 export {

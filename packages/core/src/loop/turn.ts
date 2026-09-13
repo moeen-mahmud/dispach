@@ -151,6 +151,7 @@ export interface TurnInput {
         readonly source: string
         readonly at: string
         readonly text: string
+        readonly because?: string
     }[]
     readonly skills?: readonly {
         readonly name: string
@@ -232,7 +233,19 @@ export interface TurnResult {
     readonly reasoning: string
     readonly reason: TurnEndReason
     readonly steps: number
-    readonly tokens: { readonly prompt: number; readonly output: number }
+    readonly tokens: {
+        readonly prompt: number
+        readonly output: number
+        /**
+         * Prompt tokens the last step's endpoint served from cache, when it reported a figure.
+         *
+         * From the *last* step for the same reason `prompt` is: a turn's steps share a growing prefix,
+         * so the final call is the one whose prompt the turn actually cost. Absent means unreported,
+         * never a measured zero.
+         */
+        readonly cachedPrompt?: number
+        readonly cacheSource?: string
+    }
     readonly durationMs: number
     /** Present when `reason` is `error`. Carries a field path when one applies. */
     readonly error?: ErrorDetail
@@ -322,6 +335,8 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
     let reasoning = ""
     let steps = 0
     let promptTokens = 0
+    let cachedPromptTokens: number | undefined
+    let cacheSource: string | undefined
     let outputTokens = 0
     /**
      * Turn-scoped, and outside the `try` because the result is built after it.
@@ -663,6 +678,12 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
 
             reasoning += step.reasoning
             promptTokens = step.promptTokens
+            // Last step wins, matching `promptTokens` above. Left untouched by a step that reported
+            // nothing, so one silent step in a turn does not erase a figure an earlier one gave.
+            if (step.cachedPromptTokens !== undefined) {
+                cachedPromptTokens = step.cachedPromptTokens
+                cacheSource = step.cacheSource
+            }
             outputTokens += step.outputTokens
 
             // The anchor. Only a figure the endpoint actually reported teaches anything — `promptTokens`
@@ -1003,7 +1024,13 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
 
     const durationMs = Math.round(performance.now() - started)
 
-    if (pendingProse !== "") trace.push({ role: "assistant", content: pendingProse })
+    if (pendingProse !== "") {
+        trace.push({
+            role: "assistant",
+            content: pendingProse,
+            ...(untrustedSeen ? { tainted: true } : {}),
+        })
+    }
 
     // Partial content is kept on an explicit stop and on a timeout, both of which are decisions
     // someone made. It is never persisted for a disconnect, which cannot reach this code at all.
@@ -1018,7 +1045,17 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
 
     input.bus.emit(
         "turn.end",
-        { reason, steps, tokens: { prompt: promptTokens, output: outputTokens }, durationMs },
+        {
+            reason,
+            steps,
+            tokens: {
+                prompt: promptTokens,
+                output: outputTokens,
+                ...(cachedPromptTokens === undefined ? {} : { cachedPrompt: cachedPromptTokens }),
+                ...(cacheSource === undefined ? {} : { cacheSource }),
+            },
+            durationMs,
+        },
         context,
     )
 
@@ -1028,7 +1065,12 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
         reasoning,
         reason,
         steps,
-        tokens: { prompt: promptTokens, output: outputTokens },
+        tokens: {
+            prompt: promptTokens,
+            output: outputTokens,
+            ...(cachedPromptTokens === undefined ? {} : { cachedPrompt: cachedPromptTokens }),
+            ...(cacheSource === undefined ? {} : { cacheSource }),
+        },
         durationMs,
         ...(error === undefined ? {} : { error }),
         appended,

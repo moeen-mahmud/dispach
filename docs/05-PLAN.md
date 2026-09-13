@@ -2042,8 +2042,8 @@ migration **006** (005 is the artifact store)
 - [x] Index rebuild after external file edit — mtime *and* size, with `memory rebuild` for the edit that
   preserves both
 - [x] Retrieval under 20 ms over 5000 passages — **median 0.43 ms, slowest 1.35 ms** (`evals/memory/`)
-- [x] Deleting a session leaves memory files untouched — structural: `memory_passages` has no session
-  column and no foreign key
+- [x] Deleting a session leaves canonical memory files untouched — `session:<key>` projections are
+  removed synchronously since Phase 6.4
 - [x] Boot budget met with a 5000-passage index — 76.6 ms median; an unchanged file is `stat`ed, never
   read, which is why `IndexableFile.read` is lazy
 - [x] Zero Python, zero model weights, zero network in the memory path
@@ -2874,6 +2874,86 @@ text whatever the field passes — and the test written to prove otherwise passe
 - [x] Deleting and retyping at the end of a wrapped value is visible throughout
 - [x] The new guard **fails** with the width removed — checked, unlike the wizard one
 - [x] `bun test` 2528/0 · `test:node` 1164/0 · `typecheck` clean · `lint` at the 6 pre-existing warnings
+
+---
+
+## Phase 6.4 — deterministic memory foundation
+
+**Shipped 2026-08-27.** Decisions 5.45–5.49.
+
+**Goal.** Improve lexical precision and underspecified follow-up recall before paying for vectors, and
+close the two places where derived conversation memory outlived its evidence or its trust boundary.
+
+**Deliverables**
+
+- [x] Expanded 21-question fixture with direct, paraphrase, follow-up, metadata, typo and abstention
+  categories; baseline committed before ranking changed
+- [x] Original-query coverage in the memory score; `memory search` exposes lexical and coverage
+- [x] Heading/tag fields weighted before BM25 saturation; tokeniser version bumped for rebuild
+- [x] Bounded prior-reply query expansion only for a weak, underspecified current turn
+- [x] Persisted assistant-prose taint after untrusted tool output; tainted replies excluded from history
+  indexing and from contextual query expansion
+- [x] Session clear/delete removes its `session:<key>` passage and source rows in the same transaction
+- [x] Migration 011 for `messages.tainted`; old rows honestly default clean
+
+**Acceptance**
+
+- [x] Original direct recall stays 13/13 including the prior 12/12; one-term `frankfurt` remains green
+- [x] The `1998` false positive is rejected: 0.490 → 0.123
+- [x] Expanded recall 76.5% → 88.2%; restraint 75.0% → 100%; F1 83.9% → 93.8%
+- [x] Follow-up and metadata categories move 0/1 → 1/1; changed-topic abstention remains empty
+- [x] Untrusted-derived assistant prose is persisted as tainted and cannot enter cross-session memory
+- [x] Clear/delete is immediately unsearchable and stays so through restart and rebuild; canonical files
+  and unrelated sessions remain
+- [x] 5,000-passage retrieval median 0.30 ms, slowest 0.98 ms against the 20 ms ceiling
+- [x] `build` and `typecheck` clean · Bun 2786/0 · Node 1214/0 · lint at 6 pre-existing warnings ·
+  boot 411.5 ms process-to-ready, 136.7 ms inside `Runtime.create`
+
+**Rejected after measurement.** Fuzzy typo expansion and semantic paraphrase remain red and disclosed:
+one fixture each does not justify a trigram index, synonym source or embeddings. Always-on prior-turn
+expansion was rejected because it leaks stale subjects across changed-topic turns. An additive metadata
+score was rejected because it creates a second uncalibrated scale.
+
+**Non-goals.** Vectors, temporal claims and supersession, knowledge graphs, model-driven consolidation,
+background model calls, multi-principal storage, and changes to the turn-scoped mutation gate.
+
+---
+
+## Phase 6.5 — memory utilization
+
+**Shipped 2026-08-28.** Decisions 5.50–5.53. See `docs/08-MEMORY.md`.
+
+**Goal.** Close the gap between injecting the right passage and a small model *using* it, without a
+second index, a reranker, or embeddings. Phase 6.4 made retrieval more precise; this phase puts the
+evidence where it is read, says how it was found, and recovers empty-MATCH typos.
+
+**Deliverables**
+
+- [x] Compaction notice forbids wrapping up; it does not demand verbosity
+- [x] Retrieved memory moved to slot 10 — after history and reminder, immediately before input
+- [x] Expansion-only hits carry `because` (the prior-reply slice); the passage text is unchanged
+- [x] Miss-only vocabulary correction against the indexed terms; incomplete rewrites abort
+- [x] Deterministic eval records the new placement, provenance, and typo path
+- [x] `docs/08-MEMORY.md` is the running account of the memory work
+
+**Acceptance**
+
+- [x] Direct recall stays 13/13; `frankfurt` remains a hit; `1998` remains a miss at 0.123
+- [x] `stagng cluser` and `frankfrut` retrieve; `parking cluser` does not
+- [x] Semantic paraphrase remains red and disclosed (0/1)
+- [x] Follow-up prompt contains `Found via the earlier reply`
+- [x] Recall 88.2% → 94.4%; restraint 100%; F1 93.8% → 97.1%
+- [x] 5,000-passage retrieval median 0.33 ms, slowest 3.52 ms against the 20 ms ceiling
+- [x] `typecheck` clean · `test:node` 1221/0 · lint at 6 pre-existing warnings · boot 64.3 ms
+  process-to-ready (budget 1000 ms). `bun test` 2791 pass; two skills-search tests timed out under
+  the full-suite load and passed in isolation.
+
+**Rejected.** Answer planners, a learned reranker, embeddings, always-on prior expansion, an
+independent metadata score, and a model-backed eval in-repo (deleted on request; utilization was
+probed off-tree).
+
+**Non-goals.** Vectors, synonym lists, changing `stem()`, calibrating recency constants, and any
+change to the write gate or `includeHistory` allowlist.
 
 ---
 

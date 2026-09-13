@@ -192,13 +192,18 @@ function passage(text: string, input: SplitInput, heading: string | undefined): 
     }
 }
 
+/** Metadata fields are weighted before BM25's saturation by repeating their terms in the document. */
+const HEADING_WEIGHT = 2
+const TAG_WEIGHT = 2
+
 /**
- * What BM25 actually scores: the heading, then the passage with its metadata markers removed.
+ * What BM25 actually scores: weighted metadata fields, then the passage with its markers removed.
  *
- * The heading is included because a bullet is frequently useless without it — "prefers tabs" retrieves
- * on nothing, "Formatting / prefers tabs" retrieves on `formatting`. Repeating it across every sibling
- * bullet is not a leak in the arithmetic: a term present in many passages gets a lower idf, which is
- * BM25 discounting it exactly as it should.
+ * A bullet is frequently useless without its heading — "prefers tabs" retrieves on nothing while
+ * "Formatting / prefers tabs" retrieves on `formatting`. Tags are explicit author-supplied retrieval
+ * keys, so they are scored rather than carried only for display. Repeating each field before
+ * tokenisation applies its weight to term frequency *before* BM25's saturation; adding an independent
+ * metadata score afterwards would put the result on a second, uncalibrated scale.
  *
  * ## The stamp is removed, and the reason is *not* the one it looks like
  *
@@ -219,5 +224,12 @@ function passage(text: string, input: SplitInput, heading: string | undefined): 
  */
 export function document(passage: Passage): string {
     const body = passage.text.replace(STAMP, "").replace(TAGS, "")
-    return passage.heading === undefined ? body : `${passage.heading}\n${body}`
+    const fields = [
+        ...(passage.heading === undefined
+            ? []
+            : Array.from({ length: HEADING_WEIGHT }, () => passage.heading as string)),
+        ...Array.from({ length: TAG_WEIGHT }, () => passage.tags.join(" ")),
+        body,
+    ]
+    return fields.filter((field) => field !== "").join("\n")
 }

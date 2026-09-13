@@ -246,7 +246,7 @@ describe("manifest override merge", () => {
             nativeTools: true,
             strictSchema: true,
             thinking: "none",
-            promptCache: "anthropic",
+            promptCache: "none",
             parallelToolCalls: true,
             contextWindow: 32_768,
             maxOutput: 2048,
@@ -283,11 +283,43 @@ describe("window provenance", () => {
     })
 
     test("a matched row is the registry, and names the row", () => {
-        // The pattern is the useful half. `registry claude-*` says at a glance that one row is
-        // answering for every Claude model ever released.
+        // The pattern is the useful half, and it changed meaning once the Claude rows were split:
+        // `registry claude-*` used to say one row answered for every Claude model ever released,
+        // which is what let a 200K window stand for a 1M one. A named row says the opposite.
         const provenance = windowProvenance("claude-sonnet-5")
         expect(provenance.source).toBe("registry")
-        expect(provenance.pattern).toBe("claude-*")
+        expect(provenance.pattern).toBe("claude-sonnet-5*")
+    })
+
+    /**
+     * The catch-all stays conservative, and that asymmetry is the whole reason for the split.
+     *
+     * Under-reporting a window over-compacts and wastes tokens; over-reporting one overflows the
+     * endpoint. So the 1M models are named individually and `claude-*` keeps 200K — raising the
+     * catch-all would have claimed 1M for Sonnet 4.5, Opus 4.5 and the 3.x line, which are 200K, and
+     * that error is the unrecoverable direction.
+     */
+    test("an unnamed Claude model gets the conservative row, not the 1M one", () => {
+        expect(windowProvenance("claude-sonnet-4-5").pattern).toBe("claude-*")
+        expect(matchCapabilities("claude-sonnet-4-5").capabilities.contextWindow).toBe(200_000)
+        expect(matchCapabilities("claude-3-5-sonnet-20241022").capabilities.contextWindow).toBe(
+            200_000,
+        )
+    })
+
+    test("every Claude row reports no prompt caching, whatever its window", () => {
+        // Not a claim about Anthropic — a claim about the OpenAI-compatible endpoint this runtime
+        // speaks, which does not support caching at all. A row that says otherwise is describing a
+        // transport it is not on.
+        for (const id of [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5",
+        ]) {
+            expect(matchCapabilities(id).capabilities.promptCache).toBe("none")
+        }
     })
 
     test("an unmatched id is the fallback, not a registry hit", () => {
@@ -299,7 +331,9 @@ describe("window provenance", () => {
     })
 
     test("the fallback's tag says it is a floor; the others stay short", () => {
-        expect(describeWindowSource(windowProvenance("claude-sonnet-5"))).toBe("registry claude-*")
+        expect(describeWindowSource(windowProvenance("claude-sonnet-5"))).toBe(
+            "registry claude-sonnet-5*",
+        )
         expect(describeWindowSource(windowProvenance("nothing-matches-this"))).toContain("floor")
         expect(describeWindowSource(windowProvenance("x", { contextWindow: 10 }))).toBe("manifest")
     })

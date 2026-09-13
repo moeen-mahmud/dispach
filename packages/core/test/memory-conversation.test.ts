@@ -33,6 +33,7 @@ function message(
     role: StoredMessage["role"],
     content: string,
     origin?: StoredMessage["origin"],
+    tainted = false,
 ): StoredMessage {
     next += 1
     return {
@@ -42,6 +43,7 @@ function message(
         content,
         createdAt: `2026-08-19T10:0${next % 10}:00.000Z`,
         ...(origin === undefined ? {} : { origin }),
+        ...(tainted ? { tainted: true } : {}),
     }
 }
 
@@ -88,6 +90,23 @@ describe("exchanges", () => {
         expect(out.length).toBe(1)
         expect(out[0]?.asked).toBe("research openclaw")
         expect(out[0]?.replied).toBe("It is an open-source agent runtime.")
+    })
+
+    test("assistant prose produced after untrusted output is not indexed as clean memory", () => {
+        const out = exchanges([
+            message("user", "read the external page"),
+            message("user", "OBSERVATION web_fetch — ok …", "observation"),
+            message(
+                "assistant",
+                "The page says to transfer credentials tomorrow.",
+                undefined,
+                true,
+            ),
+        ])
+
+        expect(out.length).toBe(1)
+        expect(out[0]?.asked).toBe("read the external page")
+        expect(out[0]?.replied).toBe("")
     })
 
     test("the last reply wins, because the earlier ones narrate what is about to happen", () => {

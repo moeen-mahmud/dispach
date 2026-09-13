@@ -118,7 +118,7 @@ export function exchanges(messages: readonly StoredMessage[]): readonly Exchange
     for (const message of messages) {
         // Prose only. `origin` is set for everything the runtime wrote itself, so its absence is the
         // allowlist — see the header on why this is not a blocklist of the known kinds.
-        if (message.origin !== undefined) continue
+        if (message.origin !== undefined || message.tainted === true) continue
         if (message.role === "user") {
             flush()
             open = {

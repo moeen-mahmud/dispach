@@ -1946,6 +1946,42 @@ Never claim a performance property without a number in `evals/` and a script to 
   structural rather than one test per field: `boundaries.test.ts` walks every `CommandSpec` flag and
   requires it to be named inside that command's **own** `case` block in `index.ts`. One guard, and a
   new flag is covered with nothing to remember.
+- **A reported symptom can be true with a false mechanism, and fixing the mechanism you assumed leaves
+  the cause running.** "`init` always creates the agent inside the codebase" was accurate and had
+  nothing to do with the default: driven under a pty against the *installed* binary, the wizard offers
+  `~/<stateDir>/agents/<slug>` and `--yes` writes there. The cause was the **positional** — `init milo`
+  read as the agent's name and meant the directory `./milo`, written silently into whatever checkout
+  you were standing in, after which the agent has no bare name and every later command needs a path.
+  It is `--dir` now, and a positional is refused by `CommandSpec.unexpectedArgHint`, which exists
+  because the parser refuses *before* any `case` block runs — a check in `index.ts` would be
+  unreachable, and the generic "Unexpected: milo. Quote a value containing spaces" is advice for a typo
+  this was not. Two things ride along. `QuestionDefaults.agentDirBase` was **optional**, so absence
+  fell back to a cwd-relative `./<slug>`: a second live default guarded only by every caller
+  remembering the first, and *two tests asserted both of them* — documenting the hazard as supported
+  behaviour is what stops it being deleted. And `insideSandbox` must `resolve` before comparing and
+  require a `sep` after the base, or `agents-backup` reads as inside `agents`; the test written for
+  that used `join`, **which normalises its arguments**, so it passed with the `resolve` reverted. The
+  walk has to arrive as text, the way a `--dir` value does.
+- **`SelectItem.hint` existed for phases with no `Question` supplying one, so every option folded its
+  reason into the label — and the location menu's first row came to 79 columns.** At 100 it fitted; at
+  **80 it wrapped**, onto a continuation line with no pointer and no number, which reads as a fourth
+  item in a three-item list. Same shape as the status line one component over, and the check that
+  missed it was a capture at a single width. `wrap="truncate"` on the row is the fix; splitting label
+  from `hint` is what keeps the reason legible instead of clipped. The guard took three attempts and
+  each failure is worth more than the fix: `overflowing(frame, columns)` is **not** the invariant,
+  because Ink *wraps* rather than overflowing, so every continuation line is within the width and the
+  check is green on a visibly broken list — the invariant is that the border encloses exactly four
+  non-empty lines. Read a row's number **past** the pointer, not by character position. And loop the
+  widths: 60, 80, 100.
+- **A step that stops being asked must move its default to `complete()`, which is the funnel both the
+  wizard and the flags pass through.** `dir` is asked only after "somewhere else"; the other two
+  answers derive it through `dirFor`, one pure function shared with the confirm screen — a second
+  derivation is how a summary comes to name a directory other than the one written. The `dir` question
+  deliberately has **no fallback**, because a prefill on a question reached only by choosing "somewhere
+  else" is a third directory default arriving by the back door. And `dirChoice` is skipped when `dir`
+  is already set **in `nextQuestion`**, not as a courtesy from `fromFlags`: a caller assembling `given`
+  by hand — the wizard's own tests do — would otherwise be asked where to put an agent whose path is
+  already decided.
 - **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
   under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
   builds running beside it — which is a shared 2-core runner every time. Its own comment says the

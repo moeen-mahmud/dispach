@@ -498,6 +498,7 @@ describe("init --skills find", () => {
         schedules: "none",
         server: "none",
         daemon: "none",
+        dirChoice: "custom",
         dir: "./t",
     } as const
 

@@ -94,6 +94,9 @@ describe("slot numbering", () => {
         expect(SLOT.volatile > SLOT.tools).toBe(true)
         expect(SLOT.reminder > SLOT.history).toBe(true)
         expect(SLOT.reminder < SLOT.input).toBe(true)
+        expect(SLOT.memory > SLOT.history).toBe(true)
+        expect(SLOT.memory > SLOT.reminder).toBe(true)
+        expect(SLOT.memory < SLOT.input).toBe(true)
     })
 })
 
@@ -150,6 +153,38 @@ describe("workspace tiers in the assembled prompt", () => {
         const slots = withTiers("Memory.").blocks.map((b) => b.slot)
         expect(slots.lastIndexOf(SLOT.history) < slots.indexOf(SLOT.reminder)).toBe(true)
         expect(slots.indexOf(SLOT.reminder) < slots.indexOf(SLOT.input)).toBe(true)
+    })
+
+    test("retrieved memory lands after the reminder and immediately before the input", () => {
+        const assembled = assembleContext({
+            identity: "You are a test fixture.",
+            reminder: "Answer in prose.",
+            memory: [
+                {
+                    source: "2026-08.md",
+                    at: "2026-08-01T10:00:00Z",
+                    text: "The staging cluster lives in frankfurt.",
+                    because: "We were discussing the staging cluster.",
+                },
+            ],
+            history: [
+                { role: "user", content: "first" },
+                { role: "assistant", content: "second" },
+            ],
+            input: "where is that one hosted",
+            window: 8192,
+            reserveOutput: 1024,
+        })
+        const slots = assembled.blocks.map((b) => b.slot)
+        expect(slots.lastIndexOf(SLOT.history) < slots.indexOf(SLOT.memory)).toBe(true)
+        expect(slots.indexOf(SLOT.reminder) < slots.indexOf(SLOT.memory)).toBe(true)
+        expect(slots.indexOf(SLOT.memory) < slots.indexOf(SLOT.input)).toBe(true)
+        const remembered = assembled.blocks.find((b) => b.slot === SLOT.memory)
+        expect(remembered?.pinned).toBe(false)
+        expect(remembered?.content).toContain("# Remembered")
+        expect(remembered?.content).toContain("Found via the earlier reply:")
+        expect(remembered?.content).toContain("We were discussing the staging cluster.")
+        expect(remembered?.content).toContain("The staging cluster lives in frankfurt.")
     })
 
     test("both tiers are pinned, so compaction cannot eat them", () => {

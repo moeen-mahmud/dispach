@@ -199,7 +199,7 @@ export const MIN_BODY_ROWS = 3
  * `… 1 below`. It is not derived from `COMMANDS` directly because `commands.ts` reads this module, and the
  * cycle would cost more than the assertion does.
  */
-export const LANDING_LIST_ROWS = 19
+export const LANDING_LIST_ROWS = 20
 
 /**
  * Rows of conversation the landing screen keeps, whatever the brand mark would like.

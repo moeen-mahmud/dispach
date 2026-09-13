@@ -47,6 +47,35 @@ describe("initCommand runs the whole funnel", () => {
     // dropped with no type error. `--schedules` has already been lost that way twice, and now that
     // the wizard step is gone there is no second route for the value to arrive by.
 
+    /**
+     * The far-end guard for the derived directory.
+     *
+     * `dir` stops being asked the moment the location answer is `sandbox`, so its value is produced by
+     * `complete()` — and a step that stops being asked without its default moving to the funnel is
+     * exactly how `apiKeyEnv` once vanished from generated manifests. Asserted by *where the files
+     * landed*, never by reading `complete`'s output: the object literal it returns is not
+     * excess-property-checked, so a field it fails to carry is dropped with no type error.
+     */
+    test("no --dir writes into the sandbox, derived from the location answer", async () => {
+        const home = mkdtempSync(join(tmpdir(), "init-home-"))
+        const before = process.env[`${BRAND.envPrefix}HOME`]
+        process.env[`${BRAND.envPrefix}HOME`] = home
+        try {
+            expect(await initCommand({ ...FLAGS })).toBe(EXIT_OK)
+            const expected = join(home, "agents", "milo", "agent.yaml")
+            expect(existsSync(expected)).toBe(true)
+            expect(readFileSync(expected, "utf8")).toContain("id: milo")
+            // And nothing in the working directory. This is not belt-and-braces: a broken derivation
+            // resolves `./milo` against `process.cwd()`, which under `bun test` is the repo — a
+            // deliberate revert of the funnel during review littered `milo/` into the checkout, and
+            // an untracked directory is the one failure mode a green suite will not mention.
+            expect(existsSync(join(process.cwd(), "milo"))).toBe(false)
+        } finally {
+            if (before === undefined) delete process.env[`${BRAND.envPrefix}HOME`]
+            else process.env[`${BRAND.envPrefix}HOME`] = before
+        }
+    })
+
     test("--schedules daily reaches the written agent.yaml", async () => {
         const dir = scratch()
         expect(await initCommand({ ...FLAGS, dir, schedules: "daily" })).toBe(EXIT_OK)

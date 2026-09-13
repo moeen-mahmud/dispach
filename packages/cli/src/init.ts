@@ -33,6 +33,7 @@ import { markTerminalDirty, onExit } from "#lib/exit"
 import {
     COMPOSIO_KEY_ENV,
     composioEnabled,
+    dirFor,
     type InitAnswers,
     type InitStep,
     nextQuestion,
@@ -48,7 +49,7 @@ import { findAndInstallSkill } from "#lib/init-skills"
 import { negotiateKeyboard } from "#lib/keyboard"
 import { resolveModeFromProcess } from "#lib/output"
 import { CHANNEL_IDS, PROVIDER_IDS } from "#lib/providers"
-import { agentsDir } from "#lib/sandbox"
+import { agentsDir, outsideSandboxNote } from "#lib/sandbox"
 import type { InitOptions } from "#lib/schema"
 
 /** Which flag supplies each step, for the refusal that names what is missing. */
@@ -82,7 +83,8 @@ const FLAG_FOR: Record<InitStep, string> = {
     daemon: "--daemon",
     // Never asked and never a flag — generated, because it is ours rather than a third party's.
     serverToken: "(generated)",
-    dir: "<dir>",
+    dirChoice: "--dir",
+    dir: "--dir",
 }
 
 export type InitResult =
@@ -145,8 +147,15 @@ async function runInit(options: InitOptions): Promise<InitResult> {
         )
     }
 
-    const answers = complete(partial)
+    const answers = complete(partial, defaults)
     const targetDir = resolve(process.cwd(), answers.dir)
+
+    // Said before anything is written, not after: the cost of an out-of-sandbox agent is paid by
+    // every later command, and the only moment it is cheap to reconsider is now. Never a refusal —
+    // an agent living in a project checkout is a real thing to want, and the failure this replaces
+    // was silence, not permission.
+    const note = outsideSandboxNote(targetDir)
+    if (note !== undefined) process.stderr.write(`${note}\n`)
     const manifestPath = join(targetDir, "agent.yaml")
     const files = planFiles(answers)
 
@@ -419,7 +428,10 @@ function fillDefaults(
     }
 }
 
-function complete(partial: Partial<Record<InitStep, string>>): InitAnswers {
+function complete(
+    partial: Partial<Record<InitStep, string>>,
+    defaults: QuestionDefaults,
+): InitAnswers {
     // `apiKeyEnv` and `apiKey` legitimately stay undefined — the first for a keyless endpoint, the
     // second for anyone exporting the variable another way. Everything else is present once
     // nextQuestion returns undefined.
@@ -434,6 +446,8 @@ function complete(partial: Partial<Record<InitStep, string>>): InitAnswers {
             | "skillsSearch"
             | "skillsPick"
             | "schedules"
+            | "dir"
+            | "dirChoice"
         >,
         string
     > & {
@@ -457,6 +471,10 @@ function complete(partial: Partial<Record<InitStep, string>>): InitAnswers {
         /** Both stay undefined unless the Telegram answer was `connected`. */
         telegramToken?: string
         telegramAllow?: string
+        /** Undefined unless `dirChoice` was `custom`; derived below otherwise. */
+        dir?: string
+        /** Undefined when `--dir` answered the question, which is what skips it. */
+        dirChoice?: string
     }
     // Which variable holds the key is no longer asked — it comes from `--api-key-env`, or from the
     // preset. Defaulted HERE, at the one funnel both the wizard and the scripted path pass through:
@@ -464,6 +482,19 @@ function complete(partial: Partial<Record<InitStep, string>>): InitAnswers {
     // the manifest altogether and generated an agent with no key configuration at all.
     const preset = presetById(answers.preset)
     const keyVar = answers.apiKeyEnv ?? preset?.apiKeyEnv
+
+    // `dir` stops being asked the moment the answer is `sandbox` or `here`, so its value has to be
+    // derived at this funnel — the same rule `apiKeyEnv` above is a monument to. `dirFor` is the one
+    // derivation, shared with the confirm screen, so the summary cannot describe a directory other
+    // than the one written. An explicit answer still wins: `--dir` sets both fields.
+    const dir = answers.dir ?? dirFor(answers.dirChoice, answers.name, defaults)
+    if (dir === undefined) {
+        throw new HarnessError({
+            code: "cli_init_no_directory",
+            message: `The directory answer was ${JSON.stringify(answers.dirChoice)}, which resolves to no path.`,
+            hint: "This is a bug in the CLI: every dirChoice except `custom` must derive a path in `dirFor`, and `custom` must have asked the dir question. Pass --dir <path> to get past it.",
+        })
+    }
 
     return {
         user: answers.user,
@@ -515,7 +546,8 @@ function complete(partial: Partial<Record<InitStep, string>>): InitAnswers {
         ...(answers.apiKey === undefined || answers.apiKey === ""
             ? {}
             : { apiKey: answers.apiKey }),
-        dir: answers.dir,
+        ...(answers.dirChoice === undefined ? {} : { dirChoice: answers.dirChoice }),
+        dir,
     }
 }
 

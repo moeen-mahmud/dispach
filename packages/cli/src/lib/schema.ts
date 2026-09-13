@@ -91,6 +91,21 @@ export interface CommandSpec {
      * end; making the field mandatory means a new command cannot be silently absent instead.
      */
     readonly inSession: "view" | "output" | "hidden"
+    /**
+     * What to say when this command is handed a positional it does not take.
+     *
+     * The generic refusal reports a *count* — "takes 0 argument(s), got 1. Unexpected: milo. Quote a
+     * value containing spaces." — which is the right sentence for a stray token and the wrong one when
+     * the token is something a reasonable person expected the command to accept. `init milo` is exactly
+     * that: it read as "name the agent milo" and meant "write it to ./milo", so the argument was dropped
+     * and the two readings have to be named at the point of the mistake, where the person still
+     * remembers what they meant.
+     *
+     * On the spec rather than in the dispatch, because the parser refuses before any `case` block runs —
+     * a check written in `index.ts` would be unreachable. Optional: a command with no such confusion
+     * keeps the generic sentence, which is the correct one for a typo.
+     */
+    readonly unexpectedArgHint?: string
 }
 
 // ─── parser output ───────────────────────────────────────────────────────────────────────
@@ -370,6 +385,15 @@ export interface AppProps {
      * away a half-written message is a second consequence of asking for the first.
      */
     readonly onSwitch?: (sessionKey: string, draft: string) => void
+    /**
+     * Open a conversation that does not exist yet.
+     *
+     * The same unmount-and-reopen route as `onSwitch`, and deliberately *not* a call to it with a key the
+     * component minted: the key is generated from `randomBytes`, which the host owns and injects, so a
+     * component that produced its own would be one no test could pin to a known key. It takes no key for
+     * the same reason — there is nothing for the screen to decide.
+     */
+    readonly onNew?: (draft: string) => void
     /**
      * The stored conversations, for the `/sessions` switcher.
      *

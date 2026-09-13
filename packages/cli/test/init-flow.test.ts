@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test"
 import { countRules, LOCAL_TOOL_SLUGS, parseWorkspaceFile, rulesBlocksOnly } from "@dispach/core"
 import {
     COMPOSIO_KEY_ENV,
+    dirFor,
     INIT_LOCAL_TOOL_SLUGS,
     type InitAnswers,
     nextQuestion,
@@ -19,6 +20,13 @@ import {
     slugify,
     validateAnswer,
 } from "#lib/init-flow"
+
+/**
+ * The sandbox base every caller must now supply. `agentDirBase` was optional and its absence fell
+ * back to a cwd-relative `./<slug>` — a second, silent default that put agents in whichever checkout
+ * the command ran from. Required means these call sites are the compiler's problem, not a habit.
+ */
+const DEFAULTS = { agentDirBase: "/home/x/.brand/agents" }
 
 const ANSWERS: InitAnswers = {
     user: "Moeen",
@@ -37,6 +45,7 @@ const ANSWERS: InitAnswers = {
     server: "none",
     skills: "starter",
     daemon: "none",
+    dirChoice: "custom",
     dir: "./milo",
 }
 
@@ -56,7 +65,7 @@ describe("nextQuestion", () => {
         const partial: Record<string, string> = {}
         const seen: string[] = []
         for (;;) {
-            const question = nextQuestion(partial)
+            const question = nextQuestion(partial, DEFAULTS)
             if (question === undefined) break
             seen.push(question.step)
             partial[question.step] =
@@ -79,7 +88,7 @@ describe("nextQuestion", () => {
             "telegram",
             "server",
             "skills",
-            "dir",
+            "dirChoice",
         ])
     })
 
@@ -92,7 +101,7 @@ describe("nextQuestion", () => {
         }
         const steps: string[] = []
         for (;;) {
-            const question = nextQuestion(partial)
+            const question = nextQuestion(partial, DEFAULTS)
             if (question === undefined) break
             steps.push(question.step)
             partial[question.step] = question.fallback || "x"
@@ -102,24 +111,67 @@ describe("nextQuestion", () => {
 
     test("model and base URL default from the chosen preset; custom offers nothing", () => {
         expect(
-            nextQuestion({ user: "a", name: "b", purpose: "c", preset: "deepseek" })?.fallback,
+            nextQuestion({ user: "a", name: "b", purpose: "c", preset: "deepseek" }, DEFAULTS)
+                ?.fallback,
         ).toBe("deepseek-v4-flash")
         expect(
-            nextQuestion({ user: "a", name: "b", purpose: "c", preset: "custom" })?.fallback,
+            nextQuestion({ user: "a", name: "b", purpose: "c", preset: "custom" }, DEFAULTS)
+                ?.fallback,
         ).toBe("")
     })
 
-    test("the directory default derives from the agent name", () => {
-        const { dir: _dir, ...answered } = ANSWERS
-        const question = nextQuestion(answered)
-        expect(question?.step).toBe("dir")
-        expect(question?.fallback).toBe("./milo")
+    /**
+     * The location question is a menu whose first option is the sandbox.
+     *
+     * This replaces a pair of tests that asserted *two* defaults — `./milo` with no base, the sandbox
+     * with one — which documented the cwd-relative fallback as supported behaviour rather than as the
+     * hazard it was. There is one default now and pressing enter takes it.
+     */
+    test("the location question defaults to the sandbox", () => {
+        const { dir: _dir, dirChoice: _choice, ...answered } = ANSWERS
+        const question = nextQuestion(answered, DEFAULTS)
+        expect(question?.step).toBe("dirChoice")
+        expect(question?.options?.[0]?.value).toBe("sandbox")
+        // The fallback is an index into the options; "1" has to *be* the sandbox row, or enter
+        // silently picks something else.
+        expect(question?.fallback).toBe("1")
     })
 
-    test("with a sandbox base, the directory default lands inside it", () => {
+    test("every option names the path it resolves to, not just the concept", () => {
+        const { dir: _dir, dirChoice: _choice, ...answered } = ANSWERS
+        const options = nextQuestion(answered, DEFAULTS)?.options ?? []
+        expect(options[0]?.label).toContain("/home/x/.brand/agents/milo")
+        expect(options[1]?.label).toContain("./milo")
+    })
+
+    /**
+     * The follow-up exists only for `custom` — an answer the flow discards is a question that lies,
+     * which is the same rule `web: search` follows for its backend.
+     */
+    test("only `custom` asks for a path", () => {
         const { dir: _dir, ...answered } = ANSWERS
-        const question = nextQuestion(answered, { agentDirBase: "/home/x/.brand/agents" })
-        expect(question?.fallback).toBe("/home/x/.brand/agents/milo")
+        for (const choice of ["sandbox", "here"]) {
+            expect(nextQuestion({ ...answered, dirChoice: choice }, DEFAULTS)).toBeUndefined()
+        }
+        const question = nextQuestion({ ...answered, dirChoice: "custom" }, DEFAULTS)
+        expect(question?.step).toBe("dir")
+        // No fallback: "somewhere else" with nothing typed would otherwise be a third directory
+        // default arriving by the back door.
+        expect(question?.fallback).toBe("")
+    })
+
+    test("dirFor derives the two non-custom answers and nothing else", () => {
+        expect(dirFor("sandbox", "milo", DEFAULTS)).toBe("/home/x/.brand/agents/milo")
+        expect(dirFor("here", "milo", DEFAULTS)).toBe("./milo")
+        expect(dirFor("custom", "milo", DEFAULTS)).toBeUndefined()
+        expect(dirFor("sandbox", undefined, DEFAULTS)).toBeUndefined()
+    })
+
+    test("the location answer is validated by number or by name", () => {
+        expect(validateAnswer("dirChoice", "1")).toEqual({ ok: true, value: "sandbox" })
+        expect(validateAnswer("dirChoice", "here")).toEqual({ ok: true, value: "here" })
+        expect(validateAnswer("dirChoice", "4").ok).toBe(false)
+        expect(validateAnswer("dirChoice", "elsewhere").ok).toBe(false)
     })
 })
 
@@ -214,11 +266,26 @@ describe("planFiles", () => {
         const ops = files.find((f) => f.relPath === "workspace/AGENTS.md")
         expect(ops?.contents).toContain("# What I do")
         expect(ops?.contents).toContain("memory_write")
+        // The procedure names both halves, or a generated agent treats USER.md as the dump.
+        expect(ops?.contents).toContain("USER.md is the standing picture")
+        expect(ops?.contents).toContain("MEMORY.md is my working notes")
         // Fully filled — the dialogue-example nag lives in the soul, not here.
         expect(ops?.contents.includes("{{")).toBe(false)
         // The whole point of the declarative style: an ops file that reads as zero rules.
         const body = parseWorkspaceFile("workspace/AGENTS.md", ops?.contents ?? "").body
         expect(countRules(body)).toHaveLength(0)
+    })
+
+    test("USER.md is the person's file; MEMORY.md is the write target", () => {
+        const files = planFiles(ANSWERS)
+        const user = files.find((f) => f.relPath === "workspace/USER.md")?.contents ?? ""
+        const memory = files.find((f) => f.relPath === "workspace/MEMORY.md")?.contents ?? ""
+        expect(user).toContain("Moeen is the person I work for.")
+        expect(user).toContain("What they brought me in for:")
+        expect(user).toContain("memory_write does not land")
+        expect(user.includes("the agent appends")).toBe(false)
+        expect(memory).toContain("memory_write lands here")
+        expect(memory.includes("saves land THERE")).toBe(false)
     })
 
     test("both souls are filled; the dialogue examples stay placeholders", () => {
@@ -497,9 +564,11 @@ describe("the web question", () => {
             system: "none",
         }
         // An answer the flow would discard is a question that lies.
-        expect(nextQuestion({ ...base, web: "fetch" })?.step).toBe("composio")
-        expect(nextQuestion({ ...base, web: "search" })?.step).toBe("webBackend")
-        expect(nextQuestion({ ...base, web: "search", webBackend: "exa" })?.step).toBe("webKey")
+        expect(nextQuestion({ ...base, web: "fetch" }, DEFAULTS)?.step).toBe("composio")
+        expect(nextQuestion({ ...base, web: "search" }, DEFAULTS)?.step).toBe("webBackend")
+        expect(nextQuestion({ ...base, web: "search", webBackend: "exa" }, DEFAULTS)?.step).toBe(
+            "webKey",
+        )
     })
 
     test("the web answers are validated by name or by number", () => {
@@ -601,8 +670,8 @@ describe("the Composio question", () => {
             system: "none",
             web: "none",
         }
-        expect(nextQuestion({ ...base, composio: "none" })?.step).toBe("telegram")
-        expect(nextQuestion({ ...base, composio: "connected" })?.step).toBe("composioKey")
+        expect(nextQuestion({ ...base, composio: "none" }, DEFAULTS)?.step).toBe("telegram")
+        expect(nextQuestion({ ...base, composio: "connected" }, DEFAULTS)?.step).toBe("composioKey")
     })
 
     test("the answers are validated by name or by number", () => {

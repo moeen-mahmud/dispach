@@ -1,5 +1,5 @@
 /**
- * The retrieval seam, and the one piece of ranking that is not BM25: the recency boost.
+ * The retrieval seam, and the deterministic ranking signals around BM25: coverage and recency.
  *
  * `MemoryRetriever` is a function-shaped contract for the same reason `SkillSelector` and
  * `KnowledgeSelector` are: it **ranks and nothing else**. The caller owns `threshold`, `maxActive` and
@@ -10,15 +10,13 @@
  * ## The recency boost multiplies; it never subtracts
  *
  * The obvious formula blends: `base × (1 - w) + recency × w`. It is wrong here, and the reason is the
- * threshold. `memory.threshold` is calibrated against the *normalised BM25* scale — the same scale, the
- * same constant and the same calibration as `skills.threshold`, because `rank/bm25.ts` is shared. A
- * blend can push a strong lexical match *below* the floor purely for being old, which would mean the
- * threshold no longer answers the question it was calibrated to answer ("is this passage about what was
- * asked?") and instead answers a mixed one nobody has measured.
+ * threshold. Original-query coverage deliberately lowers an incomplete lexical match before the floor;
+ * age should not lower it a second time. A blend can push a strong covered match *below* the floor purely
+ * for being old, so the threshold would answer a mixed relevance/freshness question nobody measured.
  *
- * So the boost can only lift: `final = base × (1 + w × 2^(-age / halfLife))`. A passage that would have
- * been injected still is; recency only reorders within the set that already qualifies, and lifts a
- * marginal recent note over a marginal old one. The consequence is that scores now range over
+ * So the boost can only lift: `final = coveredBase × (1 + w × 2^(-age / halfLife))`. Recency only
+ * reorders or lifts after coverage has answered how much of the current query the passage covers. The
+ * consequence is that scores range over
  * `[0, 1 + w)` rather than `[0, 1)`, which is harmless for a floor and is stated here because a reader
  * checking "normalised means under one" would otherwise think they had found a bug.
  *
@@ -31,6 +29,7 @@
  * monotonic in age — because that is what keeps the threshold meaningful.
  */
 
+import { terms } from "../rank/bm25.ts"
 import type { Passage } from "./passages.ts"
 
 /**
@@ -64,14 +63,14 @@ export function recencyBoost(at: string, now: Date): number {
     return 1 + RECENCY_WEIGHT * 2 ** (-ageDays / RECENCY_HALF_LIFE_DAYS)
 }
 
-/** Lexical score × recency. The number `memory.threshold` is compared against. */
-export function boosted(lexical: number, at: string, now: Date): number {
-    return lexical * recencyBoost(at, now)
+/** Lexical score × original-query coverage × recency. */
+export function boosted(lexical: number, at: string, now: Date, coverage = 1): number {
+    return lexical * coverage * recencyBoost(at, now)
 }
 
 export interface RetrievedPassage {
     readonly passage: Passage
-    /** Lexical × recency. Comparable to `memory.threshold` and across agents. */
+    /** Lexical × original-query coverage × recency. Comparable to `memory.threshold`. */
     readonly score: number
     /**
      * Normalised BM25 before the boost, on exactly the scale `skills/select.ts` produces.
@@ -81,8 +80,22 @@ export interface RetrievedPassage {
      * *recent*" are distinguishable without reading the code.
      */
     readonly lexical: number
+    /**
+     * Fraction of the original informative query terms present in this passage.
+     *
+     * Unlike BM25's query, this denominator retains terms absent from the corpus. That is what
+     * distinguishes a passage matching the lone shared term in a four-term question from a genuine
+     * one-term query such as `frankfurt`.
+     */
+    readonly coverage: number
     /** Estimated tokens of `passage.text`, so the caller can spend its budget without re-estimating. */
     readonly tokens: number
+    /**
+     * Prior-reply slice that recovered this hit. Present when bounded expansion found the passage
+     * (or raised it over the current turn's own ranking). Absent when the current turn already
+     * ranked it highest. The passage text is unchanged.
+     */
+    readonly because?: string
 }
 
 export interface RetrieveInput {
@@ -111,6 +124,60 @@ export interface RetrieveInput {
  * documents fit in memory and are re-scored per turn; a memory corpus does not and is not.
  */
 export type MemoryRetriever = (input: RetrieveInput) => Promise<readonly RetrievedPassage[]>
+
+/** Enough prior prose to recover a follow-up's subject without turning history into the query. */
+export const MAX_QUERY_CONTEXT_CHARS = 600
+
+/**
+ * Retrieve against a bounded prior reply only when the current query is both underspecified and weak.
+ *
+ * A broad second query on every turn makes yesterday's subject leak into an unrelated request. The
+ * current turn therefore remains authoritative: a result already clearing the configured floor stops
+ * expansion, and a query with more than two content terms is specific enough to stand alone.
+ */
+export async function retrieveWithContext(
+    retrieve: MemoryRetriever,
+    request: RetrieveInput & {
+        readonly minimumScore: number
+        readonly previousAssistant?: string
+    },
+): Promise<readonly RetrievedPassage[]> {
+    const { minimumScore, previousAssistant, ...direct } = request
+    const primary = await retrieve(direct)
+    const previous = previousAssistant?.trim()
+    if (
+        previous === undefined ||
+        previous === "" ||
+        terms(request.input).length > 2 ||
+        (primary[0]?.score ?? 0) >= minimumScore
+    ) {
+        return primary
+    }
+
+    const context = previous.slice(-MAX_QUERY_CONTEXT_CHARS)
+    const expanded = await retrieve({ ...direct, input: `${context}\n${request.input}` })
+    const primaryById = new Map(primary.map((hit) => [hit.passage.id, hit]))
+    const byId = new Map<string, RetrievedPassage>(primaryById)
+    for (const hit of expanded) {
+        const prior = primaryById.get(hit.passage.id)
+        if (prior === undefined) {
+            const current = byId.get(hit.passage.id)
+            if (current === undefined || hit.score > current.score) {
+                byId.set(hit.passage.id, { ...hit, because: context })
+            }
+            continue
+        }
+        if (hit.score > prior.score) {
+            byId.set(hit.passage.id, { ...hit, because: context })
+        }
+    }
+    return [...byId.values()].sort(byScoreThenId).slice(0, request.limit)
+}
+
+function byScoreThenId(a: RetrievedPassage, b: RetrievedPassage): number {
+    if (b.score !== a.score) return b.score - a.score
+    return a.passage.id < b.passage.id ? -1 : a.passage.id > b.passage.id ? 1 : 0
+}
 
 /**
  * Apply the three limits, in the one order that is not arbitrary.

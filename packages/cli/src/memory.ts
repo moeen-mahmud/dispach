@@ -115,6 +115,7 @@ export async function memoryCommand(options: MemoryOptions): Promise<number> {
                             at: hit.passage.at,
                             score: hit.score,
                             lexical: hit.lexical,
+                            coverage: hit.coverage,
                             tokens: hit.tokens,
                             wouldInject: hit.score >= result.threshold,
                             carried: hit.passage.source === result.carried,
@@ -158,12 +159,13 @@ export async function memoryCommand(options: MemoryOptions): Promise<number> {
         // command exists for is usually "why was that *not* recalled".
         const sourceWidth = Math.max(6, ...shown.map((hit) => label(hit, result.carried).length))
         process.stdout.write(
-            `\n${pad("SCORE", 6)}  ${pad("LEXICAL", 7)}  ${pad("SOURCE", sourceWidth)}  ${pad("LEARNED", 10)}  PASSAGE\n`,
+            `\n${pad("SCORE", 6)}  ${pad("LEXICAL", 7)}  ${pad("COVER", 5)}  ${pad("SOURCE", sourceWidth)}  ${pad("LEARNED", 10)}  PASSAGE\n`,
         )
         for (const hit of shown) {
             const mark = hit.score >= result.threshold ? " " : "·"
             process.stdout.write(
                 `${pad(hit.score.toFixed(3), 6)}  ${pad(hit.lexical.toFixed(3), 7)}  ` +
+                    `${pad(hit.coverage.toFixed(2), 5)}  ` +
                     `${pad(label(hit, result.carried), sourceWidth)}  ${pad(hit.passage.at.slice(0, 10), 10)}  ` +
                     `${mark}${preview(hit.passage.text)}\n`,
             )

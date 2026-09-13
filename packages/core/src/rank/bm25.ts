@@ -52,7 +52,7 @@ export const MIN_TERM = 2
  * new ones — retrieval simply gets worse, with nothing anywhere reporting why. Same reasoning as the
  * store's `user_version`, applied to a derived column instead of a schema.
  */
-export const TOKENISER_VERSION = 1
+export const TOKENISER_VERSION = 2
 
 /**
  * English function words, dropped from documents and queries alike.

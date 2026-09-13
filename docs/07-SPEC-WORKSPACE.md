@@ -134,8 +134,8 @@ list items are eligible to move.
 | `AGENTS.md` | static | none | 800 | Operations — *what it does and how*: responsibilities, workflow, memory procedure; the team section stays an HTML comment until delegation ships |
 | `SOUL.compact.md` | static | none | 800 | The hand-derived kernel `onUnmet: distill` ships to small models |
 | `POLICY.md` | static | none | 600 | Soft boundaries and uncertainty behaviour |
-| `USER.md` | volatile | append | 1,500 | User model |
-| `MEMORY.md` | volatile | replace | 2,000 | Working memory, capped, evicting |
+| `USER.md` | volatile | append | 1,500 | User model — person-authored; `memory_write` does not land here |
+| `MEMORY.md` | volatile | replace | 2,000 | Working memory; `memory_write` lands here because it declared `eviction: oldest` |
 | `REMINDER.md` | reminder | none | 500 | One or two re-asserted rules |
 
 A file with no `budget:` in its frontmatter takes its tier's budget. There is no per-filename

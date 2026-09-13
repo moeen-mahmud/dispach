@@ -8,7 +8,15 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BRAND, HarnessError } from "@dispach/core"
-import { agentsDir, listAgents, resolveAgentRef, sandboxRoot, storePath } from "#lib/sandbox"
+import {
+    agentsDir,
+    insideSandbox,
+    listAgents,
+    outsideSandboxNote,
+    resolveAgentRef,
+    sandboxRoot,
+    storePath,
+} from "#lib/sandbox"
 
 // Resolution is cwd-sensitive by design (the filesystem wins), so every test pins an empty cwd
 // rather than inheriting whatever happens to be in the repo checkout.
@@ -126,5 +134,61 @@ describe("resolveAgentRef", () => {
         const env = sandbox({ milo: manifest("milo") })
         const dir = join(agentsDir(env), "milo")
         expect(resolveAgentRef(dir, env, EMPTY_CWD)).toBe(join(dir, "agent.yaml"))
+    })
+})
+
+/**
+ * The containment test behind `init`'s out-of-sandbox note.
+ *
+ * Written because the note is the *only* thing standing between "this agent lives somewhere you did
+ * not intend" and silence: it is never a refusal, so if the predicate is wrong the command is back to
+ * saying nothing. The prefix cases are the ones worth having — a naive `startsWith` calls
+ * `agents-backup` inside `agents`, and an unresolved `..` walk passes a prefix test while landing
+ * outside, which is the bug `root.ts` records for write roots.
+ */
+describe("insideSandbox", () => {
+    const env = { [HOME_VAR]: "/home/x/.brand" }
+    const base = agentsDir(env)
+
+    test("the agents directory itself and anything under it is inside", () => {
+        expect(insideSandbox(base, env)).toBe(true)
+        expect(insideSandbox(join(base, "milo"), env)).toBe(true)
+        expect(insideSandbox(join(base, "milo", "workspace"), env)).toBe(true)
+    })
+
+    test("a sibling sharing the prefix is outside", () => {
+        expect(insideSandbox(`${base}-backup`, env)).toBe(false)
+        expect(insideSandbox(join(sandboxRoot(env), "logs"), env)).toBe(false)
+    })
+
+    /**
+     * Written with `join` first, which normalises its arguments — so the test passed with the
+     * `resolve` removed and was not a guard at all. The walk has to arrive as *text*, the way a
+     * `--dir` value does, for the comparison to be the thing under test.
+     */
+    test("an unnormalised walk out of the base is outside", () => {
+        expect(insideSandbox(`${base}/../../elsewhere`, env)).toBe(false)
+        expect(insideSandbox(`${base}/milo/../pip`, env)).toBe(true)
+    })
+})
+
+describe("outsideSandboxNote", () => {
+    const env = { [HOME_VAR]: "/home/x/.brand" }
+
+    test("says nothing about a sandbox target", () => {
+        expect(outsideSandboxNote(join(agentsDir(env), "milo"), env)).toBeUndefined()
+    })
+
+    test("names the resolved target, the sandbox, and the cost", () => {
+        const note = outsideSandboxNote(`${agentsDir(env)}/../../repo/checkout/milo`, env)
+        expect(note).toBeDefined()
+        // Resolved, not echoed: a note quoting `…/agents/../../repo/…` back at the reader is a
+        // note about a path they now have to work out for themselves.
+        expect(note).toContain("/home/x/repo/checkout/milo")
+        expect(note).not.toContain("..")
+        expect(note).toContain(agentsDir(env))
+        // The cost is the point: a path-only agent is why this is worth a line at all.
+        expect(note).toContain("no bare name")
+        expect(note).toContain("--dir")
     })
 })

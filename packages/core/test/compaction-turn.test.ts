@@ -363,7 +363,7 @@ describe("the compaction notice", () => {
         await runtime.stop()
 
         expect(body).toContain("context is managed for you")
-        expect(body).toContain("do not shorten your work")
+        expect(body).toContain("do not wrap up early")
         // Named only because the tool is pinned. Naming a tool an agent lacks is how a model comes to
         // report that it tried something it never could.
         expect(body).toContain("artifact_read")

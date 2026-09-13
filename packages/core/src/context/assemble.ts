@@ -1,9 +1,9 @@
 /**
  * Ordered, budgeted context assembly.
  *
- * Phase 1 filled slots 0 (identity), 8 (recent history) and 10 (current input); Phase 3 added slot 1
- * (tools) and Phase 3.5 slots 2 (extracted examples), 3 (workspace volatile), 5 (knowledge) and 9
- * (workspace reminder). Still empty: 4 with skills, 6 with memory, 7 with compaction. The slot order
+ * Phase 1 filled slots 0 (identity), 8 (recent history) and 11 (current input); Phase 3 added slot 1
+ * (tools) and Phase 3.5 slots 3 (extracted examples), 4 (workspace volatile), 6 (knowledge) and 9
+ * (workspace reminder). Slot 10 is retrieved memory. Still empty: 7 with compaction. The slot order
  * is fixed in advance so that filling them later cannot disturb the cache-stable prefix.
  *
  * History is trimmed from the oldest end when the budget is tight. That is a window, not
@@ -83,6 +83,11 @@ export interface AssembleInput {
         readonly source: string
         readonly at: string
         readonly text: string
+        /**
+         * Prior-reply slice that recovered this passage. Absent when the current turn found it
+         * unaided. Structure only — the passage text is never rewritten.
+         */
+        readonly because?: string
     }[]
     /**
      * Slot 9: the workspace's `reminder` tier, one or two re-asserted rules.
@@ -207,9 +212,10 @@ export function assembleContext(input: AssembleInput): AssembledContext {
             block(SLOT.knowledge, "system", entry.content, false, `knowledge:${entry.name}`),
         )
     }
-    // Slot 7, retrieved: unpinned for the same reason knowledge is, and framed so the model can tell a
+    // Retrieved memory: unpinned for the same reason knowledge is, and framed so the model can tell a
     // remembered fact from an instruction. One block per passage, so compaction can drop the weakest
-    // rather than all of them.
+    // rather than all of them. Sits after history, immediately before the input — evidence next to
+    // the question, not ahead of a long transcript.
     //
     // A note and a conversation excerpt get **different** sentences, and the reason is measured. With one
     // frame for both, an agent handed three excerpts of its own earlier sessions answered the question
@@ -228,11 +234,15 @@ export function assembleContext(input: AssembleInput): AssembledContext {
         const provenance = isSessionSource(passage.source)
             ? `From an earlier conversation in this session's store (${passage.source.slice(SESSION_SOURCE_PREFIX.length)}), on ${passage.at}:`
             : `From ${passage.source}, learned ${passage.at}:`
+        const because =
+            passage.because === undefined || passage.because.trim() === ""
+                ? ""
+                : `\nFound via the earlier reply: ${passage.because.trim()}`
         pinned.push(
             block(
                 SLOT.memory,
                 "system",
-                `# Remembered\n\n${provenance}\n\n${passage.text}`,
+                `# Remembered\n\n${provenance}${because}\n\n${passage.text}`,
                 false,
                 `memory:${passage.source}`,
             ),
@@ -330,9 +340,9 @@ export function assembleContext(input: AssembleInput): AssembledContext {
         ...pinned.filter((b) => b.slot === SLOT.volatile),
         ...pinned.filter((b) => b.slot === SLOT.skill),
         ...pinned.filter((b) => b.slot === SLOT.knowledge),
-        ...pinned.filter((b) => b.slot === SLOT.memory),
         ...historyBlocks,
         ...pinned.filter((b) => b.slot === SLOT.reminder),
+        ...pinned.filter((b) => b.slot === SLOT.memory),
         ...pinned.filter((b) => b.slot === SLOT.input || b.slot === SLOT.error),
     ]
 
@@ -383,6 +393,60 @@ export function slotReport(
         }
     }
     return [...bySlot.values()].sort((a, b) => a.slot - b.slot)
+}
+
+/**
+ * What the history slot is *made of*, by kind, largest first.
+ *
+ * `slotReport` collapses the history into one number, which is the number that hides the answer: on a
+ * real agent, slot 9 was 85% of a 60,973-token turn and nothing could say what was in it. The person
+ * looking at that had to measure by hand, and their agent — asked the same question — blamed its
+ * instruction files, which are read once at load and cost 885 tokens. A total with no composition is
+ * how a runtime lets its owner misdiagnose it.
+ *
+ * Grouped by `ChatMessage.origin`, which the runtime already stamps on everything it authored, falling
+ * back to the role for the messages nobody stamped — those are the conversation itself, and telling a
+ * person's words apart from a model's reply is exactly the distinction worth drawing here.
+ *
+ * Pure, and reading the same blocks the prompt was built from, so this cannot describe a history the
+ * model did not receive.
+ */
+export function historyReport(
+    blocks: readonly ContextBlock[],
+): { label: string; tokens: number; messages: number }[] {
+    const byKind = new Map<string, { label: string; tokens: number; messages: number }>()
+    for (const b of blocks) {
+        if (b.slot !== SLOT.history) continue
+        const label = historyKind(b)
+        const existing = byKind.get(label)
+        if (existing === undefined) {
+            byKind.set(label, { label, tokens: b.tokens, messages: 1 })
+        } else {
+            existing.tokens += b.tokens
+            existing.messages += 1
+        }
+    }
+    // Largest first: the question this answers is "where did it go", and the answer is the top row.
+    return [...byKind.values()].sort((a, b) => b.tokens - a.tokens)
+}
+
+/**
+ * One history message's kind.
+ *
+ * `origin` wins where it is set, because it is what the runtime recorded at the time rather than what
+ * the shape suggests now. Under `native` a tool result is a `tool`-role message and under `nlt` it is a
+ * `user` message carrying a fence — same thing, two shapes — so reading the role alone would split one
+ * kind in two and name neither correctly.
+ */
+function historyKind(block: ContextBlock): string {
+    const origin = block.message?.origin
+    if (origin === "observation") return "tool results"
+    if (origin === "call") return "tool calls"
+    if (origin === "repair") return "repairs"
+    if (origin === "digest") return "digests"
+    if (block.role === "tool") return "tool results"
+    if (block.role === "user") return "what you said"
+    return "assistant replies"
 }
 
 export { estimateTokens }

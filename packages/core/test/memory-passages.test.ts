@@ -166,12 +166,20 @@ describe("impliedDate", () => {
 })
 
 describe("document", () => {
-    test("the scored document is the heading followed by the text", () => {
+    test("the scored document weights the heading before the text", () => {
         const passages = split(["## Formatting", "- prefers tabs"].join("\n"))
         const withHeading = passages[0]
         expect(withHeading === undefined).toBe(false)
         expect(withHeading === undefined ? "" : document(withHeading)).toBe(
-            "Formatting\n- prefers tabs",
+            "Formatting\nFormatting\n- prefers tabs",
+        )
+    })
+
+    test("author tags are weighted retrieval fields rather than display-only metadata", () => {
+        const tagged = split("- _(style)_ commit messages are imperative")[0]
+        expect(tagged === undefined).toBe(false)
+        expect(tagged === undefined ? "" : document(tagged)).toBe(
+            "style\nstyle\n-  commit messages are imperative",
         )
     })
 

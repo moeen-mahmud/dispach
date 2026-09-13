@@ -67,12 +67,10 @@ export const SLOT = {
      * compaction may drop it where it must never drop a workspace tier. Phase 3.5.
      */
     knowledge: 6,
-    /** Retrieved memory passages. Phase 6. */
-    memory: 7,
     /** Rolling digest, the output of compaction. Phase 7. */
-    digest: 8,
+    digest: 7,
     /** Recent message window. */
-    history: 9,
+    history: 8,
     /**
      * Workspace `reminder` tier — one or two re-asserted rules. Pinned. Phase 3.5.
      *
@@ -81,7 +79,16 @@ export const SLOT = {
      * ends of the context than in the middle, and a rule stated once at the top of a thirty-turn
      * session is effectively in the middle.
      */
-    reminder: 10,
+    reminder: 9,
+    /**
+     * Retrieved memory passages. Phase 6.
+     *
+     * After the history and the reminder, immediately before the current input. A 3B model given the
+     * correct passage in slot 7 (ahead of history) answered UNKNOWN; putting the evidence next to the
+     * question is what recovered it. Unpinned, like knowledge: retrieved per turn, so compaction may
+     * drop it.
+     */
+    memory: 10,
     /** Current input and current task line. Pinned. */
     input: 11,
     /** Last error, if any. Pinned. */

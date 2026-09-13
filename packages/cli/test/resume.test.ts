@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test"
 import type { ChatMessage } from "@dispach/core"
 import { BRAND } from "@dispach/core"
 import { DIM_STYLE, RESET_STYLE } from "#lib/const"
-import { priorMessages, resumeNotice } from "#lib/resume"
+import { priorMessages, reopenNote, resumeNotice } from "#lib/resume"
 
 const CALL = ["ACTION: file_read", "path: notes.md", "END"].join("\n")
 
@@ -148,5 +148,49 @@ describe("resumeNotice", () => {
         expect(resumeNotice({ ref: undefined, sessionKey: "local:3c2dc5" })).toContain(
             `${BRAND.slug} run <your agent> --session local:3c2dc5`,
         )
+    })
+})
+
+describe("reopenNote", () => {
+    test("a first run explains nothing, because nothing has happened", () => {
+        expect(reopenNote("first")).toBeUndefined()
+        expect(reopenNote("first", "local:3c2dc5")).toBeUndefined()
+    })
+
+    /**
+     * The four reasons say four different things, and that is the point of the union being closed.
+     * A restart is about *configuration*; saying it after a session switch would be a lie about what
+     * just happened, which is why `restarted: boolean` had to become three-valued and then four.
+     */
+    test("each reason gets its own sentence", () => {
+        const notes = (["restart", "switch", "new"] as const).map((reason) =>
+            reopenNote(reason, "local:3c2dc5"),
+        )
+        expect(new Set(notes).size).toBe(3)
+        expect(notes[0]).toContain("configuration")
+        expect(notes[1]).toContain("switched conversation")
+        expect(notes[2]).toContain("new conversation")
+    })
+
+    /**
+     * The one assertion this file exists for.
+     *
+     * `/new` promises that nothing was destroyed, and after the rebuild the conversation being left is on
+     * screen nowhere — the banner's own `session` line names the *new* key. A sentence making that promise
+     * without naming the key is asking to be taken on trust, and the way back to it is the only actionable
+     * thing in the line.
+     */
+    test("the /new sentence names the conversation being left, and the way back to it", () => {
+        const note = reopenNote("new", "local:3c2dc5") ?? ""
+        expect(note).toContain("local:3c2dc5")
+        expect(note).toContain("/sessions")
+        expect(note).toContain("still in the store")
+    })
+
+    test("with no previous key it still promises the conversation survived", () => {
+        const note = reopenNote("new") ?? ""
+        expect(note).toContain("still in the store")
+        // Never the string "undefined" where a key belongs, which is what a template literal would give.
+        expect(note).not.toContain("undefined")
     })
 })

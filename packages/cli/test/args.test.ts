@@ -217,6 +217,26 @@ describe("positional arguments", () => {
         expect(error.hint).toContain("b.yaml")
     })
 
+    /**
+     * `init milo` created `./milo` in whatever directory you were standing in — the positional was
+     * the target *directory* and read as the agent's name. The argument is gone; what matters is
+     * that the refusal names both readings, because the generic count sentence ("takes 0
+     * argument(s), got 1. Unexpected: milo. Quote a value containing spaces.") is advice for a
+     * typo and this was not a typo.
+     */
+    test("init takes no positional, and the refusal names both readings", () => {
+        const error = refusal(["init", "milo"])
+        expect(codes(error)).toEqual(["cli_unexpected_argument"])
+        expect(error.hint).toContain("--name")
+        expect(error.hint).toContain("--dir")
+        // The generic advice must NOT survive: it sends the reader looking for a quoting mistake.
+        expect(error.hint).not.toContain("Quote a value")
+    })
+
+    test("a command without its own hint keeps the generic one", () => {
+        expect(refusal(["run", "a.yaml", "b.yaml"]).hint).toContain("Quote a value")
+    })
+
     test("a variadic command takes as many as given", () => {
         expect(command(["agents", "a.yaml", "b.yaml", "c.yaml"]).positionals).toEqual([
             "a.yaml",
