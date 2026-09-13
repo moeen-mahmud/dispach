@@ -696,9 +696,12 @@ describe("a tool call in some other protocol's format", () => {
         ).toBe(1)
     })
 
-    test("a step that produced a readable block is never flagged", () => {
-        // A model that got the format right once is not guessing, so the detector only runs when
-        // nothing at all parsed.
+    test("a step that produced a readable block is never flagged as another protocol", () => {
+        // A model that got the format right once is not guessing, so *this* detector only runs when
+        // nothing at all parsed. Scoped deliberately: the damaged-value backstop below does flag a
+        // step whose block parsed, and reading this as a claim about `malformed` in general would
+        // make the two look contradictory. Both cases here are single-line values, which that
+        // backstop never touches.
         expect(parseNlt("ACTION: glob\npattern: x\nEND").malformed).toBeUndefined()
         expect(parseNlt("<action>\nglob\npattern: x\n</action>").malformed).toBeUndefined()
     })
@@ -734,6 +737,11 @@ test("a multi-line shell value survives a colon in it", () => {
     expect(command).toContain("lsof -nP -iTCP:7420 -sTCP:LISTEN")
     // And no field was invented from the line.
     expect(Object.keys(parsed.intents[0]?.args ?? {})).toEqual(["command"])
+    // Survives *into the value*, which is what this test has always been about — and is separately
+    // reported as unwrapped, because three lines that reached the value trimmed are three lines whose
+    // indentation is gone. Harmless for this particular command and not for the next one, which is
+    // the cost the backstop accepts rather than hides.
+    expect(parsed.malformed?.length).toBe(1)
 })
 
 test("a well-formed second field is still a field", () => {
@@ -741,4 +749,113 @@ test("a well-formed second field is still a field", () => {
     // opens one, which is every argument name the catalogue actually uses.
     const parsed = parseNlt(["ACTION: exec", "command: ls", "timeoutMs: 500", "END"].join("\n"))
     expect(Object.keys(parsed.intents[0]?.args ?? {}).sort()).toEqual(["command", "timeoutMs"])
+})
+
+describe("a value damaged on the way in", () => {
+    // The carried backlog's finding, and the shapes `evals/nlt-heredoc` collected from a real
+    // endpoint. Each of these produced a *clean answer* before the backstop: the command ran
+    // truncated or indentation-flattened, nothing was reported, and the turn exited 0.
+
+    test("a blank line truncates the value and the rest becomes the reply — reported", () => {
+        // Reproduced by hand first, then again against deepseek-chat. The command is a valid string,
+        // so `coerceArgs` raises nothing; the shell reads the unterminated heredoc to EOF and runs
+        // half the script.
+        const parsed = parseNlt(
+            [
+                "ACTION: exec",
+                "command: python3 <<PY",
+                "import sys",
+                "",
+                'print("hello")',
+                "PY",
+                "END",
+            ].join("\n"),
+        )
+        expect(parsed.intents.length).toBe(1)
+        expect(parsed.intents[0]?.args.command).toBe("python3 <<PY\nimport sys")
+        // The intent survives beside the report: the loop makes the step all-or-nothing on
+        // `malformed`, so nothing runs, and carrying the intent is what lets the repair name `exec`.
+        expect(parsed.malformed?.length).toBe(1)
+        expect(parsed.malformed?.[0]?.field).toBe("command")
+        expect(parsed.malformed?.[0]?.message).toContain("terminator")
+    })
+
+    test("an unwrapped multi-line value is reported even when nothing was truncated", () => {
+        // Measured, deepseek-chat: a correct `python3 -c "…"` whose body arrives at column zero,
+        // because the continuation branch pushes each line trimmed. An `IndentationError` rather
+        // than a script — and it *runs*, which is why the parser has to say so.
+        const parsed = parseNlt(
+            [
+                "ACTION: exec",
+                'command: python3 -c "',
+                "def f(x):",
+                "    return x * 2",
+                "print(f(21))",
+                '"',
+                "END",
+            ].join("\n"),
+        )
+        expect(parsed.intents.length).toBe(1)
+        // The damage itself, asserted rather than described: the indentation is already gone.
+        expect(String(parsed.intents[0]?.args.command)).toContain("\nreturn x * 2")
+        expect(parsed.malformed?.length).toBe(1)
+        expect(parsed.malformed?.[0]?.message).toContain("spans several lines")
+    })
+
+    test("a wrapped multi-line value is left alone", () => {
+        // The good path, and the one the repair asks for. Bytes are kept exactly, blank line
+        // included, so there is nothing to report.
+        const parsed = parseNlt(
+            [
+                "ACTION: exec",
+                "command: <<<",
+                'python3 -c "',
+                "def f(x):",
+                "    return x * 2",
+                "",
+                "print(f(21))",
+                '"',
+                ">>>",
+                "END",
+            ].join("\n"),
+        )
+        expect(parsed.malformed).toBeUndefined()
+        expect(String(parsed.intents[0]?.args.command)).toContain("    return x * 2")
+    })
+
+    test("a block with no END followed by a genuine reply is not reported", () => {
+        // The case the backstop must never touch. Prose after a single-line value is ordinary, and
+        // refusing it would spend a repair on every model that forgets `END` — which the parser
+        // tolerates deliberately.
+        const parsed = parseNlt(
+            ["ACTION: exec", "command: ls -la", "", "I'll list the directory first."].join("\n"),
+        )
+        expect(parsed.intents.length).toBe(1)
+        expect(parsed.malformed).toBeUndefined()
+        expect(parsed.text).toBe("I'll list the directory first.")
+    })
+
+    test("an arithmetic shift is not a heredoc opener", () => {
+        // `<<` anchored to end-of-line is what separates a redirection from `$((1 << n))`. Without
+        // the anchor this earns a repair for a terminator called `n`.
+        const parsed = parseNlt(
+            ["ACTION: exec", 'command: echo $((1 << 3)) && echo "done"', "END"].join("\n"),
+        )
+        expect(parsed.malformed).toBeUndefined()
+    })
+
+    test("a terminated shell heredoc inside a wrapped value is not reported", () => {
+        const parsed = parseNlt(
+            [
+                "ACTION: exec",
+                "command: <<<",
+                "sqlite3 ./store.db <<'SQL'",
+                "SELECT 1;",
+                "SQL",
+                ">>>",
+                "END",
+            ].join("\n"),
+        )
+        expect(parsed.malformed).toBeUndefined()
+    })
 })

@@ -3160,50 +3160,107 @@ is told rather than charged, and `--yes` is the scripted way through.
 
 ---
 
+## Phase 7F — what a session actually pays for
+
+**Shipped 2026-08-29 to 2026-09-02. Recorded 2026-09-13, which is the finding.** The work was built,
+committed and threaded through five layers, and appeared in **no phase of this plan and no decision**
+until somebody went looking. In a repo whose method is that the docs are binding, undocumented
+shipped work is the gap that compounds: the next session reads the plan and does not know the
+capability exists.
+
+**Goal.** `/context` could report that history was 85% of a turn and nothing could say what history
+was *made of* — the owner's own agent, asked directly, blamed its instruction files. And the prompt
+cache, which decides a large share of the bill on a long conversation, was not measured at all.
+
+**Built**
+
+- `cacheUsage()` in `model/chat-completions.ts` — three spellings, because the providers did not
+  agree: OpenAI nests `prompt_tokens_details.cached_tokens`, DeepSeek reports a top-level
+  `prompt_cache_hit_tokens`, an Anthropic-shaped shim calls reads `cache_read_input_tokens`. First
+  hit wins and **the field name is carried back with the number** — a cache ratio is exactly the kind
+  of figure that gets disbelieved, and "which field is this" is the first question asked of a
+  surprising one.
+- Migration 10, `turns.cached_prompt_tokens` and `turns.cache_source`, **nullable on purpose**. Three
+  states, not two: a number, `0` meaning the endpoint reported nothing was cached, and `NULL` meaning
+  it declined to discuss caching. Those last two produce identical bills and want opposite
+  conclusions, so `NOT NULL DEFAULT 0` would erase the distinction on the way in and no later query
+  could recover it.
+- Threaded chunk → step → turn → agent → row, with a test at the **far end** that reads the value out
+  of the stored row. The sixth instance of the conditional-spread shape that has cost a round here
+  (`apiKeyEnv`, `ChatMessage.toolCalls`, `TurnInput.skills`, `ToolContext.readArtifact`,
+  `ToolContext.memoryDir`, `StoredMessage.origin`), and the guard is the same one every time.
+- `previewContext` gained `history` — the slot's composition, largest first — and `cache`, read from
+  the **stored turns** rather than from memory, so a resumed session reports the conversation's
+  history and not this process's slice of it.
+- `capabilities.ts`: a false `promptCache` row corrected, and the Claude windows updated (1M/128K for
+  the 5-series, 200K/64K for Haiku).
+
+**Measured, and the caveat is the point.** The session that built it recorded roughly 84% of a turn's
+tokens as tool output and a cache ratio in the high eighties against DeepSeek. **Those figures have no
+committed artifact.** There is no `evals/cache/`, so by this repo's own rule — never claim a
+performance property without a number in `evals/` and a script to reproduce it — they are session
+notes rather than results, and are written here as such.
+
+**Open**
+
+- [ ] `evals/cache/` with a script, or the two figures above stop being quotable
+- [ ] The Anthropic gap was diagnosed as *the compat shim cannot cache*, not as a marker bug. That
+  diagnosis is recorded nowhere but a session buffer and has no test.
+
+---
+
 ## Carried backlog
 
 Two findings that belong to no phase, recorded here so a session with no context still finds them.
 Both were reproduced rather than reasoned about.
 
-### The NLT heredoc leak — **high urgency**, documented not fixed *(recorded 2026-08-25)*
+### The NLT heredoc leak — **fixed 2026-09-13**, decisions 4.96–4.98
+
+*Recorded 2026-08-25 as high urgency and documented not fixed; kept here rather than moved into a
+phase because the finding is where a session with no context looks for it.*
 
 A model writes a multi-line shell script as an `exec` argument without wrapping it in NLT's
-`<<<` / `>>>` heredoc. `consumeLine` extends an open field across bare continuation lines — but a
-**blank line clears `openKey`**, deliberately ("models put blank lines between fields, and gluing
-whatever follows onto the last value is how prose ends up in an argument"). The next line then has a
-block open, no `openKey`, and no key match, so it falls to the last branch —
-`closeBlock(state); state.text.push(line)` — and the rest of the script becomes the reply.
+`<<<` / `>>>`. A **blank line clears `openKey`** — deliberately, so prose does not glue onto the last
+value — and the next line then has a block open, no open key and no key match, so it falls to
+`closeBlock(state); state.text.push(line)` and the rest of the script becomes the reply. The truncated
+command is a *valid string*, so `coerceArgs` raises nothing, the shell reads an unterminated heredoc
+to EOF and **runs half the script**, and the turn is recorded as a clean answer that exits 0.
 
-Reproduced against the real `parseNlt`:
+**What the fix needed first, and what it found.** The note's own instruction was that the backstop had
+to be built against shapes a real model produces, because the set of malformations is not enumerable.
+`evals/nlt-heredoc/` collects them: deepseek-chat, 8 tasks × 2 passes, identical across passes.
 
-```
-ACTION: exec                     intents:   1 ["exec"]
-command: python3 <<PY            args:      {"command":"python3 <<PY\nimport sys"}
-import sys                       text:      "print(...)\nPY\nEND"   <- shown as the reply
-                 <- blank line   malformed: undefined  <- no repair, no event, nothing reported
-print("hello")
-PY
-END
-```
+| Shape | Count | Reported before? |
+| --- | --- | --- |
+| `split` — blank line cuts the value | 2/16 | **no** |
+| `indent_lost` — value survives, indentation stripped | 2/16 | **no** |
+| `field_error` — a bare `word:` became a field | 4/16 | yes, `coerceArgs` |
+| `single_line` / `wrapped` / routing | 8/16 | n/a |
 
-The truncated command is a **valid string**, so `coerceArgs` raises no field error. The shell then
-sees an unterminated heredoc, reads to EOF, and **runs half the script**. The turn is recorded as a
-clean answer, and exits 0.
+**25% of attempts produced a damaged argument, and half were silent.** `indent_lost` was not in the
+note and is the more interesting half: the continuation branch pushes each line **trimmed**, so a
+correct `python3 -c "…"` arrives at column zero — an `IndentationError` rather than a script, and it
+*executes*. Python fails loudly; a shell `if … then … fi` would run differently.
 
-This is precisely the shape the XML tolerance was written to prevent — *"the markup became the reply,
-no repair was asked for, no event fired, and the turn was recorded as a clean answer"* — alive today,
-in the default dialect, on the most-used tool, on the most idiomatic content a shell tool receives.
+**The backstop is not the one the note proposed.** "Prose that reads as a continuation of the value it
+abandoned" is a judgement about intent. Every damaged value shared a checkable property instead:
+unwrapped *and* multi-line, or holding a shell heredoc whose terminator never arrived — and a shell
+heredoc names its own terminator, so that second signal is exact rather than heuristic. `damage()` in
+`tools/dialect/nlt.ts` asks only those two questions and consults nothing about the following prose.
+`malformed` is carried **beside** the intents, which needed no loop change: `turn.ts` already makes a
+step all-or-nothing on it and grants one repair.
 
-A bare `word:` line inside an unwrapped value (`try:`, `else:`, `finally:`, any YAML key) is the
-**loud** variant: `try` becomes a field, `coerceArgs` reports *"try is not a field of this tool"*, and
-the model earns a repair. That one is survivable. The blank-line case is not.
+**The cost is recorded, not hidden.** The unwrapped signal fires on multi-line values that would have
+run — roughly one in three. Preserving indentation on continuation lines was the alternative and was
+declined as a behavioural change to weigh on its own (4.98).
 
-**Why it is not fixed here.** It needs `evals/nlt-heredoc/` with the shapes a real model actually
-produces, because this repo's own rule is that the set of malformations is not enumerable — so adding
-one tolerance for blank lines is the wrong instinct and would invite the belief the class is handled.
-The likely direction is a **backstop**: set `ParsedOutput.malformed` when a block closes into prose
-that reads as a continuation of the value it just abandoned, earning the one repair the parser already
-grants. Do not "simplify" it into a tolerance.
+**Verification.** Both new assertions go red with `damage()` neutered; all four negative controls go
+red when it is forced to over-fire, which is the check this repo has been caught by twice. Bun
+2927/0 · Node 1307/0 · typecheck clean · lint at the 6 pre-existing warnings · boot 52.6 ms.
+
+**Still open.** One endpoint. `gpt-4o-mini` and the open-weight slot are wired into the script and
+unrun — a small model may wrap *less* often, so 25% is a floor on the problem rather than a ceiling.
+
 
 ### `deepseek-v4-pro*` context window — **low urgency** *(recorded 2026-08-25)*
 
