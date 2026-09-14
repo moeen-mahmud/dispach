@@ -182,3 +182,72 @@ describe("what naming no plugins costs", () => {
         await runtime.stop()
     })
 })
+
+describe("middleware through a real turn", () => {
+    /**
+     * The claim the unit tests cannot make: that a plugin's `use()` reaches the loop.
+     *
+     * Every layer between is a conditional spread — `TurnInput.middleware`, `AgentOptions.middleware`,
+     * `AgentSupply.middleware` — which is the shape that has cost this repo six debugging rounds, and
+     * each one type-checks while dropping the value. So this asserts at the far end: a middleware that
+     * short-circuits a turn, observed through what `send` actually returns.
+     */
+    const MIDDLEWARE_PLUGIN: Plugin = {
+        name: "gate",
+        version: "1.0.0",
+        dispachApi: "^0.1",
+        setup(context) {
+            context.use({
+                name: "refuse-everything",
+                async wrapTurn() {
+                    return { text: "refused by middleware", reason: "error", steps: 0 }
+                },
+            })
+        },
+    }
+
+    test("a plugin's wrapTurn short-circuits a real send", async () => {
+        const dir = workspace(`plugins:
+  - "@fixture/gate"
+limits:
+  maxSteps: 2
+  turnTimeoutMs: 5000
+`)
+        let called = false
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: ENV,
+            builtInPlugins: { "@fixture/gate": MIDDLEWARE_PLUGIN },
+            fetch: async () => {
+                called = true
+                return new Response("{}")
+            },
+        })
+
+        const result = await runtime.agent("test").send("hello")
+        expect({ text: result.text, endpointCalled: called }).toEqual({
+            text: "refused by middleware",
+            endpointCalled: false,
+        })
+        await runtime.stop()
+    })
+
+    test("registering middleware shows up in what the plugin registered", async () => {
+        const dir = workspace(`plugins:
+  - "@fixture/gate"
+limits:
+  maxSteps: 2
+  turnTimeoutMs: 5000
+`)
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: ENV,
+            builtInPlugins: { "@fixture/gate": MIDDLEWARE_PLUGIN },
+            fetch: async () => new Response("{}"),
+        })
+        expect(runtime.plugins.get("test")?.[0]?.registered).toEqual([
+            "middleware:refuse-everything",
+        ])
+        await runtime.stop()
+    })
+})

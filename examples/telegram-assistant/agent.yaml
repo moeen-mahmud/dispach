@@ -1,0 +1,60 @@
+# telegram-assistant — the worked workspace, wired to a real channel.
+#
+# The README beside this file explains *why* SOUL.md and POLICY.md are written the way they are.
+# This is the manifest that runs them. It is deliberately short: everything interesting about this
+# example is in `workspace/`, and a manifest that demonstrated every field would compete with it.
+# `examples/reference/agent.yaml` is the one that carries every field, with its reasons.
+#
+# Nothing here is a secret. The two tokens are named, not written — hard rule 10 — and a `.env`
+# beside this file is where they go.
+
+apiVersion: dispach/v1
+id: telegram-assistant
+name: Vela
+
+model:
+  main:
+    id: deepseek-v4-pro
+    baseUrl: https://api.deepseek.com/v1
+    apiKeyEnv: MODEL_API_KEY
+
+context:
+  window: 128000
+  reserveOutput: 4096
+
+  # Where the workspace files live, relative to this manifest.
+  workspace: ./workspace
+
+  # The tier, which is half of what this example is for. Both files are `static`: read once at load
+  # and sitting in the cache-stable prefix, so their bytes are billed once per session rather than
+  # once per turn. Order here is the order they reach the model.
+  static:
+    - SOUL.md
+    - POLICY.md
+
+  # `SOUL.md` is prose that explains itself, and the rule counter reads explanation as obligation.
+  # Two rules is what this workspace was written to: at a per-rule compliance of 0.90, two rules
+  # compounds to 0.81 and four to 0.66, so the count is a budget rather than a preference.
+  #
+  # `warn` rather than `fail` here, deliberately. This is an example somebody copies and edits, and
+  # a heuristic rule count that refuses to load the file they just wrote is a heuristic they will
+  # delete. `examples/reference` uses `fail`, which is right for an agent somebody runs.
+  rules:
+    perRuleSuccess: 0.90
+    reliabilityTarget: 0.80
+    onExceed: warn
+
+channels:
+  - type: telegram
+    id: tg
+    tokenEnv: TELEGRAM_BOT_TOKEN
+    mode: longpoll
+    # Inbound only, and closed by default. A handle here confers nothing on delivery — replies go
+    # to whatever chat a message arrived on. Telegram usernames are [A-Za-z0-9_]{5,32}, so a
+    # hyphen here is a handle that cannot exist and will match nobody, silently.
+    allowFrom:
+      - "@your_telegram_handle"
+
+limits:
+  maxSteps: 40
+  turnTimeoutMs: 1800000

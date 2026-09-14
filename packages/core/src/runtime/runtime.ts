@@ -23,6 +23,7 @@ import { type LoadedManifest, loadManifest, loadManifestFromObject } from "../ma
 import { resolveProviders } from "../manifest/providers.ts"
 import type { FetchLike } from "../model/provider.ts"
 import { agentPluginSupply, type BuiltInPlugins, type LoadedPlugin } from "../plugins/loader.ts"
+import { type Middleware, notify } from "../plugins/middleware.ts"
 import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams } from "../store/buffer.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
@@ -153,6 +154,7 @@ export interface AgentSupply {
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
+    readonly middleware: readonly Middleware[]
 }
 
 export interface BootReport {
@@ -332,8 +334,43 @@ export class Runtime {
                     toolProviders: supply.toolProviders,
                     channels: supply.channels,
                     scriptRunner: supply.scriptRunner,
+                    middleware: supply.middleware,
                 })
                 pluginsByAgent.set(agentId, supply.loaded)
+
+                // `onEvent` watchers, subscribed here rather than left to each plugin.
+                //
+                // Filtered to this agent's own events, because a plugin named by one agent has no
+                // business watching another's turns — two agents in one process is a normal
+                // configuration and the bus is runtime-wide. Boot events that fire *before* this
+                // point are missed, which is honest: a watcher registered by a manifest cannot see
+                // the read of that manifest.
+                //
+                // A throw is reported and swallowed. One plugin's observer must not be able to stop
+                // the runtime reporting to everybody else's — the same rule the bus already applies
+                // to its own subscribers.
+                const watchers = supply.middleware.filter(
+                    (entry) => typeof entry.onEvent === "function",
+                )
+                if (watchers.length > 0) {
+                    bus.on("*", (event) => {
+                        if (event.agentId !== undefined && event.agentId !== agentId) return
+                        notify(watchers, event, (error, name) => {
+                            bus.emit(
+                                "agent.warning",
+                                {
+                                    code: "middleware_observer_failed",
+                                    message: `Middleware "${name}" threw from onEvent: ${
+                                        error instanceof Error ? error.message : String(error)
+                                    }`,
+                                    hint: "`onEvent` is fire-and-forget: it must not throw and must not block. Anything slow or fallible belongs on a queue the plugin owns. The event was delivered to every other watcher regardless.",
+                                    field: "plugins",
+                                },
+                                { agentId },
+                            )
+                        })
+                    })
+                }
             }
         })
 
@@ -343,6 +380,7 @@ export class Runtime {
                 toolProviders: options.toolProviders ?? {},
                 channels: options.channels ?? {},
                 scriptRunner: options.scriptRunner,
+                middleware: [],
             }
 
         // 1. Manifests: file reads, env expansion, schema, rules. No network.
@@ -425,7 +463,8 @@ export class Runtime {
         //    — constructing a provider allocates no socket.
         const agents = mark("agents", () =>
             loaded.map((entry: LoadedManifest, index) => {
-                const runner = supplyFor(entry.manifest.id).scriptRunner
+                const agentSupply = supplyFor(entry.manifest.id)
+                const runner = agentSupply.scriptRunner
                 return Agent.create(entry, bus, store, {
                     ...(registries[index] === undefined ? {} : { tools: registries[index] }),
                     // Read once. A guard testing the merged supply while the value came from
@@ -433,6 +472,9 @@ export class Runtime {
                     // plugin-supplied runner — the conditional-spread shape that has cost this repo
                     // six debugging rounds.
                     ...(runner === undefined ? {} : { scriptRunner: runner }),
+                    ...(agentSupply.middleware.length === 0
+                        ? {}
+                        : { middleware: agentSupply.middleware }),
                     // The manifest's live env, not the ambient one: it layers the real environment
                     // over any `.env` beside the manifest, which is what the load-time key check
                     // validated against. Passing `process.env` here instead is how `validate` and

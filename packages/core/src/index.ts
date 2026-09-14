@@ -219,6 +219,12 @@ export {
 } from "./model/roles.ts"
 export { parseSSE, type SSEEvent } from "./model/sse.ts"
 export { nearest } from "./nearest.ts"
+export {
+    type ApprovalOptions,
+    approvalMiddleware,
+    type RetryOptions,
+    retryMiddleware,
+} from "./plugins/builtin.ts"
 /**
  * The plugin surface.
  *
@@ -236,6 +242,15 @@ export {
     loadPlugins,
     SETUP_BUDGET_MS,
 } from "./plugins/loader.ts"
+export {
+    type ContextMiddlewareContext,
+    compose as composeMiddleware,
+    type Middleware,
+    type ModelCallMiddlewareContext,
+    type ToolCallMiddlewareContext,
+    type TurnMiddlewareContext,
+    type TurnMiddlewareResult,
+} from "./plugins/middleware.ts"
 export type {
     ConfigSchema,
     Logger,

@@ -171,6 +171,18 @@ describe("health and auth", () => {
         await runtime.stop()
     })
 
+    test("ready is open too — it is the probe an orchestrator actually uses", async () => {
+        // It was *not*, and the consequence was that the container story could not work: a
+        // published port needs a non-loopback bind, a non-loopback bind requires a token, and the
+        // readiness probe then got 401 forever. `/v1/ready` discloses strictly less than
+        // `/v1/health`, which was already open — a status and an agent count, without the version.
+        const { call, runtime } = await harness({ token: TOKEN })
+        const response = await call("GET", "/v1/ready", { token: null })
+        expect(response.status).toBe(200)
+        expect(((await response.json()) as { status: string }).status).toBe("ready")
+        await runtime.stop()
+    })
+
     test("every other route requires the bearer token", async () => {
         const { call, runtime } = await harness({ token: TOKEN })
         const response = await call("GET", "/v1/agents", { token: null })

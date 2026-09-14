@@ -78,8 +78,28 @@ export class HarnessError extends Error {
 /** Anything wrong with a manifest, its referenced files, or the environment it needs. */
 export class ConfigError extends HarnessError {}
 
-/** Anything wrong between us and a model endpoint. */
-export class ModelError extends HarnessError {}
+/**
+ * Anything wrong between us and a model endpoint.
+ *
+ * `status` is carried as a **field** rather than only interpolated into the message, because the
+ * message is for a person and the number is for code. Retry middleware asks "was this a 429"; it
+ * cannot ask that of a sentence, and a middleware that parsed the message for a number would break
+ * the first time the wording changed. It was message-only until the retry example was written, and
+ * the consequence was silent — a retry that inspected `error.status` would have found `undefined`
+ * on every real failure and quietly never retried.
+ */
+export class ModelError extends HarnessError {
+    /** HTTP status, when the failure was a response rather than a transport error. */
+    readonly status: number | undefined
+    /** From `Retry-After`, when the endpoint sent one. The endpoint's own instruction outranks any backoff. */
+    readonly retryAfterSeconds: number | undefined
+
+    constructor(init: HarnessErrorInit & { status?: number; retryAfterSeconds?: number }) {
+        super(init)
+        this.status = init.status
+        this.retryAfterSeconds = init.retryAfterSeconds
+    }
+}
 
 /** A turn ended because something asked it to, not because it failed. */
 export class AbortedError extends HarnessError {}
@@ -200,9 +220,16 @@ export function apiKeyMissing(envName: string, field: string): ConfigError {
     })
 }
 
-export function modelHttpError(status: number, body: string, url: string): ModelError {
+export function modelHttpError(
+    status: number,
+    body: string,
+    url: string,
+    retryAfterSeconds?: number,
+): ModelError {
     const trimmed = body.length > 500 ? `${body.slice(0, 500)}…` : body
     return new ModelError({
+        status,
+        ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
         code: "model_http_error",
         message: `Model endpoint returned ${status} for ${url}: ${trimmed}`,
         hint:

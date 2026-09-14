@@ -2387,20 +2387,51 @@ together they are not.
 
 **Non-goals held.** Sandboxing. Enforced permissions. Hot reload.
 
-### 9B — middleware
+### 9B — middleware ✅ *(2026-09-14)*
 
-**Deliverables**
+**Built**
 
-- `plugins/middleware.ts` — composition, all four wrap points
-- `PluginContext.use(middleware)`
-- Retry and approval middleware as the worked examples
+- [x] `plugins/middleware.ts` — the four wrap points, `onEvent`, and `compose`
+- [x] `PluginContext.use(middleware)`, threaded per agent through the loader, the supply, the agent
+  and the turn
+- [x] `plugins/builtin.ts` — `retryMiddleware` and `approvalMiddleware`, exported and tested rather
+  than printed in a doc
+- [x] `AgentOptions.approve`, which is what finally makes `onMutate: "confirm"` satisfiable
 
 **Acceptance**
 
-- [ ] Middleware ordering matches manifest order; a short-circuit returns a well-formed result
-- [ ] Retry middleware demonstrably retries a 429
-- [ ] Approval middleware blocks a mutating tool and the agent adapts rather than crashing
-- [ ] `confirm` as an `onMutate` policy becomes reachable (decision 3.6's deferral)
+- [x] Ordering is manifest order, outermost first — asserted on entry/exit order *and* on the
+  nesting visible in the result
+- [x] A short-circuit returns a well-formed result and skips the core **and everything inside it**
+- [x] Returning `undefined` is a named failure rather than an empty result
+- [x] Retry demonstrably retries a 429, honours `Retry-After` over its own backoff, does **not**
+  retry a 400, and stops on cancellation
+- [x] Approval blocks a mutating tool with a well-formed failed `ToolResult` — the agent adapts
+  rather than the turn dying — and a throwing approver denies
+- [x] A plugin's `use()` reaches a real turn: verified end to end through `Runtime.create` → `send`,
+  and verified red by removing one conditional spread
+
+**Three things found by building it**
+
+- **`wrapModelCall` was declared over one type and wired over another.** `compose` took free type
+  parameters and dispatched through `as any`, so nothing checked that a call site matched what the
+  interface promised a plugin author — a plugin written against the published type would have
+  received a `StepResult` where it expected an `AsyncIterable<ChatChunk>`. `compose` now derives both
+  sides from the `Middleware` declaration, so a mismatched call site does not compile.
+- **`modelHttpError` carried its status only inside a message string**, so the retry example's
+  `error.status` check would have found `undefined` on every real failure and silently never retried.
+  It would have passed any test that threw a hand-made `{status: 429}`. `ModelError` carries `status`
+  and `retryAfterSeconds` as fields now, and the transport passes the header out.
+- **`onMutate: "confirm"` had been settable and unreachable since the field existed** — `authorize`
+  asks whether an approver exists and nothing ever supplied one, so the runtime refused instead of
+  asking. Worse, `tool_gated_after_first_use` recommends `confirm` as the remedy, so a person
+  following the runtime's own advice landed on a setting that could not work. There is an approver
+  seam now and a `confirm_without_approver` warning when nothing fills it. The warning was first
+  written *inside* the `tools.size === 0` branch, where it could never fire for the agent most likely
+  to be mid-setup and reading its own warnings.
+
+**Not built.** No front end supplies an approver yet, so `confirm` is reachable by an embedder and
+not from the terminal. Stated rather than implied: the warning fires for a CLI run today, correctly.
 
 ### 9C — WhatsApp
 
@@ -2461,13 +2492,37 @@ together they are not.
 
 **Acceptance**
 
-- [ ] Image under 150 MB
-- [ ] Container start → `/v1/ready` 200 under 2 s including container overhead
-- [ ] In-process boot under 1000 ms; CI enforces 1200 ms
-- [ ] Benchmark names the slowest step so a regression self-diagnoses
-- [ ] `docker run` with a mounted manifest works with no other setup
-- [ ] Every example runs as documented
-- [ ] Published boot number is reproducible on a clean clone
+- [ ] Image under 150 MB — **written, unmeasured.** No daemon on the machine it was written on; the
+  `docker` CI job builds and measures it on the next push.
+- [ ] Container start → `/v1/ready` 200 under 2 s — same: the CI job times it.
+- [x] In-process boot under 1000 ms; CI enforces 1200 ms — **53 ms**, and the README now carries the
+  machine state beside the figure, because a boot number without one is a number about somebody's
+  afternoon.
+- [x] Benchmark names the slowest step
+- [ ] `docker run` with a mounted manifest works — the CI job exercises the image's own `CMD`
+- [x] Every example runs as documented — and three did not
+- [x] Published boot number is reproducible on a clean clone
+
+**Four things found by building it**
+
+- **`/v1/ready` was behind the bearer token.** A published port needs a non-loopback bind, a
+  non-loopback bind requires a token by design, and the readiness probe then got 401 forever — so
+  the container story could not work. The auth exemption's own comment describes exactly this caller
+  ("a load balancer probing with a bearer header it does not have would mark a healthy process
+  unhealthy") and `/v1/ready` was simply missing from the list. It discloses strictly *less* than
+  `/v1/health`, which was already open. Found by writing a `HEALTHCHECK`, not by reading the line.
+- **A container binding loopback publishes nothing.** The default bind is right for a laptop and
+  invisible in a container: `-p 7420:7420` reaches a process on 127.0.0.1 inside it never. The image
+  passes `--host 0.0.0.0` and therefore requires a token — stated in the Dockerfile and the README
+  rather than left to be discovered as "it starts and answers nothing".
+- **`examples/telegram-assistant` had no manifest and a README saying it could not have one**,
+  blocked on Phase 3.5 and Phase 4 — both of which shipped long before. Nothing tests a sentence, so
+  the note outlived its truth by months. It has a manifest now, and `examples.test.ts` validates
+  every example, checks every `dispach <command>` a README names against the real command table, and
+  checks that an example documenting `.env.example` has one.
+- **`eval rules` was documented as a CLI command in four places and is a script**, with no
+  `bun run` entry at all — nor had `eval-prompt-style`. All three eval scripts have entries now and
+  the docs name the real invocation.
 
 **Non-goals.** npm publish. Multi-arch. Helm.
 

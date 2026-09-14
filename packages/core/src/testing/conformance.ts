@@ -147,6 +147,7 @@ export async function conformance(
         defineChannel: (id) => registered.push(`channel:${id}`),
         defineToolProvider: (id) => registered.push(`toolProvider:${id}`),
         defineScriptRunner: () => registered.push("scriptRunner"),
+        use: (entry) => registered.push(`middleware:${entry.name}`),
         config,
         agentId: "conformance",
         paths: {
@@ -183,7 +184,7 @@ export async function conformance(
         warn(
             "setup",
             "`setup` registered nothing.",
-            "A plugin that registers no channel, tool provider or script runner extends nothing. Correct only for a plugin that exists to carry middleware, which arrives in Phase 9B.",
+            "A plugin that registers no channel, tool provider, script runner or middleware extends nothing. Every `define*` and `use` call is recorded, so registering something and still seeing this means the registration did not run — check for a branch in `setup` that skipped it.",
         )
     }
 

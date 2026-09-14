@@ -49,7 +49,7 @@ CLI, and the tool layer with both dialects. Measured numbers live in `evals/` â€
 Phase 3.5 is in, all of it: the workspace tiers, frontmatter and comment stripping, per-file and
 total budgets, the rule guard, `context.files` as a deprecated alias, `promptStyle` rendering,
 `examplesIn` placement, `SOUL.md` gating with `soul distill`, `knowledge/`, the `workspace`
-command, `eval rules`, and `evals/prompt-style/` with committed numbers behind the `examplesIn`
+script, `bun run eval:rules`, and `evals/prompt-style/` with committed numbers behind the `examplesIn`
 and `intensity` defaults. Phase 3.7 is in: `init` scaffolds a validated starter agent from the
 workspace templates. Phase 3.8 is in: agents live in the `~/.dispach` sandbox and run by bare
 name, bare `run` opens a picker, `init` is an Ink wizard generating the SOUL.md identity pair, the

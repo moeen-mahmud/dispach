@@ -3,10 +3,25 @@
 A worked workspace — the template in `../workspace-template/` with the placeholders actually filled
 in, so the authoring rules have something concrete to point at.
 
-> **Incomplete by design, for now.** There is no `agent.yaml` here yet: this example needs the
-> tiered workspace (Phase 3.5) and the Telegram channel (Phase 4). What exists is
-> `workspace/SOUL.md` and `workspace/POLICY.md`. Running anything in this directory is not
-> possible and is not meant to be — use `examples/minimal/` for that.
+```bash
+cp .env.example .env        # MODEL_API_KEY, and a bot token from @BotFather
+# put your own Telegram handle in agent.yaml's allowFrom — it is closed by default
+dispach validate ./agent.yaml
+dispach serve ./agent.yaml  # `serve` is the only command that starts channels
+```
+
+From a clone, before the CLI is installed:
+
+```bash
+bun run build
+node packages/cli/dist/index.js validate examples/telegram-assistant/agent.yaml
+```
+
+> This example was marked *"incomplete by design, for now — needs the tiered workspace (Phase 3.5)
+> and the Telegram channel (Phase 4)"* for considerably longer than either of those took to build.
+> Both shipped; the note did not move. It is recorded here rather than quietly deleted because the
+> failure is worth naming: a README that says a thing cannot work is read as current, and nothing
+> tests a sentence.
 
 ## What it demonstrates
 

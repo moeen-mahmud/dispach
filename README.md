@@ -226,6 +226,39 @@ resolved, which is the part that is hard to get right by hand. In a container, r
 foreground and let the container runtime supervise it — it handles SIGTERM, finishes the delivery
 in flight, and exits 0.
 
+## Docker
+
+```bash
+docker build -f docker/Dockerfile -t dispach .
+docker run --rm -p 7420:7420 \
+  --env-file examples/minimal/.env \
+  -e DISPACH_API_TOKEN=pick-something \
+  -v "$PWD/examples/minimal:/agent" \
+  -v dispach-state:/state \
+  dispach
+```
+
+The token is not optional and is not boilerplate. The image binds `0.0.0.0`, because a process
+listening on loopback *inside* a container is unreachable through a published port — a container
+that looks healthy, answers nothing, and gives no clue why. A non-loopback bind then requires a
+token by design, and `serve` refuses to start without one rather than binding the world open.
+
+A manifest goes at `/agent`; the store, logs and sandbox live on a volume at `/state`. Two stages,
+so the image carries `dist/`, production dependencies and no toolchain. Non-root as `bun` (uid 1000)
+— **a host directory bind-mounted at `/state` has to be writable by uid 1000**, or the container
+starts and fails at the first turn with a permission error, which is the worse moment to find out.
+
+The healthcheck polls `/v1/ready`, which flips at `runtime.ready` — *before* channels connect,
+deliberately. A Telegram outage must not read as an unhealthy container and get it restarted into
+the same outage, so the probe answers "can it serve a turn" rather than "is everything connected".
+Channel state lives on the agent resource instead.
+
+> **Not verified on a running daemon.** The Dockerfile is written and reviewed; no image has been
+> built from it, because the machine it was written on had no Docker daemon running. The
+> image-size and start-time numbers Phase 11 asks for are therefore unmeasured rather than met.
+> Said here rather than left implicit: an unverified build instruction that reads as tested is the
+> failure this project's own rules exist to prevent.
+
 ## Development
 
 ```bash
@@ -262,12 +295,18 @@ locked decision, including the negative ones, which are the ones most likely to 
 
 Process start → `runtime.ready` in under **1000 ms**, enforced in CI at 1200 ms.
 
-Measured at **~79 ms** on an idle machine — 57 ms of interpreter and imports, 22 ms inside
-`Runtime.create` — and checked on every phase rather than at the end:
+Measured at **~53 ms** — 37 ms of interpreter and imports, 16 ms inside `Runtime.create` — and
+checked on every phase rather than at the end:
 
 ```bash
 bun run bench:boot
 ```
+
+Reported with the machine state it was taken on, because without that a boot number is a number
+about somebody's afternoon: the figure above is a 7-run median on an M-series laptop at a load
+average of ~5, and the same tree measured 58 ms with four builds running beside it. The budget has
+three orders of magnitude of headroom, so the reason to say this is not the arithmetic — it is that
+a regression is only visible against a figure you can reproduce.
 
 This single number is why the project exists: the runtime it replaces spends roughly four minutes on
 network calls during hook initialisation. Nothing here touches the network before readiness.

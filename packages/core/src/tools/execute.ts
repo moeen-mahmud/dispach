@@ -33,6 +33,7 @@ import { estimateTokens } from "../context/tokens.ts"
 import { type ErrorDetail, toolFailed, toolTimedOut } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import type { EventContext } from "../events/types.ts"
+import { compose, type Middleware } from "../plugins/middleware.ts"
 import { coerceArgs } from "./coerce.ts"
 import { authorize, type PolicyConfig } from "./policy.ts"
 import type { ToolRegistry } from "./registry.ts"
@@ -72,6 +73,16 @@ export interface ExecuteInput {
      * not read as consent.
      */
     readonly approve?: (request: ApprovalRequest) => Promise<boolean>
+    /**
+     * Plugin middleware wrapping each call.
+     *
+     * Wraps the **policy decision as well as the execution**, and that placement is the safety
+     * property: short-circuiting therefore *refuses* a call and can never grant one, because granting
+     * means calling `next()` and `next()` is the policy engine. An approval middleware can only
+     * narrow what runs. That is a fact about where the seam sits rather than about anyone's
+     * intentions, which is why it is stated here and not left to a plugin author's judgement.
+     */
+    readonly middleware?: readonly Middleware[]
 }
 
 /** What a person is being asked to allow. */
@@ -207,6 +218,40 @@ export function planIntents(
  * Both refusal shapes answer with the intent's own `callId`, which is what keeps the native
  * protocol's "every announced call is answered" invariant true whichever way this goes.
  */
+/**
+ * `decideAndRun` with the agent's middleware around it.
+ *
+ * Composed per call rather than once per turn because `tainted` changes *within* a turn — the third
+ * untrusted result flips it — and the context handed to a middleware has to describe the call being
+ * made rather than the one that started the batch.
+ *
+ * `compose` returns the core function unchanged when nothing implements the hook, so an agent with no
+ * tool middleware pays one array filter per call and no closures at all.
+ */
+async function wrapped(
+    entry: PlannedCall,
+    input: ExecuteInput,
+    tainted: boolean,
+    source: string,
+): Promise<ToolResult> {
+    const middleware = input.middleware ?? []
+    if (middleware.length === 0) return decideAndRun(entry, input, tainted, source)
+
+    const run = compose(middleware, "wrapToolCall", () =>
+        decideAndRun(entry, input, tainted, source),
+    )
+    return run({
+        agentId: input.context.agentId,
+        sessionKey: input.context.sessionKey,
+        turnId: input.context.turnId,
+        tool: entry.tool.spec,
+        intent: entry.intent,
+        args: entry.args,
+        tainted,
+        signal: input.context.signal,
+    })
+}
+
 async function decideAndRun(
     entry: PlannedCall,
     input: ExecuteInput,
@@ -290,7 +335,7 @@ export async function executeIntents(input: ExecuteInput): Promise<ExecuteOutcom
             // and neither the gate nor the policy should quietly depend on that staying true.
             // Position is preserved either way, so `results` still answers every announced call in
             // order — which the native protocol requires.
-            group.map((entry) => decideAndRun(entry, input, tainted, source)),
+            group.map((entry) => wrapped(entry, input, tainted, source)),
         )
         results.push(...settled)
 

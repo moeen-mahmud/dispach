@@ -36,6 +36,7 @@ import type { EventBus } from "../events/bus.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { ChannelFactory } from "../runtime/channels.ts"
 import type { ScriptRunner, ToolProviderFactory } from "../tools/types.ts"
+import type { Middleware } from "./middleware.ts"
 
 /**
  * What a plugin says it needs.
@@ -107,6 +108,14 @@ export interface PluginContext {
      * to own process spawning is a configuration mistake rather than a preference.
      */
     defineScriptRunner(runner: ScriptRunner): void
+    /**
+     * Add middleware around turns, context assembly, model calls and tool calls.
+     *
+     * Unkeyed, and order is the order it was added — which is manifest order across plugins, and
+     * declaration order within one. Composition is outermost-first, so the first plugin listed sees a
+     * call first and its result last.
+     */
+    use(middleware: Middleware): void
 
     /** Validated against `configSchema` when one is declared; `{}` when the entry carried no config. */
     readonly config: unknown

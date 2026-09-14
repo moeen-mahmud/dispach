@@ -98,7 +98,20 @@ function walk(dir: string, onFile: (path: string) => void): void {
     }
 }
 
-const inScope: string[] = [join(ROOT, "packages", "core", "src", "brand.ts")]
+/**
+ * Files the brand is *derived into* rather than merely mentioned in, and which this script rewrites
+ * in full.
+ *
+ * `brand.ts` owns the name. `package.json` files carry the scope. The Dockerfile carries the env var
+ * prefix and the state path, both computed from the slug exactly like the scope is — so leaving it
+ * out made a rename two commits: the tree, and then somebody noticing later that the image sets
+ * `<OLDSLUG>_HOME`. Hard rule 3's promise is that a rename is one commit, and a build artifact that
+ * needs a manual decision is the same defect as a stray literal.
+ */
+const inScope: string[] = [
+    join(ROOT, "packages", "core", "src", "brand.ts"),
+    join(ROOT, "docker", "Dockerfile"),
+]
 /** Files where only the `@<slug>/` package scope is rewritten. */
 const scopeOnly: string[] = []
 const stragglers: string[] = []

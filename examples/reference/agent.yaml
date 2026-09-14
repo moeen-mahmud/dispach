@@ -6,8 +6,6 @@
 #
 # The commenting is not cosmetic. A section this build does not implement is **refused at load**,
 # naming the phase, rather than parsed and ignored: a runtime that silently drops configuration
-# lies about what it is doing. Every section in this file is now implemented — `plugins` was the
-# last one refused, and it loads as of Phase 9A.
 #
 # `docs/02-SPEC-MANIFEST.md` is the binding reference. This file is the worked copy.
 

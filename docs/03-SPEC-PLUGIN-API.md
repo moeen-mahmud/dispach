@@ -60,6 +60,7 @@ interface PluginContext {
   defineChannel(id: string, factory: ChannelFactory): void
   defineToolProvider(id: string, factory: ToolProviderFactory): void
   defineScriptRunner(runner: ScriptRunner): void
+  use(middleware: Middleware): void          // Phase 9B
 
   // ambient
   readonly config: unknown          // validated against configSchema
@@ -90,7 +91,6 @@ liability rather than a convenience.
 
 | Point | Status |
 | --- | --- |
-| `use(middleware)` | **Phase 9B.** The four wrap points are new seams in `turn.ts`, context assembly and tool execution — the most load-bearing code here, and independent of plugin identity and loading. Split out so each is reviewable. |
 | `defineModelProvider` | Deferred. The chat-completions transport is the only one, and a second implementation is what would tell us what the seam needs. |
 | `defineStore` | Deferred with the Postgres driver (open item O.5). The `Store` interface exists; nothing has needed to register one. |
 | `defineSkillSource` | Deferred. Skill sources resolve through `lib/sources.ts` in the CLI, which is a fetch a person triggers rather than something an agent boots with. |
@@ -282,25 +282,49 @@ In-process functions. Same catalogue, same budget, same phase rules as provider 
 
 ---
 
-## Middleware — Phase 9B, not yet built
+## Middleware
 
-Specified here and **not implemented in Phase 9A**. `PluginContext` has no `use()` yet; a plugin
-declaring middleware today registers nothing and the loader warns that it registered nothing.
-
-The wrapping shape, not before/after events. Wrapping permits retry, substitution, and
+Built in Phase 9B. The wrapping shape, not before/after events. Wrapping permits retry, substitution, and
 short-circuit; events permit only observation. Events are derived from the wrap points, so
 nothing is lost by choosing wrapping.
 
 ```ts
 interface Middleware {
   name: string
-  wrapTurn?(ctx: TurnContext, next: () => Promise<TurnResult>): Promise<TurnResult>
-  wrapContext?(ctx: ContextContext, next: () => Promise<ContextBlock[]>): Promise<ContextBlock[]>
-  wrapModelCall?(ctx: ModelCallContext, next: () => Promise<ModelResult>): Promise<ModelResult>
-  wrapToolCall?(ctx: ToolCallContext, next: () => Promise<ToolResult>): Promise<ToolResult>
-  onEvent?(event: Event): void
+  wrapTurn?(ctx, next: () => Promise<TurnMiddlewareResult>): Promise<TurnMiddlewareResult>
+  wrapContext?(ctx, next: () => Promise<readonly ContextBlock[]>): Promise<readonly ContextBlock[]>
+  wrapModelCall?(ctx, next: () => Promise<StepResult>): Promise<StepResult>
+  wrapToolCall?(ctx, next: () => Promise<ToolResult>): Promise<ToolResult>
+  onEvent?(event: AnyEvent): void
 }
 ```
+
+Three departures from the shape first sketched here, each found by building it.
+
+**`wrapModelCall` wraps a step, not an `AsyncIterable<ChatChunk>`.** A stream that has already been
+partially consumed cannot be replayed, so a middleware over the chunk stream could observe a 429 and
+do nothing about it — the canonical use would have been unimplementable. `next()` re-runs the whole
+request. The cost, stated: a middleware here cannot transform individual deltas, so a redaction
+belongs in `wrapContext`, before the prompt is sent, which is the only place one is reliable anyway.
+
+**`wrapTurn` returns `{text, reason, steps}`, not a whole `TurnResult`.** A short-circuited turn ran
+nothing, so it appended nothing and spent nothing; letting a plugin fabricate the rest would put
+invented token counts and message lists in the store.
+
+**`wrapContext` returns blocks and core re-derives the rest** — and recomputes every block's token
+count from its content rather than trusting what came back. A middleware that rewrites content and
+leaves the count alone is the obvious mistake, and its consequence is invisible: the budget, the
+pressure gauge and every compaction decision downstream would be arithmetic on a number that stopped
+being true.
+
+### Where the seams sit, and the safety property
+
+`wrapToolCall` wraps the **policy decision as well as the execution**. So a middleware that
+short-circuits *refuses* a call and can never grant one, because granting means calling `next()` and
+`next()` is the policy engine. An approval middleware can only narrow what runs. That is a fact
+about where the seam sits rather than about a plugin author being careful — and it makes middleware
+approval a *second* gate rather than a replacement for `tools.policy`, with the answer being the
+intersection.
 
 Composition is manifest order, outermost first. Given plugins `[a, b]`:
 
@@ -329,7 +353,23 @@ a.wrapTurn( b.wrapTurn( core.turn ) )
 4. Errors propagate. Do not swallow. If you handle an error, return a valid result and
    record why.
 5. `onEvent` is fire-and-forget, must not throw, and must not block. Anything slow goes on
-   a queue you own.
+   a queue you own. A throw is caught, reported as an `agent.warning`, and the event still reaches
+   every other watcher — one plugin's broken observer must not stop the runtime reporting to
+   everybody else's. Watchers see only their own agent's events.
+
+**What is enforced.** A middleware returning `undefined` is a named failure rather than a silently
+empty result: short-circuiting is legitimate and returning a fabricated result is how it is spelled,
+but returning nothing at all is a forgotten `return`, and without the check it surfaces as an empty
+reply or a prompt with no blocks — confusing symptoms that name nothing. "Never mutate the context
+argument" is **documentation**: freezing would cost real time on the hot path and the argument
+objects hold references a deep freeze would break.
+
+### Shipped examples
+
+`retryMiddleware` and `approvalMiddleware` are exported from `@dispach/core` rather than printed
+here, because an example nobody runs is an example that rots. Both are constructed by a caller — an
+embedder, or a plugin that wants them — never switched on by a manifest: middleware that appeared
+without anybody naming it would be the opposite of what the plugin list is for.
 
 ### Short-circuit example
 

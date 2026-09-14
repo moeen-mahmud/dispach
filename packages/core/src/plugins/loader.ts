@@ -47,6 +47,7 @@ import type { PluginRef } from "../manifest/schema.ts"
 import type { ChannelFactory } from "../runtime/channels.ts"
 import type { ScriptRunner, ToolProviderFactory } from "../tools/types.ts"
 import { VERSION } from "../version.ts"
+import type { Middleware } from "./middleware.ts"
 import type { Logger, Permission, Plugin, PluginContext, PluginPaths } from "./plugin.ts"
 import { satisfies } from "./semver.ts"
 
@@ -82,6 +83,8 @@ export interface LoadedPlugins {
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
+    /** In the order they were added: manifest order across plugins, declaration order within one. */
+    readonly middleware: readonly Middleware[]
     /** What loaded, in manifest order — for `plugins` output and for the boot report. */
     readonly loaded: readonly LoadedPlugin[]
 }
@@ -186,6 +189,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
     const toolProviders: Record<string, ToolProviderFactory> = {}
     const channels: Record<string, ChannelFactory> = {}
     const loaded: LoadedPlugin[] = []
+    const middleware: Middleware[] = []
     const bySpec = new Map<string, string>()
     let scriptRunner: ScriptRunner | undefined
 
@@ -214,6 +218,10 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
             defineScriptRunner: (runner) => {
                 scriptRunner = runner
                 registered.push("scriptRunner")
+            },
+            use: (entry) => {
+                middleware.push(entry)
+                registered.push(`middleware:${entry.name}`)
             },
             config: validateConfig(plugin, config),
             agentId: options.agentId,
@@ -263,7 +271,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
         }
     }
 
-    return { toolProviders, channels, scriptRunner, loaded }
+    return { toolProviders, channels, scriptRunner, middleware, loaded }
 }
 
 /**
@@ -285,6 +293,7 @@ export interface AgentPluginSupply {
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
+    readonly middleware: readonly Middleware[]
     readonly loaded: readonly LoadedPlugin[]
 }
 
@@ -314,6 +323,7 @@ export async function agentPluginSupply(
             toolProviders: base.toolProviders ?? {},
             channels: base.channels ?? {},
             scriptRunner: base.scriptRunner,
+            middleware: [],
             loaded: [],
         }
     }
@@ -337,6 +347,7 @@ export async function agentPluginSupply(
         toolProviders: { ...(base.toolProviders ?? {}), ...result.toolProviders },
         channels: { ...(base.channels ?? {}), ...result.channels },
         scriptRunner: result.scriptRunner ?? base.scriptRunner,
+        middleware: result.middleware,
         loaded: result.loaded,
     }
 }
