@@ -52,26 +52,77 @@ export default {
 
 ## PluginContext
 
+**Built in Phase 9A** — the shipped surface, and the whole of it:
+
 ```ts
 interface PluginContext {
   // registration
-  defineChannel(spec: ChannelSpec): void
-  defineToolProvider(spec: ToolProviderSpec): void
-  defineModelProvider(spec: ModelProviderSpec): void
-  defineStore(spec: StoreSpec): void
-  defineSkillSource(spec: SkillSourceSpec): void
-  defineTools(tools: LocalTool[]): void
-  use(middleware: Middleware): void
+  defineChannel(id: string, factory: ChannelFactory): void
+  defineToolProvider(id: string, factory: ToolProviderFactory): void
+  defineScriptRunner(runner: ScriptRunner): void
+  use(middleware: Middleware): void          // Phase 9B
 
   // ambient
   readonly config: unknown          // validated against configSchema
   readonly agentId: string
   readonly paths: { workspace: string; state: string; manifest: string }
+  readonly env: EnvSource            // the manifest's .env over the ambient one, as core resolved it
   readonly logger: Logger
-  readonly events: EventBus         // subscribe only; emit is core's
-  readonly brand: Brand
+  readonly events: Pick<EventBus, "on">   // subscribe only; emit is core's
 }
 ```
+
+Two departures from the shape this document first described, both deliberate.
+
+**`define*` takes an id and a factory rather than a spec object.** The id is what a manifest
+*selects* — `tools.provider` names a provider id, a `channels[]` entry names a `type` — so
+registration and selection are the same namespace, and naming a plugin stays separate from granting
+what it offers. The factory is what already existed: `ChannelFactory` and `ToolProviderFactory` are
+the seams `Runtime.create` has taken since Phase 3, and a plugin registering one means core's wiring
+did not change at all. A spec object would have been a second description of the same thing.
+
+**`defineScriptRunner` is unkeyed**, because there is nothing for a manifest to choose between: a
+process can be started or cannot. Last registration wins.
+
+`brand` is not exposed. Nothing needed it, and hard rule 3 makes a brand string in a plugin a
+liability rather than a convenience.
+
+### Not built yet
+
+| Point | Status |
+| --- | --- |
+| `defineModelProvider` | Deferred. The chat-completions transport is the only one, and a second implementation is what would tell us what the seam needs. |
+| `defineStore` | Deferred with the Postgres driver (open item O.5). The `Store` interface exists; nothing has needed to register one. |
+| `defineSkillSource` | Deferred. Skill sources resolve through `lib/sources.ts` in the CLI, which is a fetch a person triggers rather than something an agent boots with. |
+| `defineTools` | Deferred. `tools.local` covers the built-ins and a plugin wanting to add tools registers a provider, which is the same capability with a name a manifest can select. |
+
+Each is absent rather than stubbed. A `define*` that records something nothing reads is the shape
+this repo keeps finding — declared vocabulary with no consumer — and it reads to an author as a
+capability that exists.
+
+---
+
+## Resolution
+
+A `plugins:` entry resolves in one of two ways, and never by installing anything (hard rule 5).
+
+1. **A built-in registry, keyed by the specifier a manifest writes.** `@dispach/channel-telegram`
+   resolves to the copy the host already bundles, with no import at all.
+2. **A module import** for anything else — a relative path, resolved against the *manifest's*
+   directory rather than the working directory, or a package name resolved from beside the agent.
+
+The registry is not an optimisation. A module imported both statically and dynamically makes
+`bun build --splitting` emit its exports twice and the bundle stops parsing — `SyntaxError:
+Duplicate export`, which `bun test` walks straight past because tests import source and the failure
+is in the bundle. The CLI statically imports the first-party packages to register them, so a loader
+that also `import()`ed them by name would produce a binary that fails to start. The registry keeps
+each module imported exactly one way.
+
+Loading happens **once per agent**, before that agent's manifest is validated. That ordering is
+forced: `loadManifest` checks `tools.provider` and a channel `type` against the ids the host can
+supply, and once plugins exist half of those ids come from the manifest itself. The refs are read
+from a shallow header parse, which needs no credentials and expands no environment — a plugin spec
+is a package name, never a secret.
 
 ---
 
@@ -233,20 +284,47 @@ In-process functions. Same catalogue, same budget, same phase rules as provider 
 
 ## Middleware
 
-The wrapping shape, not before/after events. Wrapping permits retry, substitution, and
+Built in Phase 9B. The wrapping shape, not before/after events. Wrapping permits retry, substitution, and
 short-circuit; events permit only observation. Events are derived from the wrap points, so
 nothing is lost by choosing wrapping.
 
 ```ts
 interface Middleware {
   name: string
-  wrapTurn?(ctx: TurnContext, next: () => Promise<TurnResult>): Promise<TurnResult>
-  wrapContext?(ctx: ContextContext, next: () => Promise<ContextBlock[]>): Promise<ContextBlock[]>
-  wrapModelCall?(ctx: ModelCallContext, next: () => Promise<ModelResult>): Promise<ModelResult>
-  wrapToolCall?(ctx: ToolCallContext, next: () => Promise<ToolResult>): Promise<ToolResult>
-  onEvent?(event: Event): void
+  wrapTurn?(ctx, next: () => Promise<TurnMiddlewareResult>): Promise<TurnMiddlewareResult>
+  wrapContext?(ctx, next: () => Promise<readonly ContextBlock[]>): Promise<readonly ContextBlock[]>
+  wrapModelCall?(ctx, next: () => Promise<StepResult>): Promise<StepResult>
+  wrapToolCall?(ctx, next: () => Promise<ToolResult>): Promise<ToolResult>
+  onEvent?(event: AnyEvent): void
 }
 ```
+
+Three departures from the shape first sketched here, each found by building it.
+
+**`wrapModelCall` wraps a step, not an `AsyncIterable<ChatChunk>`.** A stream that has already been
+partially consumed cannot be replayed, so a middleware over the chunk stream could observe a 429 and
+do nothing about it — the canonical use would have been unimplementable. `next()` re-runs the whole
+request. The cost, stated: a middleware here cannot transform individual deltas, so a redaction
+belongs in `wrapContext`, before the prompt is sent, which is the only place one is reliable anyway.
+
+**`wrapTurn` returns `{text, reason, steps}`, not a whole `TurnResult`.** A short-circuited turn ran
+nothing, so it appended nothing and spent nothing; letting a plugin fabricate the rest would put
+invented token counts and message lists in the store.
+
+**`wrapContext` returns blocks and core re-derives the rest** — and recomputes every block's token
+count from its content rather than trusting what came back. A middleware that rewrites content and
+leaves the count alone is the obvious mistake, and its consequence is invisible: the budget, the
+pressure gauge and every compaction decision downstream would be arithmetic on a number that stopped
+being true.
+
+### Where the seams sit, and the safety property
+
+`wrapToolCall` wraps the **policy decision as well as the execution**. So a middleware that
+short-circuits *refuses* a call and can never grant one, because granting means calling `next()` and
+`next()` is the policy engine. An approval middleware can only narrow what runs. That is a fact
+about where the seam sits rather than about a plugin author being careful — and it makes middleware
+approval a *second* gate rather than a replacement for `tools.policy`, with the answer being the
+intersection.
 
 Composition is manifest order, outermost first. Given plugins `[a, b]`:
 
@@ -275,7 +353,23 @@ a.wrapTurn( b.wrapTurn( core.turn ) )
 4. Errors propagate. Do not swallow. If you handle an error, return a valid result and
    record why.
 5. `onEvent` is fire-and-forget, must not throw, and must not block. Anything slow goes on
-   a queue you own.
+   a queue you own. A throw is caught, reported as an `agent.warning`, and the event still reaches
+   every other watcher — one plugin's broken observer must not stop the runtime reporting to
+   everybody else's. Watchers see only their own agent's events.
+
+**What is enforced.** A middleware returning `undefined` is a named failure rather than a silently
+empty result: short-circuiting is legitimate and returning a fabricated result is how it is spelled,
+but returning nothing at all is a forgotten `return`, and without the check it surfaces as an empty
+reply or a prompt with no blocks — confusing symptoms that name nothing. "Never mutate the context
+argument" is **documentation**: freezing would cost real time on the hot path and the argument
+objects hold references a deep freeze would break.
+
+### Shipped examples
+
+`retryMiddleware` and `approvalMiddleware` are exported from `@dispach/core` rather than printed
+here, because an example nobody runs is an example that rots. Both are constructed by a caller — an
+embedder, or a plugin that wants them — never switched on by a manifest: middleware that appeared
+without anybody naming it would be the opposite of what the plugin list is for.
 
 ### Short-circuit example
 
@@ -342,6 +436,18 @@ scramble. That trade is stated in the README.
 - [ ] Permissions declared honestly
 - [ ] `bun test` passes against `@dispach/core`'s plugin conformance suite
 
-Core ships `@dispach/core/testing` with `conformance(plugin)` — a suite asserting boot
-budget, version gating, config validation, and, for channels, idempotent send. Every
-first-party plugin runs it in CI.
+Core ships `@dispach/core/testing` with `conformance(plugin)`. It returns findings and throws
+nothing, because a plugin author's test runner is theirs — a suite that assumed one would be
+unusable by most of them.
+
+**It checks the mechanical half only, and says so in its own docstring**: the shape, the version
+range, the setup budget, that `setup` registers something and survives an empty environment with a
+workspace that does not exist. It does **not** check that `send()` is idempotent, that `resolve()`
+throws on an unknown slug, or that the plugin avoids the network — those are properties of code the
+suite calls once, under conditions a conformance run does not create. Passing means *well-formed*,
+not safe. A suite advertised as proving more than it does is worse than none, because it invites the
+belief that passing means the plugin is bounded by what it declared.
+
+Every first-party plugin runs it: `packages/cli/test/plugin-conformance.test.ts`, which lives there
+because the CLI is the package that imports all four — `packages/core` may not (hard rule 2), and a
+package asserting against itself would only ever check itself.

@@ -78,8 +78,28 @@ export class HarnessError extends Error {
 /** Anything wrong with a manifest, its referenced files, or the environment it needs. */
 export class ConfigError extends HarnessError {}
 
-/** Anything wrong between us and a model endpoint. */
-export class ModelError extends HarnessError {}
+/**
+ * Anything wrong between us and a model endpoint.
+ *
+ * `status` is carried as a **field** rather than only interpolated into the message, because the
+ * message is for a person and the number is for code. Retry middleware asks "was this a 429"; it
+ * cannot ask that of a sentence, and a middleware that parsed the message for a number would break
+ * the first time the wording changed. It was message-only until the retry example was written, and
+ * the consequence was silent — a retry that inspected `error.status` would have found `undefined`
+ * on every real failure and quietly never retried.
+ */
+export class ModelError extends HarnessError {
+    /** HTTP status, when the failure was a response rather than a transport error. */
+    readonly status: number | undefined
+    /** From `Retry-After`, when the endpoint sent one. The endpoint's own instruction outranks any backoff. */
+    readonly retryAfterSeconds: number | undefined
+
+    constructor(init: HarnessErrorInit & { status?: number; retryAfterSeconds?: number }) {
+        super(init)
+        this.status = init.status
+        this.retryAfterSeconds = init.retryAfterSeconds
+    }
+}
 
 /** A turn ended because something asked it to, not because it failed. */
 export class AbortedError extends HarnessError {}
@@ -200,9 +220,16 @@ export function apiKeyMissing(envName: string, field: string): ConfigError {
     })
 }
 
-export function modelHttpError(status: number, body: string, url: string): ModelError {
+export function modelHttpError(
+    status: number,
+    body: string,
+    url: string,
+    retryAfterSeconds?: number,
+): ModelError {
     const trimmed = body.length > 500 ? `${body.slice(0, 500)}…` : body
     return new ModelError({
+        status,
+        ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
         code: "model_http_error",
         message: `Model endpoint returned ${status} for ${url}: ${trimmed}`,
         hint:
@@ -908,5 +935,109 @@ export function memoryNotConfigured(): ConfigError {
         message: "This agent has no memory configured.",
         hint: "Add a `memory:` block to agent.yaml — `dir`, `maxActive`, `threshold` and `budget` all have defaults, so `memory: {}` is enough to switch it on.",
         field: "memory",
+    })
+}
+
+// ─── plugins ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A plugin written against an API version this host does not satisfy.
+ *
+ * Both numbers and the range, always. The runtime this replaces rolled config back silently on
+ * version skew, and the reason that was a debugging nightmare is that the symptom surfaces somewhere
+ * else entirely — a capability quietly missing, a channel that never receives — with nothing pointing
+ * back at the skew. A refusal naming all three is the whole remedy.
+ */
+export function pluginApiMismatch(name: string, range: string, hostVersion: string): ConfigError {
+    return new ConfigError({
+        code: "plugin_api_mismatch",
+        message: `Plugin "${name}" requires host API ${range}, and this host is ${hostVersion}.`,
+        hint: `Upgrade the plugin to a release that accepts ${hostVersion}, or run a host inside ${range}. The range is the plugin's own \`dispachApi\` field — a plugin that widened it without testing is worse than this refusal.`,
+        field: "plugins",
+    })
+}
+
+/**
+ * A `dispachApi` this host cannot parse.
+ *
+ * Deliberately *not* reported as a version mismatch, which is what it would collapse into if the
+ * range checker answered `false` when it meant "cannot decide". The two send a reader to different
+ * numbers: a mismatch is about the host version and is fixed by upgrading something, and this is
+ * about the string the plugin author wrote and is fixed by editing it. `semver.ts` supports the
+ * forms a real declaration uses and refuses the rest rather than approximating them, because being
+ * subtly wrong about which versions match is the one failure a version gate must not have.
+ */
+export function pluginApiRangeUnreadable(name: string, range: string): ConfigError {
+    return new ConfigError({
+        code: "plugin_api_range_unreadable",
+        message: `Plugin "${name}" declares dispachApi ${JSON.stringify(range)}, which is not a range this host can check.`,
+        hint: "Supported: `*`, an exact version, `^`, `~`, space-separated comparators (`>=1.2 <2.0`), and `||` between alternatives. Pre-release tags, hyphen ranges and `1.x` are not — write `^1` rather than `1.x`. The range is refused rather than assumed satisfied, because a gate that passes when it cannot decide is worse than no gate.",
+        field: "plugins",
+    })
+}
+
+/** Two plugins claiming one name. Both specs named, because either could be the one you forgot. */
+export function pluginNameCollision(name: string, specs: readonly string[]): ConfigError {
+    return new ConfigError({
+        code: "plugin_name_collision",
+        message: `Two plugins both call themselves "${name}": ${specs.join(" and ")}.`,
+        hint: "A plugin name is how events, `plugins` output and every error refer to it, so a collision would make all three ambiguous. Remove one, or ask its author to rename — a fork of a first-party plugin needs its own name.",
+        field: "plugins",
+    })
+}
+
+/**
+ * A spec that resolved to nothing.
+ *
+ * The two halves are worth separating in the hint: a bare name is looked up in the built-in registry
+ * *and* imported, and a relative path is only ever a path — so "not found" means different things and
+ * suggests different fixes.
+ */
+export function pluginNotFound(
+    spec: string,
+    builtIn: readonly string[],
+    cause?: unknown,
+): ConfigError {
+    const isPath = spec.startsWith(".") || spec.startsWith("/")
+    return new ConfigError({
+        code: "plugin_not_found",
+        message: `plugins names "${spec}", which could not be loaded.`,
+        hint: isPath
+            ? `Resolved relative to the manifest's own directory, not the working directory. Check the path exists and exports a plugin as its default export.`
+            : `Built in: ${builtIn.length === 0 ? "none" : builtIn.join(", ")}. Anything else has to be installed beside the agent before it starts — nothing is installed while the process runs (hard rule 5), so a missing package is a refusal rather than a fetch.`,
+        field: "plugins",
+        ...(cause === undefined ? {} : { cause }),
+    })
+}
+
+/** A module that loaded but is not a plugin. */
+export function pluginMalformed(spec: string, problem: string): ConfigError {
+    return new ConfigError({
+        code: "plugin_malformed",
+        message: `"${spec}" loaded, but ${problem}.`,
+        hint: "A plugin is the module's default export, an object with `name`, `version`, `dispachApi` and `setup`. A named export is not found and a factory function is not called — both would be guesses about what the author meant.",
+        field: "plugins",
+    })
+}
+
+/** A plugin's `config` that its own schema refused. */
+export function pluginConfigInvalid(name: string, problems: readonly string[]): ConfigError {
+    return new ConfigError({
+        code: "plugin_config_invalid",
+        message: `Plugin "${name}" refused its config: ${problems.join("; ")}.`,
+        hint: "Validated against the plugin's own `configSchema` before `setup` runs, so the failure lands here rather than as a confusing error from inside the plugin later. Fix the `config` block on this plugin's `plugins:` entry.",
+        field: "plugins",
+    })
+}
+
+/** A plugin whose `setup` threw. */
+export function pluginSetupFailed(name: string, cause: unknown): ConfigError {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    return new ConfigError({
+        code: "plugin_setup_failed",
+        message: `Plugin "${name}" failed during setup: ${detail}`,
+        hint: "`setup` registers capabilities and does no work, so a throw here is a genuine misconfiguration — a missing token, an impossible option. If the failure was transient, the plugin is throwing in the wrong place: connect in the channel's `start()`, which runs after readiness.",
+        field: "plugins",
+        cause,
     })
 }

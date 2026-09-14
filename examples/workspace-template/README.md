@@ -64,7 +64,7 @@ the identity file, `AGENTS.md`, `POLICY.md` and `REMINDER.md` together — the m
 know they came from different files. Over budget, the fix is to **delete rules or move them into code**, never to
 reformat them.
 
-Measure your model's rate rather than assuming 90%; small models run lower. `dispach eval rules`
+Measure your model's rate rather than assuming 90%; small models run lower. `bun run eval:rules`
 does it with a verifiable-instruction probe.
 
 ## What does not belong here

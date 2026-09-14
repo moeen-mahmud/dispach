@@ -7,6 +7,10 @@
  * line of code rather than from a later hardening pass.
  */
 
+import type { Plugin } from "@dispach/core"
+import { systemFromConfig } from "./provider.ts"
+import { SystemScriptRunner } from "./scripts.ts"
+
 export {
     CONFIG_READ_SPEC,
     CONFIG_SET_SPEC,
@@ -75,3 +79,34 @@ export { ShellSessions } from "./session.ts"
  * section above and one change produces a thirty-line diff. Two ways of writing this file would mean
  * one of them eventually being the reflowing one.
  */
+
+/** Package version, kept in step with `package.json` by a test. See `@dispach/core`'s `VERSION`. */
+export const VERSION = "0.1.0"
+
+/**
+ * This package as a plugin — the shell, the file tools, and the runner skill scripts use.
+ *
+ * **Naming it grants nothing.** The provider supplies `exec`, `file_write` and the rest only once a
+ * manifest selects `system` under `tools.providers` *and* pins the slugs it wants; `tools.policy`
+ * then decides which commands run. That separation is the reason this is a plugin at all rather than
+ * something core ships: core is what an embedder runs *other people's* agents on, and a shell tool
+ * there is one every provisioned agent gets with no way to decline it.
+ *
+ * The script runner is registered unconditionally, and that is a different kind of thing from the
+ * provider: there is nothing for a manifest to select between, and a skill's `scripts/` is only
+ * reachable once a skill ships one and that skill activates — both the workspace's decision. Without
+ * it a skill's scripts are silently never discovered, which reads as the runtime being broken.
+ */
+export default {
+    name: "system",
+    version: VERSION,
+    dispachApi: "^0.1",
+    permissions: [
+        { kind: "exec", commands: ["*"] },
+        { kind: "fs", paths: ["<workspace>"], mode: "write" },
+    ],
+    setup(context) {
+        context.defineToolProvider("system", systemFromConfig)
+        context.defineScriptRunner(new SystemScriptRunner({ env: context.env }))
+    },
+} satisfies Plugin

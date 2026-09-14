@@ -2343,19 +2343,108 @@ shared by design (11.100).
 
 **Files.** `packages/core/src/plugins/`, `packages/channel-whatsapp/`, refactors
 
+**Split into 9A, 9B and 9C (2026-09-14).** Middleware is four new seams in `turn.ts`, context
+assembly and tool execution — the most load-bearing code here — and it is independent of plugin
+identity, loading and registration. WhatsApp is a separate risk again. Each is reviewable alone;
+together they are not.
+
+### 9A — the plugin API, and the first-party packages living on it ✅ *(2026-09-14)*
+
+**Built**
+
+- [x] `plugins/plugin.ts` — `Plugin`, `PluginContext`, `Permission`, `ConfigSchema`
+- [x] `plugins/loader.ts` — built-in registry, dynamic import, version gate, config validation,
+  200 ms budget with `plugin.slow`, `plugin.loaded`
+- [x] `plugins/semver.ts` — the range check, hand-written because core takes no third dependency,
+  and **refusing what it cannot parse rather than assuming satisfied**
+- [x] `agentPluginSupply` — the one function `Runtime.create` and `validate` both call
+- [x] Telegram, Composio, system and web ship a default-export plugin beside their existing factory
+- [x] `@dispach/core/testing` with `conformance(plugin)`, and every first-party plugin runs it
+- [x] `dispach plugins` — table, `--json`, and a listing of what this binary can resolve by name
+- [x] The `plugins` section stops being refused; `examples/reference/agent.yaml` uncomments it
+
 **Acceptance**
 
-- [ ] Telegram and Composio use zero private core APIs — enforced by an export-surface test
-- [ ] A plugin with a mismatched `dispachApi` refuses to load naming both versions
-- [ ] Middleware ordering matches manifest order; a short-circuit returns a well-formed result
-- [ ] Retry middleware demonstrably retries a 429
-- [ ] Approval middleware blocks a mutating tool and the agent adapts rather than crashing
-- [ ] WhatsApp: QR pairing, message round-trip, reconnect after network drop
-- [ ] Revoking the WhatsApp session wipes credentials before re-auth; no stuck no-QR state
-- [ ] Conformance suite passes for all first-party plugins
-- [ ] Boot budget met with 5 plugins
+- [x] First-party packages use zero private core APIs — `boundaries.test.ts` scans them for a deep
+  import past the package root and for a relative reach across packages, and each is asserted to
+  actually *be* a plugin. Verified red by adding `@dispach/core/src/errors.ts` to one.
+- [x] A plugin with a mismatched `dispachApi` refuses naming both versions and the range. Verified
+  against the built binary: `Plugin "metrics" requires host API ^2, and this host is 0.1.0.`
+- [x] An unparseable range is its **own** failure, not a mismatch — the two send a reader to
+  different numbers
+- [x] Conformance passes for all four first-party plugins
+- [x] Boot: `plugins` phase 0.17 ms with none declared; ~3 ms total against a stashed baseline on
+  the same busy machine, almost all of it new modules in the import graph
 
-**Non-goals.** Sandboxing. Enforced permissions. Hot reload. A plugin registry.
+**Two things found by building it**
+
+- **`validate` and `run` disagreed**, and in the worse direction: `validate` checked provider ids
+  against the binary's static table while `run` checked them against the table *plus* the manifest's
+  plugins, so a manifest naming a third-party provider booted fine and was reported broken. Fixed by
+  `agentPluginSupply`, guarded by `validate-plugins.test.ts`, which is verified red.
+- **The `plugins` phase was the slowest in boot at 5.88 ms on an agent with no plugins**, because
+  the manifest header was parsed three times per agent. One read, reused.
+
+**Non-goals held.** Sandboxing. Enforced permissions. Hot reload.
+
+### 9B — middleware ✅ *(2026-09-14)*
+
+**Built**
+
+- [x] `plugins/middleware.ts` — the four wrap points, `onEvent`, and `compose`
+- [x] `PluginContext.use(middleware)`, threaded per agent through the loader, the supply, the agent
+  and the turn
+- [x] `plugins/builtin.ts` — `retryMiddleware` and `approvalMiddleware`, exported and tested rather
+  than printed in a doc
+- [x] `AgentOptions.approve`, which is what finally makes `onMutate: "confirm"` satisfiable
+
+**Acceptance**
+
+- [x] Ordering is manifest order, outermost first — asserted on entry/exit order *and* on the
+  nesting visible in the result
+- [x] A short-circuit returns a well-formed result and skips the core **and everything inside it**
+- [x] Returning `undefined` is a named failure rather than an empty result
+- [x] Retry demonstrably retries a 429, honours `Retry-After` over its own backoff, does **not**
+  retry a 400, and stops on cancellation
+- [x] Approval blocks a mutating tool with a well-formed failed `ToolResult` — the agent adapts
+  rather than the turn dying — and a throwing approver denies
+- [x] A plugin's `use()` reaches a real turn: verified end to end through `Runtime.create` → `send`,
+  and verified red by removing one conditional spread
+
+**Three things found by building it**
+
+- **`wrapModelCall` was declared over one type and wired over another.** `compose` took free type
+  parameters and dispatched through `as any`, so nothing checked that a call site matched what the
+  interface promised a plugin author — a plugin written against the published type would have
+  received a `StepResult` where it expected an `AsyncIterable<ChatChunk>`. `compose` now derives both
+  sides from the `Middleware` declaration, so a mismatched call site does not compile.
+- **`modelHttpError` carried its status only inside a message string**, so the retry example's
+  `error.status` check would have found `undefined` on every real failure and silently never retried.
+  It would have passed any test that threw a hand-made `{status: 429}`. `ModelError` carries `status`
+  and `retryAfterSeconds` as fields now, and the transport passes the header out.
+- **`onMutate: "confirm"` had been settable and unreachable since the field existed** — `authorize`
+  asks whether an approver exists and nothing ever supplied one, so the runtime refused instead of
+  asking. Worse, `tool_gated_after_first_use` recommends `confirm` as the remedy, so a person
+  following the runtime's own advice landed on a setting that could not work. There is an approver
+  seam now and a `confirm_without_approver` warning when nothing fills it. The warning was first
+  written *inside* the `tools.size === 0` branch, where it could never fire for the agent most likely
+  to be mid-setup and reading its own warnings.
+
+**Not built.** No front end supplies an approver yet, so `confirm` is reachable by an embedder and
+not from the terminal. Stated rather than implied: the warning fires for a CLI run today, correctly.
+
+### 9C — WhatsApp
+
+**Deliverables**
+
+- `packages/channel-whatsapp` — Baileys, auth dir, QR, reconnect, credential wipe on `loggedOut`
+- Documented risk note in that package's README
+
+**Acceptance**
+
+- [ ] QR pairing, message round-trip, reconnect after network drop
+- [ ] Revoking the session wipes credentials before re-auth; no stuck no-QR state
+- [ ] Boot budget met with 5 plugins
 
 ---
 
@@ -2403,13 +2492,45 @@ shared by design (11.100).
 
 **Acceptance**
 
-- [ ] Image under 150 MB
-- [ ] Container start → `/v1/ready` 200 under 2 s including container overhead
-- [ ] In-process boot under 1000 ms; CI enforces 1200 ms
-- [ ] Benchmark names the slowest step so a regression self-diagnoses
-- [ ] `docker run` with a mounted manifest works with no other setup
-- [ ] Every example runs as documented
-- [ ] Published boot number is reproducible on a clean clone
+- [x] Image under 150 MB — **83 MB**, arm64
+- [x] Container start → `/v1/ready` 200 under 2 s — **147 ms**, healthcheck healthy
+- [x] In-process boot under 1000 ms; CI enforces 1200 ms — **53 ms**, and the README now carries the
+  machine state beside the figure, because a boot number without one is a number about somebody's
+  afternoon.
+- [x] Benchmark names the slowest step
+- [x] `docker run` with a mounted manifest works — verified with a real turn against DeepSeek
+  through `POST /v1/agents/:id/messages`, store written to `/state` as uid 1000. amd64 is
+  unverified: the image is not multi-arch (a non-goal), so CI measures that leg.
+- [x] Every example runs as documented — and three did not
+- [x] Published boot number is reproducible on a clean clone
+
+**Six things found by building it** — the last two only once an image was actually built, which is
+the argument for the CI job rather than for reading the Dockerfile more carefully.
+
+- **`/v1/ready` was behind the bearer token.** A published port needs a non-loopback bind, a
+  non-loopback bind requires a token by design, and the readiness probe then got 401 forever — so
+  the container story could not work. The auth exemption's own comment describes exactly this caller
+  ("a load balancer probing with a bearer header it does not have would mark a healthy process
+  unhealthy") and `/v1/ready` was simply missing from the list. It discloses strictly *less* than
+  `/v1/health`, which was already open. Found by writing a `HEALTHCHECK`, not by reading the line.
+- **A container binding loopback publishes nothing.** The default bind is right for a laptop and
+  invisible in a container: `-p 7420:7420` reaches a process on 127.0.0.1 inside it never. The image
+  passes `--host 0.0.0.0` and therefore requires a token — stated in the Dockerfile and the README
+  rather than left to be discovered as "it starts and answers nothing".
+- **`examples/telegram-assistant` had no manifest and a README saying it could not have one**,
+  blocked on Phase 3.5 and Phase 4 — both of which shipped long before. Nothing tests a sentence, so
+  the note outlived its truth by months. It has a manifest now, and `examples.test.ts` validates
+  every example, checks every `dispach <command>` a README names against the real command table, and
+  checks that an example documenting `.env.example` has one.
+- **`eval rules` was documented as a CLI command in four places and is a script**, with no
+  `bun run` entry at all — nor had `eval-prompt-style`. All three eval scripts have entries now and
+  the docs name the real invocation.
+- **`COPY tsconfig.json` named a file that does not exist.** Every package's tsconfig extends
+  `tsconfig.base.json`, and that is the only root config the build needs; `biome.json` was being
+  copied and is needed by nothing an image build runs.
+- **`bun install` ran the root `prepare` script, which is husky**, a devDependency the production
+  stage does not have — `husky: not found`, exit 127. Both installs pass `--ignore-scripts` now: a
+  git-hooks installer has no business in an image build, and there is no `.git` in the context.
 
 **Non-goals.** npm publish. Multi-arch. Helm.
 
@@ -3160,50 +3281,136 @@ is told rather than charged, and `--yes` is the scripted way through.
 
 ---
 
+## Phase 7F — what a session actually pays for
+
+**Shipped 2026-08-29 to 2026-09-02. Recorded 2026-09-13, which is the finding.** The work was built,
+committed and threaded through five layers, and appeared in **no phase of this plan and no decision**
+until somebody went looking. In a repo whose method is that the docs are binding, undocumented
+shipped work is the gap that compounds: the next session reads the plan and does not know the
+capability exists.
+
+**Goal.** `/context` could report that history was 85% of a turn and nothing could say what history
+was *made of* — the owner's own agent, asked directly, blamed its instruction files. And the prompt
+cache, which decides a large share of the bill on a long conversation, was not measured at all.
+
+**Built**
+
+- `cacheUsage()` in `model/chat-completions.ts` — three spellings, because the providers did not
+  agree: OpenAI nests `prompt_tokens_details.cached_tokens`, DeepSeek reports a top-level
+  `prompt_cache_hit_tokens`, an Anthropic-shaped shim calls reads `cache_read_input_tokens`. First
+  hit wins and **the field name is carried back with the number** — a cache ratio is exactly the kind
+  of figure that gets disbelieved, and "which field is this" is the first question asked of a
+  surprising one.
+- Migration 10, `turns.cached_prompt_tokens` and `turns.cache_source`, **nullable on purpose**. Three
+  states, not two: a number, `0` meaning the endpoint reported nothing was cached, and `NULL` meaning
+  it declined to discuss caching. Those last two produce identical bills and want opposite
+  conclusions, so `NOT NULL DEFAULT 0` would erase the distinction on the way in and no later query
+  could recover it.
+- Threaded chunk → step → turn → agent → row, with a test at the **far end** that reads the value out
+  of the stored row. The sixth instance of the conditional-spread shape that has cost a round here
+  (`apiKeyEnv`, `ChatMessage.toolCalls`, `TurnInput.skills`, `ToolContext.readArtifact`,
+  `ToolContext.memoryDir`, `StoredMessage.origin`), and the guard is the same one every time.
+- `previewContext` gained `history` — the slot's composition, largest first — and `cache`, read from
+  the **stored turns** rather than from memory, so a resumed session reports the conversation's
+  history and not this process's slice of it.
+- `capabilities.ts`: a false `promptCache` row corrected, and the Claude windows updated (1M/128K for
+  the 5-series, 200K/64K for Haiku).
+
+**Measured, and the caveat is the point.** The session that built it recorded roughly 84% of a turn's
+tokens as tool output and a cache ratio in the high eighties against DeepSeek. **Those figures have no
+committed artifact.** There is no `evals/cache/`, so by this repo's own rule — never claim a
+performance property without a number in `evals/` and a script to reproduce it — they are session
+notes rather than results, and are written here as such.
+
+**Open**
+
+- [ ] `evals/cache/` with a script, or the two figures above stop being quotable
+- [ ] The Anthropic gap was diagnosed as *the compat shim cannot cache*, not as a marker bug. That
+  diagnosis is recorded nowhere but a session buffer and has no test.
+
+---
+
+## The signal race that had `main` red
+
+**Found 2026-09-14 by reading CI rather than by testing.** `main` had been failing since
+2026-09-02 on one test — `SIGINT runs the full shutdown and releases the lease`, `Expected: 0,
+Received: null` — and it passed locally every time, six runs in a row.
+
+`null` is the tell: the process was **killed by the signal** rather than exiting. In `serve.ts`,
+`claimSignals()` and `waitForSignal()` sat *after* the banner, so between `serving on …` reaching
+stdout and the handlers existing there was a window with no handler at all. SIGINT in that window
+takes its default action and kills the process outright — no outbox flush, no lease release, and
+none of the backgrounded `exec` children reaped. Exactly the failure `claimSignals` was introduced
+to prevent, one gap earlier.
+
+**Not just a flaky test.** An orchestrator restarting a container promptly sends its signal into
+that gap, and the test only caught it because a loaded two-core runner is slow enough to lose the
+race. Both calls are hoisted above the bind now; the promise is created early and awaited late, so
+a signal arriving in between resolves it rather than being missed.
+
+**The guard is structural, because the obvious test could not fail.** "Signal immediately and
+assert a clean exit" passes with the fix reverted on any machine fast enough to close the window
+first — which is every development machine and not the CI runner. So the ordering is asserted
+where it is decided, in the source. Verified red in both directions.
+
+The window is narrowed, not eliminated, and that is stated in the test: anything before
+`Runtime.create` returns is still unprotected. What is pinned is that nothing else gets inserted
+between the handlers and the bind.
+
+---
+
 ## Carried backlog
 
 Two findings that belong to no phase, recorded here so a session with no context still finds them.
 Both were reproduced rather than reasoned about.
 
-### The NLT heredoc leak — **high urgency**, documented not fixed *(recorded 2026-08-25)*
+### The NLT heredoc leak — **fixed 2026-09-13**, decisions 4.96–4.98
+
+*Recorded 2026-08-25 as high urgency and documented not fixed; kept here rather than moved into a
+phase because the finding is where a session with no context looks for it.*
 
 A model writes a multi-line shell script as an `exec` argument without wrapping it in NLT's
-`<<<` / `>>>` heredoc. `consumeLine` extends an open field across bare continuation lines — but a
-**blank line clears `openKey`**, deliberately ("models put blank lines between fields, and gluing
-whatever follows onto the last value is how prose ends up in an argument"). The next line then has a
-block open, no `openKey`, and no key match, so it falls to the last branch —
-`closeBlock(state); state.text.push(line)` — and the rest of the script becomes the reply.
+`<<<` / `>>>`. A **blank line clears `openKey`** — deliberately, so prose does not glue onto the last
+value — and the next line then has a block open, no open key and no key match, so it falls to
+`closeBlock(state); state.text.push(line)` and the rest of the script becomes the reply. The truncated
+command is a *valid string*, so `coerceArgs` raises nothing, the shell reads an unterminated heredoc
+to EOF and **runs half the script**, and the turn is recorded as a clean answer that exits 0.
 
-Reproduced against the real `parseNlt`:
+**What the fix needed first, and what it found.** The note's own instruction was that the backstop had
+to be built against shapes a real model produces, because the set of malformations is not enumerable.
+`evals/nlt-heredoc/` collects them: deepseek-chat, 8 tasks × 2 passes, identical across passes.
 
-```
-ACTION: exec                     intents:   1 ["exec"]
-command: python3 <<PY            args:      {"command":"python3 <<PY\nimport sys"}
-import sys                       text:      "print(...)\nPY\nEND"   <- shown as the reply
-                 <- blank line   malformed: undefined  <- no repair, no event, nothing reported
-print("hello")
-PY
-END
-```
+| Shape | Count | Reported before? |
+| --- | --- | --- |
+| `split` — blank line cuts the value | 2/16 | **no** |
+| `indent_lost` — value survives, indentation stripped | 2/16 | **no** |
+| `field_error` — a bare `word:` became a field | 4/16 | yes, `coerceArgs` |
+| `single_line` / `wrapped` / routing | 8/16 | n/a |
 
-The truncated command is a **valid string**, so `coerceArgs` raises no field error. The shell then
-sees an unterminated heredoc, reads to EOF, and **runs half the script**. The turn is recorded as a
-clean answer, and exits 0.
+**25% of attempts produced a damaged argument, and half were silent.** `indent_lost` was not in the
+note and is the more interesting half: the continuation branch pushes each line **trimmed**, so a
+correct `python3 -c "…"` arrives at column zero — an `IndentationError` rather than a script, and it
+*executes*. Python fails loudly; a shell `if … then … fi` would run differently.
 
-This is precisely the shape the XML tolerance was written to prevent — *"the markup became the reply,
-no repair was asked for, no event fired, and the turn was recorded as a clean answer"* — alive today,
-in the default dialect, on the most-used tool, on the most idiomatic content a shell tool receives.
+**The backstop is not the one the note proposed.** "Prose that reads as a continuation of the value it
+abandoned" is a judgement about intent. Every damaged value shared a checkable property instead:
+unwrapped *and* multi-line, or holding a shell heredoc whose terminator never arrived — and a shell
+heredoc names its own terminator, so that second signal is exact rather than heuristic. `damage()` in
+`tools/dialect/nlt.ts` asks only those two questions and consults nothing about the following prose.
+`malformed` is carried **beside** the intents, which needed no loop change: `turn.ts` already makes a
+step all-or-nothing on it and grants one repair.
 
-A bare `word:` line inside an unwrapped value (`try:`, `else:`, `finally:`, any YAML key) is the
-**loud** variant: `try` becomes a field, `coerceArgs` reports *"try is not a field of this tool"*, and
-the model earns a repair. That one is survivable. The blank-line case is not.
+**The cost is recorded, not hidden.** The unwrapped signal fires on multi-line values that would have
+run — roughly one in three. Preserving indentation on continuation lines was the alternative and was
+declined as a behavioural change to weigh on its own (4.98).
 
-**Why it is not fixed here.** It needs `evals/nlt-heredoc/` with the shapes a real model actually
-produces, because this repo's own rule is that the set of malformations is not enumerable — so adding
-one tolerance for blank lines is the wrong instinct and would invite the belief the class is handled.
-The likely direction is a **backstop**: set `ParsedOutput.malformed` when a block closes into prose
-that reads as a continuation of the value it just abandoned, earning the one repair the parser already
-grants. Do not "simplify" it into a tolerance.
+**Verification.** Both new assertions go red with `damage()` neutered; all four negative controls go
+red when it is forced to over-fire, which is the check this repo has been caught by twice. Bun
+2927/0 · Node 1307/0 · typecheck clean · lint at the 6 pre-existing warnings · boot 52.6 ms.
+
+**Still open.** One endpoint. `gpt-4o-mini` and the open-weight slot are wired into the script and
+unrun — a small model may wrap *less* often, so 25% is a floor on the problem rather than a ceiling.
+
 
 ### `deepseek-v4-pro*` context window — **low urgency** *(recorded 2026-08-25)*
 

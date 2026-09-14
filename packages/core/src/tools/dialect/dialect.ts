@@ -42,11 +42,21 @@ export interface ParsedOutput {
      * with no required fields would then run, with no arguments, having been asked for something else
      * entirely — a wrong action taken silently.
      *
-     * NLT sets it in one case, and only when *nothing* parsed: the prose is markup from some other
-     * tool-calling protocol. A model that invents `<TOOL_CALL>` or its own vendor tokens has attempted
-     * a call, and with nothing here the markup becomes the reply — shown to the person as prose, no
-     * repair asked for, no event fired, the turn recorded as a clean answer. The parser stays tolerant
-     * of *readable* variations; this is for the ones no tolerance could enumerate.
+     * NLT sets it in two cases, and the second carries *intents alongside it*.
+     *
+     * **Nothing parsed and the prose is markup** from some other tool-calling protocol. A model that
+     * invents `<TOOL_CALL>` or its own vendor tokens has attempted a call, and with nothing here the
+     * markup becomes the reply — shown to the person as prose, no repair asked for, no event fired,
+     * the turn recorded as a clean answer. The parser stays tolerant of *readable* variations; this
+     * is for the ones no tolerance could enumerate.
+     *
+     * **A block parsed but one of its values arrived damaged** — it spans lines without `<<<` / `>>>`,
+     * so the continuation branch stripped its indentation, or it opens a shell heredoc whose
+     * terminator never arrived, so it was cut at a blank line and the rest became the reply. Both were
+     * measured against a real endpoint at a combined 4 of 16 attempts on `exec`, and both produced a
+     * clean answer with a half-written command *executed*. A reader who assumes `malformed` implies
+     * `intents.length === 0` will drop the call the repair is about; the loop reads them together and
+     * makes the step all-or-nothing.
      */
     readonly malformed?: readonly FieldError[]
 }

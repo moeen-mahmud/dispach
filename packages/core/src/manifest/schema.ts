@@ -578,6 +578,7 @@ export type MemoryConfig = z.infer<typeof MemorySchema>
 export type ChannelConfig = z.infer<typeof ChannelSchema>
 export type DeliveryConfig = z.infer<typeof DeliverySchema>
 export type ScheduleConfig = z.infer<typeof ScheduleSchema>
+export type PluginRef = z.infer<typeof PluginRefSchema>
 export type LimitsConfig = z.infer<typeof LimitsSchema>
 export type ServerConfig = z.infer<typeof ServerSchema>
 export type AgentManifest = z.infer<typeof AgentManifestSchema>

@@ -36,6 +36,7 @@ import { resolveAgentRef } from "#lib/sandbox"
 import { quietAcceptedWarnings } from "#lib/warnings"
 import { memoryCommand } from "#memory"
 import { modelCommand } from "#model"
+import { pluginsCommand } from "#plugins"
 import { removeCommand } from "#remove"
 import { runCommand } from "#run"
 import { schedulesCommand } from "#schedules"
@@ -234,7 +235,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
         }
 
         case "validate":
-            return validateCommand({ manifestPath: resolved(), json: flags.bool("json") })
+            return await validateCommand({ manifestPath: resolved(), json: flags.bool("json") })
 
         case "workspace":
             return workspaceCommand({
@@ -287,6 +288,12 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 json: flags.bool("json"),
             })
         }
+
+        case "plugins":
+            return await pluginsCommand({
+                manifestPath: resolveAgentRef(positionals[0] ?? ""),
+                json: flags.bool("json"),
+            })
 
         case "agents":
             return await agentsCommand({

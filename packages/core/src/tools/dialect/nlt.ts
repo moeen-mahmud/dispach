@@ -161,6 +161,23 @@ interface Block {
     readonly slug: string
     /** Key → every occurrence, in order. Repeats are kept: an array field is often written twice. */
     readonly fields: Map<string, string[]>
+    /**
+     * Keys whose value arrived through `<<<` / `>>>` rather than through bare continuation lines.
+     *
+     * Recorded because it is the one thing the finished value cannot tell you, and the backstop below
+     * turns on it. Two multi-line strings that are byte-identical are a *faithful* value and a
+     * *damaged* one depending only on which path built them: the heredoc path pushes each line
+     * verbatim, while the continuation path pushes it trimmed — so an unwrapped value has already had
+     * its indentation destroyed by the time anything can inspect it.
+     *
+     * Keyed by field name rather than by occurrence, which is a real limit and a cheap one: a block
+     * writing the *same* key twice, once wrapped and once not, has both occurrences read as wrapped
+     * and the second escapes the backstop. A repeated key is how an array field is written, and an
+     * array whose elements are multi-line shell scripts has not turned up in any transcript. Stated
+     * because the alternative — per-occurrence tracking — is the kind of precision that costs a
+     * reader more than the case is worth.
+     */
+    readonly wrapped: Set<string>
 }
 
 interface ParseState {
@@ -195,6 +212,7 @@ function closeHeredoc(state: ParseState): void {
     const lines = [...state.heredocLines]
     if (lines[lines.length - 1] === "") lines.pop()
     push(state.block, state.heredocKey, lines.join("\n"))
+    state.block.wrapped.add(state.heredocKey)
     state.heredocKey = undefined
     state.heredocLines = []
 }
@@ -252,7 +270,7 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
             closeBlock(state)
             const match = ACTION_LINE.exec(line)
             const slug = cleanSlug(match?.[1] ?? "")
-            if (slug !== "") state.block = { slug, fields: new Map() }
+            if (slug !== "") state.block = { slug, fields: new Map(), wrapped: new Set() }
             return
         }
         state.heredocLines.push(line)
@@ -264,7 +282,7 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
         const slug = cleanSlug(action[1] ?? "")
         closeBlock(state)
         if (slug === "") return
-        state.block = { slug, fields: new Map() }
+        state.block = { slug, fields: new Map(), wrapped: new Set() }
         return
     }
 
@@ -286,7 +304,7 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
         }
         const slug = cleanSlug(trimmed)
         state.awaitingSlug = false
-        if (slug !== "") state.block = { slug, fields: new Map() }
+        if (slug !== "") state.block = { slug, fields: new Map(), wrapped: new Set() }
         return
     }
 
@@ -362,6 +380,79 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
 }
 
 /**
+ * A shell heredoc opener, and the terminator word it promises: `<<PY`, `<<'EOF'`, `<<- "SQL"`.
+ *
+ * Anchored to end-of-line because that is where a real heredoc opener sits — the redirection is the
+ * last thing on the line and the body starts on the next. Without the anchor `$((1 << n))` reads as
+ * an opener promising a terminator called `n`, and an arithmetic shift would earn a repair.
+ *
+ * `<<<` is bash's here-*string* and deliberately does not match: the character after `<<` has to
+ * begin a word, and `<` does not.
+ */
+const SHELL_HEREDOC = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*$/m
+
+/**
+ * Was this value damaged on the way in?
+ *
+ * **The backstop the carried backlog asked for, and it does not work the way that note expected.**
+ * The note proposed detecting "prose that reads as a continuation of the value it just abandoned",
+ * which is a judgement about intent and therefore the unenumerable-set problem again. Measured
+ * against a real endpoint (`evals/nlt-heredoc`, deepseek-chat, 16 attempts) every damaged value
+ * shared one *checkable* property instead: it spanned lines without using the protocol's own
+ * facility for that. So this asks about conformance, not intent.
+ *
+ * Two signals, and the second is not redundant:
+ *
+ * **Unwrapped and multi-line.** `<<<` / `>>>` exists precisely to carry a value across lines. A value
+ * that spans lines without it went through the continuation branch, which pushes each line *trimmed*
+ * — so `def f(x):` / `    return x * 2` arrives at column zero and is an `IndentationError` rather
+ * than a script. Measured at 2 of 16 attempts, and silent: the command runs. The refusal is therefore
+ * not conservatism about a value that might be fine; an unwrapped multi-line value is already wrong.
+ *
+ * **An unterminated shell heredoc.** Catches the case the first signal cannot see: when the blank
+ * line falls immediately after the opener, what survives is a *single* line — `python3 - <<'PY'` —
+ * and the rest of the script is already the reply. A shell heredoc names its own terminator, so the
+ * evidence that the value was cut is inside the value, which makes this signal exact rather than
+ * heuristic. Measured at 2 of 16, and the shape the backlog reproduced by hand.
+ *
+ * What is deliberately *not* a signal: anything about the prose that follows. A block with no `END`
+ * followed by a genuine reply is ordinary and must stay free.
+ */
+function damage(value: string, wrapped: boolean): "unwrapped" | "unterminated" | undefined {
+    const opener = SHELL_HEREDOC.exec(value)
+    if (opener !== null) {
+        const terminator = opener[2] ?? ""
+        const closed = new RegExp(`^\\s*${terminator}\\s*$`, "m").test(value)
+        if (!closed) return "unterminated"
+    }
+    if (!wrapped && value.includes("\n")) return "unwrapped"
+    return undefined
+}
+
+/**
+ * What the model is told when a value arrives damaged.
+ *
+ * Load-bearing prose rather than a formality: this is the entire content of the one repair the parser
+ * grants, and the repo's own measurement is that a placeholder in an example is read as an
+ * instruction by a small model. `field` is the field name the model wrote, so the message reads as a
+ * sentence about that field the way every other `FieldError` in `coerce.ts` does.
+ *
+ * TODO(moeen): write the two messages. See the request in the conversation — the trade-off is that a
+ * terse hint leaves a small model guessing at the wrapped form, while a long one is billed on every
+ * repair and buries the one instruction that matters.
+ */
+function damageError(field: string, kind: "unwrapped" | "unterminated"): FieldError {
+    return {
+        field,
+        message:
+            kind === "unwrapped"
+                ? "spans several lines but was not wrapped, so its line breaks and indentation could not be kept."
+                : "opens a heredoc whose terminator never arrived, so the value was cut short.",
+        hint: `Write a value that spans lines between ${HEREDOC_OPEN} and ${HEREDOC_CLOSE}, each on its own line: \`${field}: ${HEREDOC_OPEN}\`, then the value exactly as it should be, then \`${HEREDOC_CLOSE}\`. Everything between them is kept byte for byte, blank lines and indentation included. Nothing was executed, so writing the call again is safe.`,
+    }
+}
+
+/**
  * Split a model's output into invocation blocks and reply text.
  *
  * Exported for the parser tests, which are the ones that matter here: this function is the entire
@@ -377,21 +468,36 @@ export function parseNlt(output: string): ParsedOutput {
 
     closeBlock(state)
 
-    const intents: ToolIntent[] = state.blocks.map((block, index) => ({
-        // Deterministic, so a parser test can assert one. Uniqueness comes from the step id in the
-        // event envelope, which is where a call is actually identified.
-        callId: `c${index + 1}`,
-        slug: block.slug,
-        args: Object.fromEntries(
-            [...block.fields].map(([key, values]) => [
-                key,
-                values.length === 1 ? values[0] : values,
-            ]),
-        ),
-    }))
+    const damaged: FieldError[] = []
+    const intents: ToolIntent[] = state.blocks.map((block, index) => {
+        for (const [key, values] of block.fields) {
+            for (const value of values) {
+                const kind = damage(value, block.wrapped.has(key))
+                if (kind !== undefined) damaged.push(damageError(key, kind))
+            }
+        }
+        return {
+            // Deterministic, so a parser test can assert one. Uniqueness comes from the step id in
+            // the event envelope, which is where a call is actually identified.
+            callId: `c${index + 1}`,
+            slug: block.slug,
+            args: Object.fromEntries(
+                [...block.fields].map(([key, values]) => [
+                    key,
+                    values.length === 1 ? values[0] : values,
+                ]),
+            ),
+        }
+    })
 
     const text = state.text.join("\n").trim()
-    if (intents.length > 0) return { intents, text }
+    // Reported *alongside* the intents rather than instead of them. The loop reads `malformed` first
+    // and makes the step all-or-nothing, so a damaged value stops the call it belongs to — and
+    // carrying the intents means the repair names the tool the model was reaching for. Dropping them
+    // here would report "nothing parsed", which is both untrue and less useful.
+    if (intents.length > 0) {
+        return damaged.length === 0 ? { intents, text } : { intents, text, malformed: damaged }
+    }
 
     // Nothing parsed. If the prose is markup rather than prose, say so instead of delivering it.
     const attempted = attemptedCall(text)

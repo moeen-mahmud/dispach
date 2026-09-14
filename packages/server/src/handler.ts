@@ -544,10 +544,20 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             )
         }
 
-        // Health and the webhook are the two exceptions, and both for the same reason: the caller
-        // cannot hold our token. A load balancer probing /v1/health with a bearer header it does
-        // not have would mark a healthy process unhealthy.
-        const open = url.pathname === "/v1/health" || url.pathname.startsWith("/v1/channels/")
+        // The probes and the webhook are the exceptions, and all for the same reason: the caller
+        // cannot hold our token. A load balancer probing with a bearer header it does not have
+        // would mark a healthy process unhealthy.
+        //
+        // **`/v1/ready` belongs here and was missing**, which made the container story not work: a
+        // published port needs a non-loopback bind, a non-loopback bind requires a token, and the
+        // readiness probe then got 401 forever. An orchestrator's readiness probe is precisely the
+        // caller this exemption describes — and `/v1/ready` discloses strictly *less* than
+        // `/v1/health`, which was already open: a status and an agent count, without the version.
+        // Found by writing the Dockerfile's HEALTHCHECK, not by reading this line.
+        const open =
+            url.pathname === "/v1/health" ||
+            url.pathname === "/v1/ready" ||
+            url.pathname.startsWith("/v1/channels/")
         if (!open && token !== undefined) {
             const unauthorized = checkToken(request, token)
             if (unauthorized !== undefined) return unauthorized

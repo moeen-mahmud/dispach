@@ -18,9 +18,12 @@ import type { ChannelBinding } from "../channels/channel.ts"
 import { channelTypeUnknown, HarnessError, toolProviderUnknown } from "../errors.ts"
 import { EventBus } from "../events/bus.ts"
 import type { EnvSource } from "../manifest/env.ts"
+import { type ManifestHeader, readManifestHeader } from "../manifest/header.ts"
 import { type LoadedManifest, loadManifest, loadManifestFromObject } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
 import type { FetchLike } from "../model/provider.ts"
+import { agentPluginSupply, type BuiltInPlugins, type LoadedPlugin } from "../plugins/loader.ts"
+import { type Middleware, notify } from "../plugins/middleware.ts"
 import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams } from "../store/buffer.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
@@ -90,6 +93,19 @@ export interface RuntimeOptions {
      */
     readonly channels?: Readonly<Record<string, ChannelFactory>>
     /**
+     * Plugins this host can resolve by name without importing anything, keyed by the specifier a
+     * manifest writes.
+     *
+     * The registry exists for a structural reason rather than for speed. A module imported both
+     * statically and dynamically makes `bun build --splitting` emit its exports twice and the bundle
+     * stops parsing — so a binary that statically imports the first-party packages cannot also
+     * `import()` them by name. Registering them here keeps each module imported exactly one way, and
+     * a manifest still names the package it means.
+     *
+     * Anything not here is imported from beside the agent. Nothing is ever installed (hard rule 5).
+     */
+    readonly builtInPlugins?: BuiltInPlugins
+    /**
      * Start channels as part of `create`, after `runtime.ready` has fired.
      *
      * Off by default: constructing a `Runtime` in a test or a one-shot CLI command must not open a
@@ -126,6 +142,21 @@ export interface RuntimeOptions {
     readonly lease?: boolean
 }
 
+/**
+ * Everything an agent can be *supplied* with, after its plugins have registered.
+ *
+ * Separate from `RuntimeOptions` because it is per agent: two agents in one process can name
+ * different plugins, so "which channel types exist" stops being a property of the runtime the
+ * moment plugins land. Every consumer takes this rather than the options object, which is what
+ * stops one of them reading the host's map while another reads the merged one.
+ */
+export interface AgentSupply {
+    readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
+    readonly channels: Readonly<Record<string, ChannelFactory>>
+    readonly scriptRunner: ScriptRunner | undefined
+    readonly middleware: readonly Middleware[]
+}
+
 export interface BootReport {
     /** Time inside `Runtime.create`. */
     readonly bootMs: number
@@ -148,6 +179,18 @@ export class Runtime {
     readonly streams: TurnStreams
     /** Channel bindings and the delivery queue. Empty when no agent configures a channel. */
     readonly channels: ChannelHub
+    /**
+     * What each agent's `plugins:` loaded, by agent id, in manifest order.
+     *
+     * Surfaced rather than kept internal because the loader's whole output is otherwise invisible:
+     * `plugin.loaded` fires during boot, which finishes before any command can subscribe — the
+     * empty-room trap this repo has hit with boot warnings and with a trimmed catalogue. Anything
+     * true for the life of the process belongs where a person can still read it afterwards.
+     *
+     * Empty for an agent that names none, rather than absent, so a caller never has to distinguish
+     * "no plugins" from "not an agent here".
+     */
+    readonly plugins: ReadonlyMap<string, readonly LoadedPlugin[]>
     readonly scheduler: Scheduler
 
     /**
@@ -174,6 +217,7 @@ export class Runtime {
         store: Store
         streams: TurnStreams
         channels: ChannelHub
+        plugins: ReadonlyMap<string, readonly LoadedPlugin[]>
         scheduler: Scheduler
         ownsStore: boolean
         owned: readonly string[]
@@ -184,6 +228,7 @@ export class Runtime {
         this.store = init.store
         this.streams = init.streams
         this.channels = init.channels
+        this.plugins = init.plugins
         this.scheduler = init.scheduler
         this.#ownsStore = init.ownsStore
         this.#owned = init.owned
@@ -221,16 +266,139 @@ export class Runtime {
         const streams = new TurnStreams()
         streams.listen(bus)
 
+        // 0. Plugins: read each agent's `plugins:` shallowly, resolve the modules, and let them
+        //    register. **Before** the manifest load, because that load validates `tools.provider`
+        //    and a channel `type` against the ids this host can supply — and once plugins exist,
+        //    half of those ids come from the plugins themselves. Reading the refs from the header is
+        //    what breaks that circle: `readManifestHeader` parses without expanding env or checking
+        //    credentials, and a plugin spec is a package name rather than a secret.
+        //
+        //    Resolution is the only async step in boot before the store, and it does no I/O at all
+        //    for a built-in. `setup()` registers and does not work, so hard rule 4 still holds.
+        const supplyByAgent = new Map<string, AgentSupply>()
+        const pluginsByAgent = new Map<string, readonly LoadedPlugin[]>()
+        // One shallow read per agent, reused by the plugin phase and by the manifest phase below.
+        // Reading it per use cost three YAML parses of the same file and made `plugins` the slowest
+        // boot phase — 5.88 ms — on an agent with no plugins at all.
+        const headers = options.agents.map((source) =>
+            typeof source === "string"
+                ? readManifestHeader(source)
+                : {
+                      id: String((source as { id?: unknown }).id ?? ""),
+                      plugins: (source as { plugins?: ManifestHeader["plugins"] }).plugins,
+                  },
+        )
+        const agentIdAt = (index: number): string => {
+            const source = options.agents[index]
+            return headers[index]?.id ?? (typeof source === "string" ? source : "")
+        }
+
+        await markAsync("plugins", async () => {
+            for (const [index, source] of options.agents.entries()) {
+                const refs = headers[index]?.plugins ?? []
+                if (refs.length === 0) continue
+                const agentId = agentIdAt(index)
+
+                const manifestPath =
+                    typeof source === "string"
+                        ? resolve(source)
+                        : resolve(options.dir ?? process.cwd(), "agent.yaml")
+                // The same function `validate` calls. They disagreed once — `validate` checked
+                // provider ids against the host's static table while this checked them against the
+                // table plus the manifest's plugins — so a manifest naming a third-party provider
+                // booted fine and was reported broken.
+                const supply = await agentPluginSupply({
+                    refs,
+                    agentId,
+                    paths: {
+                        workspace: dirname(manifestPath),
+                        state: resolve(options.dir ?? process.cwd(), BRAND.stateDir),
+                        manifest: manifestPath,
+                    },
+                    env: options.env ?? process.env,
+                    bus,
+                    ...(options.builtInPlugins === undefined
+                        ? {}
+                        : { builtIn: options.builtInPlugins }),
+                    base: {
+                        ...(options.toolProviders === undefined
+                            ? {}
+                            : { toolProviders: options.toolProviders }),
+                        ...(options.channels === undefined ? {} : { channels: options.channels }),
+                        ...(options.scriptRunner === undefined
+                            ? {}
+                            : { scriptRunner: options.scriptRunner }),
+                    },
+                })
+                supplyByAgent.set(agentId, {
+                    toolProviders: supply.toolProviders,
+                    channels: supply.channels,
+                    scriptRunner: supply.scriptRunner,
+                    middleware: supply.middleware,
+                })
+                pluginsByAgent.set(agentId, supply.loaded)
+
+                // `onEvent` watchers, subscribed here rather than left to each plugin.
+                //
+                // Filtered to this agent's own events, because a plugin named by one agent has no
+                // business watching another's turns — two agents in one process is a normal
+                // configuration and the bus is runtime-wide. Boot events that fire *before* this
+                // point are missed, which is honest: a watcher registered by a manifest cannot see
+                // the read of that manifest.
+                //
+                // A throw is reported and swallowed. One plugin's observer must not be able to stop
+                // the runtime reporting to everybody else's — the same rule the bus already applies
+                // to its own subscribers.
+                const watchers = supply.middleware.filter(
+                    (entry) => typeof entry.onEvent === "function",
+                )
+                if (watchers.length > 0) {
+                    bus.on("*", (event) => {
+                        if (event.agentId !== undefined && event.agentId !== agentId) return
+                        notify(watchers, event, (error, name) => {
+                            bus.emit(
+                                "agent.warning",
+                                {
+                                    code: "middleware_observer_failed",
+                                    message: `Middleware "${name}" threw from onEvent: ${
+                                        error instanceof Error ? error.message : String(error)
+                                    }`,
+                                    hint: "`onEvent` is fire-and-forget: it must not throw and must not block. Anything slow or fallible belongs on a queue the plugin owns. The event was delivered to every other watcher regardless.",
+                                    field: "plugins",
+                                },
+                                { agentId },
+                            )
+                        })
+                    })
+                }
+            }
+        })
+
+        /** What this agent can be supplied with — the host's registrations plus its plugins'. */
+        const supplyFor = (agentId: string): AgentSupply =>
+            supplyByAgent.get(agentId) ?? {
+                toolProviders: options.toolProviders ?? {},
+                channels: options.channels ?? {},
+                scriptRunner: options.scriptRunner,
+                middleware: [],
+            }
+
         // 1. Manifests: file reads, env expansion, schema, rules. No network.
         const loaded = mark("manifest", () =>
-            options.agents.map((source) =>
-                typeof source === "string"
-                    ? loadManifest(source, envOptions(options))
+            options.agents.map((source, index) => {
+                const supply = supplyFor(agentIdAt(index))
+                const known = {
+                    knownProviders: Object.keys(supply.toolProviders),
+                    knownChannels: Object.keys(supply.channels),
+                }
+                return typeof source === "string"
+                    ? loadManifest(source, { ...envOptions(options), ...known })
                     : loadManifestFromObject(source, {
                           ...envOptions(options),
+                          ...known,
                           dir: options.dir ?? process.cwd(),
-                      }),
-            ),
+                      })
+            }),
         )
 
         // 2. Store: open the file, run pending migrations, reap turns a dead process left running.
@@ -279,7 +447,7 @@ export class Runtime {
         const registries = await markAsync("tools", () =>
             Promise.all(
                 loaded.map((entry: LoadedManifest) => {
-                    const providers = buildProviders(entry, options)
+                    const providers = buildProviders(entry, supplyFor(entry.manifest.id))
                     if (providers.length > 0) providersByAgent.set(entry.manifest.id, providers)
                     return ToolRegistry.create({
                         pinned: entry.manifest.tools.pinned,
@@ -294,12 +462,19 @@ export class Runtime {
         // 4. Agents: identity files, capability resolution, provider construction. Still no network
         //    — constructing a provider allocates no socket.
         const agents = mark("agents", () =>
-            loaded.map((entry: LoadedManifest, index) =>
-                Agent.create(entry, bus, store, {
+            loaded.map((entry: LoadedManifest, index) => {
+                const agentSupply = supplyFor(entry.manifest.id)
+                const runner = agentSupply.scriptRunner
+                return Agent.create(entry, bus, store, {
                     ...(registries[index] === undefined ? {} : { tools: registries[index] }),
-                    ...(options.scriptRunner === undefined
+                    // Read once. A guard testing the merged supply while the value came from
+                    // `options` type-checks, passes every existing test, and silently drops a
+                    // plugin-supplied runner — the conditional-spread shape that has cost this repo
+                    // six debugging rounds.
+                    ...(runner === undefined ? {} : { scriptRunner: runner }),
+                    ...(agentSupply.middleware.length === 0
                         ? {}
-                        : { scriptRunner: options.scriptRunner }),
+                        : { middleware: agentSupply.middleware }),
                     // The manifest's live env, not the ambient one: it layers the real environment
                     // over any `.env` beside the manifest, which is what the load-time key check
                     // validated against. Passing `process.env` here instead is how `validate` and
@@ -324,8 +499,8 @@ export class Runtime {
                             { agentId: entry.manifest.id },
                         )
                     },
-                }),
-            ),
+                })
+            }),
         )
 
         // 5. Channels: construct transports. Allocating one opens no socket — `start()` does, and
@@ -350,6 +525,7 @@ export class Runtime {
             store,
             streams,
             channels: hub,
+            plugins: pluginsByAgent,
             scheduler,
             ownsStore,
             owned: leases.owned,
@@ -361,7 +537,7 @@ export class Runtime {
             for (const [index, entry] of loaded.entries()) {
                 const agent = agents[index]
                 if (agent === undefined) continue
-                const bindings = buildChannels(entry, options)
+                const bindings = buildChannels(entry, supplyFor(entry.manifest.id))
                 if (bindings.length > 0) hub.register(agent, bindings)
             }
         })
@@ -743,8 +919,8 @@ function envOptions(options: RuntimeOptions): {
  * slug two of them both resolve is a collision it refuses — so the order decides which one is named
  * first in that failure, and nothing here may sort it into something tidier than what was written.
  */
-function buildProviders(entry: LoadedManifest, options: RuntimeOptions): readonly ToolProvider[] {
-    const factories = options.toolProviders ?? {}
+function buildProviders(entry: LoadedManifest, supply: AgentSupply): readonly ToolProvider[] {
+    const factories = supply.toolProviders
 
     // The plan's warnings are deliberately not collected here. `Agent.create` reads them from the
     // same function, so they arrive on `agent.warnings` where a front end still finds them after

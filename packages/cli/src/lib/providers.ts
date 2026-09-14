@@ -13,11 +13,16 @@
  * a rendering import costs more than the whole command.
  */
 
-import { telegramChannel } from "@dispach/channel-telegram"
-import type { ChannelFactory, ScriptRunner, ToolProviderFactory } from "@dispach/core"
-import { composioFromConfig } from "@dispach/tools-composio"
-import { SystemScriptRunner, systemFromConfig } from "@dispach/tools-system"
-import { webFromConfig } from "@dispach/tools-web"
+import telegramPlugin, { telegramChannel } from "@dispach/channel-telegram"
+import type {
+    BuiltInPlugins,
+    ChannelFactory,
+    ScriptRunner,
+    ToolProviderFactory,
+} from "@dispach/core"
+import composioPlugin, { composioFromConfig } from "@dispach/tools-composio"
+import systemPlugin, { SystemScriptRunner, systemFromConfig } from "@dispach/tools-system"
+import webPlugin, { webFromConfig } from "@dispach/tools-web"
 
 export const TOOL_PROVIDERS: Readonly<Record<string, ToolProviderFactory>> = {
     composio: composioFromConfig,
@@ -64,3 +69,31 @@ export const CHANNELS: Readonly<Record<string, ChannelFactory>> = {
 }
 
 export const CHANNEL_IDS: readonly string[] = Object.keys(CHANNELS)
+
+/**
+ * Plugins this binary can resolve by name, keyed by the specifier a manifest writes.
+ *
+ * The three tables above are what this binary supplies *by default* — every command passes them, so
+ * an agent that names no plugins behaves exactly as it did before Phase 9A. This table is what lets a
+ * manifest ask for the same capabilities by name, and it layers **over** the defaults so a future
+ * third-party plugin can replace one.
+ *
+ * **Built in rather than imported at runtime, for a structural reason.** A module imported both
+ * statically and dynamically makes `bun build --splitting` emit its exports twice and the bundle stops
+ * parsing — `SyntaxError: Duplicate export`, which `bun test` walks straight past because tests import
+ * source. The imports above are static, so the loader must never `import()` these same packages by
+ * name. Registering them here keeps each module imported exactly one way, and `boundaries.test.ts`
+ * enforces the rule generally.
+ *
+ * Keyed by package name because a manifest should name the package it means. The short name
+ * (`telegram`, `system`) is what the plugin registers its channel or provider under, and that is a
+ * different namespace on purpose: one plugin can register several.
+ */
+export const BUILT_IN_PLUGINS: BuiltInPlugins = {
+    "@dispach/channel-telegram": telegramPlugin,
+    "@dispach/tools-composio": composioPlugin,
+    "@dispach/tools-system": systemPlugin,
+    "@dispach/tools-web": webPlugin,
+}
+
+export const BUILT_IN_PLUGIN_SPECS: readonly string[] = Object.keys(BUILT_IN_PLUGINS)

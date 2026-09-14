@@ -59,6 +59,7 @@ import {
     resolveRoles,
     windowReport,
 } from "../model/roles.ts"
+import type { Middleware } from "../plugins/middleware.ts"
 import { loadSkills, type SkillCatalogue } from "../skills/index.ts"
 import { activateSkills } from "../skills/load.ts"
 import { renderScripts, skillScriptTools } from "../skills/tools.ts"
@@ -66,6 +67,7 @@ import type { SessionSummary, Store, TurnRecord } from "../store/store.ts"
 import { type DialectId, passThroughFilter, type StreamFilter } from "../tools/dialect/dialect.ts"
 import { nativeDialect, nativeWireTokens } from "../tools/dialect/native.ts"
 import { nltDialect } from "../tools/dialect/nlt.ts"
+import type { ApprovalRequest } from "../tools/execute.ts"
 import { onceOnlyTools } from "../tools/policy.ts"
 import { ToolRegistry } from "../tools/registry.ts"
 import type { ScriptRunner, Tool } from "../tools/types.ts"
@@ -157,6 +159,27 @@ export interface AgentCreateOptions extends ResolveRolesOptions {
      * model would be told about a tool that refuses.
      */
     readonly scriptRunner?: ScriptRunner
+    /**
+     * Plugin middleware for this agent, in registration order.
+     *
+     * Per agent rather than per runtime, for the same reason `setup` runs per agent: two agents in
+     * one process can name different plugins, so "what wraps a turn" is not a property of the
+     * process.
+     */
+    readonly middleware?: readonly Middleware[]
+    /**
+     * Ask a person before a call the policy wants confirmed.
+     *
+     * Supplied by whichever front end has somebody attached, and absent for a schedule or a pipe —
+     * which is exactly when `tools.policy.onNoApprover` matters. Without it,
+     * `tools.untrusted.onMutate: "confirm"` degrades to a refusal, so the agent warns at load rather
+     * than letting a settable value be silently unreachable.
+     *
+     * Distinct from an approval *middleware*, which is a second gate outside the policy: this one
+     * answers the policy's own `ask`, and a middleware can only narrow what the policy already
+     * allows. An agent may have both.
+     */
+    readonly approve?: (request: ApprovalRequest) => Promise<boolean>
 }
 
 export interface AgentSendOptions {
@@ -299,6 +322,7 @@ export class Agent {
     #phases = new Map<string, string>()
     /** Absent when the embedder supplied none; then a skill's scripts are never discovered. */
     readonly #scriptRunner: ScriptRunner | undefined
+    readonly #middleware: readonly Middleware[]
     /**
      * Slot 2, rendered **lazily and once**.
      *
@@ -334,6 +358,8 @@ export class Agent {
         knowledge: KnowledgeBase | undefined
         skills: SkillCatalogue | undefined
         scriptRunner: ScriptRunner | undefined
+        middleware: readonly Middleware[]
+        approve: ((request: ApprovalRequest) => Promise<boolean>) | undefined
     }) {
         this.id = init.loaded.manifest.id
         this.manifest = init.loaded.manifest
@@ -349,6 +375,7 @@ export class Agent {
         this.knowledge = init.knowledge
         this.skills = init.skills
         this.#scriptRunner = init.scriptRunner
+        this.#middleware = init.middleware
 
         const memory = init.loaded.manifest.memory
         if (memory === undefined) {
@@ -373,6 +400,29 @@ export class Agent {
 
         this.#manifestPath = init.loaded.path
         this.#manifestMtime = mtimeOf(init.loaded.path)
+
+        // A settable value nothing can satisfy is worse than one that does not exist: the manifest
+        // says "ask me", the runtime refuses instead, and the refusal's own wording blames the
+        // policy. `toolGatedAfterFirstUse` even recommends `confirm` as the remedy, so without this
+        // the fix a person is pointed at is one that cannot work for them.
+        //
+        // **Outside the `tools.size === 0` branch**, deliberately. It was written inside it first,
+        // where it could never fire for an agent with no tools pinned — which is exactly the agent
+        // most likely to be mid-setup and reading its own warnings. The setting is unreachable
+        // whether or not a catalogue exists; the catalogue only decides whether anything would have
+        // asked.
+        if (this.manifest.tools.untrusted.onMutate === "confirm" && init.approve === undefined) {
+            this.warnings = [
+                ...this.warnings,
+                {
+                    code: "confirm_without_approver",
+                    message:
+                        'tools.untrusted.onMutate is "confirm", and nothing here can ask anybody.',
+                    hint: 'A confirmable call is refused instead of asked when no approver is attached — the fail-closed direction, and not what this setting says. Run the agent from a surface that supplies one, add a tools.policy.allow rule naming the tool so no question is needed, or set onMutate to "refuse" so the manifest matches what happens.',
+                    field: "tools.untrusted.onMutate",
+                },
+            ]
+        }
 
         // Configuration, never inference. Reading the model id to pick a dialect would mean behaviour
         // changing silently when someone edits `model.main.id`, and a per-model difference nobody can
@@ -415,6 +465,7 @@ export class Agent {
                 // attached — absent for a schedule or a pipe, which is exactly when
                 // `onNoApprover` matters.
                 policy: this.manifest.tools.policy,
+                ...(init.approve === undefined ? {} : { approve: init.approve }),
             }
 
             // Said at load, where it can be fixed. Without it, an agent pinning `exec` runs one
@@ -541,6 +592,8 @@ export class Agent {
             knowledge,
             skills,
             scriptRunner: options.scriptRunner,
+            middleware: options.middleware ?? [],
+            approve: options.approve,
         })
     }
 
@@ -594,6 +647,7 @@ export class Agent {
 
         const result = await runTurn({
             agentId: this.id,
+            ...(this.#middleware.length === 0 ? {} : { middleware: this.#middleware }),
             sessionKey,
             turnId,
             input,

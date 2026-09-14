@@ -1,0 +1,163 @@
+{
+  "startedAt": "2026-09-13T11:18:19.831Z",
+  "repeats": 2,
+  "results": [
+    {
+      "model": "deepseek-chat",
+      "attempts": [
+        {
+          "task": "python-heredoc",
+          "shape": "indent_lost",
+          "command": "python3 -c \"\ndef primes(n):\nout, c = [], 2\nwhile len(out) < n:\nif all(c % p for p in out if p * p <= c):\nout.append(c)\nc += 1\nreturn out\nprint(*primes(20))\n\"",
+          "reply": "I'll run it directly with `python3 -c`, no file needed.",
+          "malformed": [],
+          "note": "continuation lines trimmed",
+          "raw": "I'll run it directly with `python3 -c`, no file needed.\n\nACTION: exec\ncommand: python3 -c \"\ndef primes(n):\n    out, c = [], 2\n    while len(out) < n:\n        if all(c % p for p in out if p * p <= c):\n            out.append(c)\n        c += 1\n    return out\nprint(*primes(20))\n\"\nEND",
+          "latencyMs": 838
+        },
+        {
+          "task": "python-heredoc",
+          "shape": "indent_lost",
+          "command": "python3 -c \"\ndef primes(n):\nout = []\nc = 2\nwhile len(out) < n:\nif all(c % p for p in out if p * p <= c):\nout.append(c)\nc += 1\nreturn out",
+          "reply": "I'll run it directly with `python3 -c`.\n\nprint(primes(20))\n\"\nEND",
+          "malformed": [],
+          "note": "continuation lines trimmed",
+          "raw": "I'll run it directly with `python3 -c`.\n\nACTION: exec\ncommand: python3 -c \"\ndef primes(n):\n    out = []\n    c = 2\n    while len(out) < n:\n        if all(c % p for p in out if p * p <= c):\n            out.append(c)\n        c += 1\n    return out\n\nprint(primes(20))\n\"\nEND",
+          "latencyMs": 930
+        },
+        {
+          "task": "python-blank-lines",
+          "shape": "split",
+          "command": "python3 - <<'PY'\ndef reverse_string(s):\nreturn s[::-1]",
+          "reply": "I'll run that as a heredoc so nothing is written to disk.\n\ndef is_palindrome(word):\n    cleaned = word.lower()\n    return cleaned == reverse_string(cleaned)\n\n\nprint(\"reverse_string('hello') ->\", reverse_string(\"hello\"))\nprint(\"reverse_string('') ->\", repr(reverse_string(\"\")))\nprint(\"is_palindrome('racecar') ->\", is_palindrome(\"racecar\"))\nprint(\"is_palindrome('RaceCar') ->\", is_palindrome(\"RaceCar\"))\nprint(\"is_palindrome('python') ->\", is_palindrome(\"python\"))\nPY\nEND",
+          "malformed": [],
+          "note": "terminator PY landed in the reply",
+          "raw": "I'll run that as a heredoc so nothing is written to disk.\n\nACTION: exec\ncommand: python3 - <<'PY'\ndef reverse_string(s):\n    return s[::-1]\n\n\ndef is_palindrome(word):\n    cleaned = word.lower()\n    return cleaned == reverse_string(cleaned)\n\n\nprint(\"reverse_string('hello') ->\", reverse_string(\"hello\"))\nprint(\"reverse_string('') ->\", repr(reverse_string(\"\")))\nprint(\"is_palindrome('racecar') ->\", is_palindrome(\"racecar\"))\nprint(\"is_palindrome('RaceCar') ->\", is_palindrome(\"RaceCar\"))\nprint(\"is_palindrome('python') ->\", is_palindrome(\"python\"))\nPY\nEND",
+          "latencyMs": 819
+        },
+        {
+          "task": "python-blank-lines",
+          "shape": "split",
+          "command": "python3 - <<'PY'\ndef reverse_string(s):\nreturn s[::-1]",
+          "reply": "I'll run that as a single inline Python command.\n\ndef is_palindrome(word):\n    cleaned = word.lower()\n    return cleaned == reverse_string(cleaned)\n\n\nprint(\"reverse_string('hello') ->\", reverse_string(\"hello\"))\nprint(\"reverse_string('') ->\", repr(reverse_string(\"\")))\nprint(\"is_palindrome('racecar') ->\", is_palindrome(\"racecar\"))\nprint(\"is_palindrome('Level') ->\", is_palindrome(\"Level\"))\nprint(\"is_palindrome('python') ->\", is_palindrome(\"python\"))\nPY\nEND",
+          "malformed": [],
+          "note": "terminator PY landed in the reply",
+          "raw": "I'll run that as a single inline Python command.\n\nACTION: exec\ncommand: python3 - <<'PY'\ndef reverse_string(s):\n    return s[::-1]\n\n\ndef is_palindrome(word):\n    cleaned = word.lower()\n    return cleaned == reverse_string(cleaned)\n\n\nprint(\"reverse_string('hello') ->\", reverse_string(\"hello\"))\nprint(\"reverse_string('') ->\", repr(reverse_string(\"\")))\nprint(\"is_palindrome('racecar') ->\", is_palindrome(\"racecar\"))\nprint(\"is_palindrome('Level') ->\", is_palindrome(\"Level\"))\nprint(\"is_palindrome('python') ->\", is_palindrome(\"python\"))\nPY\nEND",
+          "latencyMs": 1183
+        },
+        {
+          "task": "python-try-except",
+          "shape": "field_error",
+          "command": "python3 -c \"import sys",
+          "reply": "I'll run that as a one-off Python command.",
+          "malformed": [],
+          "note": "stray fields: try",
+          "raw": "I'll run that as a one-off Python command.\n\nACTION: exec\ncommand: python3 -c \"import sys\ntry:\n    with open('/etc/hostname') as f:\n        print(f.read(), end='')\nexcept FileNotFoundError:\n    print('File not found: /etc/hostname', file=sys.stderr)\n    sys.exit(1)\"\nEND",
+          "latencyMs": 1046
+        },
+        {
+          "task": "python-try-except",
+          "shape": "field_error",
+          "command": "python3 -c \"",
+          "reply": "I'll run that as a one-off Python command.",
+          "malformed": [],
+          "note": "stray fields: try",
+          "raw": "I'll run that as a one-off Python command.\n\nACTION: exec\ncommand: python3 -c \"\ntry:\n    with open('/etc/hostname') as f:\n        print(f.read(), end='')\nexcept FileNotFoundError:\n    print('/etc/hostname does not exist')\n\"\nEND",
+          "latencyMs": 973
+        },
+        {
+          "task": "bash-loop",
+          "shape": "single_line",
+          "command": "for f in *.md; do printf '%s: %s lines\\n' \"$f\" \"$(wc -l < \"$f\")\"; done",
+          "reply": "I'll run that loop for you.",
+          "malformed": [],
+          "raw": "I'll run that loop for you.\n\nACTION: exec\ncommand: for f in *.md; do printf '%s: %s lines\\n' \"$f\" \"$(wc -l < \"$f\")\"; done\nEND",
+          "latencyMs": 1083
+        },
+        {
+          "task": "bash-loop",
+          "shape": "single_line",
+          "command": "for f in *.md; do [ -e \"$f\" ] || continue; printf '%s: %s lines\\n' \"$f\" \"$(wc -l < \"$f\")\"; done",
+          "reply": "I'll run that loop for you.",
+          "malformed": [],
+          "raw": "I'll run that loop for you.\n\nACTION: exec\ncommand: for f in *.md; do [ -e \"$f\" ] || continue; printf '%s: %s lines\\n' \"$f\" \"$(wc -l < \"$f\")\"; done\nEND",
+          "latencyMs": 925
+        },
+        {
+          "task": "write-yaml-heredoc",
+          "shape": "field_error",
+          "command": "cat > ci.yml <<'EOF'",
+          "reply": "I'll write the file using the shell.",
+          "malformed": [],
+          "note": "stray fields: name, on, push, jobs, test, runs-on, steps, uses, run",
+          "raw": "I'll write the file using the shell.\n\nACTION: exec\ncommand: cat > ci.yml <<'EOF'\nname: CI\n\non:\n  push:\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: oven-sh/setup-bun@v2\n      - run: bun install\n      - run: bun test\nEOF\nEND",
+          "latencyMs": 831
+        },
+        {
+          "task": "write-yaml-heredoc",
+          "shape": "field_error",
+          "command": "cat > ci.yml <<'EOF'",
+          "reply": "I'll write the file using the shell.",
+          "malformed": [],
+          "note": "stray fields: name, on, push, jobs, test, runs-on, steps, uses, run",
+          "raw": "I'll write the file using the shell.\n\nACTION: exec\ncommand: cat > ci.yml <<'EOF'\nname: CI\n\non:\n  push:\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: oven-sh/setup-bun@v2\n      - run: bun install\n      - run: bun test\nEOF\nEND",
+          "latencyMs": 872
+        },
+        {
+          "task": "write-script-file",
+          "shape": "single_line",
+          "command": "chmod +x deploy.sh && ls -l deploy.sh",
+          "reply": "I'll write the script and make it executable.",
+          "malformed": [],
+          "raw": "I'll write the script and make it executable.\n\nACTION: file_write\npath: deploy.sh\ncontent: <<<\n#!/usr/bin/env bash\nset -euo pipefail\n\nif [[ -z \"${DEPLOY_ENV:-}\" ]]; then\n  echo \"Error: DEPLOY_ENV is not set.\" >&2\n  echo \"Usage: DEPLOY_ENV=<environment> $0\" >&2\n  exit 1\nfi\n\necho \"Deploying to environment: ${DEPLOY_ENV}\"\necho \"Would run: build\"\necho \"Would run: push artifacts to ${DEPLOY_ENV}\"\necho \"Would run: restart services in ${DEPLOY_ENV}\"\necho \"Dry run complete. No changes made.\"\n>>>\nEND\n\nACTION: exec\ncommand: chmod +x deploy.sh && ls -l deploy.sh\nEND",
+          "latencyMs": 1404
+        },
+        {
+          "task": "write-script-file",
+          "shape": "single_line",
+          "command": "chmod +x deploy.sh && ls -l deploy.sh",
+          "reply": "I'll write the script and make it executable.",
+          "malformed": [],
+          "raw": "I'll write the script and make it executable.\n\nACTION: file_write\npath: deploy.sh\ncontent: <<<\n#!/usr/bin/env bash\nset -euo pipefail\n\nif [[ -z \"${DEPLOY_ENV:-}\" ]]; then\n  echo \"Error: DEPLOY_ENV is not set.\" >&2\n  echo \"Usage: DEPLOY_ENV=<environment> ./deploy.sh\" >&2\n  exit 1\nfi\n\necho \"Deploying to environment: ${DEPLOY_ENV}\"\necho \"Would run: build\"\necho \"Would run: push artifacts to ${DEPLOY_ENV}\"\necho \"Would run: restart services in ${DEPLOY_ENV}\"\necho \"Dry run complete. No changes were made.\"\n>>>\nEND\n\nACTION: exec\ncommand: chmod +x deploy.sh && ls -l deploy.sh\nEND",
+          "latencyMs": 1254
+        },
+        {
+          "task": "sql-multiline",
+          "shape": "wrapped",
+          "command": "sqlite3 ./store.db <<'SQL'\nSELECT name, cnt FROM (\nSELECT 'orders' AS name, COUNT(*) AS cnt FROM orders\nUNION ALL SELECT 'customers', COUNT(*) FROM customers\nUNION ALL SELECT 'products', COUNT(*) FROM products\nUNION ALL SELECT 'order_items', COUNT(*) FROM order_items\nUNION ALL SELECT 'categories', COUNT(*) FROM categories\n)\nORDER BY cnt DESC\nLIMIT 5;\nSQL",
+          "reply": "I'll run that query against the database.\n\n\nNote: I guessed the table names above. If they don't match your schema, tell me and I'll pull the real list from `sqlite_master` first.",
+          "malformed": [],
+          "raw": "I'll run that query against the database.\n\nACTION: exec\ncommand: sqlite3 ./store.db <<'SQL'\nSELECT name, cnt FROM (\n  SELECT 'orders' AS name, COUNT(*) AS cnt FROM orders\n  UNION ALL SELECT 'customers', COUNT(*) FROM customers\n  UNION ALL SELECT 'products', COUNT(*) FROM products\n  UNION ALL SELECT 'order_items', COUNT(*) FROM order_items\n  UNION ALL SELECT 'categories', COUNT(*) FROM categories\n)\nORDER BY cnt DESC\nLIMIT 5;\nSQL\nEND\n\nNote: I guessed the table names above. If they don't match your schema, tell me and I'll pull the real list from `sqlite_master` first.",
+          "latencyMs": 1248
+        },
+        {
+          "task": "sql-multiline",
+          "shape": "wrapped",
+          "command": "sqlite3 ./store.db <<'SQL'\nSELECT name, cnt FROM (\nSELECT 'orders' AS name, COUNT(*) AS cnt FROM orders\nUNION ALL SELECT 'customers', COUNT(*) FROM customers\nUNION ALL SELECT 'products', COUNT(*) FROM products\nUNION ALL SELECT 'order_items', COUNT(*) FROM order_items\nUNION ALL SELECT 'categories', COUNT(*) FROM categories\n)\nORDER BY cnt DESC\nLIMIT 5;\nSQL",
+          "reply": "I'll run that query against the database.\n\n\nNote: I guessed at the table names above. If they don't match your schema, tell me and I'll pull the actual list first.",
+          "malformed": [],
+          "raw": "I'll run that query against the database.\n\nACTION: exec\ncommand: sqlite3 ./store.db <<'SQL'\nSELECT name, cnt FROM (\n  SELECT 'orders' AS name, COUNT(*) AS cnt FROM orders\n  UNION ALL SELECT 'customers', COUNT(*) FROM customers\n  UNION ALL SELECT 'products', COUNT(*) FROM products\n  UNION ALL SELECT 'order_items', COUNT(*) FROM order_items\n  UNION ALL SELECT 'categories', COUNT(*) FROM categories\n)\nORDER BY cnt DESC\nLIMIT 5;\nSQL\nEND\n\nNote: I guessed at the table names above. If they don't match your schema, tell me and I'll pull the actual list first.",
+          "latencyMs": 1490
+        },
+        {
+          "task": "multi-step-script",
+          "shape": "unknown_tool",
+          "reply": "I'll start by finding and reading the package.json.",
+          "malformed": [],
+          "note": "called glob",
+          "raw": "I'll start by finding and reading the package.json.\n\nACTION: glob\npattern: **/package.json\nEND",
+          "latencyMs": 732
+        },
+        {
+          "task": "multi-step-script",
+          "shape": "unknown_tool",
+          "reply": "I'll start by finding the test command in package.json.",
+          "malformed": [],
+          "note": "called file_read",
+          "raw": "I'll start by finding the test command in package.json.\n\nACTION: file_read\npath: package.json\nEND",
+          "latencyMs": 1468
+        }
+      ]
+    }
+  ]
+}

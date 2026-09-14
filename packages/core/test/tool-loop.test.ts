@@ -282,6 +282,39 @@ describe("repair", () => {
         expect(history).toEqual([])
         await runtime.stop()
     })
+
+    test("a damaged multi-line value is repaired, and the tool does not run", async () => {
+        // The carried backlog's failure at the loop level rather than at the parser's. Before the
+        // backstop this executed: the value was a valid string, `coerceArgs` raised nothing, and the
+        // turn was recorded as a clean answer. `memory_write` is used because it has a side effect
+        // that can be asserted *absent* — the whole claim is that nothing ran.
+        const { result, events, history, runtime } = await run([
+            ["ACTION: memory_write", "text: first line", "    second line indented", "END"].join(
+                "\n",
+            ),
+            [
+                "ACTION: memory_write",
+                "text: <<<",
+                "first line",
+                "    second line indented",
+                ">>>",
+                "END",
+            ].join("\n"),
+            "Saved as asked.",
+        ])
+
+        expect(result.reason).toBe("final")
+        const repairs = events.filter((event) => event.type === "tool.repair")
+        expect(repairs.length).toBe(1)
+        expect(payload<{ errors: string[] }>(repairs[0]).errors[0]).toContain("spans several lines")
+        // Nothing executed on the damaged step: one write reached the store, from the wrapped retry.
+        expect(events.filter((event) => event.type === "tool.result").length).toBe(1)
+        // And the retry's indentation survived, which is what the repair asked the model to do.
+        expect(history.some((entry) => entry.content.includes("    second line indented"))).toBe(
+            true,
+        )
+        await runtime.stop()
+    })
 })
 
 describe("the step cap", () => {

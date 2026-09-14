@@ -12,7 +12,7 @@
  * upstream has to remember to catch one.
  */
 
-import { assembleContext, slotReport } from "../context/assemble.ts"
+import { assembleContext, reassemble, slotReport } from "../context/assemble.ts"
 import type { ContextBlock } from "../context/blocks.ts"
 import { SLOT } from "../context/blocks.ts"
 import { type Calibration, comparableEstimate, observe, UNCALIBRATED } from "../context/budget.ts"
@@ -30,6 +30,7 @@ import type { EventBus } from "../events/bus.ts"
 import type { TurnEndReason } from "../events/types.ts"
 import type { ChatMessage, ToolDefinition } from "../model/provider.ts"
 import { type ResolvedRole, requestParamsFor } from "../model/roles.ts"
+import { compose, type Middleware } from "../plugins/middleware.ts"
 import type { ParsedOutput, StepOutput, ToolDialect } from "../tools/dialect/dialect.ts"
 import { nativeWireTokens } from "../tools/dialect/native.ts"
 import { type ApprovalRequest, executeIntents } from "../tools/execute.ts"
@@ -177,6 +178,14 @@ export interface TurnInput {
     readonly phases?: TurnPhases
     readonly tools?: ToolRuntime
     readonly bus: EventBus
+    /**
+     * Plugin middleware for this agent, in the order it was registered.
+     *
+     * Threaded rather than reached for, because a turn is the unit a middleware wraps and the turn
+     * has to be able to run without one — an embedder with no plugins passes nothing and every
+     * `compose` call returns the core function unchanged.
+     */
+    readonly middleware?: readonly Middleware[]
     /** Where the turn came from, for the `turn.start` event: `repl`, `api`, `schedule`, … */
     readonly source: string
     /** Caller's cancellation. A disconnect must never be wired to this. */
@@ -324,7 +333,75 @@ function abortDetail(
     return undefined
 }
 
+/**
+ * Run a turn, with any `wrapTurn` middleware around it.
+ *
+ * A thin wrapper rather than a restructured loop: the body below declares its state up front and
+ * threading a closure through it would be a large change to the most load-bearing function here for
+ * a hook most agents do not use. `compose` returns the core unchanged when nothing implements
+ * `wrapTurn`, so the common path is one array filter.
+ *
+ * **The turn id is generated here and passed down**, or the middleware's context and the turn's own
+ * events would name two different turns — which is the kind of defect that only shows up when
+ * somebody tries to correlate them months later.
+ *
+ * **The signal handed to a middleware is the caller's, not the turn's.** `wrapTurn` wraps the turn
+ * *including* its timeout, so exposing the linked signal would tell a middleware the work was
+ * cancelled at the moment the thing it is wrapping timed out — true of the inside, wrong for the
+ * outside.
+ *
+ * A middleware may replace `text`, `reason` and `steps`, and may short-circuit by returning them
+ * without calling `next()`. It cannot fabricate the rest of a `TurnResult`: a short-circuited turn
+ * ran nothing, so it appends nothing and spent nothing, and letting a plugin claim otherwise would
+ * put invented token counts in the store.
+ */
 export async function runTurn(input: TurnInput): Promise<TurnResult> {
+    const applicable = (input.middleware ?? []).filter(
+        (entry) => typeof entry.wrapTurn === "function",
+    )
+    if (applicable.length === 0) return runTurnCore(input)
+
+    const turnId = input.turnId ?? newTurnId()
+    const started = performance.now()
+    let core: TurnResult | undefined
+
+    const run = compose(applicable, "wrapTurn", async () => {
+        core = await runTurnCore({ ...input, turnId })
+        return { text: core.text, reason: core.reason, steps: core.steps }
+    })
+
+    const outcome = await run({
+        agentId: input.agentId,
+        sessionKey: input.sessionKey,
+        turnId,
+        input: input.input,
+        source: input.source,
+        signal: input.signal ?? new AbortController().signal,
+    })
+
+    if (core === undefined) {
+        // Short-circuited. Everything the loop would have recorded is genuinely absent rather than
+        // zeroed by convention — no messages were appended because none were produced.
+        return {
+            turnId,
+            text: outcome.text,
+            reasoning: "",
+            reason: outcome.reason as TurnResult["reason"],
+            steps: outcome.steps,
+            tokens: { prompt: 0, output: 0 },
+            durationMs: Math.round(performance.now() - started),
+            appended: [],
+        }
+    }
+    return {
+        ...core,
+        text: outcome.text,
+        reason: outcome.reason as TurnResult["reason"],
+        steps: outcome.steps,
+    }
+}
+
+async function runTurnCore(input: TurnInput): Promise<TurnResult> {
     const turnId = input.turnId ?? newTurnId()
     const context = { agentId: input.agentId, sessionKey: input.sessionKey, turnId }
     const started = performance.now()
@@ -453,6 +530,10 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
             views.set(phase, view)
             return view
         }
+
+        // Read once. Every `compose` below returns its core function unchanged when this is empty,
+        // so an agent with no plugins pays one array filter per step and no closures at all.
+        const middleware = input.middleware ?? []
 
         // Reassigned by `setPhase` below — the whole point is that a phase change takes effect for the
         // rest of *this* turn. Biome's linter would rather this were const; it cannot be.
@@ -664,15 +745,54 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
             const stepContext = { ...context, stepId: newStepId() }
             const params = requestParamsFor(input.role, input.window)
 
-            const step = await runStep({
-                role: input.role,
-                provider: input.role.provider,
-                messages: assembled.messages,
-                params,
-                promptTokens: assembled.totalTokens,
-                ...(tools?.requestTools === undefined ? {} : { tools: tools.requestTools }),
-                bus: input.bus,
-                context: stepContext,
+            // The last thing that happens to the prompt before it is sent, which is the only honest
+            // place for it: applied after compaction, so a middleware sees the blocks the model will
+            // actually receive rather than a draft the ladder is about to rewrite. `reassemble`
+            // re-derives `messages` and `totalTokens` from whatever comes back, and recomputes each
+            // block's token count, so an edit cannot leave the prompt and the accounting disagreeing.
+            if (middleware.length > 0) {
+                const wrapContext = compose(middleware, "wrapContext", async () => assembled.blocks)
+                const blocks = await wrapContext({
+                    agentId: input.agentId,
+                    sessionKey: input.sessionKey,
+                    turnId,
+                    step: steps,
+                    signal: link.signal,
+                })
+                if (blocks !== assembled.blocks) {
+                    assembled = reassemble(
+                        blocks,
+                        assembled.promptBudget,
+                        assembled.droppedMessages,
+                    )
+                }
+            }
+
+            const callStep = compose(middleware, "wrapModelCall", () =>
+                runStep({
+                    role: input.role,
+                    provider: input.role.provider,
+                    messages: assembled.messages,
+                    params,
+                    promptTokens: assembled.totalTokens,
+                    ...(tools?.requestTools === undefined ? {} : { tools: tools.requestTools }),
+                    bus: input.bus,
+                    context: stepContext,
+                    signal: link.signal,
+                }),
+            )
+            const step = await callStep({
+                agentId: input.agentId,
+                sessionKey: input.sessionKey,
+                turnId,
+                step: steps,
+                role: input.role.role,
+                model: input.role.config.id,
+                request: {
+                    model: input.role.config.id,
+                    messages: assembled.messages,
+                    ...(tools?.requestTools === undefined ? {} : { tools: tools.requestTools }),
+                },
                 signal: link.signal,
             })
 
@@ -864,6 +984,7 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
                     : await executeIntents({
                           registry: tools.registry,
                           intents: parsed.intents,
+                          ...(middleware.length === 0 ? {} : { middleware }),
                           context: {
                               agentId: input.agentId,
                               sessionKey: input.sessionKey,

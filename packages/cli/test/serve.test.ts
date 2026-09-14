@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -152,4 +152,48 @@ describe("serve shuts down gracefully", () => {
             rmSync(dir, { recursive: true, force: true })
         }
     }, 60_000)
+})
+
+describe("the signal handlers are registered before the socket binds", () => {
+    /**
+     * A structural assertion, because the timing one could not fail.
+     *
+     * The bug: `claimSignals()` and `waitForSignal()` sat *after* the banner, so between
+     * "serving on …" reaching stdout and the handlers existing there was a window with no handler
+     * at all — and in it SIGINT takes its default action and kills the process outright. Exit code
+     * `null`, no outbox flush, no lease release, none of the backgrounded `exec` children reaped.
+     * CI caught it on a loaded two-core runner as `Expected: 0, Received: null`; an orchestrator
+     * restarting a container promptly sends its signal into exactly that gap.
+     *
+     * The obvious test — signal immediately and assert a clean exit — **passes with the fix
+     * reverted** on any machine fast enough to close the window first, which is every development
+     * machine and not the CI runner. A guard that cannot fail is worse than no guard, so the
+     * ordering is asserted where it is actually decided: in the source.
+     *
+     * The window is narrowed rather than eliminated, and that is worth stating. Anything before
+     * `Runtime.create` returns is still unprotected; what this pins is that nothing *else* gets
+     * inserted between the handlers and the bind.
+     */
+    const SOURCE = readFileSync(join(import.meta.dirname, "..", "src", "serve.ts"), "utf8")
+
+    test("claimSignals and waitForSignal both precede the serve() call", () => {
+        const claim = SOURCE.indexOf("claimSignals()")
+        const register = SOURCE.indexOf("waitForSignal()")
+        const bind = SOURCE.indexOf("running = await serve({")
+
+        expect(claim).toBeGreaterThan(-1)
+        expect(register).toBeGreaterThan(-1)
+        expect(bind).toBeGreaterThan(-1)
+        expect({ claimBeforeBind: claim < bind, registerBeforeBind: register < bind }).toEqual({
+            claimBeforeBind: true,
+            registerBeforeBind: true,
+        })
+    })
+
+    test("the promise is awaited later, not created at the await", () => {
+        // Creating it at the `await` is the bug in a different spelling: the handlers would be
+        // registered at that moment rather than early. The hoisted form has to be a named promise.
+        expect(SOURCE).toContain("const stopRequested = waitForSignal()")
+        expect(SOURCE).toContain("await stopRequested")
+    })
 })

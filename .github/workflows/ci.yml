@@ -57,6 +57,64 @@ jobs:
       - name: boot budget
         run: bun run bench:boot -- --ci
 
+  # The image, built and measured where a daemon exists.
+  #
+  # A blocking job rather than `continue-on-error`, unlike the Node leg: the Dockerfile is a shipped
+  # artifact and a broken one is broken for everybody who reaches for it, where a Node divergence is
+  # information about a soft goal. It is also the only place this gets verified at all — the
+  # Dockerfile was written on a machine with no Docker daemon running, so until this job runs, the
+  # size and start-to-ready figures Phase 11 asks for are unmeasured rather than met.
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: build image
+        run: docker build -f docker/Dockerfile -t dispach:ci .
+
+      # Phase 11's target. Reported either way, because "how big is it" is a question somebody asks
+      # long before it fails a threshold.
+      - name: image size
+        run: |
+          bytes=$(docker image inspect dispach:ci --format '{{.Size}}')
+          mb=$(( bytes / 1000000 ))
+          echo "image is ${mb} MB"
+          if [ "$mb" -gt 150 ]; then
+            echo "::error::image is ${mb} MB, over the 150 MB target"
+            exit 1
+          fi
+
+      # Start to ready, the number the container claim is actually about. `minimal` needs only a
+      # key-shaped string to load — nothing here calls an endpoint.
+      #
+      # No command override: the point is to exercise the image's own CMD, including the
+      # `--host 0.0.0.0` without which a published port reaches nothing. The token is required by
+      # that bind and is not a secret — the container is destroyed four lines later.
+      - name: container start to ready
+        run: |
+          docker run -d --name probe -p 7420:7420 \
+            -e MODEL_ID=gpt-4o-mini \
+            -e MODEL_BASE_URL=https://api.openai.com/v1 \
+            -e MODEL_API_KEY=ci-not-a-real-key \
+            -e DISPACH_API_TOKEN=ci-not-a-real-token \
+            -v "$PWD/examples/minimal:/agent" \
+            dispach:ci
+          start=$(date +%s%N)
+          for _ in $(seq 1 100); do
+            if curl -sf localhost:7420/v1/ready >/dev/null; then break; fi
+            sleep 0.1
+          done
+          end=$(date +%s%N)
+          ms=$(( (end - start) / 1000000 ))
+          echo "start to ready: ${ms} ms"
+          curl -sf localhost:7420/v1/ready || { docker logs probe; exit 1; }
+          if [ "$ms" -gt 2000 ]; then
+            echo "::error::start to ready was ${ms} ms, over the 2000 ms target"
+            docker logs probe
+            exit 1
+          fi
+          docker rm -f probe
+
   # Decision 2.2 — Node is a soft goal, tested but never a blocker. A red leg here is information,
   # not a merge gate. The floor is 24 (decision 13.5): 22 bundles SQLite 3.51.3, whose planner turns
   # every memory query into a per-row probe of the FTS table — 260 ms against 0.7 ms. That is pinned

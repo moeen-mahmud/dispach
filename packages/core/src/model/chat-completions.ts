@@ -492,7 +492,16 @@ export function createChatCompletionsProvider(config: ChatCompletionsConfig): Mo
                     })
                     continue
                 }
-                throw modelHttpError(candidate.status, text, url)
+                // The header travels with the error so a middleware retry honours the endpoint's
+                // own instruction rather than guessing a backoff. The transport already reads it for
+                // its own retry a few lines below; carrying it out is what lets the two agree.
+                const after = retryAfterMs(candidate.headers.get("retry-after"))
+                throw modelHttpError(
+                    candidate.status,
+                    text,
+                    url,
+                    after === undefined ? undefined : after / 1000,
+                )
             }
 
             // Drain so the connection can be reused rather than left half-read.

@@ -281,6 +281,11 @@ export interface AgentsOptions {
     readonly json?: boolean
 }
 
+export interface PluginsOptions {
+    readonly manifestPath: string
+    readonly json?: boolean
+}
+
 // ─── component props ─────────────────────────────────────────────────────────────────────
 
 export interface AppProps {

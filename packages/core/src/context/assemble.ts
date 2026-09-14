@@ -373,6 +373,42 @@ export function assembleContext(input: AssembleInput): AssembledContext {
     }
 }
 
+/**
+ * Rebuild the derived halves of an `AssembledContext` from blocks a middleware returned.
+ *
+ * `messages` and `totalTokens` are pure functions of `blocks`, which is what makes `wrapContext`
+ * expressible at all: a middleware returns blocks and core re-derives the rest, so a redaction cannot
+ * leave the prompt and the accounting describing different things.
+ *
+ * **Every block's `tokens` is recomputed from its content, not trusted.** A middleware that rewrites
+ * content and leaves the count alone is the obvious mistake, and the consequence is invisible: the
+ * budget, the pressure gauge and every compaction decision downstream would be arithmetic on a number
+ * that stopped being true. Recomputing costs one estimate per block on a path that already estimates
+ * every block once.
+ *
+ * `promptBudget` and `droppedMessages` are carried through unchanged. They are facts about the
+ * assembly that produced these blocks — what the budget *was*, what was already dropped to meet it —
+ * and a middleware editing content does not retroactively change either.
+ */
+export function reassemble(
+    blocks: readonly ContextBlock[],
+    promptBudget: number,
+    droppedMessages: number,
+): AssembledContext {
+    const counted = blocks.map((b) =>
+        b.tokens === estimateMessageTokens(b.content)
+            ? b
+            : { ...b, tokens: estimateMessageTokens(b.content) },
+    )
+    return {
+        blocks: counted,
+        messages: counted.map((b) => b.message ?? { role: b.role, content: b.content }),
+        totalTokens: counted.reduce((sum, b) => sum + b.tokens, 0),
+        promptBudget,
+        droppedMessages,
+    }
+}
+
 /** Slot-level report for `GET /v1/agents/:id/context` and the `context.assembled` event. */
 export function slotReport(
     blocks: readonly ContextBlock[],

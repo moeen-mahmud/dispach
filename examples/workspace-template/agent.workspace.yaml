@@ -73,7 +73,7 @@ context:
 
   # Rule-count guard. Counts imperatives across static + reminder and fails the load if
   # the count exceeds what the reliability target permits at the configured per-rule rate.
-  # Measure perRuleSuccess on YOUR model with `dispach eval rules` — don't guess.
+  # Measure perRuleSuccess on YOUR model with `bun run eval:rules` — don't guess.
   rules:
     perRuleSuccess: 0.90
     reliabilityTarget: 0.80

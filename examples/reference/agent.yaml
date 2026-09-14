@@ -6,7 +6,6 @@
 #
 # The commenting is not cosmetic. A section this build does not implement is **refused at load**,
 # naming the phase, rather than parsed and ignored: a runtime that silently drops configuration
-# lies about what it is doing. Uncomment `plugins` today and the load fails on purpose.
 #
 # `docs/02-SPEC-MANIFEST.md` is the binding reference. This file is the worked copy.
 
@@ -524,11 +523,25 @@ schedules:
     # very different amounts of money, and this is how that is said without a second endpoint.
     role: cheap
 
-# ── Phase 9: plugins ──────────────────────────────────────────────────────────────────────
-# Trusted in-process code, documented as such. Resolved at boot from this list; never installed
-# at runtime.
+# ── plugins ───────────────────────────────────────────────────────────────────────────────
+# Trusted in-process code, documented as such — `permissions` is advisory vocabulary in v1,
+# recorded and surfaced by `dispach plugins`, and enforced by nothing. Install plugins you trust,
+# the same way you treat any npm dependency.
 #
-# plugins:
-#   - "@dispach/channel-telegram"
+# Resolved at boot: a name in this list is looked up in the binary's built-in registry first and
+# imported only if it is not there; a relative path is resolved against *this file's* directory.
+# Nothing is ever installed while the process runs.
+#
+# Naming a plugin makes a capability reachable; it does not grant it. `@dispach/tools-system` here
+# and nothing in `tools.pinned` gives the agent no shell — what it gives is a runtime that can
+# *tell* the model the shell exists, which is the difference between "I can't do that" and "I can't
+# do that yet, and here is what would let me".
+#
+# Load order is this order. A later plugin registering the same id wins, which is how a third-party
+# plugin replaces a first-party one.
+plugins:
+  - "@dispach/tools-system"
+  - "@dispach/tools-web"
+  - "@dispach/channel-telegram"
 #   - spec: "./plugins/custom-metrics"
-#     config: { endpoint: "http://localhost:9090" }
+#     config: { endpoint: "http://localhost:9090" }   # validated against the plugin's own schema

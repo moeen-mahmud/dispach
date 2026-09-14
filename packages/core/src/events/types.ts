@@ -100,6 +100,27 @@ export interface EventDataMap {
     "agent.loaded": { tools: number; skills: number; schedules: number; model: string }
     "agent.error": ErrorDetail
     "agent.warning": ErrorDetail
+    /**
+     * One plugin registered, with what it cost and what it declared.
+     *
+     * `permissions` carries the *kinds* rather than the full entries: the event's job is to make
+     * visible that a plugin asked for network and env access at all, and the detail belongs in
+     * `plugins` output where somebody is actually reading it. Advisory in v1 either way (7.5).
+     */
+    "plugin.loaded": {
+        name: string
+        version: string
+        setupMs: number
+        permissions: string[]
+    }
+    /**
+     * A `setup` over its budget.
+     *
+     * Reported, never refused. `setup` registers capabilities and does no work, so a slow one is
+     * usually doing work that belonged in a factory — and naming it is what makes that visible,
+     * where a refusal would turn a performance smell into an agent that will not start.
+     */
+    "plugin.slow": { name: string; setupMs: number }
     "turn.start": { source: string; inputTokens: number }
     "context.assembled": { slots: ContextSlotReport[]; total: number }
     /**
