@@ -118,6 +118,24 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         mode: asDaemon ? "daemon" : "terminal",
     })
 
+    // Claimed and *registered* before the socket binds, and that ordering is the bug this fixes.
+    //
+    // Both used to sit after the banner. So between "serving on …" reaching stdout and
+    // `waitForSignal()` registering its handlers there was a window with **no handler at all** — and
+    // in it, SIGINT takes its default action and kills the process outright: exit code `null`, no
+    // outbox flush, no lease release, and none of the backgrounded `exec` children reaped.
+    //
+    // Not a theoretical window. CI caught it as `Expected: 0, Received: null` on a loaded two-core
+    // runner, where the work between the two points takes long enough to lose the race — and the
+    // real-world shape is worse than a red test: an orchestrator that restarts a container promptly
+    // sends its signal into exactly that gap, which is the failure `claimSignals` was introduced to
+    // prevent in the first place.
+    //
+    // The promise is created here and awaited far below. A signal arriving in between resolves it
+    // immediately, so an early stop is honoured rather than missed.
+    claimSignals()
+    const stopRequested = waitForSignal()
+
     let running: Awaited<ReturnType<typeof serve>>
     try {
         running = await serve({
@@ -231,7 +249,6 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     //
     // `finish()` awaits `runTeardowns()`, so putting the shutdown here means the signal path waits
     // for it instead of racing it.
-    claimSignals()
     let stopped = false
     const shutdown = async () => {
         if (stopped) return
@@ -241,7 +258,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     }
     onExit(shutdown)
 
-    await waitForSignal()
+    await stopRequested
 
     process.stdout.write("stopping\n")
     await shutdown()

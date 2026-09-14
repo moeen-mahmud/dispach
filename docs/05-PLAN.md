@@ -3330,6 +3330,35 @@ notes rather than results, and are written here as such.
 
 ---
 
+## The signal race that had `main` red
+
+**Found 2026-09-14 by reading CI rather than by testing.** `main` had been failing since
+2026-09-02 on one test — `SIGINT runs the full shutdown and releases the lease`, `Expected: 0,
+Received: null` — and it passed locally every time, six runs in a row.
+
+`null` is the tell: the process was **killed by the signal** rather than exiting. In `serve.ts`,
+`claimSignals()` and `waitForSignal()` sat *after* the banner, so between `serving on …` reaching
+stdout and the handlers existing there was a window with no handler at all. SIGINT in that window
+takes its default action and kills the process outright — no outbox flush, no lease release, and
+none of the backgrounded `exec` children reaped. Exactly the failure `claimSignals` was introduced
+to prevent, one gap earlier.
+
+**Not just a flaky test.** An orchestrator restarting a container promptly sends its signal into
+that gap, and the test only caught it because a loaded two-core runner is slow enough to lose the
+race. Both calls are hoisted above the bind now; the promise is created early and awaited late, so
+a signal arriving in between resolves it rather than being missed.
+
+**The guard is structural, because the obvious test could not fail.** "Signal immediately and
+assert a clean exit" passes with the fix reverted on any machine fast enough to close the window
+first — which is every development machine and not the CI runner. So the ordering is asserted
+where it is decided, in the source. Verified red in both directions.
+
+The window is narrowed, not eliminated, and that is stated in the test: anything before
+`Runtime.create` returns is still unprotected. What is pinned is that nothing else gets inserted
+between the handlers and the bind.
+
+---
+
 ## Carried backlog
 
 Two findings that belong to no phase, recorded here so a session with no context still finds them.
