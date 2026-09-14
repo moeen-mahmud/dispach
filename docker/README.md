@@ -11,33 +11,52 @@ docker images dispach --format '{{.Size}}'            # Phase 11 target: under 1
 ```bash
 # Start → ready. The target is under 2 s including container overhead.
 docker run -d --name dispach-check -p 7420:7420 \
+  --env-file examples/minimal/.env \
+  -e DISPACH_API_TOKEN=pick-something \
   -v "$PWD/examples/minimal:/agent" -v dispach-state:/state dispach
 time (until curl -sf localhost:7420/v1/ready >/dev/null; do sleep 0.05; done)
 docker inspect --format '{{.State.Health.Status}}' dispach-check
 docker rm -f dispach-check
 ```
 
-`examples/minimal` needs `MODEL_API_KEY` and friends — pass them with `--env-file
-examples/minimal/.env`, or point `/agent` at any manifest whose keys you have.
+The token is not optional: the image binds `0.0.0.0` (a process on loopback inside a container is
+unreachable through a published port) and a non-loopback bind requires one by design.
 
-## What is unverified
+`/v1/ready` needs no token, which is the point — an orchestrator's probe cannot hold one. Anything
+else does:
 
-Every number above. No image has been built from this Dockerfile: the machine it was written on had
-no Docker daemon running, so image size, start-to-ready and the mounted-manifest path are all
-written and unmeasured.
+```bash
+curl -s -X POST localhost:7420/v1/agents/minimal/messages \
+  -H 'Authorization: Bearer pick-something' -H 'content-type: application/json' \
+  -d '{"text":"say hello"}'
+```
 
-Three things are the most likely to be wrong, in the order worth checking:
+## Measured
 
-1. **The workspace `bun install --frozen-lockfile` in a stage that has only the manifests.** Bun's
-   workspace resolution wants every workspace `package.json` present, which is why each is copied
-   individually — a missed one fails the install with a message about a missing workspace rather
-   than about the copy.
-2. **`--production` dropping something the runtime needs.** Checked rather than left on the list:
-   `ink` and `react` are in `packages/cli`'s `dependencies`, and only `@types/react` and
-   `ink-testing-library` are dev — so the lazy `import("ink")` survives. Worth re-checking if a
-   dependency ever moves, because `serve` never takes the rich path and a container would therefore
-   not notice.
-3. **The healthcheck's `bun -e`.** It exits non-zero on a non-2xx *and* on a connection refusal, so
-   a container that has not bound yet reads as unhealthy until `start-period` elapses. That is the
-   intended behaviour; what is worth confirming is that `start-period` is long enough on a cold
-   volume, where the measured 53 ms of in-process boot is not the number that matters.
+arm64 Docker Desktop, 2026-09-14:
+
+| | |
+| --- | --- |
+| image | **83 MB** (target: under 150 MB) |
+| start → `/v1/ready` | **147 ms** (target: under 2 s) |
+| healthcheck | healthy |
+| a real turn | round-tripped against DeepSeek through `POST /v1/agents/:id/messages` |
+| store | written to `/state` as uid 1000 |
+
+The CI `docker` job rebuilds and re-measures the first two on every push. One number is unverified
+and stays that way here: amd64. The image is not multi-arch (a Phase 11 non-goal), so what CI
+measures on `ubuntu-latest` is the amd64 figure and what is above is arm64.
+
+## Two things the first build found
+
+Both were wrong in the Dockerfile and invisible without a daemon, which is the argument for the CI
+job rather than for more careful reading.
+
+1. **`COPY tsconfig.json`** — there is no root `tsconfig.json`. Every package's tsconfig extends
+   `tsconfig.base.json`, and that is the only root config the build needs. `biome.json` was being
+   copied too and is not needed at all: it configures lint and format, neither of which an image
+   build runs.
+2. **`bun install` ran the root `prepare` script**, which is `husky`. In the production stage husky
+   is a devDependency that is not installed, so the install died with `husky: not found` and exit
+   127. Both installs pass `--ignore-scripts` now — a git-hooks installer has no business in an
+   image build, and there is no `.git` in the build context for it to act on.

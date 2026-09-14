@@ -33,9 +33,16 @@ COPY packages/channel-telegram/package.json ./packages/channel-telegram/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
 COPY packages/tools-web/package.json ./packages/tools-web/
-RUN bun install --frozen-lockfile
+# `--ignore-scripts` because the root `prepare` runs husky, which installs git hooks: it is a
+# devDependency the production stage does not have (`husky: not found`, exit 127) and there is no
+# `.git` in the build context for it to act on anyway. A lifecycle script has no business running
+# in an image build.
+RUN bun install --frozen-lockfile --ignore-scripts
 
-COPY tsconfig.json biome.json ./
+# `tsconfig.base.json`, which every package's tsconfig extends — there is no root `tsconfig.json`,
+# and naming one is how this failed first time. `biome.json` is deliberately not copied: it
+# configures lint and format, neither of which an image build runs.
+COPY tsconfig.base.json ./
 COPY scripts ./scripts
 COPY packages ./packages
 
@@ -60,7 +67,7 @@ COPY packages/channel-telegram/package.json ./packages/channel-telegram/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
 COPY packages/tools-web/package.json ./packages/tools-web/
-RUN bun install --frozen-lockfile --production
+RUN bun install --frozen-lockfile --production --ignore-scripts
 
 COPY --from=builder /build/packages/core/dist ./packages/core/dist
 COPY --from=builder /build/packages/cli/dist ./packages/cli/dist

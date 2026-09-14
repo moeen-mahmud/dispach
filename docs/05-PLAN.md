@@ -2492,18 +2492,20 @@ not from the terminal. Stated rather than implied: the warning fires for a CLI r
 
 **Acceptance**
 
-- [ ] Image under 150 MB — **written, unmeasured.** No daemon on the machine it was written on; the
-  `docker` CI job builds and measures it on the next push.
-- [ ] Container start → `/v1/ready` 200 under 2 s — same: the CI job times it.
+- [x] Image under 150 MB — **83 MB**, arm64
+- [x] Container start → `/v1/ready` 200 under 2 s — **147 ms**, healthcheck healthy
 - [x] In-process boot under 1000 ms; CI enforces 1200 ms — **53 ms**, and the README now carries the
   machine state beside the figure, because a boot number without one is a number about somebody's
   afternoon.
 - [x] Benchmark names the slowest step
-- [ ] `docker run` with a mounted manifest works — the CI job exercises the image's own `CMD`
+- [x] `docker run` with a mounted manifest works — verified with a real turn against DeepSeek
+  through `POST /v1/agents/:id/messages`, store written to `/state` as uid 1000. amd64 is
+  unverified: the image is not multi-arch (a non-goal), so CI measures that leg.
 - [x] Every example runs as documented — and three did not
 - [x] Published boot number is reproducible on a clean clone
 
-**Four things found by building it**
+**Six things found by building it** — the last two only once an image was actually built, which is
+the argument for the CI job rather than for reading the Dockerfile more carefully.
 
 - **`/v1/ready` was behind the bearer token.** A published port needs a non-loopback bind, a
   non-loopback bind requires a token by design, and the readiness probe then got 401 forever — so
@@ -2523,6 +2525,12 @@ not from the terminal. Stated rather than implied: the warning fires for a CLI r
 - **`eval rules` was documented as a CLI command in four places and is a script**, with no
   `bun run` entry at all — nor had `eval-prompt-style`. All three eval scripts have entries now and
   the docs name the real invocation.
+- **`COPY tsconfig.json` named a file that does not exist.** Every package's tsconfig extends
+  `tsconfig.base.json`, and that is the only root config the build needs; `biome.json` was being
+  copied and is needed by nothing an image build runs.
+- **`bun install` ran the root `prepare` script, which is husky**, a devDependency the production
+  stage does not have — `husky: not found`, exit 127. Both installs pass `--ignore-scripts` now: a
+  git-hooks installer has no business in an image build, and there is no `.git` in the context.
 
 **Non-goals.** npm publish. Multi-arch. Helm.
 
