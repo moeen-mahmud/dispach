@@ -21,6 +21,14 @@ import { newTurnId } from "@dispach/core"
 /** Per-connection state, handed to the socket by `Bun.serve`'s upgrade. */
 export interface WsSession {
     readonly agentId: string | undefined
+    /**
+     * Whether this socket receives `model.chunk`.
+     *
+     * Per socket, not per bridge, and that is the whole point: token streaming is the stated
+     * reason this endpoint exists, and it must not be the case that one client asking for tokens
+     * starts billing every other connected client's bandwidth for them.
+     */
+    readonly chunks: boolean
 }
 
 interface Socket {
@@ -49,21 +57,66 @@ export interface WebSocketBridge {
  * would otherwise mean a hundred handlers walked on every `model.chunk`, and chunk events are
  * per-token.
  */
-export function attachWebSocket(runtime: Runtime, token: string | undefined): WebSocketBridge {
+export function attachWebSocket(
+    runtime: Runtime,
+    token: string | undefined,
+    /**
+     * In-flight turns, shared with the HTTP handler.
+     *
+     * This bridge used to own a private map, which made "can this turn be stopped" depend on which
+     * door the question arrived through: a turn started with `POST /messages` could not be stopped
+     * by a `stop` frame, and a turn started over the socket answered 409 on `POST /stop`. Both
+     * surfaces reported honestly about a registry that was simply the wrong one.
+     */
+    running: Map<string, AbortController> = new Map(),
+): WebSocketBridge {
     const sockets = new Set<Socket>()
-    const running = new Map<string, AbortController>()
     let unsubscribe: (() => void) | undefined
+    /**
+     * Chunk interest, refcounted over one exact subscription rather than folded into the wildcard.
+     *
+     * The wildcard stays chunk-free and a second, exact `model.chunk` subscription is added only
+     * while some socket wants tokens — so a bridge with ten progress-watching clients and no token
+     * reader costs the bus nothing per token, and the envelope is never built. Subscribing the
+     * wildcard with `{ chunks: true }` instead would have been one line and is the shape rejected
+     * for the bus itself: build every envelope, then discard most of them.
+     *
+     * The same handler on both keys delivers exactly once — the wildcard skips chunks because it
+     * did not ask, and the exact subscription matches nothing else.
+     */
+    let chunkSockets = 0
+    let unsubscribeChunks: (() => void) | undefined
 
     const broadcast = (event: AnyEvent) => {
+        const chunk = event.type === "model.chunk"
         for (const ws of sockets) {
             // A socket subscribed to one agent does not receive another's traffic. A runtime hosting
             // several agents would otherwise leak one conversation into another client's stream.
             if (ws.data.agentId !== undefined && event.agentId !== ws.data.agentId) continue
+            // The per-socket half. One client asking for tokens is what puts them on the bus; this
+            // is what stops them reaching the clients that did not ask.
+            if (chunk && !ws.data.chunks) continue
             try {
                 ws.send(JSON.stringify(event))
             } catch {
                 // A send to a socket the platform has already torn down. `close` will follow.
             }
+        }
+    }
+
+    const takeChunkInterest = () => {
+        chunkSockets += 1
+        if (unsubscribeChunks === undefined) {
+            unsubscribeChunks = runtime.bus.on("model.chunk", broadcast)
+        }
+    }
+
+    const releaseChunkInterest = () => {
+        if (chunkSockets === 0) return
+        chunkSockets -= 1
+        if (chunkSockets === 0) {
+            unsubscribeChunks?.()
+            unsubscribeChunks = undefined
         }
     }
 
@@ -88,7 +141,15 @@ export function attachWebSocket(runtime: Runtime, token: string | undefined): We
                 }
             }
             const agentId = url.searchParams.get("agentId")
-            return { kind: "accept", session: { agentId: agentId ?? undefined } }
+            // `?chunks=true` on the handshake, the same spelling and the same default-off as the
+            // SSE routes. A `subscribe` frame can change it later without reconnecting.
+            return {
+                kind: "accept",
+                session: {
+                    agentId: agentId ?? undefined,
+                    chunks: url.searchParams.get("chunks") === "true",
+                },
+            }
         },
 
         handlers: {
@@ -97,7 +158,16 @@ export function attachWebSocket(runtime: Runtime, token: string | undefined): We
                 // Subscribed on the first socket rather than at construction, so a runtime with no
                 // WS clients pays nothing — including for `model.chunk`.
                 if (unsubscribe === undefined) unsubscribe = runtime.bus.on("*", broadcast)
-                ws.send(JSON.stringify({ type: "ws.open", agentId: ws.data.agentId ?? null }))
+                if (ws.data.chunks) takeChunkInterest()
+                ws.send(
+                    JSON.stringify({
+                        type: "ws.open",
+                        agentId: ws.data.agentId ?? null,
+                        // Reported, not assumed. A client that mistyped the parameter learns it
+                        // here rather than from an absence of tokens twenty seconds later.
+                        chunks: ws.data.chunks,
+                    }),
+                )
             },
 
             message(ws, raw) {
@@ -111,6 +181,8 @@ export function attachWebSocket(runtime: Runtime, token: string | undefined): We
                      * which is how `subscribe` came to read the agent id out of `sessionKey`.
                      */
                     agentId?: string
+                    /** Per-token frames on or off, from this frame onward. Omitted leaves it. */
+                    chunks?: boolean
                 }
                 try {
                     frame = JSON.parse(
@@ -145,9 +217,24 @@ export function attachWebSocket(runtime: Runtime, token: string | undefined): We
                         )
                         return
                     }
-                    ws.data = { agentId: frame.agentId ?? ws.data.agentId }
+                    // Chunk interest may change without reconnecting — a client that opens a
+                    // socket to watch progress and then focuses the conversation wants tokens from
+                    // that moment. Omitting the field leaves it as it was, so a `subscribe` that
+                    // only re-points the agent does not silently switch streaming off.
+                    const wantsChunks =
+                        typeof frame.chunks === "boolean" ? frame.chunks : ws.data.chunks
+                    if (wantsChunks && !ws.data.chunks) takeChunkInterest()
+                    else if (!wantsChunks && ws.data.chunks) releaseChunkInterest()
+                    ws.data = {
+                        agentId: frame.agentId ?? ws.data.agentId,
+                        chunks: wantsChunks,
+                    }
                     ws.send(
-                        JSON.stringify({ type: "ws.subscribed", agentId: ws.data.agentId ?? null }),
+                        JSON.stringify({
+                            type: "ws.subscribed",
+                            agentId: ws.data.agentId ?? null,
+                            chunks: ws.data.chunks,
+                        }),
                     )
                     return
                 }
@@ -202,7 +289,11 @@ export function attachWebSocket(runtime: Runtime, token: string | undefined): We
             },
 
             close(ws) {
-                sockets.delete(ws)
+                const had = sockets.delete(ws)
+                // Gated on the socket having actually been in the set. A `close` the platform
+                // delivers twice would otherwise decrement the refcount for one socket twice and
+                // drop the chunk subscription out from under another client that is still reading.
+                if (had && ws.data.chunks) releaseChunkInterest()
                 if (sockets.size === 0) {
                     unsubscribe?.()
                     unsubscribe = undefined
@@ -221,6 +312,9 @@ export function attachWebSocket(runtime: Runtime, token: string | undefined): We
             sockets.clear()
             unsubscribe?.()
             unsubscribe = undefined
+            unsubscribeChunks?.()
+            unsubscribeChunks = undefined
+            chunkSockets = 0
         },
     }
 }

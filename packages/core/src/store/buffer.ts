@@ -112,6 +112,18 @@ const DEFAULT_MAX_EVENTS = 10_000
  * - Retain generously and an idle process holds the chunk events of every recent turn. At a few
  *   hundred chunks per turn this is small, but it is unbounded in the number of turns.
  */
+/**
+ * **Enforced lazily, on the next recorded event — never on a timer.**
+ *
+ * Deliberate: a timer would be a handle per buffer keeping the process alive, or one interval
+ * running forever on an idle runtime, to reclaim memory nothing is contending for. The honest
+ * consequence is that a process with no traffic holds its last turns' buffers indefinitely, so
+ * `retainEndedMs` is an "at least", not an "at most" — bounded by `count`, which is the reason a
+ * count bound exists beside an age one rather than instead of it.
+ *
+ * Worth knowing when reasoning about a live server: an ended turn is often still attachable well
+ * past sixty seconds, and stops being so the moment anything else happens.
+ */
 const RETENTION = {
     ms: 60_000,
     count: 32,

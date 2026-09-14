@@ -71,7 +71,9 @@ async function harness(
         token?: string
         fetch?: typeof fetch
         /** Tune the per-turn buffer cap, so a test can reach the truncation path deliberately. */
-        streams?: { maxEventsPerTurn?: number }
+        streams?: { maxEventsPerTurn?: number; retainEndedMs?: number }
+        /** The shared cancel registry, so a test can hand the same one to the WS bridge. */
+        running?: Map<string, AbortController>
     } = {},
 ) {
     const dir = workspace()
@@ -86,6 +88,7 @@ async function harness(
         ...(options.token === undefined
             ? { allowUnauthenticated: true }
             : { token: options.token }),
+        ...(options.running === undefined ? {} : { running: options.running }),
     })
 
     const call = (
@@ -134,6 +137,63 @@ async function readSse(response: Response, max = 200): Promise<[string, unknown]
         }
     }
     return frames
+}
+
+/**
+ * Read an SSE body until `done` is satisfied, then cancel.
+ *
+ * `readSse` reads to completion, which is right for a turn stream and wrong for the firehose: that
+ * one never ends, so a frame budget either blocks forever waiting for the last frame or stops
+ * early. This stops on a condition instead.
+ */
+async function readUntil(
+    response: Response,
+    done: (frames: [string, unknown][]) => boolean,
+    limit = 400,
+): Promise<[string, unknown][]> {
+    const reader = response.body?.getReader()
+    if (reader === undefined) return []
+    const decoder = new TextDecoder()
+    const frames: [string, unknown][] = []
+    let buffer = ""
+    while (frames.length < limit && !done(frames)) {
+        const read = await reader.read()
+        if (read.done) break
+        buffer += decoder.decode(read.value, { stream: true })
+        const blocks = buffer.split("\n\n")
+        buffer = blocks.pop() ?? ""
+        for (const block of blocks) {
+            if (block.startsWith(":") || block === "") continue
+            const event = /^event: (.*)$/m.exec(block)?.[1] ?? "message"
+            const data = block
+                .split("\n")
+                .filter((line) => line.startsWith("data: "))
+                .map((line) => line.slice(6))
+                .join("\n")
+            frames.push([event, data === "" ? undefined : JSON.parse(data)])
+        }
+    }
+    await reader.cancel()
+    return frames
+}
+
+/**
+ * A socket the bridge can drive without a platform WebSocket, so these run under Node too.
+ *
+ * Module-scoped because two describe blocks need it: the bridge's own frames, and the shared
+ * cancel registry, which is about two surfaces agreeing and therefore cannot live inside either.
+ */
+function fakeSocket(agentId?: string, chunks = false) {
+    const sent: string[] = []
+    return {
+        sent,
+        frames: () => sent.map((raw) => JSON.parse(raw) as { type: string; [k: string]: unknown }),
+        ws: {
+            data: { agentId, chunks },
+            send: (message: string) => sent.push(message),
+            close: () => {},
+        },
+    }
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────────────────
@@ -565,15 +625,6 @@ describe("turns", () => {
         await runtime.stop()
     })
 
-    test("streaming a turn with no buffer says so instead of hanging", async () => {
-        const { call, runtime } = await harness()
-        const frames = await readSse(
-            await call("GET", "/v1/agents/assistant/turns/t_nonexistent/stream"),
-        )
-        expect(frames[0]?.[0]).toBe("stream.unavailable")
-        await runtime.stop()
-    })
-
     test("stopping a turn that is not running is 409, not a silent success", async () => {
         const { call, runtime } = await harness()
         const response = await call("POST", "/v1/agents/assistant/turns/t_gone/stop")
@@ -690,9 +741,147 @@ describe("event stream", () => {
         }
         expect(frames).toContain("turn.start")
         expect(frames).toContain("turn.end")
-        // The filter held: nothing else got through.
-        expect(frames.every((f) => f === "turn.start" || f === "turn.end")).toBe(true)
+        // The filter held: nothing else got through. `stream.subscribed` is exempt and has to be —
+        // it is a frame about the subscription rather than a runtime event, so filtering it by
+        // `types` would hide the report of the filter from every client that set one.
+        expect(frames.filter((f) => f !== "stream.subscribed")).toEqual(
+            frames.filter((f) => f === "turn.start" || f === "turn.end"),
+        )
+        expect(frames[0]).toBe("stream.subscribed")
         await reader?.cancel()
+        await runtime.stop()
+    })
+
+    /**
+     * The firehose is a **wildcard** subscriber, so after the per-subscriber opt-in it gets no
+     * tokens unless it asks — which turned `?types=model.chunk` into a request that streamed
+     * nothing, forever, with nothing reporting why. These two are the whole of that fix.
+     */
+    test("types naming model.chunk is itself the opt-in, and the preamble says so", async () => {
+        const { call, runtime } = await harness()
+        const stream = await call("GET", "/v1/events?types=model.chunk")
+
+        void call("POST", "/v1/agents/assistant/messages", { body: { text: "hi" } })
+        const frames = await readUntil(
+            stream,
+            (seen) => seen.filter(([event]) => event === "model.chunk").length >= 2,
+        )
+
+        expect(frames[0]?.[0]).toBe("stream.subscribed")
+        expect(frames[0]?.[1]).toEqual({
+            agentId: null,
+            types: ["model.chunk"],
+            chunks: true,
+            // Reported rather than assumed. An implication a reader cannot see is a surprise.
+            implied: "types names model.chunk",
+        })
+        const text = frames
+            .filter(([event]) => event === "model.chunk")
+            .map(([, data]) => (data as { data: { delta: string } }).data.delta)
+            .join("")
+        expect(text).toBe("hello from the model")
+        await runtime.stop()
+    })
+
+    test("a firehose that asked for nothing reports chunks: false and receives none", async () => {
+        const { call, runtime } = await harness()
+        const stream = await call("GET", "/v1/events")
+
+        void call("POST", "/v1/agents/assistant/messages", { body: { text: "hi" } })
+        const frames = await readUntil(stream, (seen) =>
+            seen.some(([event]) => event === "turn.end"),
+        )
+
+        expect(frames[0]?.[1]).toEqual({ agentId: null, types: null, chunks: false })
+        expect(frames.filter(([event]) => event === "model.chunk")).toEqual([])
+        // And it saw the turn, so this is a filtered stream rather than a broken one.
+        expect(frames.map(([event]) => event)).toContain("turn.end")
+        await runtime.stop()
+    })
+})
+
+// ─── The stream route's four states ──────────────────────────────────────────────────────
+
+/**
+ * One answer per state, and the point of each test is the state it *excludes*.
+ *
+ * Before this, every unattachable turn got `200` with a `stream.unavailable` frame — so "you typed
+ * the id wrong", "it finished an hour ago" and "it is running in another process" were one
+ * response, and telling them apart took a second request.
+ */
+describe("attaching to a turn answers what is true of it", () => {
+    test("an unknown turn id is 404, not a 200 carrying a frame", async () => {
+        const { call, runtime } = await harness()
+
+        const response = await call("GET", "/v1/agents/assistant/turns/t_nonexistent/stream")
+
+        expect(response.status).toBe(404)
+        const body = (await response.json()) as { error: { code: string; hint?: string } }
+        expect(body.error.code).toBe("turn_not_found")
+        expect(body.error.hint ?? "").not.toBe("")
+        await runtime.stop()
+    })
+
+    test("a finished, evicted turn is 200 + stream.ended carrying its stored status", async () => {
+        // Retention is what makes this state reachable at all: the buffer is dropped a while after
+        // `turn.end`, and the turn row outlives it by design — the store is the audit trail.
+        const { call, runtime } = await harness()
+        const accepted = (await (
+            await call("POST", "/v1/agents/assistant/messages", { body: { text: "hi" } })
+        ).json()) as { turnId: string }
+        // Wait on the *row*, not on `turn.end`. The event fires before `turns.finish` has
+        // resolved, so attaching right after it read a row still marked `running` and this test
+        // asserted `stream.ended` against `stream.unavailable` — the four states catching a race
+        // in the test written to check them.
+        const agent = runtime.list()[0]
+        if (agent === undefined) throw new Error("no agent")
+        for (let i = 0; i < 200; i += 1) {
+            const row = await agent.store.turns.get(accepted.turnId)
+            if (row !== undefined && row.status !== "running") break
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        // Drop the buffer the way the retention timer eventually does, without waiting 60 seconds.
+        runtime.streams.close()
+
+        const response = await call("GET", `/v1/agents/assistant/turns/${accepted.turnId}/stream`)
+        expect(response.status).toBe(200)
+        const frames = await readSse(response)
+
+        expect(frames.map(([event]) => event)).toEqual(["stream.ended"])
+        const data = frames[0]?.[1] as { turnId: string; status: string; hint: string }
+        expect(data.turnId).toBe(accepted.turnId)
+        expect(data.status).toBe("final")
+        expect(data.hint).toContain("/v1/agents/:id/turns/:turnId")
+        await runtime.stop()
+    })
+
+    test("a turn still recorded as running is stream.unavailable, never stream.ended", async () => {
+        // The state the plan's trichotomy did not have a row for, and the one that would have been
+        // a lie: the row is written at turn *start* and one store is shared by every process under
+        // a sandbox root, so a served process can hold a `running` row for a turn it is not
+        // executing. Saying "ended" would send a client to read a final text that does not exist.
+        const { call, runtime } = await harness()
+        const agent = runtime.list()[0]
+        if (agent === undefined) throw new Error("no agent")
+
+        // A row with no buffer and no process behind it — exactly what a turn running elsewhere
+        // looks like from here.
+        await agent.store.turns.start({
+            turnId: "t_elsewhere",
+            agentId: agent.id,
+            sessionKey: "api:default",
+            source: "api",
+            input: "hi",
+        })
+
+        const response = await call("GET", "/v1/agents/assistant/turns/t_elsewhere/stream")
+        expect(response.status).toBe(200)
+        const frames = await readSse(response)
+
+        expect(frames.map(([event]) => event)).toEqual(["stream.unavailable"])
+        const data = frames[0]?.[1] as { status: string; hint: string }
+        expect(data.status).toBe("running")
+        expect(data.hint).toContain("running")
         await runtime.stop()
     })
 })
@@ -819,17 +1008,6 @@ describe("the websocket subscribe frame", () => {
      * `Socket` is a three-method interface, and `/v1/ws` is Bun-only, so a portless test is the one
      * that runs everywhere.
      */
-    function fakeSocket(agentId?: string) {
-        const sent: string[] = []
-        return {
-            sent,
-            ws: {
-                data: { agentId },
-                send: (message: string) => sent.push(message),
-                close: () => {},
-            },
-        }
-    }
 
     test("sets the filter from agentId", async () => {
         const { runtime } = await harness()
@@ -845,6 +1023,9 @@ describe("the websocket subscribe frame", () => {
         expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual({
             type: "ws.subscribed",
             agentId: "assistant",
+            // Omitting `chunks` leaves it as it was, so re-pointing the agent cannot silently
+            // switch streaming off on a socket that had asked for tokens.
+            chunks: false,
         })
         await runtime.stop()
     })
@@ -868,6 +1049,200 @@ describe("the websocket subscribe frame", () => {
         })
         // And the filter is untouched, so the socket keeps working rather than going dark.
         expect(socket.ws.data.agentId).toBe("assistant")
+        await runtime.stop()
+    })
+
+    test("tokens reach the socket that asked and not the one beside it", async () => {
+        // Per socket, not per bridge. One client asking for tokens is what puts them on the bus;
+        // it must not also put them on every other connected client's wire.
+        const { runtime } = await harness()
+        const bridge = attachWebSocket(runtime, undefined)
+        const reader = fakeSocket("assistant", true)
+        const watcher = fakeSocket("assistant", false)
+        bridge.handlers.open(reader.ws)
+        bridge.handlers.open(watcher.ws)
+
+        runtime.bus.emit("model.chunk", { delta: "tok", kind: "text" }, { agentId: "assistant" })
+        runtime.bus.emit(
+            "turn.end",
+            {
+                reason: "final",
+                steps: 1,
+                tokens: { prompt: 10, output: 4 },
+                durationMs: 1,
+            },
+            { agentId: "assistant" },
+        )
+
+        const kinds = (socket: typeof reader) =>
+            socket.frames().map((frame) => frame.type ?? (frame as { type?: string }).type)
+        // `ws.open` first for both, then what each subscribed to.
+        expect(kinds(reader)).toEqual(["ws.open", "model.chunk", "turn.end"])
+        expect(kinds(watcher)).toEqual(["ws.open", "turn.end"])
+        bridge.closeAll()
+        await runtime.stop()
+    })
+
+    test("chunk interest is refcounted, so the last reader leaving turns them off", async () => {
+        // The wildcard stays chunk-free and an exact `model.chunk` subscription is added only
+        // while somebody wants tokens — so the bus builds no per-token envelope for a bridge full
+        // of progress watchers. Asserted against the bus's own counter rather than a symptom.
+        const { runtime } = await harness()
+        const bridge = attachWebSocket(runtime, undefined)
+        const before = runtime.bus.chunkSubscribers
+
+        // First, the assertion the counter alone cannot make. `chunkSubscribers` is incremented by
+        // a wildcard that passed `{ chunks: true }` just as much as by an exact subscription, so
+        // watching it go up and down is satisfied by the design this one rejects — subscribe the
+        // wildcard for tokens always, filter per socket. That variant is only distinguishable
+        // *here*: a bridge holding nothing but progress watchers must cost the bus nothing, and
+        // under the folded design this line reads `before + 1`. Found by reverting to it.
+        const watcher = fakeSocket("assistant", false)
+        bridge.handlers.open(watcher.ws)
+        expect(runtime.bus.chunkSubscribers).toBe(before)
+        bridge.handlers.close(watcher.ws)
+
+        const a = fakeSocket("assistant", true)
+        const b = fakeSocket("assistant", true)
+        bridge.handlers.open(a.ws)
+        bridge.handlers.open(b.ws)
+        expect(runtime.bus.chunkSubscribers).toBe(before + 1)
+
+        bridge.handlers.close(a.ws)
+        // Still one reader left, so the subscription stays.
+        expect(runtime.bus.chunkSubscribers).toBe(before + 1)
+        bridge.handlers.close(b.ws)
+        expect(runtime.bus.chunkSubscribers).toBe(before)
+
+        // A duplicate close must not decrement for a socket already gone, or it would drop the
+        // subscription out from under a client that is still reading.
+        bridge.handlers.close(b.ws)
+        expect(runtime.bus.chunkSubscribers).toBe(before)
+        bridge.closeAll()
+        await runtime.stop()
+    })
+
+    test("a subscribe frame can turn tokens on without reconnecting", async () => {
+        const { runtime } = await harness()
+        const bridge = attachWebSocket(runtime, undefined)
+        const socket = fakeSocket("assistant", false)
+        bridge.handlers.open(socket.ws)
+        const before = runtime.bus.chunkSubscribers
+
+        bridge.handlers.message(
+            socket.ws,
+            JSON.stringify({ type: "subscribe", agentId: "assistant", chunks: true }),
+        )
+        expect(runtime.bus.chunkSubscribers).toBe(before + 1)
+        expect(socket.frames().at(-1)).toEqual({
+            type: "ws.subscribed",
+            agentId: "assistant",
+            chunks: true,
+        })
+
+        bridge.handlers.message(
+            socket.ws,
+            JSON.stringify({ type: "subscribe", agentId: "assistant", chunks: false }),
+        )
+        expect(runtime.bus.chunkSubscribers).toBe(before)
+        bridge.closeAll()
+        await runtime.stop()
+    })
+})
+
+// ─── A stream that closes inside start ───────────────────────────────────────────────────
+
+describe("a synchronously-closing stream still runs its teardown", () => {
+    test("attaching to an ended turn leaves no listener pinning the buffer", async () => {
+        // The far end, not the assignment. `sse.ts` set `teardown` *after* calling `start`, and
+        // `streamTurn` closes inside `start` when the turn has already ended — so the real
+        // teardown landed in a variable only `cancel()` reads, and `cancel()` bails on `closed`.
+        //
+        // The assertion is the consequence rather than the mechanism: a leaked buffer listener
+        // pins the buffer against eviction, and `#evict` skips anything with listeners *before*
+        // the count cap can consider it, so the buffer escaped both bounds. Asserted through the
+        // one surface that reports it — a buffer with a listener is never dropped by age, so if
+        // the listener leaked, `state()` still answers after the window has passed.
+        const { call, runtime } = await harness({ streams: { retainEndedMs: 50 } })
+
+        const accepted = (await (
+            await call("POST", "/v1/agents/assistant/messages", { body: { text: "hi" } })
+        ).json()) as { turnId: string }
+        const agent = runtime.list()[0]
+        if (agent === undefined) throw new Error("no agent")
+        for (let i = 0; i < 200; i += 1) {
+            const row = await agent.store.turns.get(accepted.turnId)
+            if (row !== undefined && row.status !== "running") break
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+
+        // Attach to the finished turn. This is the stream that closes inside `start`.
+        const response = await call("GET", `/v1/agents/assistant/turns/${accepted.turnId}/stream`)
+        await readSse(response)
+        expect(runtime.streams.state(accepted.turnId)).toBe("ended")
+
+        // Past the retention window, and then any recorded event runs the sweep — retention is
+        // enforced lazily on `record`, never on a timer, so an idle process holds an ended buffer
+        // indefinitely. That is why this drives a second turn rather than waiting.
+        await new Promise((resolve) => setTimeout(resolve, 80))
+        await call("POST", "/v1/agents/assistant/messages", { body: { text: "again" } })
+        await runtime.bus.next("turn.end")
+
+        // With the leak, the listener is still attached and the buffer survives both bounds.
+        expect(runtime.streams.state(accepted.turnId)).toBeUndefined()
+        await runtime.stop()
+    })
+})
+
+// ─── One cancel registry ─────────────────────────────────────────────────────────────────
+
+/**
+ * Whether a turn can be stopped is a fact about the turn, not about which door the question
+ * arrived through. Each surface used to own a private map, so both answered honestly about the
+ * wrong registry — the least debuggable shape a wrong answer has.
+ */
+describe("a turn is stoppable from either surface", () => {
+    test("a turn started over HTTP is found by a WebSocket stop frame", async () => {
+        const running = new Map<string, AbortController>()
+        const { call, runtime } = await harness({ running })
+        const bridge = attachWebSocket(runtime, undefined, running)
+        const socket = fakeSocket("assistant")
+        bridge.handlers.open(socket.ws)
+
+        const accepted = (await (
+            await call("POST", "/v1/agents/assistant/messages", { body: { text: "hi" } })
+        ).json()) as { turnId: string }
+
+        bridge.handlers.message(
+            socket.ws,
+            JSON.stringify({ type: "stop", turnId: accepted.turnId }),
+        )
+
+        expect(socket.frames().at(-1)).toEqual({
+            type: "ws.stopping",
+            turnId: accepted.turnId,
+            found: true,
+        })
+        bridge.closeAll()
+        await runtime.stop()
+    })
+
+    test("a turn started over a WebSocket is stoppable with POST /stop", async () => {
+        const running = new Map<string, AbortController>()
+        const { call, runtime } = await harness({ running })
+        const bridge = attachWebSocket(runtime, undefined, running)
+        const socket = fakeSocket("assistant")
+        bridge.handlers.open(socket.ws)
+
+        bridge.handlers.message(socket.ws, JSON.stringify({ type: "message", text: "hi" }))
+        const accepted = socket.frames().find((frame) => frame.type === "ws.accepted") as
+            | { turnId: string }
+            | undefined
+        expect(accepted?.turnId).toBeDefined()
+
+        const response = await call("POST", `/v1/agents/assistant/turns/${accepted?.turnId}/stop`)
+        expect(response.status).toBe(202)
+        bridge.closeAll()
         await runtime.stop()
     })
 })

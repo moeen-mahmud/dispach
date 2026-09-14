@@ -356,6 +356,14 @@ a.wrapTurn( b.wrapTurn( core.turn ) )
    a queue you own. A throw is caught, reported as an `agent.warning`, and the event still reaches
    every other watcher — one plugin's broken observer must not stop the runtime reporting to
    everybody else's. Watchers see only their own agent's events.
+6. **`onEvent` never receives `model.chunk`.** Per-token frames are opt-in per subscriber, and a
+   watcher that gets them by default would put an envelope, a timestamp and a call through every
+   installed middleware on every token of every reply. A plugin that genuinely wants tokens
+   subscribes for itself — `context.events.on("model.chunk", handler)`, where an exact subscription
+   *is* the opt-in, or `context.events.on("*", handler, { chunks: true })` for everything. That is
+   why this is an absence rather than a `wantsChunks` field: the capability is already reachable
+   through the API a plugin has, and declaring a second way to ask for it would be vocabulary with
+   nothing behind it.
 
 **What is enforced.** A middleware returning `undefined` is a named failure rather than a silently
 empty result: short-circuiting is legitimate and returning a fabricated result is how it is spelled,
