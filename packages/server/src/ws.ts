@@ -101,7 +101,17 @@ export function attachWebSocket(runtime: Runtime, token: string | undefined): We
             },
 
             message(ws, raw) {
-                let frame: { type?: string; text?: string; sessionKey?: string; turnId?: string }
+                let frame: {
+                    type?: string
+                    text?: string
+                    sessionKey?: string
+                    turnId?: string
+                    /**
+                     * Which agent this socket watches. It was missing from this type entirely,
+                     * which is how `subscribe` came to read the agent id out of `sessionKey`.
+                     */
+                    agentId?: string
+                }
                 try {
                     frame = JSON.parse(
                         typeof raw === "string" ? raw : new TextDecoder().decode(raw),
@@ -117,7 +127,25 @@ export function attachWebSocket(runtime: Runtime, token: string | undefined): We
                 }
 
                 if (frame.type === "subscribe") {
-                    ws.data = { agentId: frame.sessionKey ?? ws.data.agentId }
+                    // Read from `agentId`. This read `frame.sessionKey`, and the damage was the
+                    // worst available shape: a session key can never equal an `event.agentId`, so
+                    // the socket's filter matched nothing, it went **permanently silent**, and it
+                    // answered `ws.subscribed` to say the change had worked. Rule 8, over a socket.
+                    //
+                    // A frame naming only `sessionKey` is refused rather than accepted, because
+                    // that is what a client written against the old behaviour sends — and silently
+                    // ignoring it would leave the same dead socket with a different cause.
+                    if (frame.agentId === undefined && frame.sessionKey !== undefined) {
+                        ws.send(
+                            JSON.stringify({
+                                type: "ws.error",
+                                code: "subscribe_needs_agent_id",
+                                hint: "Send { type: 'subscribe', agentId: '<agent>' }. A socket filters on the agent an event carries; sessionKey names a conversation and can never match one, so a socket pointed with it receives nothing.",
+                            }),
+                        )
+                        return
+                    }
+                    ws.data = { agentId: frame.agentId ?? ws.data.agentId }
                     ws.send(
                         JSON.stringify({ type: "ws.subscribed", agentId: ws.data.agentId ?? null }),
                     )

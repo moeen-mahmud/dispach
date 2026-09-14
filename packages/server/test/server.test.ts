@@ -7,7 +7,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Runtime } from "@dispach/core"
@@ -15,6 +15,7 @@ import { createHandler } from "../src/handler.ts"
 import { Router } from "../src/router.ts"
 import { isLoopback, serve } from "../src/serve.ts"
 import { encodeFrame } from "../src/sse.ts"
+import { attachWebSocket } from "../src/ws.ts"
 
 const TOKEN = "test-token-abcdef"
 const ENV = { MODEL_API_KEY: "sk-test" }
@@ -42,11 +43,19 @@ function workspace(): string {
     return dir
 }
 
-/** A model endpoint that answers one fixed reply, streamed as the loop expects. */
+/**
+ * A model endpoint that answers one fixed reply, streamed as the loop expects.
+ *
+ * The reply arrives as **two** deltas rather than one, which is what makes the token-streaming test
+ * below mean anything: with a single delta, "the frames concatenate to the reply" is satisfied by a
+ * stream carrying one frame, and a client that ignored ordering would pass.
+ */
 function replyFetch(text = "hello from the model"): typeof fetch {
+    const half = Math.ceil(text.length / 2)
     return (async () => {
         const body = [
-            `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`,
+            `data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(0, half) } }] })}\n\n`,
+            `data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(half) } }] })}\n\n`,
             `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 4 } })}\n\n`,
             "data: [DONE]\n\n",
         ].join("")
@@ -57,12 +66,20 @@ function replyFetch(text = "hello from the model"): typeof fetch {
     }) as unknown as typeof fetch
 }
 
-async function harness(options: { token?: string; fetch?: typeof fetch } = {}) {
+async function harness(
+    options: {
+        token?: string
+        fetch?: typeof fetch
+        /** Tune the per-turn buffer cap, so a test can reach the truncation path deliberately. */
+        streams?: { maxEventsPerTurn?: number }
+    } = {},
+) {
     const dir = workspace()
     const runtime = await Runtime.create({
         agents: [join(dir, "agent.yaml")],
         env: ENV,
         fetch: options.fetch ?? replyFetch(),
+        ...(options.streams === undefined ? {} : { streams: options.streams }),
     })
     const handler = createHandler({
         runtime,
@@ -406,6 +423,148 @@ describe("turns", () => {
         await runtime.stop()
     })
 
+    test("chunks: true streams the reply token by token", async () => {
+        /**
+         * The regression test for the defect this whole phase exists for.
+         *
+         * `model.chunk` was gated by a process-wide `emitChunks` that defaulted false and whose
+         * setter had no caller, and `serve` built its bus without it — so in a served process the
+         * per-token stream was dark. **Nothing could have caught it**: the harness below built its
+         * runtime without chunks too, so every streaming test passed against a chunk-less stream
+         * and asserted only what is true of one.
+         *
+         * Asserted by reconstruction rather than by counting frames: the deltas must concatenate
+         * to exactly the reply, which is the property a client actually depends on.
+         */
+        const { call, runtime } = await harness({ fetch: replyFetch("hello from the model") })
+        const response = await call("POST", "/v1/agents/assistant/messages", {
+            body: { text: "hi", stream: true, chunks: true },
+        })
+        const frames = await readSse(response)
+
+        const names = frames.map(([event]) => event)
+        expect(names).toContain("model.chunk")
+        expect(names).toContain("turn.end")
+
+        const streamed = frames
+            .filter(([event]) => event === "model.chunk")
+            .map(([, frame]) => (frame as { data: { delta: string; kind?: string } }).data)
+            .filter((chunk) => chunk.kind !== "reasoning")
+            .map((chunk) => chunk.delta)
+            .join("")
+        expect(streamed).toBe("hello from the model")
+        await runtime.stop()
+    })
+
+    test("without chunks, the same turn streams lifecycle and no tokens", async () => {
+        // The other half of an opt-in: a reader who did not ask must not be put on the per-token
+        // path. `/v1/events` subscribers and plugin watchers are all wildcard, and this is the
+        // property that keeps them off it.
+        const { call, runtime } = await harness({ fetch: replyFetch("hello from the model") })
+        const frames = await readSse(
+            await call("POST", "/v1/agents/assistant/messages", {
+                body: { text: "hi", stream: true },
+            }),
+        )
+        const names = frames.map(([event]) => event)
+        expect(names).not.toContain("model.chunk")
+        // Still a usable stream: the lifecycle is what a client watching progress needs.
+        expect(names).toContain("turn.end")
+        await runtime.stop()
+    })
+
+    test("a non-streaming POST is attachable by the id it returned", async () => {
+        // The race. `open()` used to be called only on the `stream: true` path, and `Agent.send`
+        // awaits the session write before emitting anything — so a caller who POSTed without
+        // `stream` and then immediately attached with the id it had just been handed was told
+        // there was no buffer, for a turn that was about to run.
+        //
+        // **This one is green either way on a fast machine**, and is kept for what it does prove:
+        // that the end-to-end path works. `TurnStreams.record` creates a buffer for any event
+        // carrying a turn id (`buffer.ts:142-152`), so once `turn.start` fires the buffer exists
+        // regardless — and on an unloaded machine that happens before a second HTTP request can be
+        // issued. The window is real on a loaded one, which is where CI lives.
+        //
+        // The guard that actually fails when the fix is reverted is the structural one below.
+        const { call, runtime } = await harness()
+        const accepted = (await (
+            await call("POST", "/v1/agents/assistant/messages", { body: { text: "hello" } })
+        ).json()) as { turnId: string }
+
+        const frames = await readSse(
+            await call("GET", `/v1/agents/assistant/turns/${accepted.turnId}/stream`),
+        )
+        expect(frames.map(([event]) => event)).not.toContain("stream.unavailable")
+        expect(frames.map(([event]) => event)).toContain("turn.end")
+        await runtime.stop()
+    })
+
+    test("a manually fired schedule's turn is attachable by the id it returned", async () => {
+        // The same invariant on the third route that mints an id and hands it out. This one never
+        // opened a buffer at all, so every manual schedule run was unstreamable.
+        const { call, runtime } = await harness()
+        await call("POST", "/v1/agents/assistant/schedules", {
+            body: {
+                id: "brief",
+                kind: "every",
+                expr: "15m",
+                task: "say hello",
+                deliver: "none",
+            },
+        })
+        const fired = (await (
+            await call("POST", "/v1/agents/assistant/schedules/brief/run")
+        ).json()) as { turnId: string }
+
+        const frames = await readSse(
+            await call("GET", `/v1/agents/assistant/turns/${fired.turnId}/stream`),
+        )
+        expect(frames.map(([event]) => event)).not.toContain("stream.unavailable")
+        await runtime.stop()
+    })
+
+    test("a truncated replay announces the hole before the replay frames", async () => {
+        /**
+         * Hard rule 8, on the one path where the runtime was silently lying.
+         *
+         * The buffer caps at 10,000 events and discards the **oldest** to stay under it, setting a
+         * `truncated` flag that `TurnAttachment` had no field for and that nothing ever read. So a
+         * client got a replay missing its front, concatenated what arrived, and believed it. With
+         * tokens streaming that stops being theoretical — each token is one buffered event.
+         *
+         * Order is the assertion, not merely presence: a warning after the frames it warns about
+         * is a warning that arrives too late to act on.
+         */
+        const { call, runtime } = await harness({
+            fetch: replyFetch("hello from the model"),
+            streams: { maxEventsPerTurn: 3 },
+        })
+        // A **reattaching** client, which is the only one for which this can be true: the preamble
+        // reports what is true of the replay it precedes, and on the inline path nothing has been
+        // dropped yet because the turn has barely started. Truncation is a property a late arrival
+        // discovers, which is exactly why it has to be told rather than left to infer.
+        const accepted = (await (
+            await call("POST", "/v1/agents/assistant/messages", {
+                body: { text: "hi", chunks: true },
+            })
+        ).json()) as { turnId: string }
+        await new Promise((resolve) => setTimeout(resolve, 150))
+
+        const frames = await readSse(
+            await call("GET", `/v1/agents/assistant/turns/${accepted.turnId}/stream?chunks=true`),
+        )
+
+        const names = frames.map(([event]) => event)
+        const replayAt = names.indexOf("stream.replay")
+        expect(replayAt).toBeGreaterThanOrEqual(0)
+        const preamble = frames[replayAt]?.[1] as { truncated: boolean; dropped: number }
+        expect({ truncated: preamble.truncated, dropped: preamble.dropped > 0 }).toEqual({
+            truncated: true,
+            dropped: true,
+        })
+        await runtime.stop()
+    })
+
     test("streaming a turn with no buffer says so instead of hanging", async () => {
         const { call, runtime } = await harness()
         const frames = await readSse(
@@ -596,5 +755,119 @@ describe("binding", () => {
             await running.stop()
             await runtime.stop()
         }
+    })
+})
+
+describe("whoever hands out a turn id opens its buffer first", () => {
+    /**
+     * The invariant behind the two attach-race tests above, asserted where it is decided.
+     *
+     * A behavioural version of this cannot fail reliably: `TurnStreams.record` creates a buffer for
+     * any event carrying a turn id, so once `turn.start` fires the buffer exists whether or not
+     * `open()` was called — and on an unloaded machine that beats a second HTTP request every time.
+     * The window is real on a loaded machine, which is exactly where CI runs and exactly where this
+     * class of bug has bitten this repo before (the `serve` signal race, red on CI for twelve days
+     * while passing locally six runs in a row).
+     *
+     * So the ordering is asserted in the source. There are exactly three routes that mint a turn id
+     * and hand it to a caller; each must open the buffer before starting the turn.
+     */
+    const SOURCE = readFileSync(join(import.meta.dirname, "..", "src", "handler.ts"), "utf8")
+
+    test("every newTurnId() in a route is followed by streams.open before agent.send", () => {
+        const offenders: string[] = []
+        for (const match of SOURCE.matchAll(/newTurnId\(\)/g)) {
+            // The window from the mint to the first `send` in the same route body. Generous on
+            // purpose — the assertion is about *order*, not proximity — and it has to be, because
+            // the comments explaining these two fixes are themselves ~1,400 characters. At 1,200
+            // this guard went red for code that was correct, which is its own kind of useless.
+            const after = SOURCE.slice(match.index ?? 0, (match.index ?? 0) + 3000)
+            // Matches the call, not its arity — the signature grew a `{ chunks }` argument and an
+            // exact-string match would have gone red for a fix that was still in place.
+            const opened = after.indexOf("streams.open(turnId")
+            const sent = after.indexOf(".send(")
+            if (opened === -1 || (sent !== -1 && opened > sent)) {
+                offenders.push(
+                    SOURCE.slice(0, match.index ?? 0)
+                        .split("\n")
+                        .length.toString(),
+                )
+            }
+        }
+        expect({ routesMintingATurnIdWithoutOpening: offenders }).toEqual({
+            routesMintingATurnIdWithoutOpening: [],
+        })
+    })
+
+    test("and there really are mint sites, or the test above proves nothing", () => {
+        // The count is the guard on the guard: a refactor that renames `newTurnId` would otherwise
+        // leave the assertion above passing over an empty set.
+        expect([...SOURCE.matchAll(/newTurnId\(\)/g)].length).toBeGreaterThanOrEqual(2)
+    })
+})
+
+describe("the websocket subscribe frame", () => {
+    /**
+     * A socket that reported success and then received nothing, forever.
+     *
+     * `subscribe` set the agent filter from `frame.sessionKey` — and the frame type had no
+     * `agentId` field at all, so that was the only way to reach it. A session key can never equal
+     * an `event.agentId`, so the filter in `broadcast` matched nothing: the socket went silent and
+     * answered `ws.subscribed` to say the change had worked. Rule 8, over a socket.
+     *
+     * Driven through `bridge.handlers.message` with a fake socket rather than a real connection —
+     * `Socket` is a three-method interface, and `/v1/ws` is Bun-only, so a portless test is the one
+     * that runs everywhere.
+     */
+    function fakeSocket(agentId?: string) {
+        const sent: string[] = []
+        return {
+            sent,
+            ws: {
+                data: { agentId },
+                send: (message: string) => sent.push(message),
+                close: () => {},
+            },
+        }
+    }
+
+    test("sets the filter from agentId", async () => {
+        const { runtime } = await harness()
+        const bridge = attachWebSocket(runtime, undefined)
+        const socket = fakeSocket(undefined)
+
+        bridge.handlers.message(
+            socket.ws,
+            JSON.stringify({ type: "subscribe", agentId: "assistant" }),
+        )
+
+        expect(socket.ws.data.agentId).toBe("assistant")
+        expect(JSON.parse(socket.sent[0] ?? "{}")).toEqual({
+            type: "ws.subscribed",
+            agentId: "assistant",
+        })
+        await runtime.stop()
+    })
+
+    test("refuses a frame naming only sessionKey rather than silently muting the socket", async () => {
+        // The shape a client written against the old behaviour sends. Accepting it would leave the
+        // same dead socket with a different cause, so it is an error with a hint.
+        const { runtime } = await harness()
+        const bridge = attachWebSocket(runtime, undefined)
+        const socket = fakeSocket("assistant")
+
+        bridge.handlers.message(
+            socket.ws,
+            JSON.stringify({ type: "subscribe", sessionKey: "api:default" }),
+        )
+
+        const reply = JSON.parse(socket.sent[0] ?? "{}") as { type: string; code?: string }
+        expect({ type: reply.type, code: reply.code }).toEqual({
+            type: "ws.error",
+            code: "subscribe_needs_agent_id",
+        })
+        // And the filter is untouched, so the socket keeps working rather than going dark.
+        expect(socket.ws.data.agentId).toBe("assistant")
+        await runtime.stop()
     })
 })

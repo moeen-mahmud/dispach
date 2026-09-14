@@ -151,7 +151,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 sessionKey?: unknown
                 deliver?: unknown
                 stream?: unknown
+                chunks?: unknown
             }
+            // Per-token frames are opt-in, and the *reader* decides — so the query parameter on the
+            // stream routes is the primary control and this is the writer's way to ask on the
+            // inline-stream path, where there is no second request to carry one. Strict `=== true`,
+            // like `stream`: a client sending the string "false" must not be read as asking.
+            const wantsChunks = input.chunks === true
             const text = typeof input.text === "string" ? input.text : ""
             if (text.trim() === "") {
                 return fail(
@@ -173,10 +179,22 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             const turnId = newTurnId()
             const controller = new AbortController()
             running.set(turnId, controller)
-            // Before `send`, so a `stream: true` caller attaching in the next statement finds a
-            // buffer. `Agent.send` awaits the session write before emitting, so without this the
-            // stream would report "no buffer" for a turn that was about to run.
-            if (input.stream === true) runtime.streams.open(turnId)
+            // Before `send`, and **unconditionally** — the condition was the bug.
+            //
+            // `Agent.send` awaits the session write before emitting anything, so a caller who POSTs
+            // without `stream` and then immediately GETs the stream with the turn id it was just
+            // handed arrived before `turn.start` and was told "no buffer for this turn in this
+            // process" — for a turn that was about to run. Opening here makes that deterministic
+            // rather than a race: the buffer exists before this handler's next statement, so it
+            // exists before the caller can possibly hold the id.
+            //
+            // The cost is an empty buffer per turn nobody streams, evicted by the retention policy
+            // that already runs on `turn.end`. `attach` still refuses to create one for an unknown
+            // id, which is the decision that keeps a typo'd turn id distinguishable from a real one.
+            // Chunk interest is declared here, synchronously, because the bus only builds a
+            // per-token envelope while somebody is listening — and an SSE `start` callback runs
+            // after this handler returns, by which point the first tokens are already gone.
+            runtime.streams.open(turnId, { chunks: wantsChunks })
 
             // Detached on purpose. The response returns before this settles, and nothing about the
             // turn's lifetime depends on the connection that started it.
@@ -210,12 +228,19 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             return streamTurn(runtime, turnId, {
                 accepted: { turnId, sessionKey },
                 status: 202,
+                chunks: wantsChunks,
             })
         }),
     )
 
     router.add("GET", "/v1/agents/:id/turns/:turnId/stream", (context) =>
-        withAgent(runtime, context, () => streamTurn(runtime, context.params.turnId ?? "")),
+        // `?chunks=true` — the reader decides, per connection. A reattaching client that wants
+        // tokens asks for them here; one watching progress does not have to.
+        withAgent(runtime, context, () =>
+            streamTurn(runtime, context.params.turnId ?? "", {
+                chunks: context.url.searchParams.get("chunks") === "true",
+            }),
+        ),
     )
 
     router.add("POST", "/v1/agents/:id/turns/:turnId/stop", (context) =>
@@ -226,8 +251,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 return fail(
                     {
                         code: "turn_not_running",
-                        message: `Turn ${turnId} is not running in this process.`,
-                        hint: "A turn that already finished cannot be stopped; read its final state from GET /v1/agents/:id/turns/:turnId. A turn started by a different process cannot be reached from this one.",
+                        // What is actually true, which is narrower than what this used to claim.
+                        // It said "not running in this process" — false of a turn a channel or a
+                        // schedule started, which *is* running here and simply left no cancel
+                        // handle on this surface. Nothing in core records in-flight turns, so the
+                        // handle exists only for turns this API started.
+                        message: `No cancel handle for turn ${turnId} on this API.`,
+                        hint: "This surface can stop a turn it started. A turn that has already finished cannot be stopped at all — read its final state from GET /v1/agents/:id/turns/:turnId. A turn started by a channel, a schedule, or another process is running without a handle here.",
                     },
                     409,
                 )
@@ -403,6 +433,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             const runId = newRunId()
             const sessionKey = scheduleSessionKey(row.sessionMode, row.id, runId)
             const turnId = newTurnId()
+            // This route mints a turn id and hands it back at 202, so it owes the same buffer the
+            // message route does — and did not open one at all, which made `GET …/stream` on a
+            // manually fired schedule answer "no buffer" for a turn that was running.
+            //
+            // The invariant, worth stating because there are exactly three places that mint an id
+            // and give it to a caller: **whoever hands out a turn id opens its buffer first.**
+            runtime.streams.open(turnId)
             // Detached, like every other turn on this surface: the client gets a handle and reads
             // the stream, and a disconnect never cancels the work.
             void agent
@@ -796,7 +833,7 @@ function parseDeliver(
 function streamTurn(
     runtime: Runtime,
     turnId: string,
-    extra?: { accepted?: unknown; status?: number },
+    extra?: { accepted?: unknown; status?: number; chunks?: boolean },
 ): Response {
     return sseResponse({
         ...(extra?.status === undefined ? {} : { status: extra.status }),
@@ -804,10 +841,19 @@ function streamTurn(
             if (extra?.accepted !== undefined)
                 send({ event: "turn.accepted", data: extra.accepted })
 
-            const attachment = runtime.streams.attach(turnId, (event: AnyEvent) => {
-                send({ event: event.type, data: event })
-                if (event.type === "turn.end") close()
-            })
+            // Interest is per *attachment*, so two clients can watch one turn with only one of
+            // them paying for tokens — and a client that did not ask never receives them even
+            // while another does. That per-listener filter is not a nicety: chunk interest taken
+            // by `open` outlives its turn by the retention window, so without it a later
+            // non-asking client was served tokens from the buffer's fan-out.
+            const attachment = runtime.streams.attach(
+                turnId,
+                (event: AnyEvent) => {
+                    send({ event: event.type, data: event })
+                    if (event.type === "turn.end") close()
+                },
+                { chunks: extra?.chunks === true },
+            )
 
             if (attachment === undefined) {
                 // Never buffered here, or ended and evicted. Either way there is nothing to tail;
@@ -823,6 +869,30 @@ function streamTurn(
                 close()
                 return undefined
             }
+
+            // **Before** the replay frames, not after. A client reconstructing text has to learn
+            // that a hole exists before it starts concatenating, or it silently builds a shorter
+            // reply and believes it. The cap discards the *oldest* events, so the hole is at the
+            // front — which is precisely where a client is not looking.
+            //
+            // One frame carries all three honesty facts rather than three frame types: how much
+            // was dropped, whether token history is complete, and what state the turn is in.
+            send({
+                event: "stream.replay",
+                data: {
+                    turnId,
+                    state: attachment.state,
+                    events: attachment.replay.length,
+                    truncated: attachment.truncated,
+                    dropped: attachment.dropped,
+                    chunks: attachment.chunks,
+                    ...(attachment.truncated
+                        ? {
+                              hint: `The oldest ${attachment.dropped} event(s) of this turn were discarded to stay under the buffer cap, so this replay starts mid-turn. The turn's final text is complete in GET /v1/agents/:id/turns/:turnId.`,
+                          }
+                        : {}),
+                },
+            })
 
             for (const event of attachment.replay) {
                 send({ event: event.type, data: event })
