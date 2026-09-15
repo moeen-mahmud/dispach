@@ -96,6 +96,33 @@ for await (const token of turn.tokens({ allowTruncated: true })) { … }
 This only happens when reattaching to a turn that has already produced more events than the buffer
 holds. Streaming from the start of a turn is never truncated.
 
+## When the sender is not you
+
+```ts
+const turn = await agent.send("the nightly build failed on arm64", {
+    from: { id: "agent:ci-bot", name: "CI", kind: "agent" },
+    idempotencyKey: crypto.randomUUID(),
+})
+if (turn.replayed) return // a retry: that turn already ran, nothing new happened
+```
+
+`from.kind` is a declaration with consequences, and it is the only field that has them:
+
+| `kind` | |
+| --- | --- |
+| omitted, or `"user"` | Nothing changes. The text reaches the prompt exactly as it would without `from`. |
+| `"agent"` | The server fences the text as data and blocks mutating tools for the whole turn. |
+
+There is no `trust` option beside it, here or on the wire, for the same reason `exec` has no `env`
+map: the pair could disagree, and the dangerous half is the one that would win quietly. If you want
+a peer's message treated as trusted you have to call it a user, which is at least a sentence about
+what you believe.
+
+`replayed` is a **boolean on every handle**, including one from `agent.turn(id)`. It exists to be
+branched on: enqueueing a notification twice because a retry looked like a fresh turn is the
+failure the key prevents, and only a caller who can see the replay can avoid it. A key reused with
+different text throws `idempotency_key_reused` rather than answering with the earlier turn.
+
 ## Errors
 
 Every failure is a `DispachError` carrying the wire's own `code`, `hint`, `field` and `status`.
@@ -144,6 +171,7 @@ await client.health()
 await client.agents()
 
 await agent.describe()        // model, window, dialect, counts, entryPhase, warnings
+await agent.turn(id).get()    // the stored row, including `sender` when one was declared
 await agent.tools()           // the resolved catalogue with tags and phase visibility
 await agent.skills()          // `configured: false` distinguishes "no skills block"
 await agent.sessions()

@@ -34,7 +34,7 @@ function run(actions: readonly TranscriptAction[], from = EMPTY_TRANSCRIPT): Tra
 
 const START = {
     kind: "event",
-    event: ev("turn.start", { source: "repl", inputTokens: 4 }),
+    event: ev("turn.start", { source: "repl", inputTokens: 4, trust: "trusted" }),
 } as const
 
 function chunk(delta: string, kind: "text" | "reasoning" = "text"): TranscriptAction {

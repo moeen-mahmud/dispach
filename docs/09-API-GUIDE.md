@@ -110,6 +110,61 @@ refresh. That is what `stream` and `turns/:turnId` are both for.
 
 ---
 
+## 3b. When it wasn't you who asked
+
+Two additions turn `POST /messages` from "the token-holder is talking" into a surface a multi-user
+front end or a peer agent can be put behind. Both are optional and omitting both is byte-for-byte
+the behaviour above.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -H 'Idempotency-Key: 018f3c2a-relay-0041' \
+  -d '{"text":"the nightly build failed on arm64","from":{"id":"agent:ci-bot","name":"CI","kind":"agent"}}' \
+  $A/messages
+# {"turnId":"t_…","sessionKey":"api:default"}
+```
+
+**`from.kind` decides the trust boundary, and there is no second field that can disagree with it.**
+
+| `kind` | What changes |
+| --- | --- |
+| omitted, or `user` | Nothing. The text reaches `SLOT.input` exactly as before. |
+| `agent` | The text is wrapped in the same `UNTRUSTED_TOOL_OUTPUT` fence a fetched web page gets, and the turn starts **tainted** — so `tools.untrusted.onMutate` (default `refuse`) blocks mutating tools from step one. |
+
+That second row is the whole point, and the fence is the *lesser* half of it. A model can be
+persuaded by text inside an intact fence; the write gate sits at the tool call, where prose cannot
+reach. A peer agent asking your agent to `file_write` gets:
+
+```
+memory_write was not run, and nothing was changed.
+
+Content from outside this conversation reached this turn, by way of agent agent:ci-bot. While that
+is true, tools that change things are blocked.
+```
+
+There is deliberately no `trust` field to set alongside `kind`. The dangerous configuration is a
+peer message declared trusted, and the only way to make that unrepresentable is to derive one from
+the other — writing `kind: "user"` for a peer is at least a sentence about what you believe.
+
+A peer's message is also excluded from conversation memory, so an injection cannot come back a week
+later through `SLOT.memory` after the turn's taint has expired.
+
+**`Idempotency-Key` makes a retry free.** A header rather than a body field, because it is a fact
+about the request:
+
+```bash
+# the same call again, same key
+# 200 {"turnId":"t_…","sessionKey":"api:default","replayed":true}   ← the FIRST turn's id
+```
+
+`200` rather than `202`, because nothing was accepted for processing. The same key with different
+text is `409 idempotency_key_reused` naming the turn that holds it — a client that recycled a key
+by accident must not be told a message it never sent succeeded. Keys are remembered for 24 hours,
+per agent, and claimed *before* the turn starts: this endpoint answers before it writes its turn
+row, so a claim that waited for the row would leave the exact window between two retries open.
+
+---
+
 ## 4. Stop it
 
 ```bash
@@ -196,6 +251,15 @@ for await (const token of turn.tokens()) process.stdout.write(token)
 
 `tokens()` excludes the model's reasoning from the reply and **refuses a truncated replay** rather
 than returning a fragment that looks complete. `stream()` yields the full union when you need it.
+
+```ts
+const turn = await agent.send("the nightly build failed", {
+    from: { id: "agent:ci-bot", kind: "agent" },
+    idempotencyKey: crypto.randomUUID(),
+})
+if (turn.replayed) return  // a retry; the work was already done
+```
+
 See [`packages/client/README.md`](../packages/client/README.md).
 
 ---
@@ -222,6 +286,8 @@ Worth knowing before you design around it, because each of these is a decision r
 | | |
 | --- | --- |
 | **No agent provisioning.** | An agent exists because a manifest is mounted. There is no `POST /v1/agents`. |
+| **No outbound peer calls.** | `from` is the *inbound* half. Your agent reaching another one is a tool, not a route — and `allowFrom` is inbound-only, which is a separate recorded trap. |
+| **No per-sender authorisation.** | `from` says who sent a message and confers nothing. A recipient acts under its **own** owner's grants, whoever asked. A sender cannot widen what your agent may do by declaring itself. |
 | **No OpenAI-compatible surface.** | `/v1` is its own protocol. Nothing here answers `/v1/chat/completions`. |
 | **One agent per container.** | `serve` takes one manifest. A second agent is a second service. |
 | **No live reload.** | An agent's configuration is fixed for its process lifetime — the tool catalogue resolves once and the cached prompt prefix depends on it staying fixed. `POST /reload` answers `409` and says so. |

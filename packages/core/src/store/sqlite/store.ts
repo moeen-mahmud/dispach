@@ -11,6 +11,7 @@
  * ones, so mapping is also where the two runtimes stop being distinguishable.
  */
 
+import type { SenderKind } from "../../loop/sender.ts"
 import { sessionSource } from "../../memory/conversation.ts"
 import type { ChatMessage, ToolCallRequest } from "../../model/provider.ts"
 import { parseSessionKey } from "../session-key.ts"
@@ -20,6 +21,7 @@ import type {
     ArtifactStore,
     DeliveryRecord,
     DeliveryStatus,
+    InboundKeyClaim,
     KVStore,
     LeaseClaim,
     LeaseRecord,
@@ -49,6 +51,18 @@ import { openDatabase } from "./driver.ts"
 import { type MigrationReport, migrate } from "./migrations.ts"
 
 const DEFAULT_PAGE = 50
+
+/**
+ * How long an inbound idempotency key is remembered.
+ *
+ * Twenty-four hours, and the figure is about *clients* rather than about storage. A retry that
+ * matters happens within seconds — a proxy timeout, a queue redelivery, a client's own backoff —
+ * and a day covers an operator re-running a script after lunch, which is the longest honest reading
+ * of "the same request". Longer would make the table grow for no protection anybody could use;
+ * shorter would make a key silently stop being idempotent, which is the failure it exists to
+ * prevent, arriving late.
+ */
+const INBOUND_KEY_TTL_MS = 24 * 60 * 60 * 1000
 
 interface SessionRow {
     agent_id: string
@@ -161,12 +175,23 @@ interface TurnRow {
     output_tokens: number
     cached_prompt_tokens: number | null
     cache_source: string | null
+    sender: string | null
+    sender_name: string | null
+    sender_kind: string | null
     error_code: string | null
     error_message: string | null
     error_hint: string | null
     started_at: string
     ended_at: string | null
     duration_ms: number | null
+}
+
+interface InboundKeyRow {
+    agent_id: string
+    key: string
+    turn_id: string
+    input_hash: string
+    created_at: string
 }
 
 interface DeliveryRow {
@@ -374,6 +399,12 @@ function toTurn(row: TurnRow): TurnRecord {
             ? {}
             : { cachedPromptTokens: row.cached_prompt_tokens }),
         ...(row.cache_source === null ? {} : { cacheSource: row.cache_source }),
+        // Absent means the operator, not "unknown" — see migration 12. `sender_kind` is read back
+        // through the CHECK constraint's own vocabulary, so the cast is narrowing a value the
+        // database has already refused to hold anything else in.
+        ...(row.sender === null ? {} : { sender: row.sender }),
+        ...(row.sender_name === null ? {} : { senderName: row.sender_name }),
+        ...(row.sender_kind === null ? {} : { senderKind: row.sender_kind as SenderKind }),
         ...(row.error_code === null ? {} : { errorCode: row.error_code }),
         ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
         ...(row.error_hint === null ? {} : { errorHint: row.error_hint }),
@@ -658,8 +689,20 @@ export class SqliteStore implements Store {
             ),
 
             turnInsert: db.prepare(
-                `INSERT INTO turns (turn_id, agent_id, session_key, status, source, input, started_at)
-                 VALUES (?, ?, ?, 'running', ?, ?, ?)`,
+                `INSERT INTO turns
+                     (turn_id, agent_id, session_key, status, source, input,
+                      sender, sender_name, sender_kind, started_at)
+                 VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)`,
+            ),
+            // `OR IGNORE` rather than `ON CONFLICT DO UPDATE`: a second claim must **not** move the
+            // key onto the new turn id. The whole point is that the first turn keeps it.
+            inboundKeyClaim: db.prepare(
+                `INSERT OR IGNORE INTO inbound_keys (agent_id, key, turn_id, input_hash, created_at)
+                 VALUES (?, ?, ?, ?, ?)`,
+            ),
+            inboundKeyGet: db.prepare("SELECT * FROM inbound_keys WHERE agent_id = ? AND key = ?"),
+            inboundKeyEvict: db.prepare(
+                "DELETE FROM inbound_keys WHERE agent_id = ? AND created_at < ?",
             ),
             turnFinish: db.prepare(
                 `UPDATE turns
@@ -837,6 +880,7 @@ export class SqliteStore implements Store {
             // here — deleting them explicitly would work and would also mean two places had to agree
             // about the cascade. The foreign keys are the single statement of it.
             sessionsDeleteAll: db.prepare("DELETE FROM sessions WHERE agent_id = ?"),
+            inboundKeyDeleteAll: db.prepare("DELETE FROM inbound_keys WHERE agent_id = ?"),
             outboxDeleteAll: db.prepare("DELETE FROM outbox WHERE agent_id = ?"),
             leaseDeleteAll: db.prepare("DELETE FROM runtime_leases WHERE agent_id = ?"),
             // A union rather than a join: an agent can own rows in any one of these and none of the
@@ -988,6 +1032,9 @@ export class SqliteStore implements Store {
                         record.sessionKey,
                         record.source,
                         record.input,
+                        record.sender?.id ?? null,
+                        record.sender?.name ?? null,
+                        record.sender?.kind ?? null,
                         ts,
                     )
                 })
@@ -1045,6 +1092,36 @@ export class SqliteStore implements Store {
                         reaped.push(...ids)
                     }
                     return reaped
+                })
+            },
+            claimInboundKey: async (claim) => {
+                return db.transaction<InboundKeyClaim>(() => {
+                    // Evicted here, on the write, and never on a timer — the rule `store/buffer.ts`
+                    // records for its own bounds. A timer would be a background write in a process
+                    // that may be seconds from exiting, and the table is only interesting for as
+                    // long as a client might still retry. Cost is one indexed range delete per
+                    // claim, which is the same order as the insert beside it.
+                    q.inboundKeyEvict.run(
+                        claim.agentId,
+                        new Date(claim.now.getTime() - INBOUND_KEY_TTL_MS).toISOString(),
+                    )
+                    const result = q.inboundKeyClaim.run(
+                        claim.agentId,
+                        claim.key,
+                        claim.turnId,
+                        claim.inputHash,
+                        claim.now.toISOString(),
+                    )
+                    if (result.changes === 1) return { kind: "claimed" }
+                    // Read back rather than trusting the conflict: the row could have been evicted
+                    // between the delete and the insert by another process sharing this file, in
+                    // which case the insert failed for a row that is no longer there. Answering
+                    // `replay` with no turn id would be worse than the extra query.
+                    const existing = q.inboundKeyGet.get<InboundKeyRow>(claim.agentId, claim.key)
+                    if (existing === undefined) return { kind: "claimed" }
+                    return existing.input_hash === claim.inputHash
+                        ? { kind: "replay", turnId: existing.turn_id }
+                        : { kind: "mismatch", turnId: existing.turn_id }
                 })
             },
         }
@@ -1573,6 +1650,10 @@ export class SqliteStore implements Store {
                 q.memoryDeleteAll.run(agentId)
                 q.memorySourceDeleteAll.run(agentId)
                 q.leaseDeleteAll.run(agentId)
+                // Not in the footprint and still deleted — see `AgentFootprint`. Omitting it would
+                // leave rows keyed to an agent that no longer exists, which is the `kv` table's
+                // recorded failure with a column available to avoid it.
+                q.inboundKeyDeleteAll.run(agentId)
                 scheduleQ.deleteAll.run(agentId)
                 return went
             })

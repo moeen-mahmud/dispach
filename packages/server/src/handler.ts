@@ -27,8 +27,11 @@ import {
     prepareScheduleWrite,
     type Runtime,
     type ScheduleRecord,
+    SENDER_KINDS,
+    type SenderKind,
     scheduleSessionKey,
     type TurnRecord,
+    type TurnSender,
     VERSION,
 } from "@dispach/core"
 import { Router } from "./router.ts"
@@ -36,6 +39,19 @@ import { sseResponse } from "./sse.ts"
 
 /** Bodies larger than this are refused before a channel plugin sees them. */
 const MAX_BODY_BYTES = 1_000_000
+
+/**
+ * Caps on the sender fields and the idempotency key.
+ *
+ * Small, and each for a stated reason rather than for tidiness. The id is rendered into the
+ * prompt's fence label, so an unbounded one spends the window the message needs. The name is
+ * rendered inside the fence and is attacker-supplied in exactly the case the fence exists for, so
+ * it is truncated rather than refused — a long display name is rude, not an error. The key is a
+ * database key with a unique index over it.
+ */
+const MAX_SENDER_ID = 256
+const MAX_SENDER_NAME = 128
+const MAX_IDEMPOTENCY_KEY = 255
 
 export interface HandlerOptions {
     readonly runtime: Runtime
@@ -188,6 +204,7 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 deliver?: unknown
                 stream?: unknown
                 chunks?: unknown
+                from?: unknown
             }
             // Per-token frames are opt-in, and the *reader* decides — so the query parameter on the
             // stream routes is the primary control and this is the writer's way to ask on the
@@ -212,7 +229,50 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             const deliver = parseDeliver(input.deliver)
             if (deliver.kind === "error") return fail(deliver.error, 400)
 
+            const from = parseFrom(input.from)
+            if (from.kind === "error") return fail(from.error, 400)
+
+            const idempotency = parseIdempotencyKey(context.request)
+            if (idempotency.kind === "error") return fail(idempotency.error, 400)
+
             const turnId = newTurnId()
+
+            /**
+             * The key is claimed **here**, before `agent.send`, and awaited.
+             *
+             * This handler answers `202` and lets the turn run detached, so the turn row appears
+             * some milliseconds later — a claim that waited for the row would leave the window
+             * between two retries wide open, and that window is the only thing the feature exists
+             * to close. Claiming synchronously makes the second request deterministic rather than
+             * a race: it either wins the insert or reads the winner's turn id.
+             *
+             * A mismatch is a `409` rather than a replay. A client that recycled a key by accident
+             * would otherwise be told its second, different message succeeded — the one new failure
+             * an idempotency key introduces that not having one does not.
+             */
+            if (idempotency.key !== undefined) {
+                const claim = await agent.store.turns.claimInboundKey({
+                    agentId: agent.id,
+                    key: idempotency.key,
+                    turnId,
+                    inputHash: await inputHash(sessionKey, text),
+                    now: new Date(),
+                })
+                if (claim.kind === "replay") {
+                    return json({ turnId: claim.turnId, sessionKey, replayed: true }, 200)
+                }
+                if (claim.kind === "mismatch") {
+                    return fail(
+                        {
+                            code: "idempotency_key_reused",
+                            message: `Idempotency-Key "${idempotency.key}" was already used for a different message.`,
+                            hint: `It belongs to turn ${claim.turnId}, whose text or session differed from this request's. Nothing was run. Use a fresh key for a new message, or resend the original text byte for byte to get that turn back. A key is remembered for 24 hours.`,
+                            field: "Idempotency-Key",
+                        },
+                        409,
+                    )
+                }
+            }
             const controller = new AbortController()
             running.set(turnId, controller)
             // Before `send`, and **unconditionally** — the condition was the bug.
@@ -235,7 +295,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             // Detached on purpose. The response returns before this settles, and nothing about the
             // turn's lifetime depends on the connection that started it.
             const work = agent
-                .send(text, { sessionKey, turnId, source: "api", signal: controller.signal })
+                .send(text, {
+                    sessionKey,
+                    turnId,
+                    source: "api",
+                    ...(from.from === undefined ? {} : { from: from.from }),
+                    signal: controller.signal,
+                })
                 .then(async (result) => {
                     if (deliver.target === undefined || result.text.trim() === "") return
                     await runtime.channels.deliver({
@@ -1116,6 +1182,134 @@ async function readJson(
 }
 
 /** `"none"` | a channel id | `{ channel, to }`. Absent means none. */
+/**
+ * The `from` field on `POST /messages`.
+ *
+ * Validated strictly rather than coerced, and the strictness is the point on this one field: `kind`
+ * decides whether the turn is gated, so an unrecognised value must **refuse** rather than fall to a
+ * default. Both defaults are wrong — `"user"` silently un-gates a peer message somebody tried to
+ * declare, and `"agent"` gates an operator's own turn for a typo — so there is no default at all.
+ *
+ * The id is capped because it is carried onto a row, an event and a fence label, and a megabyte of
+ * "identity" in a prompt is a cheap way to push everything else out of the window.
+ */
+function parseFrom(
+    value: unknown,
+): { kind: "ok"; from: TurnSender | undefined } | { kind: "error"; error: ErrorDetail } {
+    if (value === undefined || value === null) return { kind: "ok", from: undefined }
+
+    const invalid = (
+        message: string,
+        hint: string,
+        field = "from",
+    ): { kind: "error"; error: ErrorDetail } => ({
+        kind: "error",
+        error: { code: "sender_invalid", message, hint, field },
+    })
+
+    if (typeof value !== "object") {
+        return invalid(
+            "from must be an object.",
+            'Send { "from": { "id": "agent:ops-bot", "kind": "agent" } }, or omit it entirely for a turn the token-holder is sending itself.',
+        )
+    }
+
+    const raw = value as { id?: unknown; name?: unknown; kind?: unknown }
+    if (typeof raw.id !== "string" || raw.id.trim() === "") {
+        return invalid(
+            "from.id is required and must be a non-empty string.",
+            "Use a stable identity in your own namespace — `agent:ops-bot`, `user:018f…`, an email address. It is opaque to this runtime and is recorded on the turn so an audit can answer who asked.",
+            "from.id",
+        )
+    }
+    if (raw.id.length > MAX_SENDER_ID) {
+        return invalid(
+            `from.id is ${raw.id.length} characters, over the ${MAX_SENDER_ID} limit.`,
+            "A sender id is an identifier, not a payload. It is rendered into the prompt's fence label, so an unbounded one spends the context window the message needs.",
+            "from.id",
+        )
+    }
+    if (typeof raw.kind !== "string" || !(SENDER_KINDS as readonly string[]).includes(raw.kind)) {
+        const suggestion =
+            typeof raw.kind === "string" ? nearest(raw.kind, SENDER_KINDS) : undefined
+        return invalid(
+            `from.kind must be one of: ${SENDER_KINDS.join(", ")}.`,
+            `${suggestion === undefined ? "" : `Did you mean "${suggestion}"? `}This field decides the trust boundary — "agent" fences the message and blocks mutating tools for the turn, "user" does not — so there is no default and an unknown value is refused rather than guessed at. A turn the token-holder is sending itself omits "from".`,
+            "from.kind",
+        )
+    }
+    if (raw.name !== undefined && typeof raw.name !== "string") {
+        return invalid(
+            "from.name must be a string when present.",
+            "It is a display name only and is rendered inside the fence, never above it. Omit it if you have none.",
+            "from.name",
+        )
+    }
+
+    return {
+        kind: "ok",
+        from: {
+            id: raw.id,
+            kind: raw.kind as SenderKind,
+            ...(raw.name === undefined ? {} : { name: raw.name.slice(0, MAX_SENDER_NAME) }),
+        },
+    }
+}
+
+/**
+ * The `Idempotency-Key` header.
+ *
+ * A **header** rather than a body field, because it is a fact about the request rather than about
+ * the message — the same reason it is a header everywhere else this convention appears — and
+ * because that makes it uniform for any later POST without each one growing its own field.
+ *
+ * Refused when present and unusable rather than ignored. A client that sends a malformed key
+ * believes its retries are safe; silently dropping it is the one outcome that leaves them wrong
+ * about exactly the guarantee they asked for.
+ */
+function parseIdempotencyKey(
+    request: Request,
+): { kind: "ok"; key: string | undefined } | { kind: "error"; error: ErrorDetail } {
+    const raw = request.headers.get("idempotency-key")
+    if (raw === null) return { kind: "ok", key: undefined }
+    const key = raw.trim()
+    const bad = (message: string): { kind: "error"; error: ErrorDetail } => ({
+        kind: "error",
+        error: {
+            code: "idempotency_key_invalid",
+            message,
+            hint: `Send 1-${MAX_IDEMPOTENCY_KEY} printable ASCII characters that are unique per logical request — a UUID is the usual choice. Omit the header entirely to accept that a retry runs the turn again. Printable ASCII because the key is a database key, and node:sqlite truncates a bound string at a NUL byte where bun:sqlite stores it whole.`,
+            field: "Idempotency-Key",
+        },
+    })
+    if (key === "") return bad("Idempotency-Key is present but empty.")
+    if (key.length > MAX_IDEMPOTENCY_KEY) {
+        return bad(
+            `Idempotency-Key is ${key.length} characters, over the ${MAX_IDEMPOTENCY_KEY} limit.`,
+        )
+    }
+    if (!/^[\x20-\x7e]+$/.test(key)) {
+        return bad("Idempotency-Key contains characters that are not printable ASCII.")
+    }
+    return { kind: "ok", key }
+}
+
+/**
+ * What the key is matched against, so a reused key with different text can be refused.
+ *
+ * SHA-256 of the session key and the text together: the *same* text in two different sessions is
+ * two different logical requests, and treating them as one replay would silently drop the second
+ * conversation's message. Hashed rather than stored so the table does not hold a second copy of
+ * every message for a day.
+ */
+async function inputHash(sessionKey: string, text: string): Promise<string> {
+    const bytes = new TextEncoder().encode(`${sessionKey}\u0000${text}`)
+    const digest = await crypto.subtle.digest("SHA-256", bytes)
+    return Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("")
+}
+
 function parseDeliver(
     value: unknown,
 ):

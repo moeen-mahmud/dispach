@@ -584,6 +584,59 @@ ALTER TABLE messages
     ADD COLUMN tainted INTEGER NOT NULL DEFAULT 0 CHECK (tainted IN (0, 1));
 `,
     },
+    {
+        version: 12,
+        name: "inbound_sender_and_idempotency",
+        /**
+         * Who sent a turn, and a key that makes retrying `POST /messages` safe.
+         *
+         * **The sender columns are nullable, and null means the operator.** Not "unknown": every
+         * turn this runtime took before this migration came in through a surface the operator was
+         * holding — the REPL, a schedule, a channel turn under `allowFrom`, an API call with the
+         * container's token — so backfilling them with a synthetic identity would put a fake party
+         * on every historical row. `sender_kind` is constrained rather than free text because the
+         * trust boundary is derived from it (`loop/sender.ts`), and a typo in a value that decides
+         * whether a write is gated must fail at the write rather than default to the safe-looking
+         * branch. Trust itself is **not** a column: it is a pure function of `sender_kind`, and two
+         * fields that can disagree about a boundary is the shape decision 4.53 and the `writeRoots`
+         * floor were both fixed for.
+         *
+         * `inbound_keys` is its own table and not a column on `turns`, for a reason that only shows
+         * up under a race: the key has to be claimed *before* `Agent.send` runs, because
+         * `POST /messages` returns `202` and writes the turn row asynchronously — so at claim time
+         * there is no turn row to put a column on, and two retries arriving 1 ms apart is precisely
+         * the case the feature exists for. The primary key does the work; SQLite serialises writers,
+         * so `INSERT OR IGNORE` plus a read-back is atomic without a transaction.
+         *
+         * `input_hash` is stored so a key reused with **different text** can be refused rather than
+         * silently answering with the first turn's id. That is the one failure mode an idempotency
+         * key introduces that not having one does not: a client that recycles a key by accident
+         * would be told its second, different message succeeded.
+         *
+         * Retention is enforced lazily on claim and never on a timer — the rule `store/buffer.ts`
+         * records for its own bounds. A timer in the store would be a background write in a process
+         * that may be about to exit, and the table is only interesting for as long as a client might
+         * still retry.
+         */
+        sql: `
+ALTER TABLE turns ADD COLUMN sender TEXT;
+ALTER TABLE turns ADD COLUMN sender_name TEXT;
+ALTER TABLE turns ADD COLUMN sender_kind TEXT
+    CHECK (sender_kind IS NULL OR sender_kind IN ('user', 'agent'));
+
+CREATE TABLE inbound_keys (
+    agent_id   TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    turn_id    TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, key)
+);
+
+-- Eviction scans by age within an agent, which is also how \`purgeAgent\` deletes.
+CREATE INDEX inbound_keys_by_age ON inbound_keys (agent_id, created_at);
+`,
+    },
 ]
 
 export interface MigrationReport {

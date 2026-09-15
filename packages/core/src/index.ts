@@ -86,6 +86,14 @@ export {
     type PhaseMap,
     phasesFor,
 } from "./loop/phases.ts"
+export {
+    frameSenderInput,
+    SENDER_KINDS,
+    type SenderKind,
+    senderLabel,
+    type TurnSender,
+    trustOfSender,
+} from "./loop/sender.ts"
 export { runStep, type StepInput, type StepResult } from "./loop/step.ts"
 export {
     runTurn,

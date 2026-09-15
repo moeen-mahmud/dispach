@@ -7,6 +7,7 @@
  */
 
 import type { ErrorDetail } from "../errors.ts"
+import type { SenderKind } from "../loop/sender.ts"
 import type { OnMutate, Trust } from "../tools/trust.ts"
 
 /** Envelope fields shared by every event. */
@@ -120,7 +121,22 @@ export interface EventDataMap {
      * where a refusal would turn a performance smell into an agent that will not start.
      */
     "plugin.slow": { name: string; setupMs: number }
-    "turn.start": { source: string; inputTokens: number }
+    /**
+     * `trust` and `from` are additive within `v: 1` and both are always meaningful.
+     *
+     * `trust` is present on every turn — `"trusted"` for the operator, the REPL, a schedule and a
+     * channel turn alike — rather than only when it is `"untrusted"`. A field that appears only in
+     * the interesting case makes its absence ambiguous between "this turn was trusted" and "this
+     * server predates the field", and an observability surface has to be able to tell those apart.
+     * `from` *is* omitted when there was no sender, because an absent sender is a real third state
+     * and synthesising one would put the operator's own turn behind a fake identity.
+     */
+    "turn.start": {
+        source: string
+        inputTokens: number
+        trust: Trust
+        from?: { id: string; kind: SenderKind }
+    }
     "context.assembled": { slots: ContextSlotReport[]; total: number }
     /**
      * History that did not fit the prompt budget and was left out by `assembleContext`.

@@ -2450,6 +2450,96 @@ not from the terminal. Stated rather than implied: the warning fires for a CLI r
 
 ## Phase 10 — Multi-agent
 
+**Split into 10A and 10B** after auditing VelaCrew on 2026-09-15 (`docs/06-VELAOPS-INTEGRATION.md`
+is the consumer-facing half). They are different features answering different problems, and only
+one of them blocks anything.
+
+### What the audit changed, and what it deliberately did not
+
+VelaCrew's Team Space is **peer ↔ peer**: one owner *per agent*, one container each, and a message
+the recipient judges under **its own** owner's grants. There is no supervisor anywhere in it.
+Phase 10 as written is **supervisor → sub-agent**: one owner, one runtime, the parent's authority
+*narrowed* for the child, a typed artifact handed back. Neither substitutes for the other.
+
+The first instinct was to re-scope Phase 10 onto what the consumer needs, and it is rejected —
+`CLAUDE.md` says why in as many words: *VelaOps is a consumer, not the owner.* Intra-agent
+decomposition is a harness feature whether or not this consumer wants it, and moving the roadmap
+because one consumer does not need something is exactly the pressure that sentence exists to
+refuse. **10B is unchanged.**
+
+What the audit *did* find is three gaps in the **existing** API, each of which passes the test
+`CLAUDE.md` sets for consumer-driven work — *would this make the runtime less useful to someone who
+has never heard of VelaOps?* — so they are ours rather than theirs:
+
+| Gap | Why it is the runtime's, not a consumer's |
+| --- | --- |
+| **No sender identity** on `POST /messages` | The channel path has `InboundMessage`, carrying `peerId`, `senderHandle` and `senderName`, and `allowFrom` reasons over them. The API path carries **nothing** — so "who am I talking to", "this is not my owner typing", and any multi-user front end are all unavailable on half the runtime's own inbound surface. An asymmetry in our surface, not a request. |
+| **No idempotency key** | `grep -c idempot` in `handler.ts` returns 0. Our *outbox* is idempotent by a derived key (decision 8.x); our *inbox* is not, so a retried POST — a proxy timeout, a queue redelivery, a client's own retry — runs the turn twice and bills twice. Anyone who retries a POST needs this. |
+| **No untrusted framing for an inbound message** | We fence tool output because a stranger wrote it (`tools/trust.ts`, decision 4.25). A peer agent's message is the same class of text, and measured worse: AgentLeak reports inter-agent messages leaking sensitive data 68.8% of the time against 27.2% in final outputs. "A tool result is not automatically trustworthy" applies verbatim to a message. |
+
+**Sequencing.** 10A precedes Phase 15 (the web UI) and 10B does not. The earlier argument here was
+that delegation changes what a transcript is; true, and the weaker form. A **peer message** changes
+it more — held by a scan, flagged, needing a reply composer, attributable to someone who is not the
+operator — and it is 10A that makes those legible on the wire. 10B could honestly follow the UI.
+
+**What stays on the consumer's side**, recorded so it is not picked up here by drift: the
+`space_*` collaboration surface (theirs, and it should be a **tool-provider plugin** against the
+9A seam rather than the eight shell scripts in a skill it is today — two-hop, which decision 4.7
+refuses), the A2A endpoint and its owner-minted keys, and identity, cost control, provisioning and
+isolation as `06-VELAOPS-INTEGRATION.md` already says.
+
+---
+
+### Phase 10A — The inbound peer surface
+
+**Goal.** A message can say who sent it, can be retried safely, and is treated as data when it did
+not come from the operator.
+
+**Deliverables**
+
+- `TurnSender` in core: `{ id, name?, kind: "user" | "agent" }`. Threaded through
+  `AgentSendOptions` → `TurnInput` → the `SLOT.input` block → the turn row → `turn.start`.
+- **Trust is derived from `kind`, never settable beside it.** `agent` ⇒ untrusted, `user` ⇒
+  trusted, `from` absent ⇒ trusted and today's behaviour byte for byte. One field, so the two
+  cannot disagree — the `writeRoots` and `tools.providers` lesson.
+- An untrusted input is wrapped by the **existing** `wrapUntrusted` fence and **starts the turn
+  tainted** (`untrustedSeen` seeded from the input rather than always `false`), so the write gate
+  applies from step one. The fence is advisory; the gate is the part that holds.
+- `Idempotency-Key` request header on `POST /messages`. A replay answers `200
+  { turnId, sessionKey, replayed: true }` — the original turn id, so the caller reattaches through
+  the routes that already exist. `202` is reserved for a turn that was actually accepted.
+- Migration 12: `inbound_keys (agent_id, key) → turn_id`, claimed **synchronously in the handler
+  before `agent.send`**, because the 202 returns before the turn row is written and a race between
+  two retries is the only case the feature exists for. Retention enforced lazily on claim, never on
+  a timer (`buffer.ts`'s recorded rule), and `purgeAgent` deletes it.
+- Spec: `04-SPEC-WIRE.md` gains `from`, the header, the `replayed` response and the error codes;
+  `09-API-GUIDE.md` gains a worked peer-message call.
+
+**Files.** `packages/core/src/loop/turn.ts`, `runtime/agent.ts`, `tools/trust.ts`,
+`store/store.ts`, `store/sqlite/{migrations,store}.ts`, `events/types.ts`,
+`packages/server/src/handler.ts`, `packages/client/src/index.ts`.
+
+**Acceptance**
+
+- [ ] `from: { kind: "agent" }` fences the input and gates a mutating call on **step one** — asserted
+      on the assembled request body, not on the handler's arguments
+- [ ] `from: { kind: "user" }` and no `from` at all leave the prompt byte-identical to today
+- [ ] Two POSTs with one `Idempotency-Key` run **one** turn; the second returns the first's `turnId`
+      with `replayed: true` and `200`
+- [ ] The same key under a *different* agent is a different turn — one `store.db` per sandbox root,
+      so this is a property of the query rather than of the file
+- [ ] A key reused with different `text` is refused rather than silently answering the old turn
+- [ ] The sender survives a restart: it is on the turn row, and `GET /turns/:turnId` reports it
+- [ ] `turn.start` carries `from` and `trust`, and the spec table says so
+
+**Non-goals.** A2A agent cards. Peer *discovery*. Outbound agent-to-agent calls — a Dispach agent
+reaching another one is a tool, and a tool is 10B's or a plugin's. Per-sender authorisation beyond
+`allowFrom`, which is inbound-only and stays that way.
+
+---
+
+### Phase 10B — Supervisor delegation
+
 **Goal.** A supervisor delegates to members with isolated context and typed results.
 
 **Deliverables**
@@ -2459,7 +2549,7 @@ not from the terminal. Stated rather than implied: the warning fires for a CLI r
 - `handoff` local tool, supervisor only
 - Runtime-kind manifest with `agents` and `team`
 - Sub-agent budget enforcement; `handoff.start` / `handoff.result`
-- Migration 006: `handoffs`
+- Migration: `handoffs`
 
 **Files.** `packages/core/src/team/`, `manifest/schema.ts`, `examples/team/`
 
@@ -2473,6 +2563,14 @@ not from the terminal. Stated rather than implied: the warning fires for a CLI r
 - [ ] Members lack the `handoff` tool unless they declare their own team
 
 **Non-goals.** A2A. Free-form agent chat. Dynamic team formation.
+
+> **One finding worth carrying to the consumer.** VelaCrew's `apps/engine/src/lib/space/run-watch.ts`
+> exists entirely because `POST /hooks/agent` returns a hook-delivery id that appears in **zero** of
+> a turn's event frames — its own header records the measurement, and `evt.runId !== watch.runId`
+> dropped every event of every run, so **0 of 62 dev runs ever reached COMPLETED**. `POST
+> /v1/agents/:id/messages` returns the real `turnId`, and 13.1 made the buffer open *at acceptance*,
+> so attaching in the next statement is a guarantee rather than a race. Suffix matching, run
+> claiming and a watchdog doing identity work do not get easier — they stop existing.
 
 ---
 

@@ -799,22 +799,22 @@ describe("whoever hands out a turn id opens its buffer first", () => {
 
     test("every newTurnId() in a route is followed by streams.open before agent.send", () => {
         const offenders: string[] = []
-        for (const match of SOURCE.matchAll(/newTurnId\(\)/g)) {
-            // The window from the mint to the first `send` in the same route body. Generous on
-            // purpose — the assertion is about *order*, not proximity — and it has to be, because
-            // the comments explaining these two fixes are themselves ~1,400 characters. At 1,200
-            // this guard went red for code that was correct, which is its own kind of useless.
-            const after = SOURCE.slice(match.index ?? 0, (match.index ?? 0) + 3000)
+        // Bounded by the **next** mint site rather than by a character count. A fixed window has
+        // now been wrong twice — red at 1,200 characters for correct code, widened to 3,000, red
+        // again when 10A added the idempotency claim between the mint and the open — and each time
+        // the failure was about how much prose the fix needed rather than about the ordering. The
+        // next mint is the real boundary: it is where the route being checked stops mattering, so
+        // an `open` belonging to a *later* route can no longer cover for a missing one here, which
+        // a generous window silently permitted.
+        const mints = [...SOURCE.matchAll(/newTurnId\(\)/g)].map((m) => m.index ?? 0)
+        for (const [position, start] of mints.entries()) {
+            const after = SOURCE.slice(start, mints[position + 1] ?? SOURCE.length)
             // Matches the call, not its arity — the signature grew a `{ chunks }` argument and an
             // exact-string match would have gone red for a fix that was still in place.
             const opened = after.indexOf("streams.open(turnId")
             const sent = after.indexOf(".send(")
             if (opened === -1 || (sent !== -1 && opened > sent)) {
-                offenders.push(
-                    SOURCE.slice(0, match.index ?? 0)
-                        .split("\n")
-                        .length.toString(),
-                )
+                offenders.push(SOURCE.slice(0, start).split("\n").length.toString())
             }
         }
         expect({ routesMintingATurnIdWithoutOpening: offenders }).toEqual({

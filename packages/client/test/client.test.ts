@@ -341,6 +341,78 @@ describe("errors are typed, and carry the hint", () => {
     })
 })
 
+describe("a peer's message, and a retry that is safe", () => {
+    test("from and idempotencyKey reach the wire, and a replay says so", async () => {
+        const { client, runtime } = await harness()
+        try {
+            const agent = client.agent("assistant")
+            const first = await agent.send("run the deploy", {
+                from: { id: "agent:ops-bot", kind: "agent" },
+                idempotencyKey: "req-client-1",
+            })
+            // A fresh turn is not a replay, and `replayed` is a boolean rather than optional — a
+            // caller must not have to distinguish absent from false to know whether work happened.
+            expect(first.replayed).toBe(false)
+            expect(await first.text()).toBe("hello from the model")
+
+            const again = await agent.send("run the deploy", {
+                from: { id: "agent:ops-bot", kind: "agent" },
+                idempotencyKey: "req-client-1",
+            })
+            expect(again.turnId).toBe(first.turnId)
+            expect(again.replayed).toBe(true)
+
+            // The sender is on the row, so a UI rendering a transcript can attribute the message
+            // to someone other than the operator without having kept the send's arguments.
+            const row = await first.get()
+            expect(row.sender).toBe("agent:ops-bot")
+            expect(row.senderKind).toBe("agent")
+        } finally {
+            await runtime.stop()
+        }
+    })
+
+    test("a reattach handle is never a replay", async () => {
+        // `agent.turn(id)` knows nothing about how the turn started, so the honest answer is false
+        // rather than undefined. Asserted because the field is read to decide whether a side effect
+        // has already been performed, and `undefined` is falsy by luck rather than by contract.
+        const { client, runtime } = await harness()
+        try {
+            expect(client.agent("assistant").turn("t_whatever").replayed).toBe(false)
+        } finally {
+            await runtime.stop()
+        }
+    })
+
+    test("a key reused with different text is a typed error, not a wrong answer", async () => {
+        const { client, runtime } = await harness()
+        try {
+            const agent = client.agent("assistant")
+            await agent.send("the original", { idempotencyKey: "req-client-2" })
+            await expect(
+                agent.send("something else", { idempotencyKey: "req-client-2" }),
+            ).rejects.toMatchObject({ code: "idempotency_key_reused" })
+        } finally {
+            await runtime.stop()
+        }
+    })
+
+    test("an unknown sender kind is refused before a turn starts", async () => {
+        const { client, runtime } = await harness()
+        try {
+            await expect(
+                client.agent("assistant").send("hi", {
+                    // Deliberately outside the union: a JavaScript caller has no compiler, and the
+                    // server refusing rather than defaulting is what makes that safe.
+                    from: { id: "x", kind: "robot" as "agent" },
+                }),
+            ).rejects.toMatchObject({ code: "sender_invalid" })
+        } finally {
+            await runtime.stop()
+        }
+    })
+})
+
 describe("the firehose", () => {
     test("reports the resolved filter first, then events", async () => {
         const { client, runtime } = await harness()

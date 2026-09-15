@@ -31,6 +31,7 @@ import {
 import type { EventBus } from "../events/bus.ts"
 import { newTurnId } from "../loop/ids.ts"
 import { entryPhase, isPhased, unmatchedAllows } from "../loop/phases.ts"
+import type { TurnSender } from "../loop/sender.ts"
 import { runStep } from "../loop/step.ts"
 import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from "../loop/turn.ts"
 import type { LoadedManifest } from "../manifest/load.ts"
@@ -198,6 +199,15 @@ export interface AgentSendOptions {
      * a schedule quietly running on the expensive model forever.
      */
     readonly role?: string
+    /**
+     * Who sent this input, when it was not the operator.
+     *
+     * `kind: "agent"` fences the input and starts the turn tainted, so the write gate applies from
+     * step one — `loop/sender.ts` has the reasoning and why there is no separate `trust` field.
+     * Absent leaves every existing caller byte-identical, which is what the REPL, a schedule, a
+     * channel turn and an operator's own API call all rely on.
+     */
+    readonly from?: TurnSender
 }
 
 export interface AgentDescription {
@@ -638,7 +648,10 @@ export class Agent {
             agentId: this.id,
             sessionKey,
             source,
+            // Raw, never the fenced form. The row is the record of what was said and `sender` sits
+            // beside it, so a reader can reconstruct the framing without the evidence carrying it.
             input,
+            ...(options.from === undefined ? {} : { sender: options.from }),
         })
 
         const active = this.knowledge === undefined ? [] : activateKnowledge(input, this.knowledge)
@@ -706,6 +719,7 @@ export class Agent {
                 : {}),
             bus: this.#bus,
             source,
+            ...(options.from === undefined ? {} : { from: options.from }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         })
 

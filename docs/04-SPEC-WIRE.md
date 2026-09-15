@@ -44,6 +44,9 @@ and WebSocket surfaces can return:
 | `bad_request_url` | 400 | `request.url` could not be parsed — usually a relative URL from a host framework. |
 | `message_text_required` | 400 | `POST /messages` with no `text`. |
 | `deliver_invalid` | 400 | `deliver` named a channel with no recipient, or an unknown shape. |
+| `sender_invalid` | 400 | `from` is malformed, or `from.kind` is not `user` or `agent`. Refused rather than defaulted — `kind` decides the trust boundary. |
+| `idempotency_key_invalid` | 400 | `Idempotency-Key` is empty, over 255 characters, or not printable ASCII. |
+| `idempotency_key_reused` | 409 | The key belongs to a turn whose text or session differed. Nothing ran. |
 | `phase_invalid` | 400 | The phase is not declared in the manifest. |
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
@@ -123,12 +126,62 @@ POST /v1/agents/:id/messages
   "sessionKey": "api:moeen",
   "deliver": "none",
   "stream": true,
-  "chunks": true
+  "chunks": true,
+  "from": { "id": "agent:ops-bot", "name": "Ops Bot", "kind": "agent" }
 }
 ```
 
 Returns `202` with `{ turnId, sessionKey }` immediately, then streams SSE if `stream` is
 true. **The turn is not bound to this connection.** Disconnecting does not cancel it.
+
+#### `from` — who sent it, and what follows
+
+Optional. Omitting it means the token-holder is sending the message itself, which is what every
+caller before this field existed was doing — the REPL, a schedule, a channel turn, an operator's
+own `curl`. Absent is therefore **not** "unknown".
+
+| Field | |
+| --- | --- |
+| `id` | Required. A stable identity in the caller's own namespace — `agent:ops-bot`, `user:018f…`, an email address. Opaque to the runtime, capped at 256 characters, recorded on the turn row. |
+| `name` | Optional display name. Truncated at 128 characters. Rendered *inside* the fence, never above it. |
+| `kind` | Required. `user` or `agent`. **No default.** |
+
+`kind` decides the trust boundary and nothing else may:
+
+| `kind` | Prompt | Tools |
+| --- | --- | --- |
+| absent / `user` | The input reaches `SLOT.input` unchanged | Unaffected |
+| `agent` | The input is wrapped in the same `UNTRUSTED_TOOL_OUTPUT` fence an untrusted observation gets, labelled with the sender | The turn starts **tainted**, so `tools.untrusted.onMutate` applies from step one |
+
+There is deliberately **no `trust` field beside `kind`**. The dangerous configuration is a peer
+message declared trusted, and the only way to make it unrepresentable is to derive one from the
+other — a caller who wants a peer's text treated as trusted has to write `kind: "user"`, which is a
+sentence about what they believe rather than a flag that quietly widens a boundary.
+
+The fence is advisory: a model can be persuaded by text inside an intact one. The part that holds
+is the write gate, which sits at the tool call where prose cannot reach. Both halves are the
+existing mechanism — see decision 4.25 and `packages/core/src/tools/trust.ts`.
+
+A peer's message is also excluded from conversation memory (`tainted` on the stored row), so an
+injection cannot become durable by being retrieved into a later session's `SLOT.memory`.
+
+#### `Idempotency-Key` — making a retry safe
+
+Optional request **header**, 1–255 printable ASCII characters, unique per logical request. A header
+rather than a body field because it is a fact about the request rather than about the message.
+
+| Second request | Answer |
+| --- | --- |
+| Same key, same text and session | `200 { turnId, sessionKey, replayed: true }` — the **first** turn's id. Nothing ran. |
+| Same key, different text or session | `409 idempotency_key_reused`, naming the turn that holds it. Nothing ran. |
+| No key | `202`. The turn runs again — two turns, two bills. |
+
+Remembered for 24 hours, per agent. The key is claimed before the turn starts, not after, because
+this endpoint answers `202` and writes its turn row asynchronously: a claim that waited for the row
+would leave the window between two retries — the only window this exists to close — wide open.
+
+`replayed` is absent on a `202` rather than `false`, and `@dispach/client` normalises it to a
+boolean on the handle.
 
 `chunks` is here because `stream: true` on its own gives you lifecycle events and no tokens.
 Per-token `model.chunk` frames are **opt-in per reader**, default off, and the reason is cost
@@ -140,7 +193,7 @@ in it.
 ```
 GET  /v1/agents/:id/turns/:turnId/stream?chunks=  → SSE, replays buffered events then tails
 POST /v1/agents/:id/turns/:turnId/stop            → cooperative cancel; persists partial content
-GET  /v1/agents/:id/turns/:turnId                 → final state once complete
+GET  /v1/agents/:id/turns/:turnId                 → final state once complete, with `sender*`
 ```
 
 Reattach is core, not a convenience. Generation must survive a client refresh; partial
@@ -333,7 +386,7 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `agent.channel.status` | connect/disconnect | `channelId`, `channelType`, `status`, `detail?` |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |
 | `agent.channel.rejected` | inbound not turned into a turn | `channelId`, `reason` (`duplicate` \| `denied`), `sender`, `detail` |
-| `turn.start` | inbound accepted | `source`, `inputTokens` |
+| `turn.start` | inbound accepted | `source`, `inputTokens`, `trust`, `from?` |
 | `context.assembled` | per turn | `slots: [{slot, label, tokens, pinned}]`, `total` |
 | `context.pressure` | per step, after compaction | `fraction` (of the prompt actually sent), `tokens`, `budget`, `source: reported \| corrected \| estimated`, `peak?` (what the ladder faced) |
 | `compaction.stage` | per stage that ran | `stage`, `before`, `after`, `changed`, `digest?: model \| mechanical` |

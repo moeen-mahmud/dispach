@@ -41,6 +41,7 @@ import type { OnMutate } from "../tools/trust.ts"
 import type { DisplacedArtifact, Tool, ToolResult, WorkspaceWriteTarget } from "../tools/types.ts"
 import { newStepId, newTurnId } from "./ids.ts"
 import { allowFor, otherPhases, type PhaseMap } from "./phases.ts"
+import { frameSenderInput, senderLabel, type TurnSender, trustOfSender } from "./sender.ts"
 import { runStep } from "./step.ts"
 
 export interface TurnLimits {
@@ -188,6 +189,18 @@ export interface TurnInput {
     readonly middleware?: readonly Middleware[]
     /** Where the turn came from, for the `turn.start` event: `repl`, `api`, `schedule`, … */
     readonly source: string
+    /**
+     * Who sent `input`, when it was not the operator.
+     *
+     * Absent is the default and means today's behaviour exactly: the prompt is assembled from the
+     * raw input and the turn starts clean. Present with `kind: "agent"` fences the input and starts
+     * the turn **tainted** — see `sender.ts` for why `kind` decides that and no separate field may.
+     *
+     * `source` and this are different questions and both are kept: `source` is which surface the
+     * turn arrived through, `from` is who was on the other end of it. A schedule has a source and
+     * no sender; a peer agent reaching the API has both.
+     */
+    readonly from?: TurnSender
     /** Caller's cancellation. A disconnect must never be wired to this. */
     readonly signal?: AbortSignal
     readonly turnId?: string
@@ -376,6 +389,7 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
         turnId,
         input: input.input,
         source: input.source,
+        ...(input.from === undefined ? {} : { from: input.from }),
         signal: input.signal ?? new AbortController().signal,
     })
 
@@ -405,6 +419,22 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
     const turnId = input.turnId ?? newTurnId()
     const context = { agentId: input.agentId, sessionKey: input.sessionKey, turnId }
     const started = performance.now()
+
+    /**
+     * The input as the prompt carries it: fenced when the sender is a peer, unchanged otherwise.
+     *
+     * Computed **once**, here, and used by all three readers — the `turn.start` token estimate, the
+     * trace's first message, and `assembleContext`'s input block. A second derivation is how the
+     * prompt and the persisted history come to hold different text for one message, which would make
+     * the fence disappear from a resumed conversation with nothing reporting it.
+     *
+     * The *stored turn row* deliberately keeps the raw text (see `Agent.send`): the row is the audit
+     * record of what was said, and `sender` is a column beside it, so the framing is reconstructible
+     * and does not have to be baked into the evidence. History is the other way round — it is prompt
+     * material, so it carries the fence, exactly as a rendered observation already does.
+     */
+    const promptInput = frameSenderInput(input.input, input.from)
+    const inputTrust = trustOfSender(input.from)
 
     const link = linkSignals(input.signal, input.limits.turnTimeoutMs)
 
@@ -454,13 +484,32 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
 
     input.bus.emit(
         "turn.start",
-        { source: input.source, inputTokens: estimateMessageTokens(input.input) },
+        {
+            source: input.source,
+            // The *prompt's* cost, not the message's: a fenced input is billed with its fence, and
+            // reporting the bare message would understate every peer turn by the notice's length.
+            inputTokens: estimateMessageTokens(promptInput),
+            trust: inputTrust,
+            ...(input.from === undefined
+                ? {}
+                : { from: { id: input.from.id, kind: input.from.kind } }),
+        },
         context,
     )
 
     // Built during the loop rather than after it: with tools, what gets persisted is a trace of
     // several messages, and reconstructing it from the final state afterwards loses the order.
-    const trace: ChatMessage[] = [{ role: "user", content: input.input }]
+    const trace: ChatMessage[] = [
+        {
+            role: "user",
+            content: promptInput,
+            // Marked so `memory/conversation.ts` refuses to index it. Without this a peer's text is
+            // indexed as ordinary prose and retrieved into a later session's `SLOT.memory` — long
+            // after the turn's taint expired, which makes an injection *durable*. That exclusion
+            // already existed for tool output; nothing had ever produced a tainted *user* message.
+            ...(inputTrust === "untrusted" ? { tainted: true } : {}),
+        },
+    ]
     /** Prose from the current step that no history message carries yet. */
     let pendingProse = ""
     /** A mutating tool succeeded. Its effect happened, whatever the turn's outcome turns out to be. */
@@ -473,8 +522,22 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
      * next turn — a known, deliberate boundary, since a taint that outlives a human message is a
      * different control and the human message is what a `confirm` policy consults.
      */
-    let untrustedSeen = false
-    let untrustedSource: string | undefined
+    /**
+     * Seeded from the sender, which is the security property this whole feature rests on.
+     *
+     * The fence around the input is advisory — a model can be talked past an intact one, which
+     * `trust.ts` says in as many words. The write gate is not, because it sits at the tool call
+     * where prose cannot reach. So an `agent` sender starting the turn tainted is what makes
+     * `tools.untrusted.onMutate` apply from **step one** rather than from whenever some tool
+     * happens to return something; a turn whose only untrusted content is the message itself would
+     * otherwise pass the gate freely.
+     *
+     * It still does not survive into the next turn, per decision 4.26 — but the next turn's input
+     * re-derives it from *that* message's sender, so a conversation with a peer stays gated for as
+     * long as the peer is the one talking.
+     */
+    let untrustedSeen = inputTrust === "untrusted"
+    let untrustedSource = input.from === undefined ? undefined : senderLabel(input.from)
 
     try {
         const history: ChatMessage[] = [...input.history]
@@ -576,7 +639,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     // messages it is handed rather than from `history`, because the ladder may have
                     // replaced that array by the time this runs.
                     protectedTail: Math.max(0, messages.length - initialHistoryLength),
-                    input: input.input,
+                    input: promptInput,
                     // Reduced by whatever the dialect puts in the request body rather than in a block.
                     // Zero under NLT, so this is the same arithmetic it always was.
                     window: windowForTurn,

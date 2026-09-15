@@ -98,6 +98,51 @@ export function replyFetch(text = "hello from the model"): typeof fetch {
     }) as unknown as typeof fetch
 }
 
+/**
+ * A model endpoint that records every request body and answers a scripted sequence of replies.
+ *
+ * The recording half is what makes a prompt assertion possible at all. This repo's standing rule
+ * after six instances of the same bug is that a field threaded through a pipeline gets one test at
+ * the **far end** that reads the value out of the request body — not one at the layer that sets it,
+ * because a conditional spread is not excess-property-checked and every layer can be individually
+ * right with one of them not connected.
+ *
+ * `replies` are consumed in order and the last one repeats, so a two-step turn is scripted by
+ * handing it a tool call and then a final answer.
+ */
+export function recordingFetch(replies: readonly string[]): {
+    fetch: typeof fetch
+    bodies: Record<string, unknown>[]
+    prompts: () => string[]
+} {
+    const bodies: Record<string, unknown>[] = []
+    let call = 0
+    const doFetch = (async (_url: unknown, init: { body?: string }) => {
+        bodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>)
+        const text = replies[Math.min(call, replies.length - 1)] ?? ""
+        call += 1
+        const body = [
+            `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`,
+            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 4 } })}\n\n`,
+            "data: [DONE]\n\n",
+        ].join("")
+        return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+        })
+    }) as unknown as typeof fetch
+
+    /** Every message of every request, flattened — what the model was actually shown. */
+    const prompts = () =>
+        bodies.flatMap((body) =>
+            ((body.messages ?? []) as { content?: unknown }[]).map((m) =>
+                typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+            ),
+        )
+
+    return { fetch: doFetch, bodies, prompts }
+}
+
 export async function harness(
     options: {
         token?: string
@@ -128,9 +173,17 @@ export async function harness(
     const call = (
         method: string,
         path: string,
-        init: { body?: unknown; token?: string | null } = {},
+        init: {
+            body?: unknown
+            token?: string | null
+            /** Extra request headers. `Idempotency-Key` is the reason this exists. */
+            headers?: Record<string, string>
+        } = {},
     ) => {
-        const headers: Record<string, string> = { "content-type": "application/json" }
+        const headers: Record<string, string> = {
+            "content-type": "application/json",
+            ...init.headers,
+        }
         const auth = init.token === undefined ? options.token : (init.token ?? undefined)
         if (auth !== undefined && auth !== null) headers.authorization = `Bearer ${auth}`
         return handler(

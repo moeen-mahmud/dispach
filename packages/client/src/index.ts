@@ -23,7 +23,7 @@
  * convenience of the SDK, and a client that cancelled on disconnect would be lying about it.
  */
 
-import type { AnyEvent, EventDataMap, EventType, ScheduleRecord } from "@dispach/core"
+import type { AnyEvent, EventDataMap, EventType, ScheduleRecord, TurnSender } from "@dispach/core"
 import { DispachError, errorFromResponse, transportError, type WireError } from "./errors.ts"
 import {
     type EventStreamItem,
@@ -33,6 +33,14 @@ import {
     turnStreamItems,
 } from "./stream.ts"
 
+/**
+ * Re-exported so a caller building a `from` does not need a second import.
+ *
+ * Re-exported rather than restated: a local copy of this shape could gain a `trust` field that the
+ * wire has no way to honour, and the whole design of `from` is that trust is derived from `kind`
+ * and cannot be stated separately.
+ */
+export type { SenderKind, TurnSender } from "@dispach/core"
 export { DispachError, type WireError } from "./errors.ts"
 export type {
     EventStreamItem,
@@ -58,6 +66,16 @@ export interface ClientOptions {
 export interface TurnHandle {
     readonly turnId: string
     readonly sessionKey: string
+    /**
+     * This send was an idempotent **replay**: nothing ran, and this is the original turn.
+     *
+     * `false` on every handle that is not one, including a reattach handle from `agent.turn(id)`,
+     * so a caller never has to distinguish absent from false. Worth branching on when the send is
+     * the trigger for something else — enqueueing a notification twice because a retry looked like
+     * a fresh turn is the failure the key exists to prevent, and it is only avoidable if the caller
+     * can see that it happened.
+     */
+    readonly replayed: boolean
     /**
      * Every frame, as a discriminated union: the replay report, the events, and whichever of the
      * three endings applies. The honest view, and the one to use when assembling anything.
@@ -99,12 +117,34 @@ export interface TurnRecordLike {
     readonly promptTokens: number
     readonly outputTokens: number
     readonly errorCode?: string
+    /** Who sent the input. Absent means the token-holder — not "unknown". */
+    readonly sender?: string
+    readonly senderName?: string
+    readonly senderKind?: "user" | "agent"
 }
 
 export interface SendOptions {
     readonly sessionKey?: string
     /** `"none"`, a channel id, or `{ channel, to }`. See the spec — a bare id needs a recipient. */
     readonly deliver?: string | { readonly channel: string; readonly to: string }
+    /**
+     * Who sent this, when it was not you.
+     *
+     * `kind: "agent"` is a declaration with teeth: the server fences the text as data and blocks
+     * mutating tools for the whole turn. There is no separate `trust` field here for the same
+     * reason there is none on the wire — the pair could then disagree, and the dangerous half is
+     * the one that would win quietly.
+     */
+    readonly from?: TurnSender
+    /**
+     * Makes this send safe to retry.
+     *
+     * Sent as the `Idempotency-Key` header. A second send with the same key and the same text
+     * returns the **first** turn's handle with `replayed` set, having run nothing; the same key
+     * with different text is a `DispachError` (`idempotency_key_reused`) rather than a silent
+     * replay of a message you did not send. Remembered by the server for 24 hours.
+     */
+    readonly idempotencyKey?: string
     readonly signal?: AbortSignal
 }
 
@@ -226,6 +266,14 @@ export function createClient(options: ClientOptions): DispachClient {
             readonly body?: unknown
             readonly signal?: AbortSignal
             readonly accept?: string
+            /**
+             * Per-request headers, merged last.
+             *
+             * Merged last so a caller cannot displace the bearer token by accident — an
+             * `authorization` supplied here loses to the client's own, which is the direction that
+             * fails safely. `Idempotency-Key` is the only current user.
+             */
+            readonly headers?: Readonly<Record<string, string>>
         } = {},
     ): Promise<Response> {
         let response: Response
@@ -235,6 +283,7 @@ export function createClient(options: ClientOptions): DispachClient {
                 headers: headers({
                     ...(init.body === undefined ? {} : { "content-type": "application/json" }),
                     ...(init.accept === undefined ? {} : { accept: init.accept }),
+                    ...init.headers,
                 }),
                 ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
                 ...(init.signal === undefined ? {} : { signal: init.signal }),
@@ -249,7 +298,11 @@ export function createClient(options: ClientOptions): DispachClient {
     async function json<T>(
         method: string,
         path: string,
-        init?: { readonly body?: unknown; readonly signal?: AbortSignal },
+        init?: {
+            readonly body?: unknown
+            readonly signal?: AbortSignal
+            readonly headers?: Readonly<Record<string, string>>
+        },
     ): Promise<T> {
         return (await (await request(method, path, init ?? {})).json()) as T
     }
@@ -276,12 +329,18 @@ export function createClient(options: ClientOptions): DispachClient {
         return response.body
     }
 
-    function turnHandle(agentId: string, turnId: string, sessionKey: string): TurnHandle {
+    function turnHandle(
+        agentId: string,
+        turnId: string,
+        sessionKey: string,
+        facts: { readonly replayed?: boolean } = {},
+    ): TurnHandle {
         const query = (opts?: StreamOptions) => (opts?.chunks === true ? "?chunks=true" : "")
 
         const handle: TurnHandle = {
             turnId,
             sessionKey,
+            replayed: facts.replayed === true,
 
             async *stream(opts) {
                 const body = await streamBody(
@@ -334,26 +393,30 @@ export function createClient(options: ClientOptions): DispachClient {
             id,
 
             async send(text, opts) {
-                const accepted = await json<{ turnId: string; sessionKey: string }>(
-                    "POST",
-                    at("/messages"),
-                    {
-                        body: {
-                            text,
-                            ...(opts?.sessionKey === undefined
-                                ? {}
-                                : { sessionKey: opts.sessionKey }),
-                            ...(opts?.deliver === undefined ? {} : { deliver: opts.deliver }),
-                        },
-                        ...(opts?.signal === undefined ? {} : { signal: opts.signal }),
+                const accepted = await json<{
+                    turnId: string
+                    sessionKey: string
+                    replayed?: boolean
+                }>("POST", at("/messages"), {
+                    body: {
+                        text,
+                        ...(opts?.sessionKey === undefined ? {} : { sessionKey: opts.sessionKey }),
+                        ...(opts?.deliver === undefined ? {} : { deliver: opts.deliver }),
+                        ...(opts?.from === undefined ? {} : { from: opts.from }),
                     },
-                )
+                    ...(opts?.idempotencyKey === undefined
+                        ? {}
+                        : { headers: { "idempotency-key": opts.idempotencyKey } }),
+                    ...(opts?.signal === undefined ? {} : { signal: opts.signal }),
+                })
                 // Deliberately **not** `stream: true`. The inline stream and the reattach path
                 // would then be two code paths producing the same union, and the difference only
                 // shows up under load — a class of bug this project has paid for twice. One extra
                 // request buys one implementation, and the buffer is opened at acceptance, so
                 // attaching immediately afterwards is a guarantee rather than a race.
-                return turnHandle(id, accepted.turnId, accepted.sessionKey)
+                return turnHandle(id, accepted.turnId, accepted.sessionKey, {
+                    replayed: accepted.replayed === true,
+                })
             },
 
             turn: (turnId) => turnHandle(id, turnId, ""),

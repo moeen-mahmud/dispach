@@ -211,7 +211,13 @@ describe("migrations", () => {
             db.close()
 
             const store = await SqliteStore.open({ path })
-            expect(store.migrations.applied).toEqual([`${taint.version}_message_taint`])
+            // The *first* applied and the version it started from, rather than the whole list:
+            // asserting the list exactly made this test fail on every later migration appended
+            // above it, which is a fact about the roadmap and not about this migration. Both halves
+            // are needed — `from` proves the fixture really did stop one short, and without it a
+            // fully-migrated database would satisfy the other assertion by having applied nothing.
+            expect(store.migrations.from).toBe(taint.version - 1)
+            expect(store.migrations.applied[0]).toBe(`${taint.version}_message_taint`)
             expect((await store.messages.history(AGENT, KEY))[0]?.tainted).toBeUndefined()
             await store.close()
         } finally {

@@ -15,6 +15,7 @@
  */
 
 import type { TurnEndReason } from "../events/types.ts"
+import type { SenderKind, TurnSender } from "../loop/sender.ts"
 import type { ChatMessage, ToolCallRequest } from "../model/provider.ts"
 
 /**
@@ -103,6 +104,17 @@ export interface TurnRecord {
     readonly cachedPromptTokens?: number
     /** The wire field the figure came from, so a surprising ratio is traceable. */
     readonly cacheSource?: string
+    /**
+     * Who sent the input, when it was not the operator. Absent means the operator's own surface.
+     *
+     * Absent is not "unknown": the REPL, a schedule, an `allowFrom`-gated channel turn and an API
+     * call with the container's token are all the operator, and putting a synthesised identity on
+     * those would make the column useless for the one question it exists to answer. Trust is
+     * derived from `senderKind` rather than stored beside it — see `loop/sender.ts`.
+     */
+    readonly sender?: string
+    readonly senderName?: string
+    readonly senderKind?: SenderKind
     readonly errorCode?: string
     readonly errorMessage?: string
     readonly errorHint?: string
@@ -165,7 +177,15 @@ export interface TurnStore {
         readonly agentId: string
         readonly sessionKey: string
         readonly source: string
+        /**
+         * The text as it was sent — **raw**, never the fenced form the prompt carries.
+         *
+         * The row is the audit record of what was said, and `sender` sits beside it, so the framing
+         * is reconstructible without baking runtime decoration into the evidence. History goes the
+         * other way and keeps the fence, because history is prompt material.
+         */
         readonly input: string
+        readonly sender?: TurnSender
     }): Promise<TurnRecord>
     finish(
         turnId: string,
@@ -209,7 +229,39 @@ export interface TurnStore {
      * Rows belonging to no live lease are still reachable — see `LeaseStore.orphans`.
      */
     reapRunning(agentIds: readonly string[], reason: string): Promise<readonly string[]>
+    /**
+     * Claim an inbound idempotency key for a turn, or report the turn that already holds it.
+     *
+     * Called **before** the turn runs, which is what makes it useful: `POST /messages` answers
+     * `202` and writes its turn row asynchronously, so a claim that waited for the row would leave
+     * the window between two retries — the only window the feature exists to close — wide open.
+     *
+     * `inputHash` is compared, not merely stored. A key reused with different text is a *client
+     * bug*, and answering it with the first turn's id would tell that client its second message
+     * succeeded when nothing ran; `mismatch` lets the surface refuse instead. Hashing rather than
+     * keeping the text avoids a second copy of every message in a table that exists for minutes.
+     */
+    claimInboundKey(claim: {
+        readonly agentId: string
+        readonly key: string
+        readonly turnId: string
+        readonly inputHash: string
+        readonly now: Date
+    }): Promise<InboundKeyClaim>
 }
+
+/**
+ * What claiming an idempotency key produced.
+ *
+ * Three outcomes rather than a boolean, because "already claimed by an identical request" and
+ * "already claimed by a different one" want opposite answers on the wire — a replay and a 409.
+ */
+export type InboundKeyClaim =
+    | { readonly kind: "claimed" }
+    /** This key already belongs to a turn whose input hashed the same. Answer with that turn. */
+    | { readonly kind: "replay"; readonly turnId: string }
+    /** This key already belongs to a turn whose input was different. Refuse. */
+    | { readonly kind: "mismatch"; readonly turnId: string }
 
 /** How a runtime was started. Reported in a refusal, so it has to be a fact rather than a guess. */
 export type RuntimeMode = "daemon" | "terminal" | "embedded"
@@ -297,10 +349,16 @@ export interface KVStore {
 }
 
 /**
- * Everything one agent owns in the store, by table.
+ * Everything one agent owns that a person might weigh before deleting it, by table.
  *
  * One shape for two questions — what would go, and what went — so a listing shown before a deletion
  * and the report printed after it cannot disagree. `agentFootprint` and `purgeAgent` both return this.
+ *
+ * Deliberately **not** every table. `inbound_keys` is deleted by `purgeAgent` and counted here by
+ * nothing: it is request plumbing with a 24-hour TTL, and `inboundKeys: 3` on a deletion
+ * confirmation is a line that means nothing to anybody reading it. The listing's whole value is
+ * that somebody reads it, so a row nobody can act on costs more than it adds. Anything a person
+ * would hesitate over — a conversation, a memory passage, a pending delivery — is here.
  */
 export interface AgentFootprint {
     readonly sessions: number
