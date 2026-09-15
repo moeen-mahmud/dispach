@@ -16,9 +16,12 @@ import {
     type Agent,
     type AnyEvent,
     type ErrorDetail,
+    entryPhase,
     HarnessError,
+    isPhased,
     newRunId,
     newTurnId,
+    phasesFor,
     prepareScheduleWrite,
     type Runtime,
     type ScheduleRecord,
@@ -108,7 +111,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      */
     router.add("GET", "/v1/ready", () => {
         if (runtime.ready) return json({ status: "ready", agents: runtime.list().length })
-        return json({ status: "stopped", pending: [] }, 503)
+        // `"starting"`, not `"stopped"`. A runtime that has not reached readiness is on its way up,
+        // and "stopped" is what an orchestrator reads as "give up on this container". The
+        // `pending: []` this used to carry was a promise nothing filled: agents load inside
+        // `Runtime.create`, so there is no moment at which this route can be reached *and* name
+        // which agent it is waiting for. An empty array that is always empty says less than
+        // omitting it, because a reader cannot tell it from "nothing is pending".
+        return json({ status: "starting", agents: runtime.list().length }, 503)
     })
 
     // ─── Agents ──────────────────────────────────────────────────────────────────────────
@@ -118,17 +127,28 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
     )
 
     router.add("GET", "/v1/agents/:id", (context) =>
-        withAgent(runtime, context, (agent) =>
-            json({
+        withAgent(runtime, context, async (agent) => {
+            // Both of these were the literal `0`, for every agent, whatever was configured — and
+            // the spec advertises them as "tool count, skills indexed, schedule count". A number
+            // that is always zero is worse than an absent field: it reads as a measurement.
+            //
+            // The schedule count comes from the **store**, which is the reconciled truth — what is
+            // armed right now, including rows the API created and rows a disabled manifest entry
+            // left behind. That is deliberately a different number from the one `agent.loaded`
+            // reports, which is the manifest's declared count because that event fires before
+            // reconciliation has run. Two honest numbers about two different moments; the spec
+            // says which is which.
+            const schedules = await agent.store.schedules.list(agent.id)
+            return json({
                 ...summary(runtime, agent),
                 dialect: agent.describe().dialect,
                 window: agent.window,
                 tools: agent.tools.size,
-                skills: 0,
-                schedules: 0,
+                skills: agent.skills?.skills.length ?? 0,
+                schedules: schedules.length,
                 warnings: [...agent.warnings, ...agent.tools.warnings],
-            }),
-        ),
+            })
+        }),
     )
 
     /**
@@ -274,23 +294,27 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * that check and `attach` is real and benign: eviction can land in it, and `streamTurn`'s own
      * fallback frame covers it.
      */
-    router.add("GET", "/v1/agents/:id/turns/:turnId/stream", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const turnId = context.params.turnId ?? ""
-            if (runtime.streams.state(turnId) === undefined) {
-                const record = await agent.store.turns.get(turnId)
-                if (record === undefined)
-                    return notFound(
-                        "turn",
-                        turnId,
-                        "No turn with this id has ever run on this agent. A turn id is the `turnId` from POST /v1/agents/:id/messages — check the agent in the path too, since a turn belongs to one.",
-                    )
-                return finishedStream(record)
-            }
-            return streamTurn(runtime, turnId, {
-                chunks: context.url.searchParams.get("chunks") === "true",
-            })
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id/turns/:turnId/stream",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const turnId = context.params.turnId ?? ""
+                if (runtime.streams.state(turnId) === undefined) {
+                    const record = await agent.store.turns.get(turnId)
+                    if (record === undefined)
+                        return notFound(
+                            "turn",
+                            turnId,
+                            "No turn with this id has ever run on this agent. A turn id is the `turnId` from POST /v1/agents/:id/messages — check the agent in the path too, since a turn belongs to one.",
+                        )
+                    return finishedStream(record)
+                }
+                return streamTurn(runtime, turnId, {
+                    chunks: context.url.searchParams.get("chunks") === "true",
+                })
+            }),
+        { streaming: true },
     )
 
     router.add("POST", "/v1/agents/:id/turns/:turnId/stop", (context) =>
@@ -508,27 +532,74 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
     )
 
     router.add("GET", "/v1/agents/:id/tools", (context) =>
-        withAgent(runtime, context, (agent) =>
-            json(
+        withAgent(runtime, context, (agent) => {
+            // `tags` and phase visibility are both in the spec's own description of this route and
+            // neither was here. `tags` is the vocabulary `phases.*.allow` matches as `tag:<name>`,
+            // so without it a reader cannot tell why a tool is in a phase it did not name.
+            //
+            // `phases` is **omitted** rather than `[]` on an unphased agent. An empty array reads
+            // as "visible in no phase", which is the opposite of the truth — an unphased agent
+            // shows every tool always — and `isPhased` is the same one-line question the runtime
+            // asks before registering `phase_set` at all.
+            const phases = agent.manifest.phases
+            const phased = isPhased(phases)
+            return json(
                 agent.tools.specs().map((spec) => ({
                     slug: spec.slug,
                     summary: spec.summary,
                     mutating: spec.mutating,
                     trust: spec.trust,
                     provider: spec.provider ?? "local",
+                    tags: spec.tags,
+                    ...(phased ? { phases: phasesFor(phases, spec) } : {}),
                 })),
-            ),
-        ),
+            )
+        }),
     )
 
     /**
-     * Skills are Phase 5. The empty list is accompanied by `supported: false`.
+     * The agent's indexed skills.
      *
-     * An empty array on its own is the silent-nothing shape rule 8 exists to prevent: a client
-     * cannot tell "this agent has no skills" from "this build has no skills".
+     * This answered `{ skills: [], supported: false }` — correct when it was written and false
+     * from the moment Phase 5 shipped, which was several phases before this line was read again.
+     * `supported` becomes **`configured`**, and the distinction it draws is the one that still
+     * matters: an agent with no `skills:` block and an agent whose skills directory is empty are
+     * different states, and an empty array alone cannot tell them apart. What is gone is the third
+     * reading it used to carry — "this build cannot do skills" — which is no longer a thing.
+     *
+     * The spec also promised a "last-selected time" per skill. Nothing tracks it: selection
+     * happens per turn in the harness and is written nowhere, so the field would need a store
+     * column. The spec drops the promise rather than this route faking it with a null.
      */
     router.add("GET", "/v1/agents/:id/skills", (context) =>
-        withAgent(runtime, context, () => json({ skills: [], supported: false })),
+        withAgent(runtime, context, (agent) => {
+            const catalogue = agent.skills
+            if (catalogue === undefined) return json({ skills: [], configured: false })
+            return json({
+                configured: true,
+                maxActive: catalogue.maxActive,
+                threshold: catalogue.threshold,
+                // Whether every entry came off the cache, which is what the boot criterion
+                // measures — and the difference between a cold scan and a warm one is seconds.
+                cached: catalogue.cached,
+                skills: catalogue.skills.map((skill) => ({
+                    name: skill.name,
+                    description: skill.frontmatter.description,
+                    tokens: skill.tokens,
+                    // Selection is BM25 over the description, so there is no keyword list to
+                    // report here — that is knowledge's gate, not skills'. `whenNotToUse` is
+                    // reported because it is the half of a skill's guidance that has no other
+                    // surface, and absent is a valid and warned-about state rather than an error.
+                    ...(skill.frontmatter.whenNotToUse === undefined
+                        ? {}
+                        : { whenNotToUse: skill.frontmatter.whenNotToUse }),
+                    // Runnable entries in `scripts/`, exposed as tools only while the skill is
+                    // active. Named rather than counted: a skill's scripts are the part an
+                    // operator has to have approved.
+                    scripts: skill.scripts.map((plan) => plan.slug),
+                })),
+            })
+        }),
     )
 
     router.add("GET", "/v1/agents/:id/context", (context) =>
@@ -590,38 +661,47 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * `implied` names *why* it is on, which is the difference between a resolved state and a
      * surprising one.
      */
-    router.add("GET", "/v1/events", (context) => {
-        const agentId = context.url.searchParams.get("agentId")
-        const types = context.url.searchParams.get("types")?.split(",").filter(Boolean)
-        const asked = context.url.searchParams.get("chunks") === "true"
-        const implied = types?.includes("model.chunk") === true
-        const chunks = asked || implied
+    router.add(
+        "GET",
+        "/v1/events",
+        (context) => {
+            const agentId = context.url.searchParams.get("agentId")
+            const types = context.url.searchParams.get("types")?.split(",").filter(Boolean)
+            const asked = context.url.searchParams.get("chunks") === "true"
+            const implied = types?.includes("model.chunk") === true
+            const chunks = asked || implied
 
-        return sseResponse({
-            ...(context.request.signal === undefined ? {} : { signal: context.request.signal }),
-            start: ({ send }) => {
-                send({
-                    event: "stream.subscribed",
-                    data: {
-                        agentId: agentId ?? null,
-                        types: types ?? null,
-                        chunks,
-                        ...(chunks && !asked ? { implied: "types names model.chunk" } : {}),
-                    },
-                })
-                return runtime.bus.on(
-                    "*",
-                    (event) => {
-                        if (agentId !== null && event.agentId !== agentId) return
-                        if (types !== undefined && types.length > 0 && !types.includes(event.type))
-                            return
-                        send({ event: event.type, data: event })
-                    },
-                    { chunks },
-                )
-            },
-        })
-    })
+            return sseResponse({
+                ...(context.request.signal === undefined ? {} : { signal: context.request.signal }),
+                start: ({ send }) => {
+                    send({
+                        event: "stream.subscribed",
+                        data: {
+                            agentId: agentId ?? null,
+                            types: types ?? null,
+                            chunks,
+                            ...(chunks && !asked ? { implied: "types names model.chunk" } : {}),
+                        },
+                    })
+                    return runtime.bus.on(
+                        "*",
+                        (event) => {
+                            if (agentId !== null && event.agentId !== agentId) return
+                            if (
+                                types !== undefined &&
+                                types.length > 0 &&
+                                !types.includes(event.type)
+                            )
+                                return
+                            send({ event: event.type, data: event })
+                        },
+                        { chunks },
+                    )
+                },
+            })
+        },
+        { streaming: true },
+    )
 
     // ─── Dispatch ────────────────────────────────────────────────────────────────────────
 
@@ -640,12 +720,90 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             )
         }
 
-        const match = router.match(request.method, url.pathname)
+        /**
+         * `HEAD` and `OPTIONS`, answered from the route table at dispatch.
+         *
+         * At dispatch and not per route, because `Allow` is only correct if it is derived: a route
+         * added next week would otherwise accept `GET` and advertise nothing, and the header
+         * nobody looks at is the one that goes stale silently. `router.match` already computes the
+         * method set for a path — a request whose method matches no route comes back as
+         * `kind: "method"` carrying every method that path does accept, which is exactly the
+         * `Allow` value.
+         */
+        const method = request.method.toUpperCase()
+
+        if (method === "OPTIONS") {
+            const paths = router.match("OPTIONS", url.pathname)
+            if (paths.kind === "method") {
+                // `HEAD` is advertised wherever `GET` is answered, and only there — see below for
+                // the streams, where it is not.
+                const head = router.match("HEAD", url.pathname)
+                const streams = head.kind === "method" && streamingAt(router, url.pathname)
+                const allow = [
+                    ...paths.allowed,
+                    ...(paths.allowed.includes("GET") && !streams ? ["HEAD"] : []),
+                    "OPTIONS",
+                ]
+                return new Response(null, {
+                    status: 204,
+                    headers: { allow: allow.join(", ") },
+                })
+            }
+            // Falls through to the 404 below. An OPTIONS for a path that does not exist is a 404,
+            // not a 204 listing nothing — the second reads as "this path exists and accepts
+            // nothing", which is a different and wrong statement.
+        }
+
+        if (method === "HEAD") {
+            const get = router.match("GET", url.pathname)
+            if (get.kind === "found") {
+                /**
+                 * **A stream refuses `HEAD`, and that is deliberate rather than an oversight.**
+                 *
+                 * Answering it as `GET` would run the handler, which subscribes to the bus or
+                 * attaches to a turn buffer — and then discard the body. Nothing ever reads that
+                 * stream, so its `cancel()` never fires and the subscription is never torn down:
+                 * one leaked listener per probe, and a leaked buffer listener pins its buffer
+                 * against eviction (decision 11.158, found the hard way one stage ago). A
+                 * monitoring system polling `HEAD /v1/events` every thirty seconds would walk the
+                 * process into the ground while every endpoint kept answering correctly.
+                 *
+                 * So: 405 naming the reason, rather than a leak or a lie about the body.
+                 */
+                if (get.streaming) {
+                    return fail(
+                        {
+                            code: "method_not_allowed",
+                            message: `HEAD is not allowed on ${url.pathname}.`,
+                            hint: "This path answers with an open event stream. A HEAD would have to start one and then throw the body away, leaving a subscription nothing ever closes — so it is refused rather than leaked. Use GET, or GET /v1/health to check the server is up.",
+                        },
+                        405,
+                        { allow: "GET, OPTIONS" },
+                    )
+                }
+
+                if (!isOpenPath(url.pathname) && token !== undefined) {
+                    const unauthorized = checkToken(request, token)
+                    if (unauthorized !== undefined) return unauthorized
+                }
+
+                // The headers GET would return, with no body. The handler really runs — that is
+                // what makes the status and the content-type true rather than guessed.
+                const response = await runHandler(get.handler, {
+                    request,
+                    url,
+                    params: get.params,
+                })
+                return new Response(null, { status: response.status, headers: response.headers })
+            }
+        }
+
+        const match = router.match(method, url.pathname)
         if (match.kind === "method") {
             return fail(
                 {
                     code: "method_not_allowed",
-                    message: `${request.method} is not allowed on ${url.pathname}.`,
+                    message: `${method} is not allowed on ${url.pathname}.`,
                     hint: `This path accepts ${match.allowed.join(", ")}.`,
                 },
                 405,
@@ -663,38 +821,12 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             )
         }
 
-        // The probes and the webhook are the exceptions, and all for the same reason: the caller
-        // cannot hold our token. A load balancer probing with a bearer header it does not have
-        // would mark a healthy process unhealthy.
-        //
-        // **`/v1/ready` belongs here and was missing**, which made the container story not work: a
-        // published port needs a non-loopback bind, a non-loopback bind requires a token, and the
-        // readiness probe then got 401 forever. An orchestrator's readiness probe is precisely the
-        // caller this exemption describes — and `/v1/ready` discloses strictly *less* than
-        // `/v1/health`, which was already open: a status and an agent count, without the version.
-        // Found by writing the Dockerfile's HEALTHCHECK, not by reading this line.
-        const open =
-            url.pathname === "/v1/health" ||
-            url.pathname === "/v1/ready" ||
-            url.pathname.startsWith("/v1/channels/")
-        if (!open && token !== undefined) {
+        if (!isOpenPath(url.pathname) && token !== undefined) {
             const unauthorized = checkToken(request, token)
             if (unauthorized !== undefined) return unauthorized
         }
 
-        try {
-            return await match.handler({ request, url, params: match.params })
-        } catch (error) {
-            if (error instanceof HarnessError) return fail(error.toDetail(), 400)
-            return fail(
-                {
-                    code: "internal_error",
-                    message: error instanceof Error ? error.message : String(error),
-                    hint: "An unexpected failure in the server. The runtime's event stream carries what happened around it.",
-                },
-                500,
-            )
-        }
+        return await runHandler(match.handler, { request, url, params: match.params })
     }
 }
 
@@ -774,6 +906,55 @@ function fail(
 }
 
 /**
+ * Paths reachable without the token.
+ *
+ * The probes and the webhook, all for the same reason: the caller cannot hold our token, and a
+ * load balancer probing with a bearer header it does not have would mark a healthy process
+ * unhealthy.
+ *
+ * **`/v1/ready` belongs here and was missing**, which made the container story not work: a
+ * published port needs a non-loopback bind, a non-loopback bind requires a token, and the
+ * readiness probe then got 401 forever. An orchestrator's readiness probe is precisely the caller
+ * this exemption describes — and `/v1/ready` discloses strictly *less* than `/v1/health`, which
+ * was already open: a status and an agent count, without the version. Found by writing the
+ * Dockerfile's HEALTHCHECK, not by reading this list.
+ *
+ * A function rather than an expression inside the dispatcher because `HEAD` has to ask the same
+ * question, and two copies of an auth exemption is how one of them gains an entry the other does
+ * not.
+ */
+function isOpenPath(pathname: string): boolean {
+    return (
+        pathname === "/v1/health" ||
+        pathname === "/v1/ready" ||
+        pathname.startsWith("/v1/channels/")
+    )
+}
+
+/** Whether the `GET` route at this path answers with an open stream. */
+function streamingAt(router: Router<Handler>, pathname: string): boolean {
+    const get = router.match("GET", pathname)
+    return get.kind === "found" && get.streaming
+}
+
+/** Run a matched handler, turning a throw into a response. Shared with the `HEAD` path. */
+async function runHandler(handler: Handler, context: RequestContext): Promise<Response> {
+    try {
+        return await handler(context)
+    } catch (error) {
+        if (error instanceof HarnessError) return fail(error.toDetail(), 400)
+        return fail(
+            {
+                code: "internal_error",
+                message: error instanceof Error ? error.message : String(error),
+                hint: "An unexpected failure in the server. The runtime's event stream carries what happened around it.",
+            },
+            500,
+        )
+    }
+}
+
+/**
  * `hint` is overridable because the generic sentence talks about session keys, and it became the
  * answer to a common client mistake the moment attaching to an unknown turn started returning 404
  * — advice about channel segments is noise on a turn id, and noise in a hint is what teaches people
@@ -830,14 +1011,31 @@ function withAgent(
     return work(agent)
 }
 
+/**
+ * The shared shape of an agent in the listing and at the head of its detail.
+ *
+ * **There is no current phase here, and the field is named to say so.** It was `phase: null` for
+ * every agent — the spec's own listing promises `phase` — and filling that in with the phase the
+ * agent is "in" would be decision 5.19's failure on an HTTP surface: a phase is per *session*, and
+ * an agent hosting three conversations is in three phases at once. The agent-level facts are the
+ * phase a new session **starts** in and the names that exist, so those are what it reports, under
+ * a name a reader cannot mistake for the other thing.
+ *
+ * `phases` is present only when the manifest declares more than one, matching the question the
+ * runtime itself asks before registering `phase_set`. An unphased agent has no entry phase to
+ * name, so `entryPhase` is `null` there rather than inventing a name for the single implicit one.
+ */
 function summary(runtime: Runtime, agent: Agent) {
+    const phases = agent.manifest.phases
+    const phased = isPhased(phases)
     return {
         id: agent.id,
         name: agent.manifest.name ?? agent.id,
         status: "loaded",
         model: agent.manifest.model.main.id,
         channels: runtime.channels.statusOf(agent.id),
-        phase: null,
+        entryPhase: phased ? (entryPhase(phases) ?? null) : null,
+        ...(phased ? { phases: Object.keys(phases) } : {}),
     }
 }
 

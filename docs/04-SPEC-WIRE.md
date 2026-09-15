@@ -25,6 +25,19 @@ of this spec.
 `code` is stable and machine-readable. `hint` names the likely fix. Every error type in
 `errors.ts` populates it.
 
+**`HEAD` and `OPTIONS` are answered from the route table, not per route.** `OPTIONS` returns `204`
+with an `Allow` header listing what the path accepts, plus `OPTIONS`, plus `HEAD` wherever a `GET`
+is really answered; `OPTIONS` on a path that does not exist is a `404`, since a `204` advertising
+nothing would read as "this path exists and accepts no methods". `HEAD` runs the `GET` handler and
+returns its status and headers with no body, and still requires the token — the probe exemptions
+below are the only paths without one.
+
+**The two SSE routes refuse `HEAD` with `405`.** Answering it would mean starting a stream and
+discarding the body, leaving a subscription nothing ever closes — one leaked listener per probe,
+and a leaked turn-buffer listener also pins its buffer against eviction. A monitoring system
+polling `HEAD /v1/events` would degrade the process while every endpoint kept answering correctly,
+so it is refused with a hint naming the reason. `OPTIONS` on those paths does not advertise `HEAD`.
+
 ---
 
 ## Endpoints
@@ -33,7 +46,7 @@ of this spec.
 
 ```
 GET /v1/health   → 200 { status, version, uptimeMs, agents: number }
-GET /v1/ready    → 200 when every agent has loaded; 503 with { pending: [...] } otherwise
+GET /v1/ready    → 200 when every agent has loaded; 503 { status: "starting" } otherwise
 ```
 
 `/ready` flips at `runtime.ready` — before channels connect. Channel state is separately
@@ -43,8 +56,9 @@ connect must not make the process look dead to an orchestrator.
 ### Agents
 
 ```
-GET /v1/agents           → [{ id, name, status, model, channels[], phase }]
-GET /v1/agents/:id       → full status incl. tool count, skills indexed, schedule count
+GET /v1/agents           → [{ id, name, status, model, channels[], entryPhase, phases? }]
+GET /v1/agents/:id       → the above plus dialect, window, tool count, skills indexed,
+                           schedule count, warnings[]
 POST /v1/agents/:id/reload
 ```
 
@@ -175,13 +189,35 @@ Listing includes disabled schedules by default. `?enabled=true` filters.
 ### Tools and skills (introspection)
 
 ```
-GET /v1/agents/:id/tools     → resolved catalogue with tags, mutating, phase visibility
-GET /v1/agents/:id/skills    → indexed skills with description and last-selected time
+GET /v1/agents/:id/tools     → resolved catalogue with tags, mutating, trust, phase visibility
+GET /v1/agents/:id/skills    → indexed skills with description, token cost and script slugs
 GET /v1/agents/:id/context   → the assembled context for the next turn, with token counts per slot
 ```
 
 `/context` exists because "why did it do that?" is almost always a context question, and
 guessing at it is how days get lost.
+
+Three things about these two that are easy to misread.
+
+**`phases` on a tool is omitted, not empty, when the agent is unphased** — an empty array reads as
+"visible in no phase", which is the opposite of the truth for an agent that shows every tool
+always. **`phase_set` is not in the catalogue** and that is correct: it is a *turn* tool, built per
+turn because its description names the current phase and what each other phase would add, so there
+is no static description to report.
+
+**An agent has an `entryPhase`, not a `phase`.** A phase is per session, so an agent hosting three
+conversations is in three phases at once; the agent-level facts are where a new session starts and
+which names exist. A session's actual phase is `GET /v1/agents/:id/sessions/:key`.
+
+**Two schedule counts exist and they are different numbers.** `GET /v1/agents/:id` reports what the
+store holds — the reconciled truth, including rows the API created — while the `agent.loaded` event
+reports the *manifest's declared* count, because that event fires before reconciliation has run.
+Neither is wrong; a reader comparing them needs to know which is which.
+
+Skills carry `configured`, distinguishing an agent with no `skills:` block from one whose skills
+directory is empty. There is no last-selected time: selection happens per turn in the harness and
+is recorded nowhere, so the field would need a store column, and this document previously promised
+it anyway.
 
 Slot numbers in the `slots` array are the ones in `01-ARCHITECTURE.md`, where slot number equals
 prompt position. Slot 2 is the agent's own configuration, injected so that knowing it is not a
@@ -246,7 +282,7 @@ interface Event {
 | `runtime.stopping` | shutdown begins | `reason` |
 | `plugin.loaded` | per plugin | `name`, `version`, `setupMs`, `permissions` |
 | `plugin.slow` | setup over budget | `name`, `setupMs` |
-| `agent.loaded` | per agent | `tools`, `skills`, `schedules` |
+| `agent.loaded` | per agent | `tools`, `skills`, `schedules` (the manifest's **declared** count — this fires before reconciliation), `model` |
 | `agent.error` | load failure | `code`, `message`, `hint` |
 | `agent.channel.status` | connect/disconnect | `channelId`, `channelType`, `status`, `detail?` |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |

@@ -21,6 +21,16 @@ export interface Route<THandler> {
     /** `/v1/agents/:id/sessions/:key` — `:name` captures one segment. */
     readonly pattern: string
     readonly handler: THandler
+    /**
+     * This route answers with an open event stream rather than a finished body.
+     *
+     * Declared on the route so the one thing that needs to know — `HEAD`, which must not be
+     * answered by running a handler that subscribes to something — reads it off the table. A set
+     * of stream patterns kept beside the dispatcher would have exactly two entries today and be
+     * wrong the first time a third stream is added, with the symptom being a leaked subscription
+     * per probe rather than an error.
+     */
+    readonly streaming: boolean
 }
 
 interface Compiled<THandler> extends Route<THandler> {
@@ -30,14 +40,41 @@ interface Compiled<THandler> extends Route<THandler> {
 export class Router<THandler> {
     readonly #routes: Compiled<THandler>[] = []
 
-    add(method: string, pattern: string, handler: THandler): this {
+    add(
+        method: string,
+        pattern: string,
+        handler: THandler,
+        options: { readonly streaming?: boolean } = {},
+    ): this {
         this.#routes.push({
             method: method.toUpperCase(),
             pattern,
             handler,
+            streaming: options.streaming === true,
             segments: split(pattern),
         })
         return this
+    }
+
+    /**
+     * Every registered route, in registration order.
+     *
+     * Exposed so `Allow` headers, `OPTIONS` and the spec guard are all derived from the one table
+     * rather than from a second list beside it. A hand-kept list of routes is the shape that has
+     * cost this repo a round more than once — `NO_MANIFEST`, `DOCUMENTED_CTRL_LETTERS`,
+     * `THRESHOLD_ORDER` — and the failure is always the same: the copy is right when it is written
+     * and wrong at the next addition, with nothing reporting the gap.
+     *
+     * Handlers are deliberately included. A caller that only wants the shape can map it away; one
+     * that wants to answer a request from the table (as `HEAD` does) needs them.
+     */
+    routes(): readonly Route<THandler>[] {
+        return this.#routes.map(({ method, pattern, handler, streaming }) => ({
+            method,
+            pattern,
+            handler,
+            streaming,
+        }))
     }
 
     /**
@@ -54,6 +91,7 @@ export class Router<THandler> {
               readonly kind: "found"
               readonly handler: THandler
               readonly params: Readonly<Record<string, string>>
+              readonly streaming: boolean
           }
         | { readonly kind: "method"; readonly allowed: readonly string[] }
         | { readonly kind: "none" } {
@@ -65,7 +103,12 @@ export class Router<THandler> {
             if (params === undefined) continue
             pathMatches.push(route)
             if (route.method === method.toUpperCase()) {
-                return { kind: "found", handler: route.handler, params }
+                return {
+                    kind: "found",
+                    handler: route.handler,
+                    params,
+                    streaming: route.streaming,
+                }
             }
         }
 

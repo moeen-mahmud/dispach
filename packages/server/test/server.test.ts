@@ -30,16 +30,45 @@ model:
     apiKeyEnv: MODEL_API_KEY
 `
 
+/**
+ * A manifest with tools pinned and two phases declared.
+ *
+ * The bare manifest above resolves **no tools at all** — no `tools:` block means an empty
+ * catalogue — so every assertion about tags or phase visibility needs this one. `now` and
+ * `memory_write` are local tools with real tags (`read`/`time` and `write`/`memory`), which is
+ * what makes `tag:read` a meaningful `allow` entry rather than a string that matches by accident.
+ */
+const PHASED_MANIFEST = `apiVersion: dispach/v1
+id: assistant
+name: Assistant
+model:
+  main:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+tools:
+  pinned: [now, memory_write]
+phases:
+  triage:
+    entry: true
+    allow: [tag:read]
+  act:
+    allow: ["*"]
+`
+
+/** The same manifest with the `phases:` block removed, for the unphased half of each pair. */
+const PINNED_MANIFEST = PHASED_MANIFEST.slice(0, PHASED_MANIFEST.indexOf("phases:"))
+
 const dirs: string[] = []
 afterAll(() => {
     for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
 })
 
-function workspace(): string {
+function workspace(manifest = MANIFEST): string {
     const dir = mkdtempSync(join(tmpdir(), "server-test-"))
     dirs.push(dir)
     mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, "agent.yaml"), MANIFEST)
+    writeFileSync(join(dir, "agent.yaml"), manifest)
     return dir
 }
 
@@ -74,9 +103,11 @@ async function harness(
         streams?: { maxEventsPerTurn?: number; retainEndedMs?: number }
         /** The shared cancel registry, so a test can hand the same one to the WS bridge. */
         running?: Map<string, AbortController>
+        /** A different manifest — `PHASED_MANIFEST` for anything about tools or phases. */
+        manifest?: string
     } = {},
 ) {
-    const dir = workspace()
+    const dir = workspace(options.manifest)
     const runtime = await Runtime.create({
         agents: [join(dir, "agent.yaml")],
         env: ENV,
@@ -345,14 +376,16 @@ describe("agents", () => {
         await runtime.stop()
     })
 
-    test("skills report supported: false rather than a bare empty list", async () => {
-        // An empty array alone cannot be told apart from "this build has no skills".
+    test("an agent with no skills block reports configured: false, not a bare empty list", async () => {
+        // An empty array alone cannot be told apart from an agent whose skills directory is empty.
+        // This route used to answer `supported: false` unconditionally — true when it was written
+        // and false from the moment Phase 5 shipped, several phases before anyone read it again.
         const { call, runtime } = await harness()
         const body = (await (await call("GET", "/v1/agents/assistant/skills")).json()) as {
             skills: unknown[]
-            supported: boolean
+            configured: boolean
         }
-        expect(body).toEqual({ skills: [], supported: false })
+        expect(body).toEqual({ skills: [], configured: false })
         await runtime.stop()
     })
 
@@ -1146,6 +1179,199 @@ describe("the websocket subscribe frame", () => {
         )
         expect(runtime.bus.chunkSubscribers).toBe(before)
         bridge.closeAll()
+        await runtime.stop()
+    })
+})
+
+// ─── HEAD and OPTIONS ────────────────────────────────────────────────────────────────────
+
+describe("HEAD and OPTIONS come from the route table", () => {
+    test("OPTIONS answers 204 with an Allow derived from the routes", async () => {
+        const { call, runtime } = await harness()
+        const response = await call("OPTIONS", "/v1/agents/assistant/messages")
+
+        expect(response.status).toBe(204)
+        expect(await response.text()).toBe("")
+        const allow = (response.headers.get("allow") ?? "").split(", ").sort()
+        // POST from the table, OPTIONS always, and no HEAD — this path answers no GET.
+        expect(allow).toEqual(["OPTIONS", "POST"])
+        await runtime.stop()
+    })
+
+    test("OPTIONS advertises HEAD wherever a GET is really answered", async () => {
+        const { call, runtime } = await harness()
+        const allow = (
+            (await call("OPTIONS", "/v1/agents/assistant")).headers.get("allow") ?? ""
+        ).split(", ")
+        expect(allow).toContain("GET")
+        expect(allow).toContain("HEAD")
+        await runtime.stop()
+    })
+
+    test("OPTIONS on a path that does not exist is 404, not a 204 listing nothing", async () => {
+        // A 204 with an empty Allow reads as "this path exists and accepts no methods", which is a
+        // different statement from "there is no such path".
+        const { call, runtime } = await harness()
+        const response = await call("OPTIONS", "/v1/nope")
+        expect(response.status).toBe(404)
+        await runtime.stop()
+    })
+
+    test("HEAD returns the headers GET would, with no body", async () => {
+        const { call, runtime } = await harness()
+        const get = await call("GET", "/v1/agents/assistant")
+        const head = await call("HEAD", "/v1/agents/assistant")
+
+        expect(head.status).toBe(get.status)
+        expect(head.headers.get("content-type")).toBe(get.headers.get("content-type"))
+        expect(await head.text()).toBe("")
+        expect((await get.text()).length).toBeGreaterThan(0)
+        await runtime.stop()
+    })
+
+    test("HEAD still requires the token", async () => {
+        // A method that skipped the check would be a read of every authenticated route's status.
+        const { call, runtime } = await harness({ token: "secret" })
+        expect((await call("HEAD", "/v1/agents/assistant", { token: null })).status).toBe(401)
+        expect((await call("HEAD", "/v1/agents/assistant")).status).toBe(200)
+        // And the probes stay open, the reason the exemption exists at all.
+        expect((await call("HEAD", "/v1/ready", { token: null })).status).toBe(200)
+        await runtime.stop()
+    })
+
+    test("HEAD on a stream is refused rather than leaking a subscription", async () => {
+        // Answering it as GET would run the handler — which subscribes to the bus — and then throw
+        // the body away, so nothing ever reads the stream, its cancel() never fires and the
+        // subscription is never torn down. One leaked listener per probe, and a monitoring system
+        // polling every thirty seconds would walk the process into the ground with every endpoint
+        // still answering correctly. Asserted against the bus's own subscriber bookkeeping, not
+        // just the status code.
+        const { call, runtime } = await harness()
+        const before = runtime.bus.chunkSubscribers
+
+        for (const path of ["/v1/events", "/v1/agents/assistant/turns/t_x/stream"]) {
+            const response = await call("HEAD", path)
+            expect(response.status).toBe(405)
+            const body = (await response.json()) as { error: { code: string; hint: string } }
+            expect(body.error.code).toBe("method_not_allowed")
+            expect(body.error.hint).toContain("stream")
+            expect(response.headers.get("allow")).toContain("GET")
+        }
+
+        expect(runtime.bus.chunkSubscribers).toBe(before)
+        // And OPTIONS does not advertise a HEAD the server refuses.
+        const allow = ((await call("OPTIONS", "/v1/events")).headers.get("allow") ?? "").split(", ")
+        expect(allow).not.toContain("HEAD")
+        expect(allow).toContain("GET")
+        await runtime.stop()
+    })
+})
+
+// ─── The values that used to be constants ────────────────────────────────────────────────
+
+describe("introspection reports facts rather than placeholders", () => {
+    test("the agent resource counts its own tools, skills and schedules", async () => {
+        const { call, runtime } = await harness({ manifest: PHASED_MANIFEST })
+        const agent = runtime.list()[0]
+        if (agent === undefined) throw new Error("no agent")
+        await agent.store.schedules.upsert({
+            agentId: agent.id,
+            id: "nightly",
+            kind: "cron",
+            expr: "0 3 * * *",
+            timezone: "UTC",
+            task: "brief me",
+            sessionMode: "shared",
+            enabled: true,
+            origin: "api",
+            anchorAt: new Date().toISOString(),
+            nextRunAt: undefined,
+            // Both required rather than optional, and the interface says why: a conditional
+            // spread is not excess-property-checked, so a provenance field that silently
+            // defaulted would be one that silently stopped protecting anything.
+            sourcePath: "",
+            now: new Date().toISOString(),
+        })
+
+        const body = (await (await call("GET", "/v1/agents/assistant")).json()) as {
+            tools: number
+            skills: number
+            schedules: number
+        }
+        // `skills` and `schedules` were both the literal 0 for every agent, whatever was
+        // configured, while the spec advertised them as counts. A number that is always zero is
+        // worse than an absent field: it reads as a measurement.
+        expect(body.schedules).toBe(1)
+        expect(body.tools).toBeGreaterThan(0)
+        expect(body.skills).toBe(0)
+        await runtime.stop()
+    })
+
+    test("an unphased agent omits `phases` rather than sending an empty one", async () => {
+        // `[]` would read as "visible in no phase", which is the opposite of the truth for an
+        // agent that shows every tool always.
+        const { call, runtime } = await harness({ manifest: PINNED_MANIFEST })
+        const tools = (await (await call("GET", "/v1/agents/assistant/tools")).json()) as {
+            slug: string
+            tags: string[]
+            phases?: string[]
+        }[]
+        expect(tools.length).toBeGreaterThan(0)
+        for (const tool of tools) expect(tool).not.toHaveProperty("phases")
+        await runtime.stop()
+    })
+
+    test("tools report their tags and the phases that actually show them", async () => {
+        // The spec's own description of this route promises "tags, mutating, phase visibility",
+        // and it carried none of the first or third. Both are computed by core's `phasesFor`, so
+        // the introspection answer and the runtime's own filtering cannot disagree.
+        const { call, runtime } = await harness({ manifest: PHASED_MANIFEST })
+        const tools = (await (await call("GET", "/v1/agents/assistant/tools")).json()) as {
+            slug: string
+            tags: string[]
+            phases?: string[]
+        }[]
+        const bySlug = new Map(tools.map((tool) => [tool.slug, tool]))
+
+        // `now` is tagged `read`, so `triage`'s `allow: [tag:read]` reaches it — and `act`'s `*`
+        // reaches everything. `memory_write` is tagged `write`, so only `act` shows it.
+        expect(bySlug.get("now")?.tags).toContain("read")
+        expect(bySlug.get("now")?.phases).toEqual(["triage", "act"])
+        expect(bySlug.get("memory_write")?.tags).toContain("write")
+        expect(bySlug.get("memory_write")?.phases).toEqual(["act"])
+        // **`phase_set` is deliberately absent, and this pins that.** It is a *turn* tool
+        // (`turn.ts:515`), built per turn because its description names the current phase and what
+        // each other phase would add — so there is no static description for this route to report,
+        // and listing it here would mean inventing one. `phases.*.allow` gets it added by
+        // `allowFor` regardless of whether a phase names it, so nothing is lost at runtime.
+        expect(bySlug.has("phase_set")).toBe(false)
+        await runtime.stop()
+    })
+
+    test("an agent has an entryPhase, never a current phase", async () => {
+        // A phase is per session — an agent hosting three conversations is in three at once — so
+        // the agent-level fact is where a new session starts, under a name a reader cannot mistake
+        // for the other thing.
+        const { call, runtime } = await harness({ manifest: PHASED_MANIFEST })
+        const listing = (await (await call("GET", "/v1/agents")).json()) as Record<
+            string,
+            unknown
+        >[]
+        expect(listing[0]).not.toHaveProperty("phase")
+        // `entry: true` wins over declaration order, which is what `entryPhase` is for.
+        expect(listing[0]?.entryPhase).toBe("triage")
+        expect(listing[0]?.phases).toEqual(["triage", "act"])
+        await runtime.stop()
+    })
+
+    test("an unphased agent reports a null entryPhase and no phase list", async () => {
+        const { call, runtime } = await harness()
+        const listing = (await (await call("GET", "/v1/agents")).json()) as Record<
+            string,
+            unknown
+        >[]
+        expect(listing[0]?.entryPhase).toBeNull()
+        expect(listing[0]).not.toHaveProperty("phases")
         await runtime.stop()
     })
 })

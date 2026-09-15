@@ -568,7 +568,13 @@ export class Runtime {
                 {
                     tools: agent.tools.size,
                     skills: agent.skills?.skills.length ?? 0,
-                    schedules: 0,
+                    // The **manifest's declared** count, not the store's. This event fires here,
+                    // before reconciliation has run, so the reconciled number does not exist yet
+                    // and reporting a store read would give whatever the *previous* boot left
+                    // behind — a figure about a process that has exited. `GET /v1/agents/:id`
+                    // reports the reconciled count instead, and the spec says which is which.
+                    // It was the literal `0`, which was neither.
+                    schedules: agent.manifest.schedules.length,
                     model: agent.manifest.model.main.id,
                 },
                 { agentId: agent.id },

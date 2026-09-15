@@ -79,6 +79,12 @@ export type {
     TurnEndReason,
 } from "./events/types.ts"
 export { newRunId, newStepId, newTurnId } from "./loop/ids.ts"
+export {
+    entryPhase,
+    isPhased,
+    type PhaseMap,
+    phasesFor,
+} from "./loop/phases.ts"
 export { runStep, type StepInput, type StepResult } from "./loop/step.ts"
 export {
     runTurn,
