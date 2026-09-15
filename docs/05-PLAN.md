@@ -2566,6 +2566,71 @@ unchanged.
 
 ---
 
+## Phase 13 — The agent server — **complete**
+
+**Goal.** `docker compose up` brings up a server with an agent and an exposed API, and the wire
+surface tells the truth about itself. The protocol was already largely specified in
+`04-SPEC-WIRE.md` — Phase 4 arrived at the reattachable-session shape independently, and OpenAI
+shipped the same shape as their Agents API on 2026-09-10 — so this phase is not new design. It is
+the gap between a specified protocol and a working one.
+
+**What the inventory found, and this phase fixed**
+
+| # | Found | Stage |
+| --- | --- | --- |
+| 1 | Token streaming reached the wire **never** in a served process. `emitChunks` was a process-wide boolean whose setter had no caller. | 13.2 |
+| 2 | A replay could lose its front silently: the cap dropped the oldest events and set a flag nothing read. | 13.3 |
+| 3 | Two attach races, and a docstring describing behaviour nobody wrote. | 13.1, 13.4 |
+| 4 | `subscribe` read the agent id out of `sessionKey`, muting the socket and reporting success. Two disjoint cancel registries. | 13.1, 13.4 |
+| 5 | The spec disagreed with the code in about twelve places, and its own text claimed it had finished cleaning up. | 13.7 |
+| 6 | No compose file, **no `.dockerignore`** (and `.gitignore` ignored one), `HEAD /v1/health` 405, four introspection values hardcoded. | 13.5, 13.6 |
+
+**Stages**
+
+- **13.1** Honesty fixes: `open()` unconditional and at acceptance, `subscribe` reads `agentId`, the
+  409 says what is true.
+- **13.2** Per-subscriber chunk opt-in. An exact `model.chunk` subscription *is* the opt-in;
+  `emitChunks` deleted so two gates cannot be ANDed with the unset one winning.
+- **13.3** `TurnAttachment` gains `truncated`/`dropped`/`chunks`, and `stream.replay` precedes the
+  replay frames.
+- **13.4** Four states and three answers when attaching; one cancel registry per process;
+  per-socket WS chunk filtering.
+- **13.5** `docker-compose.yml`, `.env.example`, a committed `.dockerignore`, compose in the rename
+  script's scope, README, CI.
+- **13.6** `HEAD`/`OPTIONS` from the route table; skills, schedules, tags, phase visibility and
+  `entryPhase` report facts.
+- **13.7** `EVENT_TYPES` with a compile-time assertion, `agent.error` deleted, `?types=` validated,
+  and `packages/server/test/spec.test.ts`.
+
+**Acceptance**
+
+- [x] A reply is reconstructible from `model.chunk` frames on the wire; **none arrive without
+  asking** — verified live against DeepSeek, 29 frames asked, 0 not asked
+- [x] A truncated replay announces the hole before the frames it is missing them from
+- [x] An unknown turn id is `404`, an evicted turn is `stream.ended`, a turn running elsewhere is
+  `stream.unavailable` — four states, three answers
+- [x] A turn is stoppable from whichever surface asks, not only the one that started it
+- [x] `docker compose up -d --wait` reaches healthy with no compose edit — **5.8 s**, image 47 MB
+- [x] An unauthenticated write is refused `401`; `store.db` lands on the state volume as uid 1000
+- [x] `HEAD` answers as `GET`, `OPTIONS` reports a derived `Allow`, and a stream refuses `HEAD`
+  rather than leaking a subscription per probe
+- [x] `?types=` refuses an unknown type and names the nearest real one
+- [x] `tsc` goes red when `EventDataMap` and `EVENT_TYPES` disagree, in both directions
+- [x] The spec is checked against the code: events, planned events, emitters, envelope, routes,
+  error codes, and a hint on every reachable failure — nine assertions, each revert-checked
+
+**Non-goals, deliberately.** CORS (the UI is same-origin). Webhook rate limiting (needs a
+trusted-proxy decision first; `X-Forwarded-For` is attacker-controlled). A core-owned in-flight
+turn registry, so `POST /stop` still cannot reach a channel- or schedule-started turn — 13.1's
+honest 409 is the interim. WS replay. Multi-agent `serve`. Per-key sessions or memory. Skills
+`lastSelectedAt`. GHCR and multi-arch.
+
+**Still owed to Phases 14 and 15.** `packages/client`, the API reference, the VelaOps migration
+guide — which is where **Phase 12 above gets deleted** and its reason recorded — then operator
+keys, approvals over the wire, and `packages/web`.
+
+---
+
 ## Deferred to v0.2
 
 A2A agent card and server. MCP tool provider. Postgres store. Plugin sandboxing and enforced

@@ -168,7 +168,9 @@ describe("failure", () => {
             chunk("I was saying"),
             {
                 kind: "event",
-                event: ev("agent.error", {
+                // `error`, not `agent.error`. The latter was declared and never emitted, so this
+                // test was the only thing in the tree that could produce one.
+                event: ev("error", {
                     code: "model_http_error",
                     message: "502 from the endpoint",
                     hint: "The provider is failing; retry or switch base URL.",

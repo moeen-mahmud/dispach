@@ -16,9 +16,11 @@ import {
     type Agent,
     type AnyEvent,
     type ErrorDetail,
+    EVENT_TYPES,
     entryPhase,
     HarnessError,
     isPhased,
+    nearest,
     newRunId,
     newTurnId,
     phasesFor,
@@ -670,6 +672,31 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             const asked = context.url.searchParams.get("chunks") === "true"
             const implied = types?.includes("model.chunk") === true
             const chunks = asked || implied
+
+            // **An unknown type is refused rather than filtered.** This accepted any string at
+            // all, so `?types=turn.ended` — the plural nobody can keep straight — opened a stream
+            // that matched nothing and stayed open forever: no error, no frames, and a client with
+            // every reason to believe the runtime was idle. Rule 8 with a query parameter in front
+            // of it, and unfixable until `EVENT_TYPES` existed, because `EventDataMap` is a *type*
+            // and nothing at runtime could enumerate it.
+            const unknown = types?.filter(
+                (type) => !(EVENT_TYPES as readonly string[]).includes(type),
+            )
+            if (unknown !== undefined && unknown.length > 0) {
+                const suggestion = nearest(unknown[0] ?? "", EVENT_TYPES)
+                return fail(
+                    {
+                        code: "unknown_event_type",
+                        message: `No such event type: ${unknown.join(", ")}.`,
+                        hint:
+                            suggestion === undefined
+                                ? "The full catalogue is the event table in docs/04-SPEC-WIRE.md. Omit ?types= to receive every event."
+                                : `Did you mean "${suggestion}"? The full catalogue is the event table in docs/04-SPEC-WIRE.md.`,
+                        field: "types",
+                    },
+                    400,
+                )
+            }
 
             return sseResponse({
                 ...(context.request.signal === undefined ? {} : { signal: context.request.signal }),

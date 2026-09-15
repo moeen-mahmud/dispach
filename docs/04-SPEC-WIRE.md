@@ -25,6 +25,45 @@ of this spec.
 `code` is stable and machine-readable. `hint` names the likely fix. Every error type in
 `errors.ts` populates it.
 
+### Error codes
+
+`code` is the part a client branches on, so it is the part that must not move. Every code the HTTP
+and WebSocket surfaces can return:
+
+| Code | Status | Means |
+| --- | --- | --- |
+| `unauthorized` | 401 | Missing or invalid token. Never distinguishes which, and never says the token was absent rather than wrong. |
+| `not_found` | 404 | No route for this method and path. |
+| `agent_not_found` | 404 | No agent with that id in this runtime. |
+| `session_not_found` | 404 | No session with that key for this agent. |
+| `turn_not_found` | 404 | No turn with that id has ever run for this agent. |
+| `schedule_not_found` | 404 | No schedule with that id for this agent. |
+| `method_not_allowed` | 405 | The path exists under another method. `Allow` names them. Also the answer to `HEAD` on a stream route. |
+| `body_not_json` | 400 | The request body did not parse. |
+| `body_too_large` | 400 | Over the 1 MB cap, refused before a channel plugin sees it. |
+| `bad_request_url` | 400 | `request.url` could not be parsed — usually a relative URL from a host framework. |
+| `message_text_required` | 400 | `POST /messages` with no `text`. |
+| `deliver_invalid` | 400 | `deliver` named a channel with no recipient, or an unknown shape. |
+| `phase_invalid` | 400 | The phase is not declared in the manifest. |
+| `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
+| `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
+| `reload_not_supported` | 409 | An agent's configuration is fixed for its process lifetime, deliberately. |
+| `turn_not_running` | 409 | No cancel handle for that turn **on this API** — a channel- or schedule-started turn has none. |
+| `internal_error` | 500 | An unexpected throw. The event stream carries what happened around it. |
+| `websocket_unavailable` | 501 | `/v1/ws` under Node, which has no upgrade path without a dependency. |
+| `server_token_missing` | — | `createHandler` was built with neither a token nor `allowUnauthenticated`. Thrown at construction, not returned. |
+| `server_public_without_token` | — | A non-loopback bind with no token. Thrown at construction. |
+| `frame_not_json` | — | WebSocket frame did not parse. Sent as a `ws.error` frame. |
+| `unknown_frame_type` | — | WebSocket frame `type` is not one this endpoint answers. |
+| `subscribe_needs_agent_id` | — | A `subscribe` frame naming only `sessionKey`. Refused rather than leaving a silent socket. |
+| `message_text_required` (ws) | — | A `message` frame with empty text. |
+| `agent_not_found` (ws) | — | The socket's `agentId` names no agent. |
+
+The last rows have no status because they are not HTTP responses: two are thrown while building the
+server, and the rest are `ws.error` frames on an open socket. `spec.test.ts` asserts every `code:`
+literal under `packages/server/src` appears in this table, plus the four `<kind>_not_found` codes
+that are built rather than written — so a new error cannot ship undocumented.
+
 **`HEAD` and `OPTIONS` are answered from the route table, not per route.** `OPTIONS` returns `204`
 with an `Allow` header listing what the path accepts, plus `OPTIONS`, plus `HEAD` wherever a `GET`
 is really answered; `OPTIONS` on a path that does not exist is a `404`, since a `204` advertising
@@ -266,7 +305,7 @@ interface Event {
   v: 1
   ts: string          // RFC 3339
   runtimeId: string
-  agentId: string
+  agentId?: string
   sessionKey?: string
   turnId?: string
   stepId?: string
@@ -275,15 +314,22 @@ interface Event {
 }
 ```
 
+**`agentId` is optional and this document said it was required for several phases.** Runtime-scoped
+events — `runtime.ready`, `store.ready`, `runtime.stopping` — belong to the process rather than to
+any agent, so they carry no id. A client that trusted the old declaration and dereferenced it was
+reading the field on exactly the events that report the runtime coming up. `sessionKey`, `turnId`
+and `stepId` narrow the same way: present when the event happened inside one, absent otherwise.
+
 | Type | When | Key `data` |
 | --- | --- | --- |
 | `runtime.ready` | boot complete | `bootMs`, `phases: {step: ms}` |
 | `store.ready` | store open, migrations done | `location`, `driver`, `from`, `to`, `applied[]`, `reaped[]` |
 | `runtime.stopping` | shutdown begins | `reason` |
+| `runtime.released` | a lease this process held is given back | `agentId`, `kind` |
 | `plugin.loaded` | per plugin | `name`, `version`, `setupMs`, `permissions` |
 | `plugin.slow` | setup over budget | `name`, `setupMs` |
 | `agent.loaded` | per agent | `tools`, `skills`, `schedules` (the manifest's **declared** count — this fires before reconciliation), `model` |
-| `agent.error` | load failure | `code`, `message`, `hint` |
+| `agent.warning` | a fact true for the whole session, said at load | `code`, `message`, `hint`, `field?` |
 | `agent.channel.status` | connect/disconnect | `channelId`, `channelType`, `status`, `detail?` |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |
 | `agent.channel.rejected` | inbound not turned into a turn | `channelId`, `reason` (`duplicate` \| `denied`), `sender`, `detail` |
@@ -296,14 +342,13 @@ interface Event {
 | `phase.changed` | per `phase_set` that moved | `to`, `tools` (count now visible) |
 | `model.call` | request sent | `role`, `model`, `promptTokens`, `cached`, `attempt` |
 | `model.chunk` | streaming | `delta`, `kind: text \| reasoning` — emitted only while some subscriber has opted in, per subscriber |
+| `model.retry` | a retryable model failure, before the next attempt | `status`, `attempt`, `delayMs` |
 | `model.result` | response done | `outputTokens`, `finishReason`, `latencyMs`, `costUsd?` |
 | `tool.call` | before execute | `slug`, `callId`, `argsHash`, `mutating` |
 | `tool.result` | after execute | `slug`, `callId`, `ok`, `latencyMs`, `bytes`, `truncated`, `trust` |
 | `tool.gated` | a call was blocked | `slug`, `callId`, `reason`, `policy` |
 | `tool.repair` | step unusable | `slugs[]`, `errors[]` |
 | `tools.refreshed` | after `runtime.ready` | `provider`, `ok`, `fetched`, `changed[]`, `missing[]`, `latencyMs`, `error?` |
-| `handoff.start` | delegation | `to`, `task` |
-| `handoff.result` | returned | `to`, `ok`, `steps`, `tokens` |
 | `delivery.sent` | outbox success | `channelId`, `providerMessageId?`, `chunkIndex`, `chunkTotal`, `attempts`, `uncertain` |
 | `delivery.retry` | retryable send failed | `channelId`, `chunkIndex`, `attempts`, `delayMs`, `error` |
 | `delivery.failed` | chunk abandoned | `channelId`, `chunkIndex`, `chunkTotal`, `attempts`, `exhausted`, `abandoned`, `error` |
@@ -316,11 +361,45 @@ interface Event {
 | `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs` |
 | `error` | anything uncaught | `code`, `message`, `hint`, `stack?` |
 
-Six rows were removed from this table rather than corrected: a second `context.pressure` naming
+### Planned
+
+Types this document intends and **no runtime emits yet**. Separated rather than deleted, because
+the shape is designed and a reader planning against it should be able to see it — and separated
+rather than mixed in, because a row in the table above is a promise that subscribing works today.
+
+| Event | When | Data | Blocked on |
+| --- | --- | --- | --- |
+| `handoff.start` | delegation begins | `to`, `task` | Phase 10 |
+| `handoff.result` | delegation returns | `to`, `ok`, `steps`, `tokens` | Phase 10 |
+
+`packages/server/test/spec.test.ts` asserts this table's rows are **absent** from `EVENT_TYPES`, so
+the day delegation ships the guard goes red until the row is moved up. That is the whole mechanism:
+the one moment anybody is thinking about a planned event is when they implement it.
+
+### How this table is kept true
+
+Everything above is checked against the code, because for several phases it was not and it drifted
+badly. `EVENT_TYPES` in `packages/core/src/events/types.ts` is the list as a *value*, with a
+compile-time assertion in both directions — a type added to `EventDataMap` and not to the tuple
+fails `tsc`, and a typo in the tuple is rejected at the literal. `spec.test.ts` then compares this
+document against that value, asserts every documented event is really emitted somewhere, and checks
+the envelope, the routes and the error codes the same way.
+
+Two rounds of corrections are worth recording, because the second happened *after* this document
+claimed to have finished the first.
+
+Six rows were removed earlier rather than corrected: a second `context.pressure` naming
 `used`/`window`, a second `compaction.stage` naming `dropped`, a `context.reset` naming `sessionKey`,
 a duplicate `phase.changed` naming `from`/`by`, and `skill.selected`/`skill.none`, which have never
 existed as events at all. They were an early draft left below the accurate rows in the same table, so
 anything written against them would have read `undefined` from a field this document promised.
+
+The guard then found six more this paragraph had missed. `agent.error` was documented and declared
+in `EventDataMap` and **emitted by nothing, ever** — it is deleted from both. `handoff.start` and
+`handoff.result` moved to *Planned* above. And `agent.warning`, `model.retry` and `runtime.released`
+were emitted by the runtime and documented nowhere, which is the same defect pointing the other way:
+a consumer cannot subscribe to what it is never told exists. **Prose saying the table was cleaned up
+is not a mechanism, which is the transferable half.**
 
 `tools.refreshed` is the only evidence a remote provider caught its cached catalogue up, and it is
 deliberately the only evidence: the refresh is detached, because awaiting it would put a network round

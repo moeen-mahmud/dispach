@@ -98,7 +98,6 @@ export interface EventDataMap {
     }
     "runtime.stopping": { reason: string }
     "agent.loaded": { tools: number; skills: number; schedules: number; model: string }
-    "agent.error": ErrorDetail
     "agent.warning": ErrorDetail
     /**
      * One plugin registered, with what it cost and what it declared.
@@ -405,6 +404,83 @@ export interface EventDataMap {
 }
 
 export type EventType = keyof EventDataMap & string
+
+/**
+ * Every event type, as a value.
+ *
+ * `EventDataMap` is a *type*, so nothing at runtime could enumerate it — which is why
+ * `GET /v1/events?types=` accepted any string at all and streamed nothing forever for a typo, and
+ * why `04-SPEC-WIRE.md` could carry six rows for events that did not exist. Both are the same
+ * missing thing: a list a program can read.
+ *
+ * Kept in the same order as `EventDataMap` so the two can be diffed by eye, though nothing depends
+ * on the order.
+ */
+export const EVENT_TYPES = [
+    "runtime.ready",
+    "store.ready",
+    "runtime.stopping",
+    "agent.loaded",
+    "agent.warning",
+    "plugin.loaded",
+    "plugin.slow",
+    "turn.start",
+    "context.assembled",
+    "context.dropped",
+    "context.pressure",
+    "compaction.stage",
+    "context.reset",
+    "phase.changed",
+    "model.call",
+    "model.chunk",
+    "model.retry",
+    "model.result",
+    "tool.call",
+    "tool.result",
+    "tool.gated",
+    "tool.repair",
+    "tools.refreshed",
+    "agent.channel.status",
+    "agent.channel.error",
+    "agent.channel.rejected",
+    "delivery.sent",
+    "delivery.retry",
+    "delivery.failed",
+    "delivery.uncertain",
+    "runtime.released",
+    "schedules.reconciled",
+    "schedule.fired",
+    "schedule.skipped",
+    "schedule.deferred",
+    "schedule.error",
+    "turn.end",
+    "error",
+] as const satisfies readonly EventType[]
+
+/** Declared in `EventDataMap` and absent from `EVENT_TYPES`. Should always be `never`. */
+export type EventTypesMissing = Exclude<EventType, (typeof EVENT_TYPES)[number]>
+
+/** Named in `EVENT_TYPES` and absent from `EventDataMap`. Should always be `never`. */
+export type EventTypesUnknown = Exclude<(typeof EVENT_TYPES)[number], EventType>
+
+/**
+ * **The drift check, and it is `tsc` rather than a test on purpose.**
+ *
+ * A test can only run where somebody runs it; a type error stops the build, and the whole problem
+ * being solved here is a list that was correct when written and wrong at the next addition. Adding
+ * a type to `EventDataMap` without adding it here makes the annotation `never`, so `= true` fails
+ * to compile — and `EventTypesMissing` above names which one, because an error reading "true is
+ * not assignable to never" would send somebody looking in the wrong place.
+ *
+ * `satisfies readonly EventType[]` on the tuple covers the other direction: a typo'd member is
+ * rejected at the literal itself, where the mistake is.
+ *
+ * Exported because `noUnusedLocals` is on and an unused local would be deleted by the next person
+ * tidying up — the check has to be load-bearing to survive.
+ */
+export const EVENT_TYPES_COMPLETE: [EventTypesMissing, EventTypesUnknown] extends [never, never]
+    ? true
+    : never = true
 
 export type AnyEvent = {
     [K in EventType]: EventEnvelope<K, EventDataMap[K]>

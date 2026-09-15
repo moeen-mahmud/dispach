@@ -78,6 +78,7 @@ export type {
     EventType,
     TurnEndReason,
 } from "./events/types.ts"
+export { EVENT_TYPES } from "./events/types.ts"
 export { newRunId, newStepId, newTurnId } from "./loop/ids.ts"
 export {
     entryPhase,
