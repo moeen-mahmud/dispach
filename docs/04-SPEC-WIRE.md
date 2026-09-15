@@ -69,21 +69,50 @@ POST /v1/agents/:id/messages
   "text": "what's on my calendar today?",
   "sessionKey": "api:moeen",
   "deliver": "none",
-  "stream": true
+  "stream": true,
+  "chunks": true
 }
 ```
 
 Returns `202` with `{ turnId, sessionKey }` immediately, then streams SSE if `stream` is
 true. **The turn is not bound to this connection.** Disconnecting does not cancel it.
 
+`chunks` is here because `stream: true` on its own gives you lifecycle events and no tokens.
+Per-token `model.chunk` frames are **opt-in per reader**, default off, and the reason is cost
+rather than caution: a token event is one envelope and one ISO timestamp per token, and a client
+watching a turn's progress — most of them — wants none of that. So the reader says whether it
+wants to be billed for the resolution. `stream` asks for a stream; `chunks` asks for the tokens
+in it.
+
 ```
-GET  /v1/agents/:id/turns/:turnId/stream   → SSE, replays buffered events then tails
-POST /v1/agents/:id/turns/:turnId/stop     → cooperative cancel; persists partial content
-GET  /v1/agents/:id/turns/:turnId          → final state once complete
+GET  /v1/agents/:id/turns/:turnId/stream?chunks=  → SSE, replays buffered events then tails
+POST /v1/agents/:id/turns/:turnId/stop            → cooperative cancel; persists partial content
+GET  /v1/agents/:id/turns/:turnId                 → final state once complete
 ```
 
 Reattach is core, not a convenience. Generation must survive a client refresh; partial
 content is saved on explicit stop only, never on disconnect.
+
+**Attaching has four states and three answers.** A turn id you hold is in exactly one of them, and
+each gets what is true of it rather than one shared "cannot stream this":
+
+| State | Answer |
+| --- | --- |
+| Buffered in this process | `200`, `stream.replay` then the replayed events, then live |
+| No buffer, turn finished | `200` + `stream.ended` carrying the stored `status` and `steps` |
+| No buffer, turn still `running` | `200` + `stream.unavailable` — recorded, not observable here |
+| No such turn | `404 turn_not_found` |
+
+The third row is not hypothetical. A turn row is written at turn *start*, and one store is shared
+by every process under a sandbox root — so a served process can hold a `running` row for a turn
+another process is executing. Reporting that as ended would send a client to read a final text
+that does not exist yet.
+
+A stream that opens with `stream.replay` may be missing its oldest events: the per-turn buffer is
+capped and discards from the **front**, which is precisely where a client reconstructing text is
+not looking. The preamble arrives *before* the replayed frames and carries `truncated`, `dropped`
+and `chunks: "start" | "partial" | "none"` so a reader learns a hole exists before it starts
+concatenating rather than after.
 
 `deliver` accepts `"none"` (result via API only), a channel id, or `{ channel, to }`.
 
@@ -173,8 +202,18 @@ cap and rate limit before the plugin sees anything.
 ### Runtime event stream
 
 ```
-GET /v1/events?agentId=&types=   → SSE, all lifecycle events
+GET /v1/events?agentId=&types=&chunks=   → SSE, all lifecycle events
 ```
+
+The first frame is always `stream.subscribed`, carrying the resolved `agentId`, `types` and
+`chunks` — a control frame about the subscription, so it is **not** subject to the `types` filter.
+A reader that set a filter needs to see the filter it got.
+
+`chunks` works as it does on a turn stream, with one addition: **naming `model.chunk` in `types`
+turns it on**, and the preamble says so with `implied`. Asking for a type is asking for it, and
+without the implication `?types=model.chunk` was a request that streamed nothing forever with
+nothing reporting why. The implication is reported rather than silent, which is the difference
+between a resolved state and a surprising one.
 
 Filterable. This is the observability surface — VelaOps subscribes here to populate
 `sub_agent_invocations` and `tool_calls`. **Core emits; consumers persist.** Core writes no
@@ -220,7 +259,7 @@ interface Event {
 | `context.dropped` | history the budget could not fit | `messages`, `budget`, `keptTokens` |
 | `phase.changed` | per `phase_set` that moved | `to`, `tools` (count now visible) |
 | `model.call` | request sent | `role`, `model`, `promptTokens`, `cached`, `attempt` |
-| `model.chunk` | streaming | `delta` — suppressed unless subscriber opted in |
+| `model.chunk` | streaming | `delta`, `kind: text \| reasoning` — emitted only while some subscriber has opted in, per subscriber |
 | `model.result` | response done | `outputTokens`, `finishReason`, `latencyMs`, `costUsd?` |
 | `tool.call` | before execute | `slug`, `callId`, `argsHash`, `mutating` |
 | `tool.result` | after execute | `slug`, `callId`, `ok`, `latencyMs`, `bytes`, `truncated`, `trust` |
@@ -313,11 +352,27 @@ One endpoint, for genuinely bidirectional use — an interactive client needing 
 streaming plus mid-turn interrupts:
 
 ```
-GET /v1/ws?agentId=&token=
+GET /v1/ws?agentId=&token=&chunks=
 ```
 
 Client frames: `{ type: "message" | "stop" | "subscribe" | "ping" }`.
-Server frames: the same event objects as SSE.
+Server frames: the same event objects as SSE, plus the control frames `ws.open`, `ws.subscribed`,
+`ws.accepted`, `ws.stopping` and `ws.error`.
+
+`chunks` is **per socket**, not per server: one client asking for tokens must not start sending
+them to every other connected client. It is set on the handshake and reported back on `ws.open`,
+and `{ type: "subscribe", chunks }` changes it without reconnecting — omitting the field leaves it
+as it was, so re-pointing the agent cannot silently switch streaming off.
+
+A `subscribe` frame must name `agentId`. A frame carrying only `sessionKey` is refused with
+`subscribe_needs_agent_id` rather than accepted: a socket filters on the agent an event carries, a
+session key can never match one, and a socket pointed with it goes permanently silent. It used to
+be accepted, and answered `ws.subscribed` to say so.
+
+**`stop` reaches any turn this process started**, over either surface — the cancel registry is one
+per process, shared by the HTTP handler and this bridge. It does not reach a turn a channel or a
+schedule began: nothing in core records in-flight turns, so there is no handle to share, and
+`POST /stop` says exactly that with `turn_not_running`.
 
 **Served under Bun only.** Bun has an upgrade path in `Bun.serve`; Node has none without a
 dependency, and adding one for an endpoint this section itself calls secondary is the wrong trade.

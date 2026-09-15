@@ -1,0 +1,108 @@
+# Dispach as a hosted agent server.
+#
+#   cp .env.example .env     # then a token and a model key
+#   docker compose up -d --wait
+#   curl localhost:7420/v1/ready
+#
+# At the **repo root** rather than in `docker/`, so `git clone && docker compose up` needs no `-f`.
+# The Dockerfile stays where it is; `build.dockerfile` points at it.
+#
+# Most of what follows is a default that would otherwise bite, so each one says which.
+
+services:
+    agent:
+        build:
+            context: .
+            dockerfile: docker/Dockerfile
+        # `image:` names what a local build tags *and* what a future registry pull would fetch, so
+        # publishing to GHCR later is a one-line change rather than a restructure. Untagged
+        # deliberately: a floating `:latest` in a compose file people copy is how a pinned
+        # deployment stops being one.
+        image: dispach:local
+
+        # **No `command:` here, and that is load-bearing.** The image's CMD carries
+        # `--host 0.0.0.0`; a compose `command:` replaces CMD wholesale, so adding one — even to
+        # "just pass the manifest path" — silently drops the host flag. The process then listens on
+        # loopback inside the container, which no published port can reach: a container that builds,
+        # starts, reports healthy and answers nothing.
+
+        # Likewise **no `healthcheck:`**. The image defines one against `/v1/ready`; restating it
+        # here gives two definitions to keep in step, and the one in the compose file wins.
+
+        ports:
+            # Host side is configurable because 7420 is often already taken by a `serve` running
+            # outside Docker. Container side never moves — the healthcheck inside the image polls
+            # 127.0.0.1:7420 and knows nothing about this mapping.
+            - "${HOST_PORT:-7420}:7420"
+
+        environment:
+            # `:?` fails at `up` time with this message rather than letting the container start and
+            # refuse. Both refusals are correct; only one of them is visible without reading logs.
+            DISPACH_API_TOKEN: ${DISPACH_API_TOKEN:?set DISPACH_API_TOKEN in .env — the image binds 0.0.0.0 and refuses to serve the world unauthenticated}
+
+            # The model. Passed through the *environment* rather than read from a `.env` beside the
+            # manifest, because `examples/minimal/.env` is gitignored — a fresh clone has nothing
+            # there — and because the ambient environment deliberately beats the agent's own file:
+            # an operator has to be able to configure the agent their container runs.
+            MODEL_ID: ${MODEL_ID:?set MODEL_ID in .env}
+            MODEL_BASE_URL: ${MODEL_BASE_URL:?set MODEL_BASE_URL in .env}
+            MODEL_API_KEY: ${MODEL_API_KEY:?set MODEL_API_KEY in .env}
+
+        volumes:
+            # **Read-write, not `:ro`.** The skills cache writes to `<agentDir>/.dispach/` and
+            # `memory_write` appends to the workspace files beside the manifest. Mounted read-only,
+            # an agent boots and then fails the first time it is asked to remember something.
+            - "${AGENT_DIR:-./examples/minimal}:/agent"
+
+            # A **named** volume, which is the whole reason the most common first-run failure is
+            # unreachable here: a named volume inherits uid 1000 from the image, while a host path
+            # keeps host ownership and a non-root container cannot write its own store. Swap this
+            # for a bind mount and `chown 1000:1000` it first.
+            - dispach-state:/state
+
+        # `exec` backgrounds children on purpose, and a backgrounded child whose parent is PID 1
+        # has nothing to reap it. Without an init, zombies accumulate — 33 unreaped shells once
+        # took a machine to load average 351 and a 132 s boot, with nothing obviously wrong.
+        init: true
+
+        # Compose's default is 10 s, which can SIGKILL an outbox flush mid-write. Exactly-once is
+        # held per crash point rather than claimed outright, and the window a hard kill lands in is
+        # the one `delivery.uncertain` exists to make explicable afterwards. 30 s is the graceful
+        # path having room to run `runtime.stop()`.
+        stop_grace_period: 30s
+
+        restart: unless-stopped
+
+        # Bounded, because the default json-file driver has no limit and a poll loop that reports a
+        # fault every few seconds fills a disk. The runtime this replaces wrote 57 MB of one
+        # sentence into a log nobody had been told about.
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+
+    # A second agent is a second service, and the cost is worth seeing rather than describing:
+    # `serve` takes one manifest, so one agent per container is the topology. Each needs its own
+    # port, its own agent directory, and **its own state volume** — two containers sharing one
+    # would share a `store.db` whose rows are keyed by agent id, and reconciliation ends with
+    # `removeManifestExcept`, so each boot would delete the other's schedules and report success.
+    #
+    # agent-two:
+    #     image: dispach:local
+    #     ports:
+    #         - "7421:7420"
+    #     environment:
+    #         DISPACH_API_TOKEN: ${DISPACH_API_TOKEN:?}
+    #         MODEL_ID: ${MODEL_ID:?}
+    #         MODEL_BASE_URL: ${MODEL_BASE_URL:?}
+    #         MODEL_API_KEY: ${MODEL_API_KEY:?}
+    #     volumes:
+    #         - "./my-other-agent:/agent"
+    #         - dispach-state-two:/state
+    #     init: true
+    #     stop_grace_period: 30s
+
+volumes:
+    dispach-state:
+    # dispach-state-two:

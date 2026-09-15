@@ -226,6 +226,49 @@ resolved, which is the part that is hard to get right by hand. In a container, r
 foreground and let the container runtime supervise it — it handles SIGTERM, finishes the delivery
 in flight, and exits 0.
 
+## Hosting with Compose
+
+The one-command path. `docker compose up` brings up a server with an agent and an exposed API — a
+living agent server, reachable over HTTP, with nothing to configure but a token and a model key.
+
+```bash
+cp .env.example .env          # then DISPACH_API_TOKEN and MODEL_API_KEY
+docker compose up -d --wait
+curl localhost:7420/v1/ready
+```
+
+```bash
+curl -s -H "Authorization: Bearer $DISPACH_API_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"text":"what can you do?"}' \
+  localhost:7420/v1/agents/minimal/messages
+# → {"turnId":"t_…","sessionKey":"api:default"}
+```
+
+`docker-compose.yml` is at the repo root so a fresh clone needs no `-f`. The full wire surface is
+in [`docs/04-SPEC-WIRE.md`](docs/04-SPEC-WIRE.md); `docker compose down` stops it and
+`docker compose down -v` also discards the state volume.
+
+Four things in that file are answers to defaults that bite, and they are commented there rather
+than left to be discovered:
+
+- **No `command:` override.** The image's CMD carries `--host 0.0.0.0`; a compose `command:`
+  replaces CMD wholesale, so adding one drops the host flag and the process listens on loopback
+  *inside* the container, which no published port can reach.
+- **A named volume at `/state`.** A named volume inherits uid 1000 from the image; a host path
+  keeps host ownership, and a non-root container cannot write its own store.
+- **`/agent` is read-write.** The skills cache and `memory_write` both write beside the manifest.
+- **`stop_grace_period: 30s`.** The 10 s default can SIGKILL an outbox flush mid-write.
+
+The model reaches the container through the *environment* rather than through a `.env` beside the
+manifest, which is the documented precedence: the ambient environment beats an agent's own file,
+so an operator can configure the agent their container runs.
+
+One agent per container: `serve` takes one manifest. A second agent is a second service with its
+own port, its own agent directory and **its own state volume** — a commented example in the
+compose file shows the shape, including why sharing a volume would have two boots deleting each
+other's schedules.
+
 ## Docker
 
 ```bash
@@ -253,11 +296,19 @@ deliberately. A Telegram outage must not read as an unhealthy container and get 
 the same outage, so the probe answers "can it serve a turn" rather than "is everything connected".
 Channel state lives on the agent resource instead.
 
-Measured on an arm64 Docker Desktop: the image is **83 MB** against the 150 MB target, container
-start to `/v1/ready` is **147 ms** against 2 s, the healthcheck reports healthy, and a real turn
-against DeepSeek round-trips through `POST /v1/agents/:id/messages` with the store landing in
-`/state` as uid 1000. The CI `docker` job rebuilds and re-measures both numbers on every push,
-because a figure nobody re-checks is a figure about one afternoon.
+Measured on an arm64 Docker Desktop, 2026-09-15: the image is **47 MB** against the 150 MB target,
+`docker compose up -d --wait` reaches healthy in **5.8 s**, the healthcheck reports healthy, an
+unauthenticated write is refused with 401, `store.db` lands on the state volume owned by uid 1000,
+and a real streaming turn against DeepSeek reconstructs from 26 `model.chunk` frames. The CI
+`docker` job rebuilds and re-measures on every push, because a figure nobody re-checks is a figure
+about one afternoon.
+
+Two notes on reading those numbers. The size is `docker image inspect --format '{{.Size}}'`, which
+is what the CI gate uses; `docker images` prints **180 MB** for the same image on the same machine,
+a different accounting, so check which one a figure came from before treating it as a regression.
+And the boot happened with a **deliberately invalid** model key — no network I/O before
+`runtime.ready` is the rule this project exists for, and a container reaching healthy on a fake
+credential is that rule visible from outside.
 
 ## Development
 

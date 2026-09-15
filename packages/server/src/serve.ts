@@ -57,16 +57,28 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         })
     }
 
+    /**
+     * One cancel registry for the whole process, shared by every surface that can start a turn.
+     *
+     * Created here rather than inside either surface because it is a fact about the *process*: a
+     * turn is in flight or it is not, and which connection started it is not part of that. Each
+     * surface owning its own map made `POST /stop` answer 409 for a turn a socket had started and
+     * a `stop` frame find nothing for a turn `POST /messages` had started — two honest reports
+     * about the wrong registry, which is the least debuggable shape a wrong answer has.
+     */
+    const running = new Map<string, AbortController>()
+
     const handler = createHandler({
         runtime,
         ...(options.token === undefined ? {} : { token: options.token }),
         // Only reachable on loopback, per the guard above. Stated rather than defaulted.
         ...(options.token === undefined ? { allowUnauthenticated: true } : {}),
         ...(options.now === undefined ? {} : { now: options.now }),
+        running,
     })
 
     const underBun = typeof Bun !== "undefined" && typeof Bun.serve === "function"
-    if (underBun) return serveWithBun(handler, options)
+    if (underBun) return serveWithBun(handler, options, running)
     return serveWithNode(handler, options)
 }
 
@@ -75,8 +87,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
 function serveWithBun(
     handler: (request: Request) => Promise<Response>,
     options: ServeOptions,
+    running: Map<string, AbortController>,
 ): RunningServer {
-    const bridge = attachWebSocket(options.runtime, options.token)
+    const bridge = attachWebSocket(options.runtime, options.token, running)
 
     const server = Bun.serve<WsSession, never>({
         port: options.port,

@@ -240,7 +240,6 @@ export async function runCommand(options: RunOptions): Promise<number> {
     for (;;) {
         const runtime = await RuntimeClass.create({
             agents: [options.manifestPath],
-            emitChunks: true,
             toolProviders: TOOL_PROVIDERS,
             builtInPlugins: BUILT_IN_PLUGINS,
             scriptRunner: scriptRunner(),

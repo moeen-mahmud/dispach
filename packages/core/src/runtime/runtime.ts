@@ -25,7 +25,7 @@ import type { FetchLike } from "../model/provider.ts"
 import { agentPluginSupply, type BuiltInPlugins, type LoadedPlugin } from "../plugins/loader.ts"
 import { type Middleware, notify } from "../plugins/middleware.ts"
 import { Scheduler } from "../schedule/scheduler.ts"
-import { TurnStreams } from "../store/buffer.ts"
+import { TurnStreams, type TurnStreamsOptions } from "../store/buffer.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
 import type { RuntimeMode, Store } from "../store/store.ts"
 import { ToolRegistry } from "../tools/registry.ts"
@@ -59,10 +59,16 @@ export interface RuntimeOptions {
     readonly runtimeId?: string
     readonly env?: EnvSource
     readonly fetch?: FetchLike
-    /** Emit per-token `model.chunk` events. Off by default; the REPL turns it on. */
-    readonly emitChunks?: boolean
     /** Bring your own bus, to subscribe before boot events fire. */
     readonly bus?: EventBus
+    /**
+     * Per-turn event buffer limits.
+     *
+     * The cap is a memory bound, and memory is the embedder's to decide: a host serving one
+     * conversation at a time wants a generous one, and a host with a thousand wants the opposite.
+     * Defaults are in `TurnStreams` and are right for a single container.
+     */
+    readonly streams?: TurnStreamsOptions
     /** Directory for relative paths in object-form manifests. Defaults to `process.cwd()`. */
     readonly dir?: string
     readonly store?: StoreSource
@@ -241,7 +247,6 @@ export class Runtime {
             options.bus ??
             new EventBus({
                 runtimeId,
-                ...(options.emitChunks === undefined ? {} : { emitChunks: options.emitChunks }),
             })
 
         const phases: Record<string, number> = {}
@@ -263,7 +268,7 @@ export class Runtime {
         }
 
         // Buffering starts before anything is emitted, so an early turn cannot be half-recorded.
-        const streams = new TurnStreams()
+        const streams = new TurnStreams(options.streams ?? {})
         streams.listen(bus)
 
         // 0. Plugins: read each agent's `plugins:` shallowly, resolve the modules, and let them

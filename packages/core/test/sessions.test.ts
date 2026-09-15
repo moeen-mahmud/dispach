@@ -432,16 +432,28 @@ describe("reattachment", () => {
                 agents: [join(dir, "agent.yaml")],
                 env: ENV,
                 fetch: gatedFetch(gate),
-                emitChunks: true,
             })
 
+            // Chunk interest, declared the way the server declares it. A wildcard subscriber —
+            // which `TurnStreams` is — receives no `model.chunk` unless somebody asked, so a test
+            // that wants token history in its replay has to open the turn asking for it. Before
+            // per-subscriber opt-in this test passed because the whole *process* had chunks on.
+            runtime.streams.open("t_attach", { chunks: true })
             const inFlight = runtime.agent("test").send("hello", { turnId: "t_attach" })
             await new Promise((resolve) => setTimeout(resolve, 20))
 
             const tailed: AnyEvent[] = []
-            const attachment = runtime.streams.attach("t_attach", (event) => {
-                tailed.push(event)
-            })
+            // `{ chunks: true }` on the attachment as well as on `open`: interest is per
+            // listener, so a client that wants token history in its *tail* has to say so. Without
+            // it the replay carries chunks (they were buffered) and the live tail does not, which
+            // is exactly the gap this test measures.
+            const attachment = runtime.streams.attach(
+                "t_attach",
+                (event) => {
+                    tailed.push(event)
+                },
+                { chunks: true },
+            )
 
             expect(attachment).toBeDefined()
             expect(attachment?.state).toBe("running")

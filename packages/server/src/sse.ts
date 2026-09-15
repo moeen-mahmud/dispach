@@ -112,7 +112,25 @@ export function sseResponse(options: SseStreamOptions): Response {
 
             options.signal?.addEventListener("abort", finish, { once: true })
 
-            teardown = options.start({ send, close: finish })
+            // **Assigned only if the stream is still open.** `start` is permitted to `close()`
+            // synchronously — `streamTurn` does exactly that when it attaches to a turn that has
+            // already ended, and so does any single-frame stream — and when it does, `finish()`
+            // runs *here*, before this assignment, with `teardown` still undefined. It called
+            // nothing, set `closed`, and returned; then the real teardown landed in a variable
+            // only `cancel()` reads, and `cancel()` bails on `closed`. So the subscription leaked.
+            //
+            // The cost was not a tidiness one. A leaked buffer listener pins its buffer against
+            // eviction — `#evict` skips anything with listeners *before* the count cap can even
+            // consider it, so the buffer escaped both the age and the count bound — and a leaked
+            // attachment holding chunk interest leaves the bus building a per-token envelope for
+            // the life of the process with nobody reading it. Found by watching a real server
+            // hold an ended turn's buffer through two sweeps, ninety seconds after it ended.
+            const started = options.start({ send, close: finish })
+            if (closed) {
+                started?.()
+                return
+            }
+            teardown = started
 
             heartbeat = setInterval(() => {
                 if (closed) return

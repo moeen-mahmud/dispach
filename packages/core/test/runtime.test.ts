@@ -196,7 +196,6 @@ describe("a turn", () => {
             agents: [join(dir, "agent.yaml")],
             env: ENV,
             fetch: replyFetch,
-            emitChunks: true,
         })
         const agent = runtime.agent("test")
 
@@ -343,7 +342,6 @@ describe("cancellation", () => {
         const runtime = await Runtime.create({
             agents: [join(dir, "agent.yaml")],
             env: ENV,
-            emitChunks: true,
             fetch: async () => {
                 const stream = new ReadableStream<Uint8Array>({
                     async pull(controller) {
@@ -379,7 +377,6 @@ describe("cancellation", () => {
         const runtime = await Runtime.create({
             agents: [join(dir, "agent.yaml")],
             env: ENV,
-            emitChunks: true,
             fetch: async () => {
                 const stream = new ReadableStream<Uint8Array>({
                     async pull(controller) {

@@ -1,0 +1,62 @@
+# What is kept out of the build context.
+#
+# This file was **absent** until Phase 13.5, and `.gitignore` actively ignored it — so every
+# `docker build` sent the whole working tree to the Docker daemon, `.git/`, `node_modules/`, every
+# `dist/`, and **every `.env` on disk** included. That is a disclosure rather than a slow build: a
+# build context is readable by anything that can talk to the daemon, and a layer built from it can
+# be pushed. The Dockerfile copies only what it names, so nothing here was ever *in* the image —
+# which is exactly why nobody noticed.
+#
+# Ordered roughly by how much each one costs.
+
+# Dependencies. Reinstalled inside the image from the lockfile, per-platform — a host
+# `node_modules` is the wrong architecture as often as not.
+node_modules
+**/node_modules
+
+# Build output. The builder stage runs `bun run build` itself; shipping a stale local `dist/`
+# would be the recorded stale-dist hazard with a container around it.
+dist
+**/dist
+*.tsbuildinfo
+
+# History. Large, and carries every secret ever committed and reverted.
+.git
+.gitignore
+.github
+
+# **Secrets.** The reason this file is not a build-speed optimisation.
+.env
+**/.env
+.env.*
+!.env.example
+**/*.pem
+**/*.key
+
+# Local state: stores, logs, sandbox agents, skill caches.
+local_test
+.dispach
+**/.dispach
+*.db
+*.db-shm
+*.db-wal
+
+# Tests and fixtures. The runtime stage has no test runner and the builder does not run them.
+**/test
+**/*.test.ts
+**/*.test.tsx
+evals
+
+# Docs and editor noise.
+docs
+*.md
+!README.md
+.vscode
+.idea
+.DS_Store
+.remember
+.claude
+
+# The compose file and the Dockerfile itself. Read by the daemon from outside the context.
+docker-compose.yml
+docker

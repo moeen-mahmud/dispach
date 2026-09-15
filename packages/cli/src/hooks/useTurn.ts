@@ -47,38 +47,49 @@ export function useTurn(options: {
     useEffect(() => {
         // One wildcard subscription rather than six by name: the reducer already ignores what it
         // does not own, and a subscription list would silently miss any event a later phase adds.
-        return bus.on("*", (event: AnyEvent) => {
-            // Other sessions share this bus — from Phase 4, a channel can be delivering a turn for
-            // a different peer while this prompt is open. An event with no session key is
-            // runtime-wide and belongs to everyone.
-            if (event.sessionKey !== undefined && event.sessionKey !== sessionKey) return
+        //
+        // `{ chunks: true }` is not optional here and is the whole reason the TUI streams. A
+        // wildcard subscriber receives no `model.chunk` unless it asks — because `/v1/events`, the
+        // WebSocket bridge and every plugin watcher are also wildcard and must not be put on the
+        // per-token path by accident. This is the one wildcard in the tree that genuinely wants
+        // tokens; drop the flag and the TUI silently stops streaming, which is the same shape of
+        // failure the per-subscriber opt-in was introduced to remove.
+        return bus.on(
+            "*",
+            (event: AnyEvent) => {
+                // Other sessions share this bus — from Phase 4, a channel can be delivering a turn for
+                // a different peer while this prompt is open. An event with no session key is
+                // runtime-wide and belongs to everyone.
+                if (event.sessionKey !== undefined && event.sessionKey !== sessionKey) return
 
-            // Reasoning is never parsed for tool calls, so it is never filtered for them either.
-            if (event.type === "model.chunk") {
-                const { delta, kind } = event.data
-                if (kind === "reasoning") {
-                    dispatch({ kind: "delta", of: "reasoning", text: delta })
+                // Reasoning is never parsed for tool calls, so it is never filtered for them either.
+                if (event.type === "model.chunk") {
+                    const { delta, kind } = event.data
+                    if (kind === "reasoning") {
+                        dispatch({ kind: "delta", of: "reasoning", text: delta })
+                        return
+                    }
+                    dispatch({ kind: "delta", of: "text", text: filter.current.push(delta) })
                     return
                 }
-                dispatch({ kind: "delta", of: "text", text: filter.current.push(delta) })
-                return
-            }
 
-            // The filter owns the paragraph break between one step's narration and the next's, which
-            // is why it is told where a step ends rather than being replaced at each one.
-            if (event.type === "model.result") {
-                dispatch({ kind: "delta", of: "text", text: filter.current.endStep() })
-                return
-            }
+                // The filter owns the paragraph break between one step's narration and the next's, which
+                // is why it is told where a step ends rather than being replaced at each one.
+                if (event.type === "model.result") {
+                    dispatch({ kind: "delta", of: "text", text: filter.current.endStep() })
+                    return
+                }
 
-            if (event.type === "turn.end") {
-                // Flush before the reducer commits the reply, or the last line of it is lost.
-                dispatch({ kind: "delta", of: "text", text: filter.current.end() })
-                filter.current = agent.streamFilter()
-            }
+                if (event.type === "turn.end") {
+                    // Flush before the reducer commits the reply, or the last line of it is lost.
+                    dispatch({ kind: "delta", of: "text", text: filter.current.end() })
+                    filter.current = agent.streamFilter()
+                }
 
-            dispatch({ kind: "event", event })
-        })
+                dispatch({ kind: "event", event })
+            },
+            { chunks: true },
+        )
     }, [agent, bus, sessionKey])
 
     const send = useCallback(
