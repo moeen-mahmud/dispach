@@ -44,6 +44,16 @@
         "ink-testing-library": "4.0.0",
       },
     },
+    "packages/client": {
+      "name": "@dispach/client",
+      "version": "0.1.0",
+      "dependencies": {
+        "@dispach/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@dispach/server": "workspace:*",
+      },
+    },
     "packages/core": {
       "name": "@dispach/core",
       "version": "0.1.0",
@@ -186,6 +196,8 @@
     "@dispach/channel-telegram": ["@dispach/channel-telegram@workspace:packages/channel-telegram"],
 
     "@dispach/cli": ["@dispach/cli@workspace:packages/cli"],
+
+    "@dispach/client": ["@dispach/client@workspace:packages/client"],
 
     "@dispach/core": ["@dispach/core@workspace:packages/core"],
 

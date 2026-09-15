@@ -84,6 +84,28 @@ jobs:
             exit 1
           fi
 
+      # What the agent's shell can reach. Asserted, because the absence of `git` does not degrade
+      # the skills catalogue — it deletes it, and the symptom is `git: not found` inside somebody
+      # else's container. A slimming change to the base image would otherwise take a shipped
+      # feature with it silently.
+      - name: the shell the agent gets
+        run: |
+          missing=""
+          for tool in sh bash git python3 curl wget node; do
+            docker run --rm --entrypoint sh dispach:ci -c "command -v $tool >/dev/null" \
+              || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::absent from the image:$missing — see docker/Dockerfile for why each is there"
+            exit 1
+          fi
+          echo "toolchain present"
+          # Non-root is the other half, and it is what the containment in docker-compose.yml
+          # assumes. A base-image change that reverted to root would make every cap_drop moot.
+          uid=$(docker run --rm --entrypoint sh dispach:ci -c 'id -u')
+          [ "$uid" = "1000" ] || { echo "::error::image runs as uid $uid, expected 1000"; exit 1; }
+          echo "runs as uid 1000"
+
       # Start to ready, the number the container claim is actually about. `minimal` needs only a
       # key-shaped string to load — nothing here calls an endpoint.
       #

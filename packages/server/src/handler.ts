@@ -994,7 +994,10 @@ function notFound(kind: string, id: string, hint?: string): Response {
             message: `No ${kind} "${id}".`,
             hint:
                 hint ??
-                `Check the id. A ${kind} id is case-sensitive and, for a session key, includes its channel segment.`,
+                // No indefinite article: `A ${kind}` printed "A agent id is case-sensitive" on the
+                // most common 404 this server returns, which is the kind of blemish that only ever
+                // shows up in real output and makes the rest of the sentence read as unproofed.
+                `Check the id — it is case-sensitive, and a session key includes its channel segment.`,
         },
         404,
     )

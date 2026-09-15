@@ -27,6 +27,7 @@ WORKDIR /build
 # Copying the whole tree here instead would make `bun install` run on every edit.
 COPY package.json bun.lock ./
 COPY packages/core/package.json ./packages/core/
+COPY packages/client/package.json ./packages/client/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/server/package.json ./packages/server/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/
@@ -59,8 +60,31 @@ ENV NODE_ENV=production
 # Where the store, logs and sandbox agents live. A volume mounts here.
 ENV DISPACH_HOME=/state
 
+# ─── What the agent's shell can reach ─────────────────────────────────────────────────────
+#
+# `exec` gives the agent a shell, and a shell is only as useful as what is on the PATH. The base
+# image ships busybox `sh`, `wget` and node — and **nothing else**, which is a bigger hole than it
+# reads as:
+#
+# - **`git`** is how `skills install`, `sources search` and `sources update` fetch catalogues. Its
+#   absence does not degrade the feature, it deletes it: 440+ skills across two catalogues are
+#   unreachable, and the symptom is `git: not found` rather than anything that explains itself.
+# - **`python3`** is what a skill shipping scripts declares. The documented `uv run` path — which
+#   materialises `.venv/` inside the skill directory on first call — cannot start without it.
+# - **`bash`** is the shebang on a good fraction of third-party skill scripts. `exec` itself runs
+#   `sh -c` and does not need it; a `#!/bin/bash` script does.
+# - **`curl`** is what a model reaches for first. `wget` is a substitute it will not think of.
+# - **`ca-certificates`** so an HTTPS call from the shell verifies rather than failing oddly.
+#
+# Measured: 21 MB, taking the image from 47 MB to 68 MB against the 150 MB CI ceiling. The
+# alternative considered and rejected was a second `dispach:dev` image — which makes the
+# production one the variant nobody tests, and leaves a shipped feature unusable in the only
+# supported deployment.
+RUN apk add --no-cache git python3 bash curl ca-certificates
+
 COPY package.json bun.lock ./
 COPY packages/core/package.json ./packages/core/
+COPY packages/client/package.json ./packages/client/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/server/package.json ./packages/server/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/

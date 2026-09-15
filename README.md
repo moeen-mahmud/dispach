@@ -269,6 +269,54 @@ own port, its own agent directory and **its own state volume** — a commented e
 compose file shows the shape, including why sharing a volume would have two boots deleting each
 other's schedules.
 
+## Developing against the container
+
+The container is the honest place to exercise an agent that has a shell, and not only for
+containment. Every `exec` test in this repo otherwise runs on macOS, where the shell is a real
+bash and `realpath` resolves `/var` through a symlink — the exact conditions the recorded
+`$PWD`-comparison bug lived in. In the image it is busybox `sh` on Linux, with a different PATH
+and different `realpath` semantics. Those have never been exercised until now.
+
+```bash
+cp .env.example .env                                  # token + a model key
+echo 'AGENT_DIR=./examples/shell-agent' >> .env       # an agent that can actually run things
+docker compose up -d --build --wait
+```
+
+Then the loop. `--build` on `up` rebuilds only what changed, and layer caching means a source-only
+edit re-runs `bun run build` and nothing before it:
+
+```bash
+docker compose up -d --build --wait     # after any source change
+docker compose logs -f                  # what it is saying
+docker compose exec agent sh            # a shell in the container, as uid 1000
+docker compose down                     # stop;  down -v also discards /state
+```
+
+Verified: `exec` runs inside the container as **uid 1000**, cwd `/agent/workspace`, with output
+fenced as untrusted. What the agent's shell can reach is `sh`, `bash`, `git`, `python3`, `curl`,
+`wget` and `node` — `git` because the skills catalogue is fetched with it and its absence *deletes*
+that feature rather than degrading it, `python3` because a skill shipping scripts needs it. The
+CI `docker` job asserts all of them, and that the image still runs as uid 1000.
+
+### What containment the compose file adds
+
+`tools.policy` decides *whether* a command runs. It does not decide *where*, and it cannot: a
+write root does not bind `exec`, because `echo x > file` carries its target inside a shell string
+nothing can inspect. So the deployment supplies the other half:
+
+| | |
+| --- | --- |
+| `cap_drop: [ALL]` | The process is uid 1000 and binds 7420, above 1024. Nothing asks for a capability, so an empty set is the true requirement rather than a compromise. |
+| `no-new-privileges` | A setuid binary cannot raise privileges. There should be none; this makes that a property rather than an audit. |
+| `pids_limit: 512` | **A fork bomb is one `exec` call away.** `init: true` reaps children; only this bounds them. |
+| `mem_limit: 2g`, `cpus: 2.0` | An agent asked to process a large file can allocate until the host swaps. Here it is OOM-killed and restarts, which is legible. |
+| `read_only: true` | An immutable root filesystem. `/agent` and `/state` are mounts and stay writable — the skills cache and `memory_write` both need that. |
+| `tmpfs` on `/tmp` and `$HOME` | The two places something genuinely writes: `exec` hands children a file descriptor in `/tmp`, and `uv` caches under `$HOME`. **Wiped on restart**, so a Python skill rebuilds its venv after each boot. |
+
+`examples/shell-agent` is the agent to mount for this, and its README is blunt about the
+consequence: run it on a laptop and the policy is the only boundary there is.
+
 ## Docker
 
 ```bash
@@ -426,6 +474,8 @@ thing that will distinguish a plugin from a scramble when enforcement lands.
 | `docs/03-SPEC-PLUGIN-API.md` | Plugin and middleware contracts |
 | `docs/04-SPEC-WIRE.md` | HTTP/SSE surface and lifecycle event schema |
 | `docs/05-PLAN.md` | Every phase with acceptance criteria, and what is ticked |
+| `docs/09-API-GUIDE.md` | The agent server, walked through from `compose up` to a streamed reply |
+| `packages/client/README.md` | The typed client — turns, streams, reattach, typed errors |
 | `docs/07-SPEC-WORKSPACE.md` | Workspace file tiers, budgets, and prompt-style rendering |
 | `CLAUDE.md` | The standing brief: hard rules and the hazards already paid for |
 | `evals/` | Every performance claim, with the number and a script to reproduce it |

@@ -2487,7 +2487,7 @@ not from the terminal. Stated rather than implied: the warning fires for a CLI r
 - CI gate failing above 1200 ms
 - README with the measured number and how to reproduce it
 - Complete `examples/`
-- API docs generated from types
+- ~~API docs generated from types~~ — answered in Phase 14.2 **without** a generator: the spec is the contract and is now machine-checked, and `@dispach/client`'s types are the reference. `docs/09-API-GUIDE.md` is the walkthrough. A generated third description would drift from both and read as the most authoritative.
 - v0.1.0 tagged
 
 **Acceptance**
@@ -2536,33 +2536,39 @@ the argument for the CI job rather than for reading the Dockerfile more carefull
 
 ---
 
-## Phase 12 — VelaOps compat adapter
+## Phase 12 — VelaOps compat adapter — **deleted**
 
-**Goal.** A VelaOps agent container runs Dispach instead of OpenClaw, with `apps/engine`
-unchanged.
+Not deferred, not descoped: **removed, with the work it described replaced by a migration.**
 
-**Deliverables**
+It was to be `packages/compat-openclaw` — a WS RPC server on 18789 reproducing OpenClaw's
+protocol, so `apps/engine` could stay untouched and both runtimes could run side by side per
+agent. Four reasons it is gone, in the order that matters:
 
-- `packages/compat-openclaw` — WS RPC on 18789, `x-openclaw-scopes`, `auth.token`, TUI client id, subscribe, terminal phase `result`
-- `/healthz`
-- `openclaw.json` → `agent.yaml` translation incl. `modelByChannel`, `delivery`, `deliveryTargets`
-- `model: "openclaw/main"` indirection accepted and rewritten
-- Gateway channel ids incl. `msteams`
-- `[boot-phase]` markers on stdout for `boot-progress.ts`
-- Cron RPC surface mapped to native schedules
-- Compatibility test suite recorded against a live OpenClaw gateway
+1. **It asks Dispach to impersonate the thing it replaces**, bug-compatibly. A model field that
+   accepts only `openclaw/main`, `auth.token` rather than `auth.password`, a terminal phase called
+   `result` rather than `end`, `teams` spelled `msteams` — all reproduced exactly, including the
+   ones that are defects. A runtime whose case for existing is being better cannot also be
+   faithful to that.
+2. **It is a second protocol with no guard.** `04-SPEC-WIRE.md` is machine-checked against the
+   code as of 13.7; an adapter would be a second surface with nothing checking it, and the one
+   nobody checks is the one that drifts.
+3. **`/v1` is the better target.** Detached turns and reattach are core here, which *fixes*
+   "generation dies on browser refresh" — a gotcha the adapter would have had to preserve the
+   shape of while fixing the behaviour underneath.
+4. **The engine change is smaller than the adapter.** One typed client replacing a hand-rolled WS
+   RPC client and its reconnect logic, against a call-by-call mapping.
 
-**Acceptance**
+**The cost, stated rather than hidden.** The old plan explicitly budgeted for weeks of
+side-by-side dogfooding, and without an adapter there is no incremental path: an agent runs one
+runtime or the other, and switching is a redeploy. `docs/06-VELAOPS-INTEGRATION.md` carries the
+cutover sequence, the RPC mapping, the file-by-file engine diff, and the row most likely to be
+missed — `POST /reload` answers `409`, so engine code expecting a live reload to apply anything
+has to change.
 
-- [ ] A VelaOps agent container with `runtime: dispach` boots and serves chat with **zero** engine changes
-- [ ] Telegram and WhatsApp work through the existing wiring
-- [ ] `boot-progress.ts` renders the stepper correctly
-- [ ] Cron round-trips through the existing UI including all three kinds and disabled jobs
-- [ ] Detached chat reattach works via existing `stream-hub.ts`
-- [ ] Both runtimes run side by side, selected per agent
-- [ ] Documented deviations recorded in `06-VELAOPS-INTEGRATION.md`
-
-**Non-goals.** Migrating existing agents. Changing engine code. Feature parity with OpenClaw.
+Two claims in that document were **false** when this was written and are corrected there: it
+promised a channel change "applies on `reload` without restart" and that reload "returns a diff".
+Neither was ever true. A manifest change takes effect at the next boot, which at ~55 ms is cheaper
+than the hot-patch it replaces.
 
 ---
 
@@ -2625,9 +2631,38 @@ turn registry, so `POST /stop` still cannot reach a channel- or schedule-started
 honest 409 is the interim. WS replay. Multi-agent `serve`. Per-key sessions or memory. Skills
 `lastSelectedAt`. GHCR and multi-arch.
 
-**Still owed to Phases 14 and 15.** `packages/client`, the API reference, the VelaOps migration
-guide — which is where **Phase 12 above gets deleted** and its reason recorded — then operator
-keys, approvals over the wire, and `packages/web`.
+**Still owed to Phase 15.** Operator keys, approvals over the wire, and `packages/web`.
+
+---
+
+## Phase 14 — The client and the docs — **complete**
+
+**Goal.** Calling the agent server feels like an SDK, and VelaOps has something to act on.
+
+- **14.1** `packages/client` — `createClient`, `agent(id).send()`, a turn handle with `stream()`,
+  `tokens()`, `text()`, `get()` and `stop()`, the firehose, and `DispachError` carrying the wire's
+  own `code`/`hint`/`field`/`status`. No dependency beyond the standard library and core, which
+  supplies `parseSSE` and `EventDataMap` so the client cannot drift from the catalogue.
+- **14.2** `docs/09-API-GUIDE.md` — the walkthrough, and the answer to Phase 11's "API docs
+  generated from types" **without** a generator.
+- **14.3** `docs/06-VELAOPS-INTEGRATION.md` rewritten as a migration: the cutover sequence, the
+  RPC surface mapped call by call, the file-by-file engine diff, and two false claims corrected.
+
+**Acceptance**
+
+- [x] The client's own tests drive the **real** handler, not a mocked `fetch` — no port, no process
+- [x] Tokens reconstruct a reply and exclude the model's reasoning, verified live against
+  deepseek-v4-pro through the built binary
+- [x] Reattach by turn id works from a handle the sending code never held
+- [x] A truncated replay is **refused** by `tokens()` and reported by `stream()`
+- [x] Every failure is a `DispachError` — including a transport failure and a non-JSON 502 — so one
+  `catch` is a complete answer
+- [x] An unknown event type is refused at the call, naming the nearest real one
+- [x] Phase 12 deleted with its reason, and `compat-openclaw` gone from every directory map
+
+**Non-goals.** A generated HTML reference. A browser bundle budget — that is Phase 15's, where the
+client is consumed by `packages/web` and the image has 150 MB to stay under. WebSocket support in
+the client: `/v1/ws` is 501 under Node and everything it offers is reachable over SSE.
 
 ---
 

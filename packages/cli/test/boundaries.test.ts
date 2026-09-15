@@ -568,6 +568,31 @@ describe("hard rule 3 — the brand lives in one file", () => {
     })
 })
 
+describe("the image can build what the repo builds", () => {
+    test("the Dockerfile copies every workspace package's manifest", () => {
+        // A hand-kept list of workspace members, and it bit immediately: adding `@dispach/client`
+        // to the root `build` script broke the image, because `bun install` inside the builder
+        // never saw that package and `@dispach/core` then would not resolve from it. The failure
+        // is a `TS2307` in a container build — far from the edit that caused it, and invisible
+        // until somebody builds the image.
+        //
+        // Derived here instead. Both stages copy the same set, so both counts have to match: the
+        // builder needs the manifest to link the workspace, and the runtime stage installs
+        // production dependencies against the same root `workspaces` glob.
+        const dockerfile = readFileSync(join(SRC, "..", "..", "..", "docker", "Dockerfile"), "utf8")
+        const packages = readdirSync(join(SRC, "..", ".."), { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => entry.name)
+            .sort()
+        const missing = packages.filter(
+            (name) =>
+                (dockerfile.match(new RegExp(`^COPY packages/${name}/package\\.json `, "gm")) ?? [])
+                    .length !== 2,
+        )
+        expect(missing).toEqual([])
+    })
+})
+
 describe("the process actually leaves", () => {
     test("the entry point exits deliberately rather than waiting for the loop", () => {
         // `finish` sets `process.exitCode` and lets the event loop empty, which assumes the loop can

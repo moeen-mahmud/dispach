@@ -49,7 +49,12 @@ async function validateQuietly(manifestPath: string): Promise<{ code: number; ou
 test("the set of examples is what this test thinks it is", () => {
     // A new example added without a manifest would otherwise be silently unexercised — the
     // discovery is a glob, so the guard has to be the count.
-    expect(WITH_MANIFEST.sort()).toEqual(["minimal", "reference", "telegram-assistant"])
+    expect(WITH_MANIFEST.sort()).toEqual([
+        "minimal",
+        "reference",
+        "shell-agent",
+        "telegram-assistant",
+    ])
 })
 
 describe("every example validates", () => {

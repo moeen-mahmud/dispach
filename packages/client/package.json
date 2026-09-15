@@ -1,0 +1,36 @@
+{
+    "name": "@dispach/client",
+    "version": "0.1.0",
+    "description": "Typed client for the Dispach agent server \u2014 turns, streams, sessions and schedules over HTTP.",
+    "license": "Apache-2.0",
+    "author": "Moeen Mahmud",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/moeen-mahmud/dispach.git",
+        "directory": "packages/client"
+    },
+    "type": "module",
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "typecheck": "tsc -p tsconfig.json"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "dependencies": {
+        "@dispach/core": "workspace:*"
+    },
+    "devDependencies": {
+        "@dispach/server": "workspace:*"
+    }
+}
