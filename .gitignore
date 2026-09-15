@@ -26,7 +26,11 @@ examples/*/memory/
 .DS_Store
 
 # Local Docker test harness — tooling, the agent it scaffolds, and the secrets beside it.
-# Kept out of the repo entirely: it exists to exercise a build on one machine, and
-# `docker/Dockerfile` is a Phase 11 deliverable that has not started.
+# Kept out of the repo entirely: it exists to exercise a build on one machine.
+#
+# `.dockerignore` used to be on this list, under a comment saying the Dockerfile was a phase that
+# had not started. Both halves went stale and the second one hid the first: with no
+# `.dockerignore`, every build shipped the whole tree — `.git/`, `node_modules/`, every `.env` —
+# to the Docker daemon. It is committed now, deliberately, because a build context is a
+# disclosure surface and the right contents of one are not a local preference.
 local_test/
-.dockerignore

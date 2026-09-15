@@ -517,6 +517,55 @@ describe("hard rule 3 — the brand lives in one file", () => {
         ).map((file) => file.path)
         expect(offenders).toEqual([])
     })
+
+    /**
+     * The root config files a rename has to carry with it, guarded by their **consequence** rather
+     * than by the rename script's own classification.
+     *
+     * `rename-brand.ts` *reports* a file it leaves alone, and a report is what made this a
+     * two-commit problem once already (decision 11.142, the Dockerfile). Three more were found
+     * adding the compose file: `.gitignore`, `.dockerignore` and the reference manifest. The
+     * sharpest was `.gitignore` — renamed, it would go on ignoring the old state directory and
+     * stop ignoring the new one, so the next `git add` offers up a `store.db` full of
+     * conversation history.
+     *
+     * Asserting the script's straggler list is empty is **not** the guard, and believing otherwise
+     * cost a round: a file can be both rewritten (its `@scope` imports) and reported (it mentions
+     * the brand for some other reason), so that list has 35 legitimate entries and a test over it
+     * would be red for correct code. These read the derived values out of the real `BRAND`
+     * instead, so they go red on a stale file however the script decides to treat it.
+     */
+    const rootFile = (name: string) => readFileSync(join(SRC, "..", "..", "..", name), "utf8")
+
+    test("both ignore files ignore the state directory", () => {
+        for (const name of [".gitignore", ".dockerignore"]) {
+            expect(rootFile(name)).toContain(BRAND.stateDir)
+        }
+    })
+
+    test("the compose front door names the token variable the runtime reads", () => {
+        // `serve` refuses a non-loopback bind without this variable, and the image binds
+        // 0.0.0.0 — so a stale name here is a `docker compose up` that fails at the refusal with
+        // a correct message about a variable the compose file never sets.
+        const token = `${BRAND.envPrefix}API_TOKEN`
+        expect(rootFile("docker-compose.yml")).toContain(token)
+        expect(rootFile(".env.example")).toContain(token)
+    })
+
+    test("the compose file does not override the image's command", () => {
+        // The image's CMD carries `--host 0.0.0.0`. A compose `command:` replaces CMD wholesale,
+        // so adding one drops the host flag and the process listens on loopback inside the
+        // container — which no published port can reach. It builds, starts, reports healthy and
+        // answers nothing, which is the failure with the least to go on.
+        const compose = rootFile("docker-compose.yml")
+        const directives = compose
+            .split("\n")
+            .filter((line) => !line.trimStart().startsWith("#"))
+            .map((line) => line.trim())
+        expect(directives.filter((line) => line.startsWith("command:"))).toEqual([])
+        // Same argument for the healthcheck: two definitions to keep in step, and this one wins.
+        expect(directives.filter((line) => line.startsWith("healthcheck:"))).toEqual([])
+    })
 })
 
 describe("the process actually leaves", () => {

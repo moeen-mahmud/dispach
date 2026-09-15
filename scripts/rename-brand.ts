@@ -111,6 +111,23 @@ function walk(dir: string, onFile: (path: string) => void): void {
 const inScope: string[] = [
     join(ROOT, "packages", "core", "src", "brand.ts"),
     join(ROOT, "docker", "Dockerfile"),
+    // The compose file and its example environment carry the env var prefix, the image tag and
+    // the state volume's name — all derived from the slug exactly like the package scope is.
+    // Left out, they are reported as "left alone — review these", which makes a rename two
+    // commits: the tree, and then somebody noticing later that `docker compose up` still wants
+    // `<OLDSLUG>_API_TOKEN`. Hard rule 3's promise is one commit, and the front door needing a
+    // manual decision is the same defect as a stray literal. Decision 11.142, one file over.
+    join(ROOT, "docker-compose.yml"),
+    join(ROOT, ".env.example"),
+    // The ignore files carry the state directory, and `.gitignore`'s omission was the worst of
+    // the three found here: after a rename it would go on ignoring the *old* state directory and
+    // stop ignoring the new one, so the next `git add` would offer up a `store.db` full of
+    // conversation history. A straggler report is not protection against that.
+    join(ROOT, ".gitignore"),
+    join(ROOT, ".dockerignore"),
+    // The reference manifest carries `apiVersion: <slug>/v1`, which a rename must rewrite or the
+    // file stops loading — plus `@<slug>/` provider comments and `<slug> …` command examples.
+    join(ROOT, "examples", "reference", "agent.yaml"),
 ]
 /** Files where only the `@<slug>/` package scope is rewritten. */
 const scopeOnly: string[] = []

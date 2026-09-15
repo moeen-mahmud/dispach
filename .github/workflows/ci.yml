@@ -115,6 +115,42 @@ jobs:
           fi
           docker rm -f probe
 
+      # The front door, exercised the way a reader of the README will. The step above proves the
+      # *image*; this proves the compose file — which is where the traps are, because every one of
+      # them is a default that produces a container which builds, starts and answers nothing.
+      #
+      # `config -q` first, and it is a real gate rather than a formality: it exits 1 on a missing
+      # `:?` variable, so a compose file that has grown a required variable nobody sets fails here
+      # instead of at somebody's `up`.
+      #
+      # Then `up -d --wait`, which waits on the image's own HEALTHCHECK — so this is also the only
+      # thing that checks the healthcheck and the compose file agree. Dummy credentials for the
+      # same reason as above: nothing calls an endpoint before readiness.
+      - name: compose front door
+        run: |
+          cat > .env <<'ENV'
+          DISPACH_API_TOKEN=ci-not-a-real-token
+          MODEL_ID=gpt-4o-mini
+          MODEL_BASE_URL=https://api.openai.com/v1
+          MODEL_API_KEY=ci-not-a-real-key
+          ENV
+          docker compose config -q
+          # The image is already built and tagged by the first step; retagging saves a rebuild.
+          docker tag dispach:ci dispach:local
+          docker compose up -d --wait || { docker compose logs; exit 1; }
+          curl -sf localhost:7420/v1/ready || { docker compose logs; exit 1; }
+          # The token is required, so an unauthenticated write must be refused — the property the
+          # 0.0.0.0 bind depends on, checked rather than assumed.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'content-type: application/json' -d '{"text":"hi"}' \
+            localhost:7420/v1/agents/minimal/messages)
+          if [ "$code" != "401" ]; then
+            echo "::error::an unauthenticated POST returned ${code}, expected 401"
+            docker compose logs
+            exit 1
+          fi
+          docker compose down -v
+
   # Decision 2.2 — Node is a soft goal, tested but never a blocker. A red leg here is information,
   # not a merge gate. The floor is 24 (decision 13.5): 22 bundles SQLite 3.51.3, whose planner turns
   # every memory query into a per-row probe of the FTS table — 260 ms against 0.7 ms. That is pinned
