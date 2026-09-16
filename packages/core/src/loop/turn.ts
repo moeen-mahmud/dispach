@@ -177,6 +177,16 @@ export interface TurnInput {
     readonly compaction?: TurnCompaction
     /** Declared phases and where this session currently is. Absent means one implicit phase. */
     readonly phases?: TurnPhases
+    /**
+     * Tools layered onto the registry for this turn only, beside any a skill brought.
+     *
+     * The same seam a skill's script tools use and for the same reason: they are **never** rendered
+     * into slot 1, which is built once at load and must stay byte-identical for the prompt cache.
+     * A handoff uses it to hand the member a `submit_artifact` tool whose parameter schema is the
+     * supervisor's declared artifact — so the schema travels with the delegation instead of being
+     * baked into an agent that has no opinion about it.
+     */
+    readonly turnTools?: readonly Tool[]
     readonly tools?: ToolRuntime
     readonly bus: EventBus
     /**
@@ -415,6 +425,36 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
     }
 }
 
+/**
+ * Layer tools onto a `ToolRuntime`, re-rendering the catalogue only when asked.
+ *
+ * `rerender` is what separates a skill's script (registry only, described in its own block) from a
+ * handoff's return channel (registry *and* catalogue, because the model will not call a tool the
+ * catalogue does not list). Both go through one function so the two cannot drift about anything
+ * else — the registry, the dialect, the wire tokens.
+ */
+function withRenderedTools(
+    tools: ToolRuntime,
+    layered: readonly Tool[],
+    rerender: boolean,
+): ToolRuntime {
+    const registry = tools.registry.withTools(layered)
+    if (!rerender) return { ...tools, registry }
+    const specs = registry.specs()
+    const requestTools = tools.dialect.requestTools(specs)
+    return {
+        ...tools,
+        registry,
+        blocks: tools.dialect.renderCatalogue(specs, registry.notEnabled),
+        ...(requestTools === undefined ? {} : { requestTools }),
+        // Recomputed with the catalogue: under `native` the schemas travel in the request body, so a
+        // stale figure would have the budget reserving room for a different set of tools.
+        // The same helper the phase view uses, not a second arithmetic: two ways to count the wire
+        // would let a budget disagree with itself about how much room the schemas take.
+        wireTokens: requestTools === undefined ? 0 : nativeWireTokens(requestTools),
+    }
+}
+
 async function runTurnCore(input: TurnInput): Promise<TurnResult> {
     const turnId = input.turnId ?? newTurnId()
     const context = { agentId: input.agentId, sessionKey: input.sessionKey, turnId }
@@ -549,14 +589,37 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
          * model is about to reason over: a compaction that breaks the turn it was called to rescue.
          */
         const initialHistoryLength = history.length
-        // The active skills' script tools, layered on for this turn only. `withTurnTools` returns a new
+        // The active skills' script tools, layered on for this turn only. `withTools` returns a new
         // registry and leaves the one slot 1 was rendered from untouched, which is what keeps the cached
         // prefix out of reach — `tools.blocks` is still the catalogue built at load.
         const turnScripts = (input.skills ?? []).flatMap((skill) => skill.tools)
+        /**
+         * `turnTools`, which is the same layering and the **opposite** answer about the catalogue.
+         *
+         * A skill's script is deliberately absent from slot 1: the skill's own slot-5 block
+         * describes it, and a per-turn slot-1 entry would quietly multiply the bill of a *persisting*
+         * session. A handoff's `submit_artifact` had no such block, and the first attempt at this
+         * put its description in the **input** instead. That was refuted by a real model in one run:
+         *
+         *   "The tool is not listed? Wait tools listed: now only … We cannot call a tool not in
+         *    available tools. 'Use only the tools listed below.'"
+         *
+         * The catalogue is authoritative to the model because the NLT preamble says so in as many
+         * words, so describing a tool anywhere else creates a contradiction the model resolves
+         * correctly and expensively — that member spent several hundred reasoning tokens deciding
+         * not to call it.
+         *
+         * So these **are** rendered, and the reason it costs nothing is specific rather than
+         * general: a handoff's session is fresh per delegation (`handoff:<runId>`), so there is no
+         * cached prefix to preserve. Two mechanisms with two names, each right for the lifetime it
+         * serves — not one mechanism with a compromise.
+         */
+        const rendered = input.turnTools ?? []
+        const layered = [...turnScripts, ...rendered]
         const baseTools =
-            input.tools === undefined || turnScripts.length === 0
+            input.tools === undefined || layered.length === 0
                 ? input.tools
-                : { ...input.tools, registry: input.tools.registry.withTurnTools(turnScripts) }
+                : withRenderedTools(input.tools, layered, rendered.length > 0)
 
         /**
          * The catalogue as one phase sees it, rebuilt only when the phase changes.
@@ -574,7 +637,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
 
             const allow = allowFor(input.phases.config, phase)
             const all = baseTools.registry.specs()
-            const registry = baseTools.registry.inPhase(allow).withTurnTools([
+            const registry = baseTools.registry.inPhase(allow).withTools([
                 phaseSetTool({
                     phases: Object.keys(input.phases.config),
                     current: phase,

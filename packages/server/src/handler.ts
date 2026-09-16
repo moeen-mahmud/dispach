@@ -181,6 +181,7 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             // reconciliation has run. Two honest numbers about two different moments; the spec
             // says which is which.
             const schedules = await agent.store.schedules.list(agent.id)
+            const team = runtime.team(agent.id)
             return json({
                 ...summary(runtime, agent),
                 dialect: agent.describe().dialect,
@@ -188,6 +189,27 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 tools: agent.tools.size,
                 skills: agent.skills?.skills.length ?? 0,
                 schedules: schedules.length,
+                /**
+                 * Who this agent delegates to.
+                 *
+                 * Members are excluded from `GET /v1/agents` and from every route behind
+                 * `withAgent`, deliberately: an addressable member is a route around whatever
+                 * policy its supervisor carries. This is how they stay *observable* without
+                 * becoming reachable — the debugging value of a roster without a way to run one
+                 * directly. Absent rather than `[]` for an agent with no team, matching `phases`.
+                 */
+                ...(team.length === 0
+                    ? {}
+                    : {
+                          team: team.map((member) => ({
+                              id: member.id,
+                              task: member.task,
+                              // What the supervisor gets back, not the whole schema: a UI showing
+                              // a delegation needs the field names, and the member's own
+                              // `/tools` has the full version.
+                              artifact: Object.keys(member.artifact.properties),
+                          })),
+                      }),
                 warnings: [...agent.warnings, ...agent.tools.warnings],
             })
         }),

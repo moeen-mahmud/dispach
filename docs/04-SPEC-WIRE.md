@@ -102,9 +102,16 @@ connect must not make the process look dead to an orchestrator.
 ```
 GET /v1/agents           → [{ id, name, status, model, channels[], entryPhase, phases? }]
 GET /v1/agents/:id       → the above plus dialect, window, tool count, skills indexed,
-                           schedule count, warnings[]
+                           schedule count, warnings[], team? [{ id, task, artifact[] }]
 POST /v1/agents/:id/reload
 ```
+
+**Team members are not listed and not addressable.** `GET /v1/agents` returns only served agents,
+and every route above resolves through the same list — so a member has no URL. That is a boundary
+rather than tidiness: a member is an implementation detail of its supervisor, its catalogue may be
+wider, and an addressable one is a route around whatever policy the supervisor was carrying with
+nobody having asked the supervisor. `team?` on the supervisor's own resource is how they stay
+observable, and it is absent rather than `[]` for an agent with no team.
 
 `reload` re-reads the manifest and context files and rebuilds the tool and skill indexes.
 It does **not** restart channels unless their config changed, and it never drops in-flight
@@ -432,6 +439,8 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `agent.channel.status` | connect/disconnect | `channelId`, `channelType`, `status`, `detail?` |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |
 | `agent.channel.rejected` | inbound not turned into a turn | `channelId`, `reason` (`duplicate` \| `denied`), `sender`, `detail` |
+| `handoff.start` | a delegation began | `member`, `task`, `sessionKey` |
+| `handoff.result` | how it ended | `member`, `sessionKey`, `outcome`, `steps`, `tokens`, `errorCode?` |
 | `approval.requested` | a call is waiting on a person | `approvalId`, `slug`, `callId`, `match?`, `mutating`, `reason` |
 | `approval.resolved` | how it ended | `approvalId`, `slug`, `granted`, `by` |
 | `turn.start` | inbound accepted | `source`, `inputTokens`, `trust`, `from?` |
@@ -444,7 +453,7 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `model.call` | request sent | `role`, `model`, `promptTokens`, `cached`, `attempt` |
 | `model.chunk` | streaming | `delta`, `kind: text \| reasoning` — emitted only while some subscriber has opted in, per subscriber |
 | `model.retry` | a retryable model failure, before the next attempt | `status`, `attempt`, `delayMs` |
-| `model.result` | response done | `outputTokens`, `finishReason`, `latencyMs`, `costUsd?` |
+| `model.result` | response done | `outputTokens`, `promptTokens`, `promptTokensReported`, `finishReason`, `latencyMs` |
 | `tool.call` | before execute | `slug`, `callId`, `argsHash`, `mutating` |
 | `tool.result` | after execute | `slug`, `callId`, `ok`, `latencyMs`, `bytes`, `truncated`, `trust` |
 | `tool.gated` | a call was blocked | `slug`, `callId`, `reason`, `policy` |
@@ -468,13 +477,28 @@ Types this document intends and **no runtime emits yet**. Separated rather than 
 the shape is designed and a reader planning against it should be able to see it — and separated
 rather than mixed in, because a row in the table above is a promise that subscribing works today.
 
+**Nothing is planned and unshipped.** The last two rows here, `handoff.start` and `handoff.result`,
+moved up into the live table when Phase 10B shipped them — which is what this section exists to
+force. A row returns the moment a document describes an event before a runtime emits it.
+
 | Event | When | Data | Blocked on |
 | --- | --- | --- | --- |
-| `handoff.start` | delegation begins | `to`, `task` | Phase 10 |
-| `handoff.result` | delegation returns | `to`, `ok`, `steps`, `tokens` | Phase 10 |
+
+**It worked.** Adding `handoff.start` to `EVENT_TYPES` in Phase 10B turned this guard red in both
+directions at once — `undocumented: ["handoff.start", "handoff.result"]` — and the rows only moved
+up once the live table above described them. The move also corrected two field names the planned
+rows had guessed at: `member` rather than `to`, and `outcome` rather than `ok`, because a delegation
+ends four ways and a boolean collapses "the task was too large" into "it failed".
+
+> **What the guard does not check: field lists.** It compares the first column against
+> `EVENT_TYPES`, so a *name* cannot drift — and a row's `Data` column can. Found the hard way in
+> 10B: `model.result` was documented as carrying `costUsd?`, which has never existed, and as not
+> carrying `promptTokens`, which it always has. Both corrected above. Deriving the field lists from
+> `EventDataMap` is the obvious next guard and is not built; until it is, **read the type before
+> writing against a `Data` column.**
 
 `packages/server/test/spec.test.ts` asserts this table's rows are **absent** from `EVENT_TYPES`, so
-the day delegation ships the guard goes red until the row is moved up. That is the whole mechanism:
+the day a planned event ships the guard goes red until the row is moved up. That is the whole mechanism:
 the one moment anybody is thinking about a planned event is when they implement it.
 
 ### How this table is kept true

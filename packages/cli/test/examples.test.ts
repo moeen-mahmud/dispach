@@ -53,6 +53,11 @@ test("the set of examples is what this test thinks it is", () => {
         "minimal",
         "reference",
         "shell-agent",
+        // A supervisor with two members. Its own member manifests live under `team/` and are not
+        // listed here: they are discovered by the *glob*, which looks one level deep, and they are
+        // validated transitively — loading the supervisor loads them, so a broken member fails the
+        // supervisor's own validation.
+        "team",
         "telegram-assistant",
     ])
 })

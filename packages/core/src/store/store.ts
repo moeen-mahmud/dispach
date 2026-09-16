@@ -263,6 +263,71 @@ export type InboundKeyClaim =
     /** This key already belongs to a turn whose input was different. Refuse. */
     | { readonly kind: "mismatch"; readonly turnId: string }
 
+export type HandoffOutcomeStatus = "running" | "ok" | "no_artifact" | "budget" | "error"
+
+export interface HandoffRecord {
+    readonly handoffId: string
+    /** The supervisor. */
+    readonly agentId: string
+    readonly sessionKey: string
+    readonly turnId: string
+    readonly memberId: string
+    /**
+     * Where the member's transcript is.
+     *
+     * The load-bearing column. A supervisor's prompt only ever sees the artifact (decision 10.2),
+     * so without a pointer back, "what did the member actually say" is unanswerable from any
+     * surface — and a `no_artifact` outcome is exactly the case where somebody needs to look.
+     */
+    readonly memberSession: string
+    readonly task: string
+    readonly outcome: HandoffOutcomeStatus
+    /** JSON, present only when `outcome` is `ok`. */
+    readonly artifact?: string
+    readonly errorCode?: string
+    readonly errorMessage?: string
+    readonly steps: number
+    readonly promptTokens: number
+    readonly outputTokens: number
+    readonly startedAt: string
+    readonly endedAt?: string
+}
+
+export interface HandoffStore {
+    /**
+     * Written `running` before the member starts, for the same reason a turn row is.
+     *
+     * A crash mid-delegation then leaves a durable record that one was in flight, rather than
+     * nothing at all — which is the difference between "the supervisor's turn died during a
+     * handoff" and "the supervisor never delegated".
+     */
+    start(record: {
+        readonly handoffId: string
+        readonly agentId: string
+        readonly sessionKey: string
+        readonly turnId: string
+        readonly memberId: string
+        readonly memberSession: string
+        readonly task: string
+        readonly startedAt: string
+    }): Promise<void>
+    finish(
+        handoffId: string,
+        outcome: {
+            readonly outcome: Exclude<HandoffOutcomeStatus, "running">
+            readonly artifact?: string
+            readonly errorCode?: string
+            readonly errorMessage?: string
+            readonly steps: number
+            readonly promptTokens: number
+            readonly outputTokens: number
+            readonly endedAt: string
+        },
+    ): Promise<void>
+    /** What one turn delegated, oldest first. The question a transcript view asks. */
+    forTurn(agentId: string, turnId: string): Promise<readonly HandoffRecord[]>
+}
+
 /** How a runtime was started. Reported in a refusal, so it has to be a fact rather than a guess. */
 export type RuntimeMode = "daemon" | "terminal" | "embedded"
 
@@ -874,6 +939,7 @@ export interface Store {
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
+    readonly handoffs: HandoffStore
     /** Human-readable location, for `store.ready` and the `sessions` command. */
     readonly location: string
     /**

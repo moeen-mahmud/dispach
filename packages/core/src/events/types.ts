@@ -168,6 +168,32 @@ export interface EventDataMap {
         granted: boolean
         by: "approver" | "error" | "abandoned"
     }
+    /**
+     * A delegation began. Emitted on the **supervisor's** context, so the envelope's `turnId` is
+     * the turn that is waiting rather than the member's.
+     *
+     * `sessionKey` is the member's fresh session, which is the answer to "what did it actually
+     * say" — the artifact is all that reaches the supervisor's prompt, deliberately, so without
+     * this a `no_artifact` would be unexplainable from the outside.
+     */
+    "handoff.start": { member: string; task: string; sessionKey: string }
+    /**
+     * How it ended. `outcome` rather than a boolean, and that is the same reasoning
+     * `approval.resolved.by` carries: four outcomes collapse badly into `ok: false`.
+     *
+     * `no_artifact` is the member declining or failing to fit the schema — its own prose says which.
+     * `budget` is its `limits` stopping it, which is a task-too-large signal rather than a fault.
+     * `error` is a fault. Reporting the first two as failure would send a reader debugging the
+     * member when the thing to change is the task.
+     */
+    "handoff.result": {
+        member: string
+        sessionKey: string
+        outcome: "ok" | "no_artifact" | "budget" | "error"
+        steps: number
+        tokens: { prompt: number; output: number }
+        errorCode?: string
+    }
     "turn.start": {
         source: string
         inputTokens: number
@@ -251,6 +277,20 @@ export interface EventDataMap {
     "model.result": {
         outputTokens: number
         promptTokens: number
+        /**
+         * Whether `promptTokens` came from the endpoint or from `estimateTokens`.
+         *
+         * The event carried the number and not whether it was measured, so every consumer summing
+         * it was mixing the two silently — and the estimator runs **16-20% low** on exactly the
+         * observation-heavy prompts worth summing (`evals/budget`). `StepResult` has carried this
+         * flag since Phase 7A for the compaction ladder, which refuses to calibrate without it; a
+         * ladder that would not trust the figure while an observability surface reported it as fact
+         * is the same asymmetry `cachedPromptTokens`' three states exist to prevent.
+         *
+         * Added by 10B's eval, which needs to compare two token figures and must refuse to print a
+         * ratio of two estimates.
+         */
+        promptTokensReported: boolean
         finishReason: string
         latencyMs: number
     }
@@ -479,6 +519,8 @@ export const EVENT_TYPES = [
     "plugin.slow",
     "approval.requested",
     "approval.resolved",
+    "handoff.start",
+    "handoff.result",
     "turn.start",
     "context.assembled",
     "context.dropped",

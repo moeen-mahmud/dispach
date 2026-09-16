@@ -166,6 +166,7 @@ export async function runStep(input: StepInput): Promise<StepResult> {
         {
             outputTokens,
             promptTokens,
+            promptTokensReported,
             finishReason: finishReason === "" ? (aborted ? "aborted" : "stop") : finishReason,
             latencyMs,
         },

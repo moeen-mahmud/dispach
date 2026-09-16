@@ -637,6 +637,55 @@ CREATE TABLE inbound_keys (
 CREATE INDEX inbound_keys_by_age ON inbound_keys (agent_id, created_at);
 `,
     },
+    {
+        version: 13,
+        name: "handoffs",
+        /**
+         * One delegation: who asked, who ran it, and what came back.
+         *
+         * **The artifact is stored and the member's transcript is not** — not here, anyway. The
+         * transcript is `messages` rows under `member_session`, which is where every other
+         * conversation lives, so this table holds the *envelope* rather than a second copy of the
+         * work. `member_session` is therefore the load-bearing column: the supervisor's prompt only
+         * ever sees the artifact (decision 10.2), so without a pointer back, "what did the
+         * researcher actually say" would be unanswerable from any surface.
+         *
+         * `outcome` mirrors the `handoff.result` event exactly, including `budget` and
+         * `no_artifact` as distinct from `error`. A boolean would collapse "the task was too large"
+         * into "it failed", and those want opposite responses — split the task, against debug the
+         * member. Constrained rather than free text, because a typo in a value three surfaces read
+         * should fail at the write.
+         *
+         * No foreign key to `turns`. `messages.turn_id` is a plain column for the same reason:
+         * migration 7 had to create-copy-drop-rename `turns` to widen a CHECK, and a referencing
+         * table would have made that a much larger operation for no integrity anybody was relying on.
+         */
+        sql: `
+CREATE TABLE handoffs (
+    handoff_id     TEXT PRIMARY KEY,
+    agent_id       TEXT NOT NULL,
+    session_key    TEXT NOT NULL,
+    turn_id        TEXT NOT NULL,
+    member_id      TEXT NOT NULL,
+    member_session TEXT NOT NULL,
+    task           TEXT NOT NULL,
+    outcome        TEXT NOT NULL CHECK (
+                       outcome IN ('running', 'ok', 'no_artifact', 'budget', 'error')
+                   ),
+    artifact       TEXT,
+    error_code     TEXT,
+    error_message  TEXT,
+    steps          INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens  INTEGER NOT NULL DEFAULT 0,
+    started_at     TEXT NOT NULL,
+    ended_at       TEXT
+);
+
+-- "What did this turn delegate?" is the question a transcript view asks, and it asks it per turn.
+CREATE INDEX handoffs_by_turn ON handoffs (agent_id, turn_id, started_at);
+`,
+    },
 ]
 
 export interface MigrationReport {

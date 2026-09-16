@@ -28,6 +28,15 @@ model:
     apiKeyEnv: MODEL_API_KEY
 `
 
+/**
+ * A frame name that is not an event and is on nobody's roadmap.
+ *
+ * Deliberately not borrowed from the spec's planned list, which is how this fixture broke twice.
+ * Dotted and not `stream.`-prefixed, because the implementation must not be allowed to pass by
+ * testing the prefix — that is the whole thing under test.
+ */
+const NOT_AN_EVENT = "future.frame"
+
 const dirs: string[] = []
 afterAll(() => {
     for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
@@ -580,17 +589,17 @@ describe("the frame mapper", () => {
         // directly: a future frame named neither way must not surface as an event with no
         // envelope, which is how a client crashes on `event.data.something`.
         // The stand-in for a future frame is **asserted absent from the catalogue**, not assumed
-        // absent. This test used `approval.requested` until 15.2 made it a real event, at which
-        // point the fixture still passed its own shape check while testing the opposite of what it
-        // says — a frame the client now correctly yields as an event. `handoff.start` is Phase 10B's
-        // and sits in the spec's `### Planned` table, which `spec.test.ts` already asserts is
-        // disjoint from `EVENT_TYPES`; this line is the local half of that guard.
-        expect(EVENT_TYPES as readonly string[]).not.toContain("handoff.start")
+        // absent — and the assertion, not the name, is the part that works. Two stages running, the
+        // chosen name shipped: `approval.requested` became real in 15.2, and `handoff.start`, which
+        // replaced it, became real in 10B one stage later. Each time this line is what turned the
+        // silent inversion into a failure, so it stays and the name is now deliberately one no
+        // roadmap mentions.
+        expect(EVENT_TYPES as readonly string[]).not.toContain(NOT_AN_EVENT)
         const items = []
         for await (const item of turnStreamItems(
             sse([
                 { event: "turn.accepted", data: { turnId: "t_1", sessionKey: "api:x" } },
-                { event: "handoff.start", data: { to: "researcher" } },
+                { event: NOT_AN_EVENT, data: { anything: true } },
                 {
                     event: "turn.start",
                     data: { v: 1, type: "turn.start", data: { source: "api" } },

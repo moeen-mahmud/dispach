@@ -156,6 +156,8 @@ export type {
     ScheduleConfig,
     ServerConfig,
     SkillsConfig,
+    TeamConfig,
+    TeamMemberConfig,
     ThresholdsConfig,
     ToolsConfig,
 } from "./manifest/schema.ts"
@@ -400,6 +402,9 @@ export type {
     DeliveryStatus,
     EnqueueDelivery,
     EnqueueResult,
+    HandoffOutcomeStatus,
+    HandoffRecord,
+    HandoffStore,
     KVStore,
     MessagePage,
     MessageStore,
@@ -419,6 +424,26 @@ export type {
     TurnStore,
     UpsertSchedule,
 } from "./store/store.ts"
+export {
+    type ArtifactSink,
+    describeArtifact,
+    SUBMIT_ARTIFACT,
+    submitArtifactTool,
+} from "./team/artifact.ts"
+export { type ExpandedTeams, expandTeams } from "./team/expand.ts"
+export {
+    type HandoffCost,
+    type HandoffOutcome,
+    type HandoffTarget,
+    runHandoff,
+} from "./team/handoff.ts"
+export {
+    checkTeamGraph,
+    HANDOFF,
+    handoffTool,
+    MAX_TEAM_DEPTH,
+    type ResolvedMember,
+} from "./team/supervisor.ts"
 export {
     type Coercion,
     type CoercionFailure,

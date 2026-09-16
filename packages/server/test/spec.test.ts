@@ -103,9 +103,21 @@ describe("the event catalogue matches the spec", () => {
         // one moment anybody is thinking about it. A planned row that quietly became real is how
         // the phantom rows got there in the first place.
         const planned = plannedEvents()
-        expect(planned.length).toBeGreaterThan(0)
         const real = new Set<string>(EVENT_TYPES)
         expect(planned.filter((type) => real.has(type))).toEqual([])
+
+        // An **empty** planned table is a legitimate state — it is what shipping everything looks
+        // like, and 10B produced it — but it is also what a renamed header or a broken slicer
+        // produces, and those want opposite responses. This guard used to demand a non-empty table
+        // for exactly that reason, and then went red for correct code the day the last planned
+        // event shipped.
+        //
+        // So the parser is proven independently of the contents: an empty table has to be
+        // *declared* empty in prose. Whoever deletes that sentence to add a row has to write a row,
+        // and whoever breaks the slicer gets a failure rather than a pass on no data.
+        if (planned.length === 0) {
+            expect(SPEC.includes("**Nothing is planned and unshipped.**")).toBe(true)
+        }
     })
 
     test("every documented event is emitted by something", () => {

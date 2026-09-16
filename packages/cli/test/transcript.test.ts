@@ -277,6 +277,7 @@ describe("events the transcript does not own", () => {
                 event: ev("model.result", {
                     outputTokens: 5,
                     promptTokens: 10,
+                    promptTokensReported: true,
                     finishReason: "stop",
                     latencyMs: 100,
                 }),
@@ -702,6 +703,7 @@ describe("a multi-step turn reads in the order it happened", () => {
             event: ev("model.result", {
                 outputTokens: 10,
                 promptTokens: 100,
+                promptTokensReported: true,
                 finishReason: "tool_calls",
                 latencyMs: 200,
             }),

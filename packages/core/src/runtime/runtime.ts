@@ -21,6 +21,7 @@ import type { EnvSource } from "../manifest/env.ts"
 import { type ManifestHeader, readManifestHeader } from "../manifest/header.ts"
 import { type LoadedManifest, loadManifest, loadManifestFromObject } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
+import type { TeamMemberConfig } from "../manifest/schema.ts"
 import type { FetchLike } from "../model/provider.ts"
 import { agentPluginSupply, type BuiltInPlugins, type LoadedPlugin } from "../plugins/loader.ts"
 import { type Middleware, notify } from "../plugins/middleware.ts"
@@ -28,9 +29,12 @@ import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams, type TurnStreamsOptions } from "../store/buffer.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
 import type { RuntimeMode, Store } from "../store/store.ts"
+import { expandTeams } from "../team/expand.ts"
+import type { HandoffTarget } from "../team/handoff.ts"
+import { handoffTool } from "../team/supervisor.ts"
 import type { ApprovalRequest } from "../tools/execute.ts"
 import { ToolRegistry } from "../tools/registry.ts"
-import type { ScriptRunner, ToolProvider, ToolProviderFactory } from "../tools/types.ts"
+import type { ScriptRunner, Tool, ToolProvider, ToolProviderFactory } from "../tools/types.ts"
 import { Agent } from "./agent.ts"
 import { type ChannelFactory, ChannelHub } from "./channels.ts"
 import { claimLeases, LEASE_BEAT_MS } from "./lease.ts"
@@ -227,6 +231,20 @@ export class Runtime {
     #providers: readonly ToolProvider[] = []
 
     #agents = new Map<string, Agent>()
+    /**
+     * Agents that exist only to receive handoffs, excluded from `list()`.
+     *
+     * A member is an implementation detail of its supervisor, and an addressable one is a route
+     * around whatever policy the supervisor carries — its catalogue may be wider, and nothing would
+     * have asked the supervisor. Every HTTP route resolves through `withAgent`, which reads
+     * `list()`, so filtering here closes the served surface without a second concept.
+     *
+     * `agent(id)` still resolves a member, deliberately: the handoff runner needs it, and the
+     * boundary being drawn is the served surface rather than the process.
+     */
+    #members: ReadonlySet<string> = new Set()
+    /** A supervisor's declared members, by supervisor id. Empty for an agent with no team. */
+    #teams: ReadonlyMap<string, readonly TeamMemberConfig[]> = new Map()
     #stopped = false
     /** False when the caller passed an already-open store, which stays theirs to close. */
     #ownsStore: boolean
@@ -407,7 +425,7 @@ export class Runtime {
             }
 
         // 1. Manifests: file reads, env expansion, schema, rules. No network.
-        const loaded = mark("manifest", () =>
+        const roots = mark("manifest", () =>
             options.agents.map((source, index) => {
                 const supply = supplyFor(agentIdAt(index))
                 const known = {
@@ -423,6 +441,29 @@ export class Runtime {
                       })
             }),
         )
+
+        /**
+         * Team members, loaded alongside their supervisors.
+         *
+         * Expanded here so `serve` and `run` need no change: they pass one manifest and get whatever
+         * that manifest's team declares. The graph is checked in the same pass — a cycle or an
+         * over-deep chain is refused **now**, against the manifests, rather than at the third hop of
+         * a turn somebody is waiting on.
+         *
+         * `memberIds` is what `list()` filters by. Members are loaded, leased and runnable; they are
+         * not *served*, because an addressable member is a route around whatever policy its
+         * supervisor was carrying.
+         */
+        const expanded = mark("teams", () =>
+            roots.some((entry) => entry.manifest.team !== undefined)
+                ? expandTeams(roots, envOptions(options))
+                : {
+                      loaded: roots,
+                      memberIds: new Set<string>(),
+                      teams: new Map<string, readonly TeamMemberConfig[]>(),
+                  },
+        )
+        const loaded = expanded.loaded
 
         // 2. Store: open the file, run pending migrations, reap turns a dead process left running.
         //    Disk only — a database file is not network I/O, so this belongs before readiness.
@@ -488,8 +529,48 @@ export class Runtime {
             loaded.map((entry: LoadedManifest, index) => {
                 const agentSupply = supplyFor(entry.manifest.id)
                 const runner = agentSupply.scriptRunner
+                /**
+                 * A supervisor's `handoff` tool, added at **load** so slot 1 renders it once.
+                 *
+                 * Declaring `team:` is what registers it — there is no second switch to remember,
+                 * the same rule decision 4.53 records for providers: a capability reachable only by
+                 * someone who already knows the field name is one the manifest is hiding.
+                 *
+                 * The member lookup is **lazy**, and it has to be: the tool goes into the registry
+                 * this `map` is building, while the member `Agent` it will call is another iteration
+                 * of the same `map`. A getter closed over `runtime.#agents` resolves at turn time,
+                 * hours later, by which point every agent exists. Eager resolution here is a
+                 * chicken-and-egg that would only work if members happened to be loaded first.
+                 */
+                const team = expanded.teams.get(entry.manifest.id)
+                // Annotated, all three, and not for style: the getter below reads `runtime`, which
+                // is initialised from this very `map`, so every inferred type in the chain becomes
+                // circular and TypeScript gives up with six `implicitly has type any` errors. One
+                // explicit return type on the getter breaks the cycle; the other two follow from it.
+                const teamTools: readonly Tool[] =
+                    team === undefined
+                        ? []
+                        : [
+                              handoffTool({
+                                  bus,
+                                  store: store.handoffs,
+                                  members: team.map((config) => ({
+                                      config,
+                                      // Resolved per call. `runtime` is assigned below this block,
+                                      // so this closure cannot be evaluated eagerly either.
+                                      get agent(): HandoffTarget {
+                                          return runtime.agent(config.id)
+                                      },
+                                  })),
+                              }),
+                          ]
+                const withTeam: ToolRegistry | undefined =
+                    registries[index] === undefined || teamTools.length === 0
+                        ? registries[index]
+                        : registries[index]?.withTools(teamTools)
+
                 return Agent.create(entry, bus, store, {
-                    ...(registries[index] === undefined ? {} : { tools: registries[index] }),
+                    ...(withTeam === undefined ? {} : { tools: withTeam }),
                     // Threaded rather than defaulted: `Agent.create` reads `approve === undefined`
                     // to decide whether to warn about an unreachable `onMutate: "confirm"`, so a
                     // no-op stub here would silence a warning while nothing could actually ask.
@@ -568,6 +649,11 @@ export class Runtime {
                 if (bindings.length > 0) hub.register(agent, bindings)
             }
         })
+
+        // Before the registration loop, so `list()` is already correct the first time anything reads
+        // it — including the `agent.loaded` events emitted inside that loop.
+        runtime.#members = expanded.memberIds
+        runtime.#teams = expanded.teams
 
         for (const agent of agents) {
             if (runtime.#agents.has(agent.id)) {
@@ -803,8 +889,31 @@ export class Runtime {
         return agent
     }
 
+    /**
+     * The agents this runtime **serves** — team members excluded.
+     *
+     * Not a filtered view of an internal list for convenience: this is the served surface, and
+     * `withAgent` in the server reads it, so a member is unreachable over HTTP by construction
+     * rather than by every route remembering to check.
+     */
     list(): readonly Agent[] {
+        return [...this.#agents.values()].filter((agent) => !this.#members.has(agent.id))
+    }
+
+    /** Every agent, members included. For a caller that needs the whole process, not the surface. */
+    all(): readonly Agent[] {
         return [...this.#agents.values()]
+    }
+
+    /**
+     * An agent's declared team, for introspection.
+     *
+     * Exposed so a member is *observable* without being addressable: `GET /v1/agents/:id` can
+     * report who this agent delegates to, which is the debugging value of listing members, without
+     * offering a route that runs one directly.
+     */
+    team(id: string): readonly TeamMemberConfig[] {
+        return this.#teams.get(id) ?? []
     }
 
     async stop(reason = "requested"): Promise<void> {

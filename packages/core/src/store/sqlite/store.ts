@@ -21,6 +21,8 @@ import type {
     ArtifactStore,
     DeliveryRecord,
     DeliveryStatus,
+    HandoffRecord,
+    HandoffStore,
     InboundKeyClaim,
     KVStore,
     LeaseClaim,
@@ -184,6 +186,25 @@ interface TurnRow {
     started_at: string
     ended_at: string | null
     duration_ms: number | null
+}
+
+interface HandoffRow {
+    handoff_id: string
+    agent_id: string
+    session_key: string
+    turn_id: string
+    member_id: string
+    member_session: string
+    task: string
+    outcome: string
+    artifact: string | null
+    error_code: string | null
+    error_message: string | null
+    steps: number
+    prompt_tokens: number
+    output_tokens: number
+    started_at: string
+    ended_at: string | null
 }
 
 interface InboundKeyRow {
@@ -380,6 +401,27 @@ function toArtifact(row: ArtifactRow): ArtifactRecord {
     }
 }
 
+function toHandoff(row: HandoffRow): HandoffRecord {
+    return {
+        handoffId: row.handoff_id,
+        agentId: row.agent_id,
+        sessionKey: row.session_key,
+        turnId: row.turn_id,
+        memberId: row.member_id,
+        memberSession: row.member_session,
+        task: row.task,
+        outcome: row.outcome as HandoffRecord["outcome"],
+        ...(row.artifact === null ? {} : { artifact: row.artifact }),
+        ...(row.error_code === null ? {} : { errorCode: row.error_code }),
+        ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
+        steps: row.steps,
+        promptTokens: row.prompt_tokens,
+        outputTokens: row.output_tokens,
+        startedAt: row.started_at,
+        ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),
+    }
+}
+
 function toTurn(row: TurnRow): TurnRecord {
     return {
         turnId: row.turn_id,
@@ -532,6 +574,7 @@ export class SqliteStore implements Store {
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
+    readonly handoffs: HandoffStore
     readonly location: string
     /** What `migrate` did at open. Reported by boot rather than logged and forgotten. */
     readonly migrations: MigrationReport
@@ -880,6 +923,23 @@ export class SqliteStore implements Store {
             // here — deleting them explicitly would work and would also mean two places had to agree
             // about the cascade. The foreign keys are the single statement of it.
             sessionsDeleteAll: db.prepare("DELETE FROM sessions WHERE agent_id = ?"),
+            handoffInsert: db.prepare(
+                `INSERT INTO handoffs
+                     (handoff_id, agent_id, session_key, turn_id, member_id, member_session,
+                      task, outcome, started_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
+            ),
+            handoffFinish: db.prepare(
+                `UPDATE handoffs
+                    SET outcome = ?, artifact = ?, error_code = ?, error_message = ?,
+                        steps = ?, prompt_tokens = ?, output_tokens = ?, ended_at = ?
+                  WHERE handoff_id = ?`,
+            ),
+            handoffsForTurn: db.prepare(
+                `SELECT * FROM handoffs WHERE agent_id = ? AND turn_id = ?
+                  ORDER BY started_at ASC, rowid ASC`,
+            ),
+            handoffDeleteAll: db.prepare("DELETE FROM handoffs WHERE agent_id = ?"),
             inboundKeyDeleteAll: db.prepare("DELETE FROM inbound_keys WHERE agent_id = ?"),
             outboxDeleteAll: db.prepare("DELETE FROM outbox WHERE agent_id = ?"),
             leaseDeleteAll: db.prepare("DELETE FROM runtime_leases WHERE agent_id = ?"),
@@ -1506,6 +1566,36 @@ export class SqliteStore implements Store {
          */
         const placeholders = (count: number): string => new Array(count).fill("?").join(", ")
 
+        this.handoffs = {
+            start: async (record) => {
+                q.handoffInsert.run(
+                    record.handoffId,
+                    record.agentId,
+                    record.sessionKey,
+                    record.turnId,
+                    record.memberId,
+                    record.memberSession,
+                    record.task,
+                    record.startedAt,
+                )
+            },
+            finish: async (handoffId, outcome) => {
+                q.handoffFinish.run(
+                    outcome.outcome,
+                    outcome.artifact ?? null,
+                    outcome.errorCode ?? null,
+                    outcome.errorMessage ?? null,
+                    outcome.steps,
+                    outcome.promptTokens,
+                    outcome.outputTokens,
+                    outcome.endedAt,
+                    handoffId,
+                )
+            },
+            forTurn: async (agentId, turnId) =>
+                q.handoffsForTurn.all<HandoffRow>(agentId, turnId).map(toHandoff),
+        }
+
         this.schedules = {
             upsert: async (schedule) => {
                 scheduleQ.upsert.run(
@@ -1654,6 +1744,10 @@ export class SqliteStore implements Store {
                 // leave rows keyed to an agent that no longer exists, which is the `kv` table's
                 // recorded failure with a column available to avoid it.
                 q.inboundKeyDeleteAll.run(agentId)
+                // Also not in the footprint: a handoff envelope is a fact about a turn, and turns
+                // are already counted. Deleted for the reason inbound keys are — rows keyed to an
+                // agent that no longer exists.
+                q.handoffDeleteAll.run(agentId)
                 scheduleQ.deleteAll.run(agentId)
                 return went
             })

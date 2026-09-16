@@ -27,6 +27,11 @@ export function newStepId(now = Date.now()): string {
     return id("s", now)
 }
 
+/** One delegation's identity. Time-prefixed, so a turn's handoffs sort in the order they ran. */
+export function newHandoffId(now = Date.now()): string {
+    return id("h", now)
+}
+
 /**
  * One approval's identity, and it has to be minted rather than derived.
  *

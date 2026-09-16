@@ -2538,31 +2538,88 @@ reaching another one is a tool, and a tool is 10B's or a plugin's. Per-sender au
 
 ---
 
-### Phase 10B — Supervisor delegation
+### Phase 10B — Supervisor delegation — **complete** (2026-09-16)
 
 **Goal.** A supervisor delegates to members with isolated context and typed results.
 
 **Deliverables**
 
-- `team/handoff.ts` — envelope, artifact validation against declared JSON Schema
-- `team/supervisor.ts`
-- `handoff` local tool, supervisor only
-- Runtime-kind manifest with `agents` and `team`
-- Sub-agent budget enforcement; `handoff.start` / `handoff.result`
-- Migration: `handoffs`
+- `team/artifact.ts` — the member's return channel. The declared JSON Schema **becomes
+  `submit_artifact`'s parameter schema**, so validation is `coerceArgs` and a bad shape earns the
+  loop's existing one repair. Zero new validation code (10.10).
+- `team/handoff.ts` — the runner. Four outcomes: `ok`, `no_artifact`, `budget`, `error`.
+- `team/supervisor.ts` — the `handoff` tool, `policyArg: "member"`, and `checkTeamGraph`.
+- `team/expand.ts` — member manifests loaded alongside their supervisor; cycles and depth refused
+  at load (10.12).
+- `team.members[]` on the **supervisor's own manifest**. The spec's `kind: Runtime` file was
+  deleted rather than built (10.9).
+- `handoff.start` / `handoff.result`, migration 13 (`handoffs`), `ToolRegistry.withTools`,
+  `TurnInput.turnTools`, `RuntimeOptions` unchanged.
+- `evals/handoff/` + `bun run eval:handoff` — **built and verified against a fixture, not yet run
+  against a real endpoint.**
 
-**Files.** `packages/core/src/team/`, `manifest/schema.ts`, `examples/team/`
+**Files.** `packages/core/src/team/`, `manifest/schema.ts`, `examples/team/`, `scripts/eval-handoff.ts`
 
 **Acceptance**
 
-- [ ] Supervisor delegates to two members; both return validated artifacts
-- [ ] Parent context contains the artifact and **not** the sub-agent transcript — asserted on token counts
-- [ ] Schema-violating artifact is a typed failure the supervisor can handle, not an exception
-- [ ] Budget exceeded terminates the sub-agent and reports honestly
-- [ ] Measured: delegation uses fewer parent tokens than the equivalent in-context approach; recorded in `evals/`
-- [ ] Members lack the `handoff` tool unless they declare their own team
+- [x] Supervisor delegates to two members; both return validated artifacts
+- [x] Parent context contains the artifact and **not** the sub-agent transcript — asserted on
+      character counts: 12,000 characters of member work moves the supervisor's prompt by under 200
+- [x] Schema-violating artifact is a typed failure the supervisor can handle, not an exception —
+      `no_artifact`, carrying the member's own explanation, and the supervisor's turn completes
+- [x] Budget exceeded terminates the sub-agent and reports honestly — `budget`, distinct from
+      `error`, because "the task was too large" and "the member is broken" want opposite responses
+- [x] Members lack the `handoff` tool unless they declare their own team
+- [x] Two handoffs to one member do not share history (10.13)
+- [ ] **Measured: delegation uses fewer parent tokens than the in-context equivalent.** The script
+      exists and both its branches are verified; the run is deliberately left to the owner, since it
+      spends on a real key. Against a fixture endpoint it reported parent −31.6% and **total up**,
+      which is the honest shape — delegation *moves* tokens, and whether the total falls depends on
+      the members running a cheaper model.
 
-**Non-goals.** A2A. Free-form agent chat. Dynamic team formation.
+**Non-goals.** A2A. Free-form agent chat. Dynamic team formation. Parallel handoffs — deferred
+rather than refused, see 10.11.
+
+**Verified live** against DeepSeek through `examples/team`: `researcher -> ok` with a validated
+artifact on the row, the member's transcript in its own session, and the supervisor answering from
+the artifact alone. Getting there took three real runs and found two defects no fixture could reach
+(10.14, 10.15) — which is the argument for running the example as part of the phase rather than
+after it.
+
+**One live limit, stated rather than fixed.** A *chained* delegation — where the second member needs
+the first's artifact verbatim — failed twice on this model, first by inventing a `Claims` argument
+and then by writing a multi-line value without NLT's heredoc. Both are the recorded NLT
+multi-line-value hazard reached through a long composed `task`. Single delegations work; chaining
+through a text-only channel is fragile and belongs in `evals/` before it is claimed.
+
+**Seven things found by building it.**
+
+- **The spec described a design nobody had chosen.** `kind: Runtime` with an `agents:` list and a
+  `team: {supervisor, members}` block, never built, contradicting one-agent-per-container. Deleted
+  with the reason (10.9).
+- **The `### Planned` guard worked, exactly as advertised.** Adding `handoff.start` to
+  `EVENT_TYPES` turned `spec.test.ts` red in both directions until the rows moved into the live
+  table — and the move corrected two field names the planned rows had guessed at (`member` not
+  `to`, `outcome` not `ok`). The table is now empty, which broke its *own* non-empty assertion; the
+  guard now proves its parser by requiring an empty table to be declared empty in prose.
+- **`model.result` documented a `costUsd?` that has never existed** and omitted `promptTokens`,
+  which it always carried. Field-level drift is **not** guarded — the guard compares event *names* —
+  and that gap is now stated in the spec.
+- **The first isolation test was worthless and passing.** Reverting the fresh session key left it
+  green, because a member is a different `agent_id`. The real leak needs two handoffs (10.13).
+- **The client's frame-mapper fixture inverted itself again.** It had used `approval.requested`
+  until 15.2 made that real, then `handoff.start` — which this stage made real one phase later. The
+  `expect(EVENT_TYPES).not.toContain(...)` line is what caught it both times; the name is now one no
+  roadmap mentions.
+- **`submit_artifact` was executable and undocumented, and the first fix was also wrong.** A turn
+  tool is layered onto the registry while slot 1's catalogue is rendered at load, so three live
+  handoffs came back `no_artifact`. Describing it in the *input* then contradicted the NLT
+  preamble's "use only the tools listed below", which a real model quoted back while declining to
+  call it. `turnTools` re-renders the catalogue now — safe because a handoff's session is fresh, not
+  because the rule it was reasoning against was wrong in general (10.14).
+- **`handoff`'s `task` did not say it was the only channel**, so the supervisor invented a `Claims`
+  argument carrying the researcher's artifact — reasonable, and one repair away from losing the turn
+  (10.15).
 
 > **One finding worth carrying to the consumer.** VelaCrew's `apps/engine/src/lib/space/run-watch.ts`
 > exists entirely because `POST /hooks/agent` returns a hook-delivery id that appears in **zero** of

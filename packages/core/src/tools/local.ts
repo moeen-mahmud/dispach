@@ -298,7 +298,7 @@ const artifactRead: Tool = {
  * cannot write, which is decision 4.53's failure. Counts rather than slugs, or the constraint the phase
  * exists to impose is undone by the sentence explaining it.
  *
- * Added per turn through `withTurnTools`, the same seam a skill's script tools use, and rebuilt whenever
+ * Added per turn through `withTools`, the same seam a skill's script tools use, and rebuilt whenever
  * the phase changes — because `current` and `others` are facts about the phase, not about the agent.
  * `mutating` is
  * **false**: it changes what the agent may do, not anything in the world, and marking it true would

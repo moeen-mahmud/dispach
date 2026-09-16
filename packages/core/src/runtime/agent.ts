@@ -208,6 +208,14 @@ export interface AgentSendOptions {
      * channel turn and an operator's own API call all rely on.
      */
     readonly from?: TurnSender
+    /**
+     * Tools for this turn only, beside whatever a skill activates.
+     *
+     * A handoff's return channel arrives this way: `submit_artifact`'s parameter schema is the
+     * *supervisor's* declared artifact, which the member's own manifest knows nothing about, so it
+     * travels with the delegation rather than being baked into the member.
+     */
+    readonly turnTools?: readonly Tool[]
 }
 
 export interface AgentDescription {
@@ -720,6 +728,7 @@ export class Agent {
             bus: this.#bus,
             source,
             ...(options.from === undefined ? {} : { from: options.from }),
+            ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         })
 
