@@ -28,6 +28,7 @@ import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams, type TurnStreamsOptions } from "../store/buffer.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
 import type { RuntimeMode, Store } from "../store/store.ts"
+import type { ApprovalRequest } from "../tools/execute.ts"
 import { ToolRegistry } from "../tools/registry.ts"
 import type { ScriptRunner, ToolProvider, ToolProviderFactory } from "../tools/types.ts"
 import { Agent } from "./agent.ts"
@@ -69,6 +70,23 @@ export interface RuntimeOptions {
      * Defaults are in `TurnStreams` and are right for a single container.
      */
     readonly streams?: TurnStreamsOptions
+    /**
+     * How to ask a person, for every agent this runtime hosts.
+     *
+     * `ToolContext.approve` has existed since Phase 3 and **nothing anywhere filled it** — a grep
+     * for callers found only the definition — so `tools.untrusted.onMutate: "confirm"` has been
+     * unreachable and `tools.policy` rules with `ask` fell to `onNoApprover`. This is the seam a
+     * front end supplies, and supplying it is also what silences the `confirm_without_approver`
+     * warning, which `Agent.create` keys on this being absent.
+     *
+     * Runtime-wide rather than per-agent because the thing that can ask is a property of the
+     * *surface* — a terminal, an HTTP client, a queue — not of which agent is running. An embedder
+     * hosting two agents behind one UI has one approver.
+     *
+     * Absent means nobody is reachable, which is the honest state for a schedule, a pipe, or an
+     * unattended container, and `tools.policy.onNoApprover` decides what `ask` means there.
+     */
+    readonly approve?: (request: ApprovalRequest) => Promise<boolean>
     /** Directory for relative paths in object-form manifests. Defaults to `process.cwd()`. */
     readonly dir?: string
     readonly store?: StoreSource
@@ -472,6 +490,10 @@ export class Runtime {
                 const runner = agentSupply.scriptRunner
                 return Agent.create(entry, bus, store, {
                     ...(registries[index] === undefined ? {} : { tools: registries[index] }),
+                    // Threaded rather than defaulted: `Agent.create` reads `approve === undefined`
+                    // to decide whether to warn about an unreachable `onMutate: "confirm"`, so a
+                    // no-op stub here would silence a warning while nothing could actually ask.
+                    ...(options.approve === undefined ? {} : { approve: options.approve }),
                     // Read once. A guard testing the merged supply while the value came from
                     // `options` type-checks, passes every existing test, and silently drops a
                     // plugin-supplied runner — the conditional-spread shape that has cost this repo

@@ -13,8 +13,8 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Runtime } from "@dispach/core"
-import { createHandler } from "@dispach/server"
+import { EVENT_TYPES, Runtime } from "@dispach/core"
+import { type ApprovalRegistry, createApprovalRegistry, createHandler } from "@dispach/server"
 import { createClient, DispachError, isEvent } from "../src/index.ts"
 import { turnStreamItems } from "../src/stream.ts"
 
@@ -45,46 +45,62 @@ afterAll(() => {
  * had no reasoning in it at first, and the filter that excludes it was consequently untested:
  * deleting that line left the suite passing.
  */
-function replyFetch(text: string): typeof fetch {
-    const half = Math.ceil(text.length / 2)
-    return (async () =>
-        new Response(
+function replyFetch(text: string | readonly string[]): typeof fetch {
+    // A sequence answers each call in turn, last one repeating. Only the approval tests need it,
+    // and they need it because a single fixed reply containing an `ACTION` block would make *every*
+    // step ask for the same tool — a turn that loops until the no-progress guard stops it, which
+    // looks like the approval mechanism hanging.
+    const replies = typeof text === "string" ? [text] : text
+    let call = 0
+    return (async () => {
+        const body = replies[Math.min(call, replies.length - 1)] ?? ""
+        call += 1
+        const half = Math.ceil(body.length / 2)
+        const text_ = body
+        return new Response(
             [
                 `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "Let me think about " } }] })}\n\n`,
                 `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "what to say." } }] })}\n\n`,
-                `data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(0, half) } }] })}\n\n`,
-                `data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(half) } }] })}\n\n`,
+                `data: ${JSON.stringify({ choices: [{ delta: { content: text_.slice(0, half) } }] })}\n\n`,
+                `data: ${JSON.stringify({ choices: [{ delta: { content: text_.slice(half) } }] })}\n\n`,
                 `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 4 } })}\n\n`,
                 "data: [DONE]\n\n",
             ].join(""),
             { status: 200, headers: { "content-type": "text/event-stream" } },
-        )) as unknown as typeof fetch
+        )
+    }) as unknown as typeof fetch
 }
 
 async function harness(
     options: {
         token?: string
-        reply?: string
+        reply?: string | readonly string[]
         /** Shrink the per-turn buffer so the truncation path is reachable deliberately. */
         streams?: { maxEventsPerTurn?: number }
+        /** A manifest whose mutating calls must be asked about, for the approval tests. */
+        manifest?: string
+        /** Attach a real approval registry, so a blocked turn has somewhere to wait. */
+        approvals?: ApprovalRegistry
     } = {},
 ) {
     const dir = mkdtempSync(join(tmpdir(), "client-test-"))
     dirs.push(dir)
     mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, "agent.yaml"), MANIFEST)
+    writeFileSync(join(dir, "agent.yaml"), options.manifest ?? MANIFEST)
 
     const runtime = await Runtime.create({
         agents: [join(dir, "agent.yaml")],
         env: { MODEL_API_KEY: "sk-test" },
         fetch: replyFetch(options.reply ?? "hello from the model"),
         ...(options.streams === undefined ? {} : { streams: options.streams }),
+        ...(options.approvals === undefined ? {} : { approve: options.approvals.approver }),
     })
     const handler = createHandler({
         runtime,
         ...(options.token === undefined
             ? { allowUnauthenticated: true }
             : { token: options.token }),
+        ...(options.approvals === undefined ? {} : { approvals: options.approvals }),
     })
 
     const client = createClient({
@@ -463,6 +479,68 @@ describe("the firehose", () => {
     })
 })
 
+describe("approvals", () => {
+    const ASK_MANIFEST = `${MANIFEST}tools:
+  pinned: [now, memory_write]
+  policy:
+    mode: ask
+`
+
+    test("a blocked turn is discoverable and answerable through the client", async () => {
+        // The full loop a UI runs: the turn blocks, `approvals()` finds the question, `approve()`
+        // releases it. Driven through the real handler, so the suspended turn is a real one.
+        const approvals = createApprovalRegistry()
+        const { client, runtime } = await harness({
+            manifest: ASK_MANIFEST,
+            approvals,
+            reply: ["I'll save that.\nACTION: memory_write\ntext: a note\nEND", "done"],
+        })
+        try {
+            const agent = client.agent("assistant")
+            const turn = await agent.send("save a note")
+
+            let waiting = await agent.approvals()
+            for (let attempt = 0; attempt < 300 && waiting.length === 0; attempt += 1) {
+                await new Promise((resolve) => setTimeout(resolve, 10))
+                waiting = await agent.approvals()
+            }
+            expect(waiting.length).toBe(1)
+            // Everything a prompt needs to be rendered without a second request.
+            expect(waiting[0]?.slug).toBe("memory_write")
+            expect(waiting[0]?.mutating).toBe(true)
+            expect(waiting[0]?.reason.length).toBeGreaterThan(0)
+            expect(waiting[0]?.requestedAt).toMatch(/^\d{4}-/)
+
+            await agent.approve(waiting[0]?.approvalId ?? "", true)
+            // `text()` waits for the turn rather than reading the row immediately — the POST
+            // releases the question and the turn still has a step to run, so `get()` here races it
+            // and reads `running`. That race is worth naming: it is the normal shape of answering
+            // an approval, and a UI that re-renders straight off the POST response will see a turn
+            // that is not finished yet.
+            // Both steps' prose, which is correct: anything the model writes outside an `ACTION`
+            // block is shown to the person, so a turn that narrated before calling a tool carries
+            // that narration into its reply.
+            expect(await turn.text()).toBe("I'll save that.\n\ndone")
+            expect((await turn.get()).status).toBe("final")
+            expect(await agent.approvals()).toEqual([])
+        } finally {
+            await runtime.stop()
+        }
+    })
+
+    test("answering an approval that is not waiting is a typed error", async () => {
+        const approvals = createApprovalRegistry()
+        const { client, runtime } = await harness({ manifest: ASK_MANIFEST, approvals })
+        try {
+            await expect(
+                client.agent("assistant").approve("a_nothing", true),
+            ).rejects.toMatchObject({ code: "approval_not_found" })
+        } finally {
+            await runtime.stop()
+        }
+    })
+})
+
 describe("introspection", () => {
     test("describe, tools, skills and ready report what the server reports", async () => {
         const { client, runtime } = await harness()
@@ -501,11 +579,18 @@ describe("the frame mapper", () => {
         // and this client does not use the inline-stream path that produces it. So this is tested
         // directly: a future frame named neither way must not surface as an event with no
         // envelope, which is how a client crashes on `event.data.something`.
+        // The stand-in for a future frame is **asserted absent from the catalogue**, not assumed
+        // absent. This test used `approval.requested` until 15.2 made it a real event, at which
+        // point the fixture still passed its own shape check while testing the opposite of what it
+        // says — a frame the client now correctly yields as an event. `handoff.start` is Phase 10B's
+        // and sits in the spec's `### Planned` table, which `spec.test.ts` already asserts is
+        // disjoint from `EVENT_TYPES`; this line is the local half of that guard.
+        expect(EVENT_TYPES as readonly string[]).not.toContain("handoff.start")
         const items = []
         for await (const item of turnStreamItems(
             sse([
                 { event: "turn.accepted", data: { turnId: "t_1", sessionKey: "api:x" } },
-                { event: "approval.requested", data: { approvalId: "a_1" } },
+                { event: "handoff.start", data: { to: "researcher" } },
                 {
                     event: "turn.start",
                     data: { v: 1, type: "turn.start", data: { source: "api" } },

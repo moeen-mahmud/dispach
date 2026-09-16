@@ -131,6 +131,43 @@ export interface EventDataMap {
      * `from` *is* omitted when there was no sender, because an absent sender is a real third state
      * and synthesising one would put the operator's own turn behind a fake identity.
      */
+    /**
+     * A call is waiting on a person, and the runtime emitted this **before** asking.
+     *
+     * Core emits it, not the front end, and that placement is the whole reason every surface gets
+     * approvals for free. The plan had the approver emitting its own event, which makes the request
+     * visible only to whichever front end implements it — so a second observer of a REPL session,
+     * or an audit log, or the firehose, would see a turn simply stop. Core already holds the
+     * `EventContext` (agent, session, turn) that a client needs to correlate the prompt with what it
+     * is showing, and an `ApprovalRequest` deliberately does not carry any of it.
+     *
+     * Paired with exactly one `approval.resolved`. A request with no resolution is a bug, not a
+     * state — the same reasoning that keeps `tool.gated` from emitting a `tool.call` it will never
+     * follow with a `tool.result`.
+     */
+    "approval.requested": {
+        approvalId: string
+        slug: string
+        callId: string
+        /** The command or path a rule would match. Terminal escapes already stripped. */
+        match?: string
+        mutating: boolean
+        reason: string
+    }
+    /**
+     * How it ended, including the ways nobody chose.
+     *
+     * `by` matters more than `granted` to a client with a prompt on screen: `"abandoned"` means
+     * take it down because the turn is gone, `"error"` means the approver itself is broken and the
+     * denial says nothing about what a person wanted. Collapsing all three into `granted: false`
+     * would make a crashed approver indistinguishable from a considered no.
+     */
+    "approval.resolved": {
+        approvalId: string
+        slug: string
+        granted: boolean
+        by: "approver" | "error" | "abandoned"
+    }
     "turn.start": {
         source: string
         inputTokens: number
@@ -440,6 +477,8 @@ export const EVENT_TYPES = [
     "agent.warning",
     "plugin.loaded",
     "plugin.slow",
+    "approval.requested",
+    "approval.resolved",
     "turn.start",
     "context.assembled",
     "context.dropped",

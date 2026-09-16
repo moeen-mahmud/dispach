@@ -34,6 +34,7 @@ import {
     type TurnSender,
     VERSION,
 } from "@dispach/core"
+import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
 
@@ -80,6 +81,20 @@ export interface HandlerOptions {
      * in-flight turns, so there is no handle to share. The 409 says exactly that.
      */
     readonly running?: Map<string, AbortController>
+    /**
+     * Where a blocked call's question waits for an answer.
+     *
+     * Created **before** the runtime, because `Runtime.create({ approve })` needs the registry's
+     * approver and a runtime cannot hand back the function it was constructed with. That ordering
+     * is why this is passed in rather than owned here, and why the CLI creates it rather than
+     * `serve` — the same reason the `running` map is shared, one layer further out.
+     *
+     * Absent is a coherent state, not a broken one: nothing is ever pending, so every answer gets
+     * `approval_not_found` and the routes still exist and still say something true. An agent whose
+     * runtime was built without an approver keeps its `confirm_without_approver` warning, which is
+     * the honest signal that no question can be asked here.
+     */
+    readonly approvals?: ApprovalRegistry
 }
 
 type Handler = (context: RequestContext) => Promise<Response> | Response
@@ -106,6 +121,15 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
 
     /** In-flight turns, so `POST /stop` has something to cancel. Shared when one is supplied. */
     const running = options.running ?? new Map<string, AbortController>()
+    /**
+     * Pending approvals. An empty one is correct when nothing wired an approver.
+     *
+     * Defaulted rather than left optional so the routes have one code path. The alternative was a
+     * branch answering `501 no_approver` — which reads as a missing feature when the truth is that
+     * this deployment chose not to attach one, and the agent's own `confirm_without_approver`
+     * warning already says so where somebody is looking.
+     */
+    const approvals = options.approvals ?? createApprovalRegistry()
 
     const router = new Router<Handler>()
 
@@ -409,6 +433,73 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             return json({ turnId, stopping: true }, 202)
         }),
     )
+
+    // ─── Approvals ───────────────────────────────────────────────────────────────────────
+
+    /**
+     * What is waiting on a person right now.
+     *
+     * The recovery path, and the reason approvals are usable from a browser at all: a client that
+     * missed `approval.requested` — opened after the turn blocked, refreshed, a second operator —
+     * otherwise sees a turn that has visibly stopped with no way to discover why. Same argument as
+     * turn reattach, which the spec calls core rather than a convenience.
+     *
+     * Not scoped by agent even though the path names one. The registry is per *process* and a
+     * pending approval's turn belongs to whichever agent raised it; filtering here would need the
+     * registry to carry an agent id it has no use for otherwise, and `serve` hosts one agent. The
+     * path keeps the agent segment so the route reads like its neighbours and so scoping later is
+     * additive rather than a URL change.
+     */
+    router.add("GET", "/v1/agents/:id/approvals", (context) =>
+        withAgent(runtime, context, async () => json({ approvals: approvals.pending() })),
+    )
+
+    /**
+     * Answer one.
+     *
+     * `granted` is required and must be a real boolean. There is no default, for the reason the
+     * whole mechanism exists: a missing field defaulting to `false` would deny a call on a typo,
+     * and defaulting to `true` would grant one on a malformed request — so a body this route
+     * cannot read is a `400` rather than a decision nobody made.
+     *
+     * A `404` covers every way an id can fail to be waiting: answered already, abandoned when its
+     * turn ended, never existed. They are deliberately one answer — distinguishing them would mean
+     * keeping a record of settled approvals, and a client that can ask "was this one denied an hour
+     * ago" is a client relying on state this registry says plainly that it does not keep.
+     */
+    router.add("POST", "/v1/agents/:id/approvals/:approvalId", (context) =>
+        withAgent(runtime, context, async () => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const input = body.value as { granted?: unknown }
+            if (typeof input.granted !== "boolean") {
+                return fail(
+                    {
+                        code: "approval_decision_required",
+                        message: "The request body has no boolean `granted`.",
+                        hint: 'Send { "granted": true } or { "granted": false }. There is no default: one direction would deny a call over a typo and the other would grant one, and neither is a decision anybody made.',
+                        field: "granted",
+                    },
+                    400,
+                )
+            }
+
+            const approvalId = context.params.approvalId ?? ""
+            if (!approvals.resolve(approvalId, input.granted)) {
+                return fail(
+                    {
+                        code: "approval_not_found",
+                        message: `No approval with id ${approvalId} is waiting.`,
+                        hint: 'It was answered already, or its turn ended while it waited — a stopped or timed-out turn abandons its question, and `approval.resolved` reports that as `by: "abandoned"`. GET /v1/agents/:id/approvals lists what is actually waiting. Nothing about a settled approval is kept, so this is also the answer for an id that was never real.',
+                    },
+                    404,
+                )
+            }
+            return json({ approvalId, granted: input.granted })
+        }),
+    )
+
+    // ─── Turns, continued ────────────────────────────────────────────────────────────────
 
     router.add("GET", "/v1/agents/:id/turns/:turnId", (context) =>
         withAgent(runtime, context, async (agent) => {

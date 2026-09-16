@@ -16,7 +16,7 @@
  */
 
 import { BRAND, EventBus, HarnessError, loadManifest, Runtime } from "@dispach/core"
-import { serve } from "@dispach/server"
+import { createApprovalRegistry, serve } from "@dispach/server"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
@@ -89,8 +89,27 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         })
     }
 
+    /**
+     * Created before the runtime, because the runtime is constructed *with* the approver.
+     *
+     * That ordering is the whole reason this lives here and not inside `serve()`: `Runtime.create`
+     * takes `approve` and cannot hand back the function it was built with, so the registry has to
+     * exist first and then be given to both. Same shape as the shared `running` map, one layer
+     * further out.
+     *
+     * Supplying it is also what silences `confirm_without_approver` — `Agent.create` keys that
+     * warning on `approve` being absent, so an agent with `onMutate: "confirm"` stops warning under
+     * `serve` and keeps warning under `run`, which is exactly true of the two surfaces today.
+     */
+    const approvals = createApprovalRegistry()
+
     const runtime = await Runtime.create({
         agents: [options.manifestPath],
+        // The seam `ToolContext.approve` declared in Phase 3 and nothing ever filled. A blocked
+        // call now emits `approval.requested` and waits for a POST; an unanswered one ends with the
+        // turn, because core races the approver against the turn's own signal rather than starting
+        // a second clock.
+        approve: approvals.approver,
         env,
         bus,
         toolProviders: TOOL_PROVIDERS,
@@ -142,6 +161,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             runtime,
             host,
             port,
+            approvals,
             ...(token === undefined || token === "" ? {} : { token }),
         })
     } catch (error) {

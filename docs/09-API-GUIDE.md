@@ -179,6 +179,60 @@ than claiming the turn has finished.
 
 ---
 
+## 4b. When it needs permission
+
+A call the policy says to `ask` about — or a mutating call in a tainted turn under
+`tools.untrusted.onMutate: "confirm"` — **suspends the turn** and announces itself:
+
+```
+event: approval.requested
+data: {…,"turnId":"t_…","type":"approval.requested","data":{
+  "approvalId":"a_mu2t…","slug":"memory_write","callId":"c1",
+  "mutating":true,"reason":"memory_write changes something."}}
+```
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" $A/approvals | python3 -m json.tool
+# { "approvals": [ { "approvalId": "a_mu2t…", "slug": "memory_write", … } ] }
+
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"granted":true}' $A/approvals/a_mu2t…
+# {"approvalId":"a_mu2t…","granted":true}
+```
+
+The turn resumes. Four things worth knowing, each of which exists because its absence was a gap:
+
+**The runtime emits the event, not the front end.** So the question reaches the firehose, an audit
+log, and a second operator watching the same session — not only the surface that draws prompts. The
+envelope carries the turn, which is the correlation a UI needs.
+
+**`GET /approvals` is the recovery path.** Refresh the page and the event is gone; the listing is
+how a client discovers why a turn has visibly stopped. Same argument as turn reattach.
+
+**`granted` has no default, in either direction.** A missing field would deny a call on a typo or
+grant one on a malformed body, and neither is a decision anybody made — so a body the route cannot
+read is a `400`.
+
+**There is no approval timeout.** `limits.turnTimeoutMs` bounds the wait. An unanswered question
+ends with the turn and reports `approval.resolved` with `by: "abandoned"` — which the model is told
+as *"nobody declined it"*, because nobody did. The other two outcomes are `by: "approver"` (somebody
+decided) and `by: "error"` (the approver itself broke, so the denial says nothing about what a
+person wanted).
+
+Nothing about a settled approval is kept, so a `404` covers answered-already, abandoned-with-its-turn
+and never-existed alike. Watch `approval.resolved` if you need to take a prompt down for the right
+reason.
+
+```ts
+for await (const item of client.events({ types: ["approval.requested"] })) {
+    if (item.kind !== "event") continue
+    const { approvalId, slug, match } = item.event.data
+    if (await askTheHuman(slug, match)) await agent.approve(approvalId, true)
+}
+```
+
+---
+
 ## 5. Watch everything
 
 ```bash
@@ -290,6 +344,7 @@ Worth knowing before you design around it, because each of these is a decision r
 | **No per-sender authorisation.** | `from` says who sent a message and confers nothing. A recipient acts under its **own** owner's grants, whoever asked. A sender cannot widen what your agent may do by declaring itself. |
 | **No OpenAI-compatible surface.** | `/v1` is its own protocol. Nothing here answers `/v1/chat/completions`. |
 | **One agent per container.** | `serve` takes one manifest. A second agent is a second service. |
+| **No approval history.** | A pending approval lives in the serving process's memory, because the thing it resolves is a suspended turn *in that process*. A row surviving a restart would describe a question nobody is still waiting on. |
 | **No live reload.** | An agent's configuration is fixed for its process lifetime — the tool catalogue resolves once and the cached prompt prefix depends on it staying fixed. `POST /reload` answers `409` and says so. |
 | **No CORS.** | The web UI is same-origin. A default `*` would be catastrophic on a loopback bind, where the spec permits omitting the token entirely. |
 | **WebSocket is secondary, and Bun-only.** | Everything achievable over HTTP + SSE stays there. `/v1/ws` answers `501` under Node, which has no upgrade path without a dependency. |

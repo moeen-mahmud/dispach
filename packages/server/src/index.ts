@@ -10,6 +10,11 @@
  * a socket.
  */
 
+export {
+    type ApprovalRegistry,
+    createApprovalRegistry,
+    type PendingApproval,
+} from "./approvals.ts"
 export { createHandler, type HandlerOptions } from "./handler.ts"
 export { type Route, type RouteMatch, Router } from "./router.ts"
 export { isLoopback, type RunningServer, type ServeOptions, serve } from "./serve.ts"

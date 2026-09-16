@@ -123,6 +123,38 @@ branched on: enqueueing a notification twice because a retry looked like a fresh
 failure the key prevents, and only a caller who can see the replay can avoid it. A key reused with
 different text throws `idempotency_key_reused` rather than answering with the earlier turn.
 
+## When it needs permission
+
+A call the agent's policy says to `ask` about suspends the turn. The question arrives on the event
+stream and is answered with one call:
+
+```ts
+for await (const item of client.events({ types: ["approval.requested"] })) {
+    if (item.kind !== "event") continue
+    const { approvalId, slug, match, reason } = item.event.data
+    const ok = await askTheHuman({ slug, match, reason })
+    await agent.approve(approvalId, ok)
+}
+```
+
+`agent.approvals()` is the **recovery path**, and a UI needs it: refresh the page and the event is
+gone, leaving a turn that has visibly stopped with no way to discover why. Poll it on mount for the
+same reason you reattach to a turn rather than assuming you saw its whole stream.
+
+```ts
+for (const question of await agent.approvals()) {
+    // approvalId, slug, callId, match?, mutating, reason, requestedAt
+}
+```
+
+`approve()` throws `approval_not_found` when the question is no longer waiting — answered already,
+or abandoned when its turn ended. Nothing about a settled approval is kept, so those are one answer.
+Watch `approval.resolved` if you need to take a prompt down for the right reason: `by` is
+`"approver"` (somebody decided), `"error"` (the approver broke, so the denial says nothing about
+what a person wanted) or `"abandoned"` (the turn ended first, and nobody declined it).
+
+There is no approval timeout. The turn's own `limits.turnTimeoutMs` bounds the wait.
+
 ## Errors
 
 Every failure is a `DispachError` carrying the wire's own `code`, `hint`, `field` and `status`.
@@ -172,6 +204,7 @@ await client.agents()
 
 await agent.describe()        // model, window, dialect, counts, entryPhase, warnings
 await agent.turn(id).get()    // the stored row, including `sender` when one was declared
+await agent.approvals()       // what is waiting on a person right now, oldest first
 await agent.tools()           // the resolved catalogue with tags and phase visibility
 await agent.skills()          // `configured: false` distinguishes "no skills block"
 await agent.sessions()

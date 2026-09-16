@@ -38,6 +38,7 @@ and WebSocket surfaces can return:
 | `session_not_found` | 404 | No session with that key for this agent. |
 | `turn_not_found` | 404 | No turn with that id has ever run for this agent. |
 | `schedule_not_found` | 404 | No schedule with that id for this agent. |
+| `approval_not_found` | 404 | No approval with that id is waiting — answered, abandoned with its turn, or never real. |
 | `method_not_allowed` | 405 | The path exists under another method. `Allow` names them. Also the answer to `HEAD` on a stream route. |
 | `body_not_json` | 400 | The request body did not parse. |
 | `body_too_large` | 400 | Over the 1 MB cap, refused before a channel plugin sees it. |
@@ -48,6 +49,7 @@ and WebSocket surfaces can return:
 | `idempotency_key_invalid` | 400 | `Idempotency-Key` is empty, over 255 characters, or not printable ASCII. |
 | `idempotency_key_reused` | 409 | The key belongs to a turn whose text or session differed. Nothing ran. |
 | `phase_invalid` | 400 | The phase is not declared in the manifest. |
+| `approval_decision_required` | 400 | `POST /approvals/:id` with no boolean `granted`. No default in either direction. |
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
 | `reload_not_supported` | 409 | An agent's configuration is fixed for its process lifetime, deliberately. |
@@ -198,6 +200,50 @@ GET  /v1/agents/:id/turns/:turnId                 → final state once complete,
 
 Reattach is core, not a convenience. Generation must survive a client refresh; partial
 content is saved on explicit stop only, never on disconnect.
+
+### Approvals
+
+```
+GET  /v1/agents/:id/approvals              → { approvals: [...] }, oldest first
+POST /v1/agents/:id/approvals/:approvalId  → { granted: true | false }
+```
+
+A call the policy says to `ask` about, or a mutating call under `tools.untrusted.onMutate:
+"confirm"` in a tainted turn, suspends the turn and emits **`approval.requested`**. Answering with
+a POST resumes it. The runtime emits **`approval.resolved`** either way, and the two are paired on
+`approvalId` — a request always gets exactly one resolution.
+
+`approvalId` is minted per question and is **not** `callId`: a dialect numbers calls within a step,
+so two steps of one turn both have a `c1`, and an id that decides which blocked call resumes cannot
+collide.
+
+**The event comes from the runtime, not from whichever front end asks.** So the question is visible
+to the firehose, to a second observer of the same session, and to an audit log — not only to the
+surface that implements the prompt. The envelope carries `agentId`, `sessionKey` and `turnId`, which
+is the correlation a client needs and which the approval payload deliberately does not repeat.
+
+**The listing is the recovery path**, for the same reason turn reattach is: a client that missed the
+event — opened after the turn blocked, refreshed the page, a second operator — otherwise sees a turn
+that has visibly stopped with no way to discover why.
+
+| Outcome | `by` | What it means |
+| --- | --- | --- |
+| answered | `approver` | Somebody decided. `granted` is their decision. |
+| the approver failed | `error` | Denied, and the denial says nothing about what a person wanted. A crashed prompt is not consent. |
+| the turn ended first | `abandoned` | Denied, and **nobody declined it**. Take the prompt down. |
+
+**There is no approval timeout.** `limits.turnTimeoutMs` bounds the wait: the runtime races the
+approver against the turn's own signal, so an unanswered question ends with the turn rather than on
+a second clock. Two deadlines racing each other is the shape that leaves a tool running with nothing
+referencing it.
+
+Nothing about a settled approval is kept. A pending one lives in the serving process's memory and
+dies with it, because the thing it resolves is a suspended turn *in that process* — a row surviving
+a restart would describe a question nobody is still waiting on. A restart abandons the turn, which
+`by: "abandoned"` already says.
+
+A deployment that attached no approver still answers both routes: the listing is empty and every
+POST is a `404`. The agent's own `confirm_without_approver` warning is where that is reported.
 
 **Attaching has four states and three answers.** A turn id you hold is in exactly one of them, and
 each gets what is true of it rather than one shared "cannot stream this":
@@ -386,6 +432,8 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `agent.channel.status` | connect/disconnect | `channelId`, `channelType`, `status`, `detail?` |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |
 | `agent.channel.rejected` | inbound not turned into a turn | `channelId`, `reason` (`duplicate` \| `denied`), `sender`, `detail` |
+| `approval.requested` | a call is waiting on a person | `approvalId`, `slug`, `callId`, `match?`, `mutating`, `reason` |
+| `approval.resolved` | how it ended | `approvalId`, `slug`, `granted`, `by` |
 | `turn.start` | inbound accepted | `source`, `inputTokens`, `trust`, `from?` |
 | `context.assembled` | per turn | `slots: [{slot, label, tokens, pinned}]`, `total` |
 | `context.pressure` | per step, after compaction | `fraction` (of the prompt actually sent), `tokens`, `budget`, `source: reported \| corrected \| estimated`, `peak?` (what the ladder faced) |

@@ -28,6 +28,19 @@ export function newStepId(now = Date.now()): string {
 }
 
 /**
+ * One approval's identity, and it has to be minted rather than derived.
+ *
+ * `callId` is the obvious candidate and cannot be used: a dialect numbers calls **within a step**
+ * (`c1`, `c2`, …), so two steps of one turn — let alone two concurrent turns — both have a `c1`.
+ * An approval id reaches a client, comes back in a URL, and decides which blocked call resumes; a
+ * colliding one would resume the wrong call in the wrong turn, which is the worst available
+ * outcome for a mechanism whose whole job is asking permission.
+ */
+export function newApprovalId(now = Date.now()): string {
+    return id("a", now)
+}
+
+/**
  * One scheduled run's identity, which becomes the thread segment of its session key.
  *
  * A scheduled run gets a fresh session every time, so a daily brief never accumulates history it

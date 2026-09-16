@@ -33,6 +33,7 @@ import { estimateTokens } from "../context/tokens.ts"
 import { type ErrorDetail, toolFailed, toolTimedOut } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import type { EventContext } from "../events/types.ts"
+import { newApprovalId } from "../loop/ids.ts"
 import { compose, type Middleware } from "../plugins/middleware.ts"
 import { coerceArgs } from "./coerce.ts"
 import { authorize, type PolicyConfig } from "./policy.ts"
@@ -87,6 +88,14 @@ export interface ExecuteInput {
 
 /** What a person is being asked to allow. */
 export interface ApprovalRequest {
+    /**
+     * This question's identity, minted per ask.
+     *
+     * Not `callId`, which a dialect numbers within a step — see `newApprovalId`. An approver that
+     * hands a question to something else (an HTTP client, a queue, another process) needs an id it
+     * can be answered by, and this is it.
+     */
+    readonly approvalId: string
     readonly slug: string
     readonly callId: string
     /**
@@ -105,6 +114,17 @@ export interface ApprovalRequest {
     readonly mutating: boolean
     /** Why it is being asked rather than allowed outright. */
     readonly reason: string
+    /**
+     * The turn's cancellation, so an approver holding a question can drop it.
+     *
+     * **A courtesy, not the guarantee.** Core races the approver against this signal itself and
+     * denies when it wins, so an approver that ignores the field is still correct and a hung
+     * question still ends the turn. What the field buys is that an approver holding resources — a
+     * pending promise in a map, a row, a socket — can release them instead of leaking one per
+     * abandoned approval. Relying on every approver remembering to check it would be the
+     * fail-open direction; relying only on the race would leak.
+     */
+    readonly signal: AbortSignal
 }
 
 export interface ExecuteOutcome {
@@ -121,6 +141,43 @@ export interface PlannedCall {
     readonly intent: ToolIntent
     readonly tool: Tool
     readonly args: Readonly<Record<string, unknown>>
+}
+
+/**
+ * Resolves to a denial when the turn is abandoned, and never resolves otherwise.
+ *
+ * Never-resolving is correct inside a `Promise.race`: the approver is the other arm, and a timer
+ * here would be a second deadline racing `limits.turnTimeoutMs`. This repo has a recorded bug from
+ * exactly that shape — a tool that outlives the harness leaves a process with nothing referencing
+ * it — so there is deliberately one clock, the turn's, and this only listens to it.
+ *
+ * The listener is registered with `once`, so a resolved race leaves nothing attached to a signal
+ * that lives as long as the turn does.
+ */
+export function abandonedWhen(signal: AbortSignal): Promise<{ granted: false; by: "abandoned" }> {
+    if (signal.aborted) return Promise.resolve({ granted: false, by: "abandoned" })
+    return new Promise((resolve) => {
+        signal.addEventListener("abort", () => resolve({ granted: false, by: "abandoned" }), {
+            once: true,
+        })
+    })
+}
+
+/**
+ * What the model is told, and it must not read as a person having said no.
+ *
+ * An abandoned approval is the turn ending underneath the question — nobody refused anything — and
+ * an `error` is the approver being broken. Reporting either as "not approved" would put a decision
+ * in somebody's mouth, and on the `error` path it would hide a fault behind a plausible outcome.
+ */
+function reasonFor(slug: string, by: "approver" | "error" | "abandoned"): string {
+    if (by === "abandoned") {
+        return `${slug} was waiting on an approval when the turn ended, so it did not run. Nobody declined it.`
+    }
+    if (by === "error") {
+        return `${slug} was not run: the approver failed before anyone could answer. A broken prompt is not consent.`
+    }
+    return `${slug} was not approved.`
 }
 
 /** The match argument as text. A non-string argument cannot be pattern-matched, so it is not. */
@@ -272,19 +329,58 @@ async function decideAndRun(
     })
 
     if (decision.effect === "ask" && input.approve !== undefined) {
-        // A thrown approver denies. A prompt that crashed is not consent, and treating it as such
-        // is the one failure mode this whole layer exists to prevent.
-        const granted = await input
-            .approve({
-                ...call,
-                ...(match === undefined ? {} : { match: stripControl(match) }),
-                mutating: spec.mutating,
-                reason: decision.reason,
-            })
-            .catch(() => false)
-        decision = granted
+        const approvalId = newApprovalId()
+        const request: ApprovalRequest = {
+            approvalId,
+            ...call,
+            ...(match === undefined ? {} : { match: stripControl(match) }),
+            mutating: spec.mutating,
+            reason: decision.reason,
+            signal: input.context.signal,
+        }
+
+        // Emitted **before** asking, and by core rather than by the approver. A front end that
+        // emitted its own would make the question visible only to itself — so a second observer of
+        // the session, the firehose, or an audit log would see the turn simply stop. The event
+        // carries `eventContext`, which is the agent, session and turn an `ApprovalRequest`
+        // deliberately does not.
+        input.bus.emit(
+            "approval.requested",
+            {
+                approvalId,
+                slug: request.slug,
+                callId: request.callId,
+                ...(request.match === undefined ? {} : { match: request.match }),
+                mutating: request.mutating,
+                reason: request.reason,
+            },
+            input.eventContext,
+        )
+
+        // Three ways this ends and only one of them is somebody's decision.
+        //
+        // A thrown approver denies: a prompt that crashed is not consent, and treating it as such
+        // is the one failure mode this layer exists to prevent. An aborted turn denies too, and the
+        // race is what makes "wait for an answer" safe to implement — without it an unanswered
+        // question holds the step open forever, the turn never reaches its own timeout check, and a
+        // `running` row outlives the process with nothing able to tell it from a live one.
+        const outcome = await Promise.race([
+            input
+                .approve(request)
+                .then((granted) => ({ granted, by: "approver" as const }))
+                .catch(() => ({ granted: false, by: "error" as const })),
+            abandonedWhen(input.context.signal),
+        ])
+
+        input.bus.emit(
+            "approval.resolved",
+            { approvalId, slug: request.slug, granted: outcome.granted, by: outcome.by },
+            input.eventContext,
+        )
+
+        decision = outcome.granted
             ? { effect: "allow", reason: "A person approved this call." }
-            : { effect: "deny", reason: `${spec.slug} was not approved.` }
+            : { effect: "deny", reason: reasonFor(spec.slug, outcome.by) }
     }
 
     if (decision.effect === "allow") return runOne(entry, input)

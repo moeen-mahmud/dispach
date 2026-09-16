@@ -2490,7 +2490,7 @@ isolation as `06-VELAOPS-INTEGRATION.md` already says.
 
 ---
 
-### Phase 10A — The inbound peer surface
+### Phase 10A — The inbound peer surface — **complete** (2026-09-15)
 
 **Goal.** A message can say who sent it, can be retried safely, and is treated as data when it did
 not come from the operator.
@@ -3554,6 +3554,83 @@ where it is decided, in the source. Verified red in both directions.
 The window is narrowed, not eliminated, and that is stated in the test: anything before
 `Runtime.create` returns is still unprotected. What is pinned is that nothing else gets inserted
 between the handlers and the bind.
+
+---
+
+## Phase 15 — Dispach Web
+
+**Goal.** Chat, sessions and approvals in a browser, same origin, no CORS.
+
+Three stages with **one** hard dependency: 15.3 needs 15.1. 15.2 needs neither, which is why it
+went first — 10A made the write gate fire on step one, so "I was blocked and had to ask" became the
+live experience of a peer-driven turn while nothing anywhere could be asked.
+
+### 15.2 — Approvals over the wire — **complete** (2026-09-15)
+
+**Goal.** Fill `ToolContext.approve`, which has existed since Phase 3 with **no caller anywhere** —
+a grep found only the definition — so `tools.untrusted.onMutate: "confirm"` was unreachable and a
+`tools.policy` rule with `ask` fell through to `onNoApprover`.
+
+Deliberately **not** over WebSocket: `/v1/ws` answers `501` under Node, and a capability half the
+supported runtimes cannot reach is not a capability. The request goes out on the stream every reader
+already has; the answer is an ordinary POST.
+
+- `newApprovalId()`, `approval.requested`, `approval.resolved` — emitted by **core**, before and
+  after asking, so a suspended turn is visible to the firehose, an audit log and a second observer
+  rather than only to the surface drawing the prompt (11.188).
+- `RuntimeOptions.approve`, threaded to `Agent.create` — which also silences
+  `confirm_without_approver`, since that warning keys on the seam being empty.
+- `createApprovalRegistry()` in `packages/server` — `approver` for `Runtime.create`, `pending()`
+  for the recovery path, `resolve()` for the route. No persistence: what a pending approval resolves
+  is a suspended turn *in this process* (11.190).
+- `GET /v1/agents/:id/approvals`, `POST /v1/agents/:id/approvals/:approvalId`.
+- No approval clock. The turn's own timeout bounds the wait, and core races the approver against the
+  turn's signal (11.189).
+
+**Acceptance**
+
+- [x] A blocked turn is listable while it waits, and the row is still `running` — asserted, because
+      "it worked" is also true of a runtime that asked nobody
+- [x] Granting runs the call; denying refuses it and the model is told a *person* declined
+- [x] `approval.requested` reaches the firehose carrying the turn, session and agent it belongs to
+- [x] An unanswered question ends with its turn as `by: "abandoned"`, and the model is told
+      **"nobody declined it"** — nobody did
+- [x] A thrown approver is `by: "error"`, not a considered no
+- [x] Answering twice is a `404`; a body with no boolean `granted` is a `400` (11.191)
+- [x] With no approver wired, both routes answer something true and the agent keeps its warning
+- [x] Verified live: real server, real model, a turn suspended and released by curl
+
+**Three findings.** `serve` builds its `createHandler` argument by hand, so `approvals` was
+declared, accepted and **dropped** — the seventh instance of the conditional-spread shape recorded
+in `CLAUDE.md`, and every test passed because they all construct the handler directly. There is now
+a real-bind guard that goes red when the one forwarding line is removed. Second: the client's
+frame-mapper test used `approval.requested` as its stand-in for a *hypothetical* future frame, so
+this stage silently inverted what it tested; the fixture now uses `handoff.start` and **asserts it
+is absent from `EVENT_TYPES`**, so the day 10B lands the premise fails loudly. Third: an `approve`
+callback cannot read the `events` array its own test helper returns — temporal dead zone, caught by
+`decideAndRun` as a denial, so the capture reads empty and the assertion passes on no data.
+
+### 15.1 — Operator keys — **not started**
+
+Migration 13 (10A took 12): one table — id, label, hash, `created_at`, `last_used_at`,
+`revoked_at` — hashed with `scrypt` from `node:crypto`, so no new dependency and `check:deps` stays
+green. Shown once at issue. `POST /v1/keys`, `GET /v1/keys`, `DELETE /v1/keys/:id`; `checkToken`
+grows a second path matching a presented key against the table, keeping the constant-time comparison
+and never distinguishing "no token" from "wrong token". `serve` prints a **one-time claim URL** at
+boot whose token dies on use or restart, so reading the container logs confers first ownership.
+
+Keys are **authentication only**: every key sees every session. Said in the UI, not discovered.
+
+### 15.3 — The UI — **not started**
+
+`packages/web`, built to static assets, mounted by `packages/server` at `/`, consuming
+`packages/client`. Chat with per-token streaming, session list and switch, tool calls and results,
+approval prompts, key management.
+
+Two costs to weigh before starting. The image is 83 MB against a 150 MB CI ceiling, so the bundle
+has a budget. And the framework choice is a dependency decision that belongs in `00-DECISIONS.md` —
+11.10 caps the CLI's runtime deps at the renderer pair, and this is the first thing to test whether
+that discipline generalises.
 
 ---
 

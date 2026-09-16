@@ -160,6 +160,36 @@ export interface AgentClient {
     sessions(): Promise<readonly SessionSummary[]>
     schedules(): Promise<readonly ScheduleRecord[]>
     context(options?: { readonly sessionKey?: string; readonly input?: string }): Promise<unknown>
+    /**
+     * What is waiting on a person right now, oldest first.
+     *
+     * The recovery path. `approval.requested` on the stream is how a live client learns about a
+     * question; this is how one that missed it — opened late, refreshed, a second operator —
+     * discovers why a turn has visibly stopped. A UI that only listens will lose prompts to a page
+     * reload, which is the same failure turn reattach exists to prevent.
+     */
+    approvals(): Promise<readonly PendingApproval[]>
+    /**
+     * Answer one. Throws `approval_not_found` when it is no longer waiting.
+     *
+     * That covers answered-already and abandoned-with-its-turn alike, deliberately: nothing about a
+     * settled approval is kept, so there is no state to tell them apart with. Watch
+     * `approval.resolved` for `by: "abandoned"` if you need to take a prompt down for the right
+     * reason.
+     */
+    approve(approvalId: string, granted: boolean): Promise<void>
+}
+
+/** A question waiting on somebody. */
+export interface PendingApproval {
+    readonly approvalId: string
+    readonly slug: string
+    readonly callId: string
+    /** The command or path a rule would match — what the person actually needs to read. */
+    readonly match?: string
+    readonly mutating: boolean
+    readonly reason: string
+    readonly requestedAt: string
 }
 
 export interface AgentDescriptionLike {
@@ -425,6 +455,19 @@ export function createClient(options: ClientOptions): DispachClient {
             skills: () => json<SkillsReport>("GET", at("/skills")),
             sessions: () => json<readonly SessionSummary[]>("GET", at("/sessions")),
             schedules: () => json<readonly ScheduleRecord[]>("GET", at("/schedules")),
+
+            approvals: async () =>
+                (await json<{ approvals: readonly PendingApproval[] }>("GET", at("/approvals")))
+                    .approvals,
+
+            approve: async (approvalId, granted) => {
+                await json<unknown>("POST", at(`/approvals/${encodeURIComponent(approvalId)}`), {
+                    // Always sent, never defaulted. The server refuses a body without it for the
+                    // reason the mechanism exists: one default denies a call over a typo and the
+                    // other grants one, and neither is a decision anybody made.
+                    body: { granted },
+                })
+            },
 
             context: (opts) => {
                 const params = new URLSearchParams()
