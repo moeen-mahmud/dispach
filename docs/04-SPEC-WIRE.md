@@ -39,6 +39,7 @@ and WebSocket surfaces can return:
 | `turn_not_found` | 404 | No turn with that id has ever run for this agent. |
 | `schedule_not_found` | 404 | No schedule with that id for this agent. |
 | `approval_not_found` | 404 | No approval with that id is waiting — answered, abandoned with its turn, or never real. |
+| `key_not_found` | 404 | No operator key with that id. Distinct from an already-revoked one, which is a `200`. |
 | `method_not_allowed` | 405 | The path exists under another method. `Allow` names them. Also the answer to `HEAD` on a stream route. |
 | `body_not_json` | 400 | The request body did not parse. |
 | `body_too_large` | 400 | Over the 1 MB cap, refused before a channel plugin sees it. |
@@ -50,6 +51,9 @@ and WebSocket surfaces can return:
 | `idempotency_key_reused` | 409 | The key belongs to a turn whose text or session differed. Nothing ran. |
 | `phase_invalid` | 400 | The phase is not declared in the manifest. |
 | `approval_decision_required` | 400 | `POST /approvals/:id` with no boolean `granted`. No default in either direction. |
+| `key_label_required` | 400 | `POST /v1/keys` with no string `label`. Required rather than defaulted — it is the only thing distinguishing two credentials. |
+| `key_label_invalid` | 400 | The label is empty, over 64 characters, or carries a control character. |
+| `claim_spent` | 401 | The boot claim was recognised and has already been exchanged. A claim from an earlier boot is `unauthorized` instead — this process has never seen it. |
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
 | `reload_not_supported` | 409 | An agent's configuration is fixed for its process lifetime, deliberately. |
@@ -274,6 +278,57 @@ and `chunks: "start" | "partial" | "none"` so a reader learns a hole exists befo
 concatenating rather than after.
 
 `deliver` accepts `"none"` (result via API only), a channel id, or `{ channel, to }`.
+
+
+### Operator keys
+
+```
+POST   /v1/keys          → { keyId, label, createdAt, secret }   — the secret, once
+GET    /v1/keys          → { keys: [...], scope }                — never a secret
+DELETE /v1/keys/:keyId   → the revoked record
+```
+
+A key is a **labelled bearer credential with no identity attached** — no username, no password, no
+role, no signup. It exists so a browser session has a credential that can be revoked without
+restarting the process, which the container's `server.tokenEnv` value cannot be.
+
+**Keys are authentication, not authorisation.** Every key reaches every route for every agent this
+server holds. `GET /v1/keys` says so in its own `scope` field rather than leaving each client to
+rediscover it.
+
+Three credentials authenticate a request, tried in this order:
+
+1. The value of the variable named by `server.tokenEnv`. Unchanged, still first-class, and **not
+   revocable through this API** — it belongs to the environment, and a route that could revoke it
+   would be a route that locks an operator out of their own container.
+2. An operator key, matched by an unsalted `SHA-256` of the presented secret against a unique index.
+   A single hash rather than a KDF: the secret is 160 bits of CSPRNG output, so there is no
+   candidate space for a work factor to protect, while a per-key salt would make authenticating one
+   request cost one derivation *per key in the table* — on every call, including each stream open.
+3. The boot claim, which authenticates `POST /v1/keys` and nothing else. Scoped to that method and
+   path together: `/v1/keys` is shared with the listing, so a path-only scope would let a claim
+   enumerate every credential on the server before exchanging itself for one.
+
+`POST /v1/keys` is the only response that ever carries a `secret`, and `OperatorKeyRecord` has no
+field for one — so there is no shape in which a stored or listed key could carry it.
+
+**A live key makes an otherwise-open server demand a credential.** On loopback with no
+`server.tokenEnv` the surface is open, as it has always been; the moment one key exists, every
+non-open path requires one. Without that, minting a key would do nothing and a browser could show a
+key-management page on a server anybody on the machine can reach. It latches on and never off:
+revoking the last key does **not** reopen the server, because a `DELETE` whose real effect is to
+remove authentication from every route is not what anybody revoking a credential is asking for.
+
+**The bootstrap is a one-time claim printed at boot**, while no key is live. Reading the server's
+own output is what confers first ownership — `docker logs` already reveals the agent's
+conversations, so it grants nothing new to whoever can see it. It is held in the process rather than
+the database, so it never outlives the boot that printed it; `serve --claim` prints one when a key
+already exists, which is the only route back from a lost credential on a token-less server.
+
+It is exchanged with a `POST`, not by opening a URL: a `GET` that spends a single-use token can be
+burned by a link preview or a browser pre-fetch before the person clicks, and the failure would look
+like a ticket that never worked. The spend happens **after** the body validates, so a rejected label
+leaves the ticket usable.
 
 ### Sessions
 

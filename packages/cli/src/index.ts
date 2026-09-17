@@ -310,6 +310,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 ...(port === undefined ? {} : { port }),
                 ...(host === undefined ? {} : { host }),
                 ...(store === undefined ? {} : { store }),
+                claim: flags.bool("claim"),
                 json: flags.bool("json"),
             })
         }

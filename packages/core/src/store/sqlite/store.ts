@@ -33,6 +33,8 @@ import type {
     MemoryStore,
     MessagePage,
     MessageStore,
+    OperatorKeyRecord,
+    OperatorKeyStore,
     OutboxStore,
     RuntimeMode,
     ScheduleOrigin,
@@ -48,6 +50,7 @@ import type {
     TurnStatus,
     TurnStore,
 } from "../store.ts"
+import { DEFAULT_KEY_TOUCH_MS } from "../store.ts"
 import type { OpenOptions, SqlDatabase, SqlStatement } from "./driver.ts"
 import { openDatabase } from "./driver.ts"
 import { type MigrationReport, migrate } from "./migrations.ts"
@@ -186,6 +189,16 @@ interface TurnRow {
     started_at: string
     ended_at: string | null
     duration_ms: number | null
+}
+
+/** No `agent_id`, deliberately — see migration 14. */
+interface OperatorKeyRow {
+    key_id: string
+    label: string
+    fingerprint: string
+    created_at: string
+    last_used_at: string | null
+    revoked_at: string | null
 }
 
 interface HandoffRow {
@@ -422,6 +435,16 @@ function toHandoff(row: HandoffRow): HandoffRecord {
     }
 }
 
+function toOperatorKey(row: OperatorKeyRow): OperatorKeyRecord {
+    return {
+        keyId: row.key_id,
+        label: row.label,
+        createdAt: row.created_at,
+        ...(row.last_used_at === null ? {} : { lastUsedAt: row.last_used_at }),
+        ...(row.revoked_at === null ? {} : { revokedAt: row.revoked_at }),
+    }
+}
+
 function toTurn(row: TurnRow): TurnRecord {
     return {
         turnId: row.turn_id,
@@ -575,6 +598,7 @@ export class SqliteStore implements Store {
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
     readonly handoffs: HandoffStore
+    readonly operatorKeys: OperatorKeyStore
     readonly location: string
     /** What `migrate` did at open. Reported by boot rather than logged and forgotten. */
     readonly migrations: MigrationReport
@@ -940,6 +964,32 @@ export class SqliteStore implements Store {
                   ORDER BY started_at ASC, rowid ASC`,
             ),
             handoffDeleteAll: db.prepare("DELETE FROM handoffs WHERE agent_id = ?"),
+            keyInsert: db.prepare(
+                `INSERT INTO operator_keys (key_id, label, fingerprint, created_at)
+                 VALUES (?, ?, ?, ?)`,
+            ),
+            // `revoked_at IS NULL` is in the statement rather than in a caller's filter: a
+            // revocation that depends on every reader remembering to check is a revocation that
+            // silently does nothing the first time somebody forgets.
+            keyByFingerprint: db.prepare(
+                "SELECT * FROM operator_keys WHERE fingerprint = ? AND revoked_at IS NULL",
+            ),
+            keyGet: db.prepare("SELECT * FROM operator_keys WHERE key_id = ?"),
+            // The coarse write, expressed as a predicate rather than a read-then-write: two
+            // concurrent requests would otherwise both read a stale stamp and both write.
+            keyTouch: db.prepare(
+                `UPDATE operator_keys
+                    SET last_used_at = ?
+                  WHERE key_id = ?
+                    AND (last_used_at IS NULL OR last_used_at < ?)`,
+            ),
+            keyList: db.prepare("SELECT * FROM operator_keys ORDER BY created_at DESC, rowid DESC"),
+            keyRevoke: db.prepare(
+                "UPDATE operator_keys SET revoked_at = ? WHERE key_id = ? AND revoked_at IS NULL",
+            ),
+            keyLiveCount: db.prepare(
+                "SELECT COUNT(*) AS c FROM operator_keys WHERE revoked_at IS NULL",
+            ),
             inboundKeyDeleteAll: db.prepare("DELETE FROM inbound_keys WHERE agent_id = ?"),
             outboxDeleteAll: db.prepare("DELETE FROM outbox WHERE agent_id = ?"),
             leaseDeleteAll: db.prepare("DELETE FROM runtime_leases WHERE agent_id = ?"),
@@ -1594,6 +1644,37 @@ export class SqliteStore implements Store {
             },
             forTurn: async (agentId, turnId) =>
                 q.handoffsForTurn.all<HandoffRow>(agentId, turnId).map(toHandoff),
+        }
+
+        this.operatorKeys = {
+            issue: async (record) => {
+                q.keyInsert.run(record.keyId, record.label, record.fingerprint, record.createdAt)
+                return {
+                    keyId: record.keyId,
+                    label: record.label,
+                    createdAt: record.createdAt,
+                }
+            },
+            findLive: async (fingerprint) => {
+                const row = q.keyByFingerprint.get<OperatorKeyRow>(fingerprint)
+                return row === undefined ? undefined : toOperatorKey(row)
+            },
+            touch: async (keyId, at, coarseMs = DEFAULT_KEY_TOUCH_MS) => {
+                // `at` minus the window is the floor the stored stamp has to be below. Computed
+                // here rather than passed in so the threshold cannot differ between two callers.
+                const floor = new Date(Date.parse(at) - coarseMs).toISOString()
+                q.keyTouch.run(at, keyId, floor)
+            },
+            list: async () => q.keyList.all<OperatorKeyRow>().map(toOperatorKey),
+            revoke: async (keyId, at) => {
+                q.keyRevoke.run(at, keyId)
+                // Read back rather than trusting the UPDATE's row count, because "no rows changed"
+                // is true both of an unknown id and of an already-revoked key, and those are a 404
+                // and a success. One read settles which.
+                const row = q.keyGet.get<OperatorKeyRow>(keyId)
+                return row === undefined ? undefined : toOperatorKey(row)
+            },
+            liveCount: async () => q.keyLiveCount.get<{ c: number }>()?.c ?? 0,
         }
 
         this.schedules = {

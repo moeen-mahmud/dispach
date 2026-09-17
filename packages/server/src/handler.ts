@@ -20,9 +20,15 @@ import {
     entryPhase,
     HarnessError,
     isPhased,
+    keyFingerprint,
+    keyLabelProblem,
+    MAX_KEY_LABEL,
     nearest,
+    newKeyId,
+    newKeySecret,
     newRunId,
     newTurnId,
+    type OperatorKeyStore,
     phasesFor,
     prepareScheduleWrite,
     type Runtime,
@@ -35,6 +41,7 @@ import {
     VERSION,
 } from "@dispach/core"
 import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
+import type { ClaimTicket } from "./keys.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
 
@@ -95,6 +102,17 @@ export interface HandlerOptions {
      * the honest signal that no question can be asked here.
      */
     readonly approvals?: ApprovalRegistry
+    /**
+     * The one-time bootstrap credential, when this boot printed one.
+     *
+     * Created by the caller that prints it, for the reason `running` and `approvals` are: a handler
+     * that minted one could not hand it back to be shown, and the printing is the entire mechanism.
+     *
+     * Absent is the ordinary state — a server whose key table is already populated has nothing to
+     * bootstrap, and printing a fresh claim at every boot would leave a standing credential in the
+     * logs, which is the opposite of what a one-time ticket is for.
+     */
+    readonly claim?: ClaimTicket
 }
 
 type Handler = (context: RequestContext) => Promise<Response> | Response
@@ -130,6 +148,32 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * warning already says so where somebody is looking.
      */
     const approvals = options.approvals ?? createApprovalRegistry()
+
+    /**
+     * Whether this server demands a credential — and a **latch**, not a running check.
+     *
+     * A configured token has always meant yes. The addition is that a live operator key means yes
+     * too, and that is the subtle half: without it, minting a key on a token-less loopback server
+     * would do *nothing*, so a browser could show a credential list and a key-management page on a
+     * server that every process on the machine can reach unauthenticated. That is the "looks
+     * protected and is not" shape, and it is worse than being plainly open.
+     *
+     * It latches **on** and never off. Revoking the last key on a token-less server does not reopen
+     * it, and that is deliberate in the safe direction: the alternative is a `DELETE` whose real
+     * effect is to remove authentication from every route, which is not what anybody revoking a
+     * credential is asking for. A server meant to be open is one started with no keys.
+     *
+     * The latch is also what keeps this off the hot path. With a token configured it answers from
+     * the first condition and never reads the database; with keys present it reads once per process.
+     * Only the genuinely open case asks each time, where the query is a count over an index on a
+     * table with no rows in it.
+     */
+    let closed = false
+    const authRequired = async (): Promise<boolean> => {
+        if (token !== undefined || closed) return true
+        closed = (await runtime.store.operatorKeys.liveCount()) > 0
+        return closed
+    }
 
     const router = new Router<Handler>()
 
@@ -520,6 +564,122 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             return json({ approvalId, granted: input.granted })
         }),
     )
+
+    // ─── Operator keys ───────────────────────────────────────────────────────────────────
+
+    /**
+     * Issue a key. The secret is in this response and in no other, ever.
+     *
+     * Authenticated by **either** an existing credential or the boot claim, and the claim is
+     * checked first for a reason that only shows up on a fresh server: with no token configured and
+     * no keys yet, the ordinary auth path lets every request through, so a claim presented there
+     * would be spent on a request that did not need it. Checking it first means a ticket is only
+     * ever consumed by a caller that actually exchanged it.
+     */
+    router.add("POST", "/v1/keys", async (context) => {
+        /**
+         * Whether the credential on this request *is* the claim — compared, never merely detected.
+         *
+         * The first version asked "did this request present a bearer at all", which is true of the
+         * configured token and of every key, so an entirely ordinary `POST` was answered
+         * `claim_spent`. Every call that mints a key went through it, so the whole route was broken
+         * by a question that looked equivalent and was not.
+         */
+        const usedClaim =
+            options.claim !== undefined && presentedClaim(context.request) === options.claim.token
+
+        const body = await readJson(context.request)
+        if (body.kind === "error") return fail(body.error, 400)
+        const input = body.value as { label?: unknown }
+        if (typeof input.label !== "string") {
+            return fail(
+                {
+                    code: "key_label_required",
+                    message: "The request body has no string `label`.",
+                    hint: 'Send { "label": "my browser" }. A label is required rather than defaulted because it is the only thing distinguishing two credentials in a listing, and "key 2" is a name nobody can act on when deciding which to revoke.',
+                    field: "label",
+                },
+                400,
+            )
+        }
+        const problem = keyLabelProblem(input.label)
+        if (problem !== undefined) {
+            return fail(
+                {
+                    code: "key_label_invalid",
+                    message: problem,
+                    hint: `A label is shown in a listing and in the UI, so it is at most ${MAX_KEY_LABEL} printable characters on one line. It is a display name, not a description.`,
+                    field: "label",
+                },
+                400,
+            )
+        }
+
+        /**
+         * Spent **after** validation and before the write.
+         *
+         * After, because burning a one-use bootstrap credential on a malformed label would leave an
+         * operator with a spent ticket, no key, and a restart as the only way back — while the
+         * request that failed is one they can simply retry. Before the write, because that ordering
+         * makes a lost race a refusal rather than a second key: two claims arriving together both
+         * pass the gate while the ticket is live, and only one `spend()` returns true.
+         */
+        if (usedClaim && options.claim?.spend() !== true) return claimSpent()
+
+        const secret = newKeySecret()
+        const record = await runtime.store.operatorKeys.issue({
+            keyId: newKeyId(now()),
+            label: input.label.trim(),
+            fingerprint: await keyFingerprint(secret),
+            createdAt: new Date(now()).toISOString(),
+        })
+        // `secret` is spread in beside the record rather than being part of it: `OperatorKeyRecord`
+        // has no field for one, so there is no shape in which a stored or listed key carries it.
+        return json({ ...record, secret }, 201)
+    })
+
+    /**
+     * List keys — labels and metadata, never secrets.
+     *
+     * Revoked keys are listed with their `revokedAt`, not filtered out. A revocation somebody
+     * cannot see the result of is one they will do twice, and the row is the only record that a
+     * credential ever existed.
+     */
+    router.add("GET", "/v1/keys", async () => {
+        const keys = await runtime.store.operatorKeys.list()
+        return json({
+            keys,
+            /**
+             * Said on the wire, because the plan's rule was "said in the UI, not discovered" and a
+             * UI is one consumer. Every key reaches every session; keys are authentication only.
+             */
+            scope: "Every key authenticates every route for every agent this server holds. Keys are authentication, not authorisation.",
+        })
+    })
+
+    /**
+     * Revoke one. Idempotent, and it never reports a lie about what is now true.
+     *
+     * Revoking an already-revoked key is a success carrying the original stamp rather than a 404:
+     * the caller asked for a state that already holds, and a retried request is not a mistake. An
+     * id that never existed is the 404, which is the only case where the answer "it is revoked"
+     * would be a statement about nothing.
+     */
+    router.add("DELETE", "/v1/keys/:keyId", async (context) => {
+        const keyId = context.params.keyId ?? ""
+        const record = await runtime.store.operatorKeys.revoke(keyId, new Date(now()).toISOString())
+        if (record === undefined)
+            // Its own hint, because the default one talks about session keys and channel segments —
+            // true of the 404 this server returns most often and about nothing here. Found by
+            // reading real output: a caller who has just been told to check for a channel segment
+            // in a key id is a caller looking in the wrong place.
+            return notFound(
+                "key",
+                keyId,
+                "The id is the `keyId` from POST /v1/keys, not the secret — GET /v1/keys lists them. An already-revoked key is a 200 carrying its original stamp, so this really does mean no such key exists.",
+            )
+        return json(record)
+    })
 
     // ─── Turns, continued ────────────────────────────────────────────────────────────────
 
@@ -988,8 +1148,15 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                     )
                 }
 
-                if (!isOpenPath(url.pathname) && token !== undefined) {
-                    const unauthorized = checkToken(request, token)
+                if (!isOpenPath(url.pathname) && (await authRequired())) {
+                    const unauthorized = await authorise({
+                        request,
+                        expected: token,
+                        keys: runtime.store.operatorKeys,
+                        claim: options.claim,
+                        pathname: url.pathname,
+                        at: now(),
+                    })
                     if (unauthorized !== undefined) return unauthorized
                 }
 
@@ -1027,8 +1194,15 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             )
         }
 
-        if (!isOpenPath(url.pathname) && token !== undefined) {
-            const unauthorized = checkToken(request, token)
+        if (!isOpenPath(url.pathname) && (await authRequired())) {
+            const unauthorized = await authorise({
+                request,
+                expected: token,
+                keys: runtime.store.operatorKeys,
+                claim: options.claim,
+                pathname: url.pathname,
+                at: now(),
+            })
             if (unauthorized !== undefined) return unauthorized
         }
 
@@ -1183,20 +1357,134 @@ function notFound(kind: string, id: string, hint?: string): Response {
 }
 
 /**
- * Compared in constant time, and the failure never says which part was wrong.
+ * What a request presented as its bearer token, or `""` when it presented nothing.
  *
- * A message distinguishing "no token" from "wrong token" tells an attacker their request shape is
- * right, which is the more useful half of the answer.
+ * `""` rather than `undefined` so the constant-time comparison below always has something to
+ * compare: an early return on "no header" would make the absent-token case measurably faster than
+ * the wrong-token one.
  */
-function checkToken(request: Request, expected: string): Response | undefined {
+/**
+ * The presented bearer, when there is one. Used only to decide whether a claim is being exchanged.
+ *
+ * Separate from `presentedToken` because the two answer different questions and want different
+ * empty values: authentication needs a string to compare in constant time, while "is this a claim
+ * attempt" needs to tell an absent header from an empty one.
+ */
+function presentedClaim(request: Request): string | undefined {
     const header = request.headers.get("authorization") ?? ""
-    const presented = header.startsWith("Bearer ") ? header.slice(7) : ""
-    if (timingSafeEqual(presented, expected)) return undefined
+    if (!header.startsWith("Bearer ")) return undefined
+    const value = header.slice(7)
+    return value === "" ? undefined : value
+}
+
+function presentedToken(request: Request): string {
+    const header = request.headers.get("authorization") ?? ""
+    return header.startsWith("Bearer ") ? header.slice(7) : ""
+}
+
+/**
+ * Whether this request may proceed, checked against every credential this server accepts.
+ *
+ * ## Three credentials, in a fixed order, and the order is the design
+ *
+ * 1. **The configured token**, from `server.tokenEnv`. Still a first-class credential and not
+ *    demoted to a bootstrap: a platform calls server-to-server with the container's token and has
+ *    to keep working once a person has also minted a browser key. It cannot be revoked through this
+ *    API — it is the environment's, and a route that could revoke it would be a route that locks an
+ *    operator out of their own container.
+ * 2. **An operator key**, matched by fingerprint. One indexed read; `auth/keys.ts` carries the
+ *    argument for why that is a single SHA-256 rather than a KDF.
+ * 3. **The boot claim**, which authenticates `POST /v1/keys` and nothing else. Scoped here rather
+ *    than trusted to the route, so a claim presented to any other path is an ordinary `401` instead
+ *    of a partial credential whose blast radius depends on which handler remembered to check.
+ *
+ * The token is tried first because it is a constant-time compare with no I/O, so the common
+ * server-to-server case never touches the database. It is deliberately **not** dispatched on the
+ * key prefix, which would read as tidier and would lock out an operator whose `server.tokenEnv`
+ * value happens to begin with it.
+ *
+ * ## The failure never says which part was wrong
+ *
+ * One message for a missing token, a wrong token, a revoked key and an unknown key. Distinguishing
+ * them tells an attacker their request *shape* is right, which is the more useful half of the
+ * answer — and "revoked" specifically would confirm that a leaked credential had once been real.
+ */
+async function authorise(input: {
+    readonly request: Request
+    readonly expected: string | undefined
+    readonly keys: OperatorKeyStore
+    readonly claim: ClaimTicket | undefined
+    readonly pathname: string
+    readonly at: number
+}): Promise<Response | undefined> {
+    const presented = presentedToken(input.request)
+
+    if (input.expected !== undefined && timingSafeEqual(presented, input.expected)) return undefined
+
+    if (presented !== "") {
+        const record = await input.keys.findLive(await keyFingerprint(presented))
+        if (record !== undefined) {
+            // Coarse, and awaited rather than fired and forgotten: an unawaited write can outlive
+            // the response and land after the store has closed, which throws from a context with
+            // nothing to catch it.
+            await input.keys.touch(record.keyId, new Date(input.at).toISOString())
+            return undefined
+        }
+        if (input.claim !== undefined && timingSafeEqual(presented, input.claim.token)) {
+            /**
+             * A claim opens exactly one **route**, which is a method *and* a path.
+             *
+             * Scoping on the path alone is the obvious version and was wrong: `/v1/keys` is shared
+             * by the listing, so a claim could read every credential on the server — labels,
+             * ids, and which of them are live — before exchanging itself for anything. Caught by
+             * the test that asserts it opens one route and no other, which is exactly the shape
+             * that would have looked correct in review.
+             *
+             * Scoped here rather than trusted to the route, so a claim presented anywhere else is
+             * an ordinary 401 rather than a partial credential whose blast radius depends on which
+             * handler remembered to check.
+             */
+            if (input.request.method !== "POST" || input.pathname !== "/v1/keys")
+                return unauthorized()
+            // Recognised and used up. This is the one credential failure worth distinguishing:
+            // unlike a wrong key it discloses nothing the caller does not already hold, and the
+            // alternative is a bootstrap that fails with no way to tell a spent ticket from a
+            // mistyped paste. A claim from an *earlier boot* is not recognisable at all and falls
+            // through to the generic answer, which is honest — this process has never seen it.
+            if (!input.claim.live()) return claimSpent()
+            return undefined
+        }
+    }
+
+    return unauthorized()
+}
+
+/**
+ * The one refusal every failed credential shares, built in one place so they cannot drift.
+ *
+ * A missing token, a wrong token, a revoked key, an unknown key and a claim presented to the wrong
+ * path all answer with this. Two of those are tempting to distinguish and both would tell an
+ * attacker their request *shape* is right, which is the more useful half of the answer — "revoked"
+ * would additionally confirm that a leaked credential had once been real.
+ */
+function unauthorized(): Response {
     return fail(
         {
             code: "unauthorized",
             message: "Missing or invalid bearer token.",
-            hint: "Send Authorization: Bearer <token>, where the token is the value of the variable named by server.tokenEnv.",
+            hint: "Send Authorization: Bearer <token>, where the token is either the value of the variable named by server.tokenEnv or an operator key from POST /v1/keys. A revoked key and a wrong one answer the same way on purpose.",
+        },
+        401,
+    )
+}
+
+/** Two callers — the gate and the route's race loser — so the answer cannot differ between them. */
+function claimSpent(): Response {
+    return fail(
+        {
+            code: "claim_spent",
+            message: "That claim has already been exchanged.",
+            hint: "A claim is good for one key. Use the key it minted; if it is lost, restart with --claim to print a new one — a claim lives in the process rather than the database, so it never outlives the boot that printed it.",
         },
         401,
     )

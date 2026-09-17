@@ -16,6 +16,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Runtime } from "@dispach/core"
 import { createHandler } from "../src/handler.ts"
+import type { ClaimTicket } from "../src/keys.ts"
 
 export const TOKEN = "test-token-abcdef"
 export const ENV = { MODEL_API_KEY: "sk-test" }
@@ -153,6 +154,8 @@ export async function harness(
         running?: Map<string, AbortController>
         /** A different manifest — `PHASED_MANIFEST` for anything about tools or phases. */
         manifest?: string
+        /** The one-time bootstrap ticket, for the claim path. */
+        claim?: ClaimTicket
     } = {},
 ) {
     const dir = workspace(options.manifest)
@@ -168,6 +171,7 @@ export async function harness(
             ? { allowUnauthenticated: true }
             : { token: options.token }),
         ...(options.running === undefined ? {} : { running: options.running }),
+        ...(options.claim === undefined ? {} : { claim: options.claim }),
     })
 
     const call = (

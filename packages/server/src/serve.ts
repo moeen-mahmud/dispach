@@ -83,6 +83,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // accepted, and dropped, so a registry handed to `serve` would have answered every POST
         // with `approval_not_found` while the turn waited on the *other* registry forever.
         ...(options.approvals === undefined ? {} : { approvals: options.approvals }),
+        // Same trap, eighth field. A dropped claim would print a working-looking bootstrap line
+        // whose token authenticates nothing — a first-run failure with no way to tell it from a
+        // mistyped paste.
+        ...(options.claim === undefined ? {} : { claim: options.claim }),
     })
 
     const underBun = typeof Bun !== "undefined" && typeof Bun.serve === "function"

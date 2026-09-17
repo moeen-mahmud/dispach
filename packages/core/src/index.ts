@@ -5,6 +5,13 @@
  * surface — CLI, server, Docker image — is a consumer of what is exported here.
  */
 
+export {
+    keyFingerprint,
+    keyLabelProblem,
+    MAX_KEY_LABEL,
+    newKeySecret,
+    OPERATOR_KEY_PREFIX,
+} from "./auth/keys.ts"
 export type { Brand } from "./brand.ts"
 export {
     BRAND,
@@ -79,7 +86,7 @@ export type {
     TurnEndReason,
 } from "./events/types.ts"
 export { EVENT_TYPES } from "./events/types.ts"
-export { newRunId, newStepId, newTurnId } from "./loop/ids.ts"
+export { newKeyId, newRunId, newStepId, newTurnId } from "./loop/ids.ts"
 export {
     entryPhase,
     isPhased,
@@ -408,6 +415,8 @@ export type {
     KVStore,
     MessagePage,
     MessageStore,
+    OperatorKeyRecord,
+    OperatorKeyStore,
     OutboxStore,
     ScheduleFired,
     ScheduleOrigin,
@@ -424,6 +433,7 @@ export type {
     TurnStore,
     UpsertSchedule,
 } from "./store/store.ts"
+export { DEFAULT_KEY_TOUCH_MS } from "./store/store.ts"
 export {
     type ArtifactSink,
     describeArtifact,

@@ -328,6 +328,85 @@ export interface HandoffStore {
     forTurn(agentId: string, turnId: string): Promise<readonly HandoffRecord[]>
 }
 
+/**
+ * How stale `last_used_at` is allowed to get: one minute.
+ *
+ * The figure the column answers is "is anybody still using this credential", which is read by the
+ * day. A per-request `UPDATE` would buy second-level precision nobody looks at and pay for it on
+ * every route including each SSE open.
+ */
+export const DEFAULT_KEY_TOUCH_MS = 60_000
+
+/**
+ * One operator key, as every surface but the issue response sees it.
+ *
+ * **There is no secret field, and there is no way to add one.** The secret exists for the length of
+ * `POST /v1/keys` and is never stored — only its fingerprint is — so a record that carried one
+ * would be a record that could not be produced. That absence is the whole security property, which
+ * is why it is a fact about the type rather than a rule about the queries.
+ */
+export interface OperatorKeyRecord {
+    readonly keyId: string
+    /** What distinguishes this credential from the others in a listing. */
+    readonly label: string
+    readonly createdAt: string
+    /**
+     * Coarse: written at most once a minute per key, so a live credential is distinguishable from a
+     * forgotten one without an `UPDATE` on the hot path of every request.
+     */
+    readonly lastUsedAt?: string
+    /** Set rather than deleted. Present means the key is dead and can never be revived. */
+    readonly revokedAt?: string
+}
+
+/**
+ * Bearer credentials for this server, independent of any agent.
+ *
+ * The only store in this file with no `agent_id` parameter anywhere, for the reason migration 14
+ * records: a key authenticates a caller to a *server*, and `purgeAgent` deliberately leaves them.
+ */
+export interface OperatorKeyStore {
+    /**
+     * Store a new key's fingerprint under a label. The secret itself is never passed in.
+     *
+     * Takes the fingerprint rather than the secret precisely so this interface cannot be the place
+     * a secret is accidentally logged, retained or compared.
+     */
+    issue(record: {
+        readonly keyId: string
+        readonly label: string
+        readonly fingerprint: string
+        readonly createdAt: string
+    }): Promise<OperatorKeyRecord>
+    /**
+     * The live key with this fingerprint, if any. One indexed read.
+     *
+     * A revoked key answers `undefined` — the caller must not have to remember to check, because
+     * "forgot to filter on `revoked_at`" is a revocation that silently does nothing.
+     */
+    findLive(fingerprint: string): Promise<OperatorKeyRecord | undefined>
+    /**
+     * Note that a key was just used, if the stored stamp is older than `coarseMs`.
+     *
+     * The threshold lives here rather than at the call site so every caller gets the same
+     * behaviour: a per-caller decision about how often to write is how one route comes to keep a
+     * column fresh while another leaves it null.
+     */
+    touch(keyId: string, at: string, coarseMs?: number): Promise<void>
+    /** Every key, newest first, live and revoked. Revoked ones are shown, never hidden. */
+    list(): Promise<readonly OperatorKeyRecord[]>
+    /**
+     * Revoke one key. `undefined` when no such id exists; the record when it does.
+     *
+     * Revoking an already-revoked key keeps the original stamp and is not an error — the caller
+     * asked for a state that already holds, and a 404 there would make a retried request look like
+     * a mistake.
+     */
+    revoke(keyId: string, at: string): Promise<OperatorKeyRecord | undefined>
+    /** How many keys can still authenticate. Read at boot to decide whether a claim is needed. */
+    liveCount(): Promise<number>
+}
+
 /** How a runtime was started. Reported in a refusal, so it has to be a fact rather than a guess. */
 export type RuntimeMode = "daemon" | "terminal" | "embedded"
 
@@ -940,6 +1019,14 @@ export interface Store {
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
     readonly handoffs: HandoffStore
+    /**
+     * Server credentials. The one store here that is not per-agent — see migration 14.
+     *
+     * Which is why `purgeAgent` does not clean it and `AgentFootprint` does not count it: removing
+     * one agent from a shared sandbox root must not revoke the credential still authenticating
+     * calls about the others.
+     */
+    readonly operatorKeys: OperatorKeyStore
     /** Human-readable location, for `store.ready` and the `sessions` command. */
     readonly location: string
     /**

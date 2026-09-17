@@ -55,3 +55,15 @@ export function newApprovalId(now = Date.now()): string {
 export function newRunId(now = Date.now()): string {
     return id("r", now)
 }
+
+/**
+ * One operator key's identity. It is **not** the secret, and it is not derived from it.
+ *
+ * The id is what `DELETE /v1/keys/:id` names and what `GET /v1/keys` lists, so it reaches logs,
+ * URLs and screens — all places the secret must never be. Deriving it from the secret (a prefix, a
+ * truncated hash) would make every one of those a partial disclosure of the credential, and a
+ * truncated hash is exactly the kind of "it is only eight characters" that turns out to be enough.
+ */
+export function newKeyId(now = Date.now()): string {
+    return id("k", now)
+}

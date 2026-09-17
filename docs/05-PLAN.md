@@ -3667,22 +3667,82 @@ is absent from `EVENT_TYPES`**, so the day 10B lands the premise fails loudly. T
 callback cannot read the `events` array its own test helper returns — temporal dead zone, caught by
 `decideAndRun` as a denial, so the capture reads empty and the assertion passes on no data.
 
-### 15.1 — Operator keys — **not started**
+### 15.1 — Operator keys — **complete** (2026-09-17)
 
-Migration 13 (10A took 12): one table — id, label, hash, `created_at`, `last_used_at`,
-`revoked_at` — hashed with `scrypt` from `node:crypto`, so no new dependency and `check:deps` stays
-green. Shown once at issue. `POST /v1/keys`, `GET /v1/keys`, `DELETE /v1/keys/:id`; `checkToken`
-grows a second path matching a presented key against the table, keeping the constant-time comparison
-and never distinguishing "no token" from "wrong token". `serve` prints a **one-time claim URL** at
-boot whose token dies on use or restart, so reading the container logs confers first ownership.
+**Goal.** A credential a browser can hold and an operator can revoke without restarting the
+process, which the container's `server.tokenEnv` value cannot be: it is the one secret every
+scheduled caller also uses, so pasting it into a web form makes the least rotatable thing the most
+widely handled.
 
-Keys are **authentication only**: every key sees every session. Said in the UI, not discovered.
+Migration **14** (10A took 12, 10B took 13): one table — `key_id`, `label`, `fingerprint`,
+`created_at`, `last_used_at`, `revoked_at`. `POST /v1/keys`, `GET /v1/keys`,
+`DELETE /v1/keys/:keyId`. `authorise` replaces `checkToken` and tries three credentials in a fixed
+order: the configured token, an operator key, the boot claim.
+
+**Three places this departs from the plan, each with the reason recorded.**
+
+- **`SHA-256`, not `scrypt`** (11.192). A slow KDF protects a *guessable* secret; a 160-bit CSPRNG
+  token has no candidate space. What it would have cost is concrete: a per-key salt cannot be
+  indexed, so one request means one derivation *per key in the table*, on every call including each
+  SSE open.
+- **A claim exchanged by `POST`, not a URL** (11.195). A `GET` that spends a single-use token can be
+  burned by a link preview before the person clicks, and a URL implies a page 15.3 has not built.
+- **A live key closes an otherwise-open server** (11.193), which the plan did not mention and which
+  the feature is hollow without: on loopback with no token, minting a key would otherwise do
+  nothing at all.
+
+**Acceptance**
+
+- [x] The secret appears in one response and nowhere else — asserted against the whole serialised
+      listing, not field by field, because a conditional spread would be invisible to the latter
+- [x] A key authenticates every non-open route, and the configured token keeps working beside it
+- [x] A revoked key, a wrong key and no token are one answer; only a recognised-but-spent claim is
+      distinguished, which discloses nothing the caller does not already hold
+- [x] The claim exchanges once, opens `POST /v1/keys` and no other route, and survives a refused body
+- [x] `last_used_at` is written, coarsely, and the threshold is the store's rather than each caller's
+- [x] `purgeAgent` leaves the keys alone, asserted with two agents in one store
+- [x] Verified live: real server, real model — the claim matrix across three restarts, the latch, a
+      turn taken through a key, and the token still working with keys present
+
+**Four defects, three found by tests and one by reading real output.**
+
+The claim route asked `presentedClaim(request) !== undefined`, which means "did this request present
+*any* bearer" — true of the token and of every key — so **every ordinary mint was answered
+`claim_spent`**. Scoping the claim by path alone let it read `GET /v1/keys`, enumerating every
+credential on the server before exchanging itself for one; a claim opens a method *and* a path.
+Spending it before validation burned the ticket on a malformed label, leaving a restart as the only
+way back. And `key_not_found` inherited `notFound`'s default hint — *"a session key includes its
+channel segment"* — which is advice to look in the wrong place; its guard now names what the
+sentence must mention, because a non-empty-hint assertion passed happily on the wrong sentence.
+
+**Two guards that could not fail on the first write**, both fixed:
+
+- The real-bind test (`serve` forwarding `claim` — the **eighth** instance of the hand-built-object
+  shape) had no token, so the server was open and the request succeeded whether or not the claim
+  reached the handler. A token is what makes the claim the only thing that can authorise the call.
+- Nothing guarded the spend *ordering* until a test asserted that a `400` leaves the ticket live.
+
+All told, eleven guards revert-checked red in both directions.
+
+**A CLI surface is not part of this.** `keys` is already the keyboard byte probe, and the recovery
+path a person needs turned out to be one flag: a claim prints whenever no key is live, so revoking
+your last one recovers on the next boot with nothing to remember. `serve --claim` covers the
+remaining case — a live key whose secret is lost.
+
+**Left for 15.3.** The claim URL form, once a page exists to consume it; a `?claim=` query then puts
+the token in browser history, which is a cost to state at that point rather than assume now.
 
 ### 15.3 — The UI — **not started**
 
 `packages/web`, built to static assets, mounted by `packages/server` at `/`, consuming
 `packages/client`. Chat with per-token streaming, session list and switch, tool calls and results,
 approval prompts, key management.
+
+15.1 and 15.2 are both in, so this stage now has everything it consumes: a revocable browser
+credential, and an approval request on the stream with a POST to answer it. Two things it inherits
+rather than designs — the claim URL form (11.195), and the sentence `GET /v1/keys` already returns
+in its `scope` field, which says keys are authentication and not authorisation and must be shown
+rather than left to be discovered.
 
 Two costs to weigh before starting. The image is 83 MB against a 150 MB CI ceiling, so the bundle
 has a budget. And the framework choice is a dependency decision that belongs in `00-DECISIONS.md` —

@@ -686,6 +686,57 @@ CREATE TABLE handoffs (
 CREATE INDEX handoffs_by_turn ON handoffs (agent_id, turn_id, started_at);
 `,
     },
+    {
+        version: 14,
+        name: "operator_keys",
+        /**
+         * Labelled bearer credentials a person can revoke without restarting the process.
+         *
+         * **No `agent_id`, and that is the one deliberate exception in this file.** Every other
+         * table is keyed by agent because isolation here is a property of the queries rather than
+         * of the filesystem — one `store.db` per sandbox root. A key is not an agent's, though: it
+         * authenticates a *caller* to a server, `serve` takes one manifest, and a key minted while
+         * serving one agent has to keep working when the same operator serves another from the same
+         * root. Two consequences are stated rather than discovered. `purgeAgent` does not touch
+         * this table, because deleting one agent must not revoke the credential somebody is holding
+         * for the rest; and `AgentFootprint` has no key count, because a per-agent report cannot
+         * honestly carry a server-wide number. That is the same shape as `kv` having no `agent_id`
+         * — the difference, and the reason this is not a repeat of that mistake, is that `kv` has
+         * no consumer anywhere while every column below is read by a route.
+         *
+         * `fingerprint` is `SHA-256(secret)`, **unsalted and UNIQUE**, which is what makes
+         * authentication one indexed read. `auth/keys.ts` carries the argument for why that is the
+         * right primitive for a 160-bit generated secret and why a salted KDF would have turned
+         * every request into one derivation per stored key.
+         *
+         * `revoked_at` is a soft delete and `DELETE /v1/keys/:id` writes it rather than removing
+         * the row. Two reasons, and the second is the one that decides it: the row is the only
+         * record that a credential ever existed, and `fingerprint` must stay in the unique index so
+         * a revoked secret can never be re-presented — a hard delete would free its digest for a
+         * future collision check to miss.
+         *
+         * `last_used_at` is written **at most once a minute per key**, not on every request. The
+         * column exists so an operator can tell a live credential from a forgotten one, and that
+         * question is answered by the day; an `UPDATE` per request would put a write on the hot path
+         * of every route including each SSE open, for a figure nobody reads to the second. A column
+         * nothing writes would have been the `includeHistory` shape this repo has been caught by six
+         * times, so it is written — just coarsely, and the coarseness is in the store rather than
+         * left to each caller.
+         */
+        sql: `
+CREATE TABLE operator_keys (
+    key_id       TEXT PRIMARY KEY,
+    label        TEXT NOT NULL,
+    fingerprint  TEXT NOT NULL UNIQUE,
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at   TEXT
+);
+
+-- The listing orders by age and shows live keys first; the lookup rides the UNIQUE index above.
+CREATE INDEX operator_keys_by_age ON operator_keys (created_at);
+`,
+    },
 ]
 
 export interface MigrationReport {

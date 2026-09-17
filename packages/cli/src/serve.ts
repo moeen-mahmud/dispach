@@ -16,7 +16,7 @@
  */
 
 import { BRAND, EventBus, HarnessError, loadManifest, Runtime } from "@dispach/core"
-import { createApprovalRegistry, serve } from "@dispach/server"
+import { claimCommand, createApprovalRegistry, createClaimTicket, serve } from "@dispach/server"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
@@ -35,6 +35,8 @@ export interface ServeOptions {
     readonly port?: number
     readonly host?: string
     readonly store?: string
+    /** Print a one-time claim even when a key already exists. The lockout escape. */
+    readonly claim?: boolean
     readonly json?: boolean
 }
 
@@ -155,6 +157,20 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     claimSignals()
     const stopRequested = waitForSignal()
 
+    /**
+     * The one-time bootstrap credential, minted only when there is nothing to bootstrap *from*.
+     *
+     * Printed while no operator key is live, and otherwise not — a fresh claim at every boot would
+     * leave a standing credential in the log, which is the opposite of a one-time ticket. `--claim`
+     * overrides that, because a claim printed only while no key exists is a claim unavailable to
+     * exactly the person who has lost theirs.
+     *
+     * Minted after `Runtime.create` because the store has to be open to ask, and before the bind
+     * because the handler needs it — the same ordering `approvals` has one layer up.
+     */
+    const liveKeys = await runtime.store.operatorKeys.liveCount()
+    const claim = liveKeys === 0 || options.claim === true ? createClaimTicket() : undefined
+
     let running: Awaited<ReturnType<typeof serve>>
     try {
         running = await serve({
@@ -162,6 +178,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             host,
             port,
             approvals,
+            ...(claim === undefined ? {} : { claim }),
             ...(token === undefined || token === "" ? {} : { token }),
         })
     } catch (error) {
@@ -204,6 +221,8 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                 url: running.url,
                 websocket: running.websocket,
                 authenticated: token !== undefined && token !== "",
+                keys: liveKeys,
+                ...(claim === undefined ? {} : { claim: claim.token }),
                 agents: agents.map((agent) => ({
                     id: agent.id,
                     channels: runtime.channels.statusOf(agent.id),
@@ -231,6 +250,29 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                               : ""
                       }`
             process.stdout.write(`  ${agent.id} — ${suffix}${scheduled}\n`)
+        }
+        if (claim !== undefined) {
+            // Printed here rather than logged at debug level for the reason the 57 MB log taught:
+            // this is the line somebody is looking at, and a bootstrap credential in a file nobody
+            // opens is a bootstrap nobody performs. Reading it is what confers first ownership, and
+            // that is a real boundary — `docker logs` already reveals the agent's conversations, so
+            // this grants nothing new to anyone who can see it.
+            process.stdout.write(
+                `  one-time claim — exchange it once for an operator key you can revoke:\n    ${claimCommand(
+                    host,
+                    running.port,
+                    claim.token,
+                )}\n`,
+            )
+            if (token === undefined || token === "") {
+                // The latch in `createHandler`: a live key makes this server demand a credential.
+                // Said out loud, because minting one on an open server *changes* what the server
+                // is, and discovering that by being locked out of your own loopback port is the
+                // worst way to learn it.
+                process.stdout.write(
+                    "    the first key closes this server — every route then needs a credential.\n",
+                )
+            }
         }
         if (token === undefined || token === "") {
             // Loopback-only, or `serve` would have refused to bind. Said out loud anyway: someone
