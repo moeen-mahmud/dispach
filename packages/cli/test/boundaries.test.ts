@@ -569,27 +569,56 @@ describe("hard rule 3 — the brand lives in one file", () => {
 })
 
 describe("the image can build what the repo builds", () => {
-    test("the Dockerfile copies every workspace package's manifest", () => {
-        // A hand-kept list of workspace members, and it bit immediately: adding `@dispach/client`
-        // to the root `build` script broke the image, because `bun install` inside the builder
-        // never saw that package and `@dispach/core` then would not resolve from it. The failure
-        // is a `TS2307` in a container build — far from the edit that caused it, and invisible
-        // until somebody builds the image.
-        //
-        // Derived here instead. Both stages copy the same set, so both counts have to match: the
-        // builder needs the manifest to link the workspace, and the runtime stage installs
-        // production dependencies against the same root `workspaces` glob.
+    /** The Dockerfile split at its stage boundaries, so a claim can be made about one stage. */
+    function stages(): { readonly builder: string; readonly runtime: string } {
         const dockerfile = readFileSync(join(SRC, "..", "..", "..", "docker", "Dockerfile"), "utf8")
+        const parts = dockerfile.split(/^FROM /m)
+        const builder = parts.find((part) => part.includes("AS builder")) ?? ""
+        const runtime = parts.find((part) => part.includes("AS runtime")) ?? ""
+        expect(builder).not.toBe("")
+        expect(runtime).not.toBe("")
+        return { builder, runtime }
+    }
+
+    test("the builder copies every workspace package's manifest", () => {
+        // A hand-kept list of workspace members, and it bit immediately: adding a new workspace
+        // package to the root `build` script broke the image, because `bun install` inside the
+        // builder never saw that package and core then would not resolve from it. The failure is a
+        // `TS2307` in a container build — far from the edit that caused it, and invisible until
+        // somebody builds the image. Derived here instead.
+        //
+        // **Once, not twice.** This asserted two copies until 15.5, because both stages installed:
+        // the builder to link the workspace, the runtime to install production dependencies. The
+        // runtime stage has no install any more — the application is one compiled binary — so a
+        // second copy would be a stage doing work nothing needs.
+        const { builder } = stages()
         const packages = readdirSync(join(SRC, "..", ".."), { withFileTypes: true })
             .filter((entry) => entry.isDirectory())
             .map((entry) => entry.name)
             .sort()
         const missing = packages.filter(
             (name) =>
-                (dockerfile.match(new RegExp(`^COPY packages/${name}/package\\.json `, "gm")) ?? [])
-                    .length !== 2,
+                (builder.match(new RegExp(`^COPY packages/${name}/package\\.json `, "gm")) ?? [])
+                    .length !== 1,
         )
         expect(missing).toEqual([])
+    })
+
+    test("the runtime stage installs nothing and carries no source", () => {
+        // The property that makes one manifest copy correct, and it is worth locking rather than
+        // implying. A runtime `bun install --production` is how ~17 MB of `react-devtools-core`
+        // reached every shipped image: `ink` declares it a **peerDependency**, so `--production`
+        // does not skip it. Deleting the install is what makes that unrepresentable; reintroducing
+        // one would restore the cost silently, and the image would still work.
+        //
+        // No `COPY packages/` either: the whole application is the compiled binary, so a `dist/`
+        // arriving in the runtime stage means something is being resolved at boot that should have
+        // been bundled.
+        const { runtime } = stages()
+        expect(runtime).not.toContain("bun install")
+        expect(runtime.match(/^COPY packages\//m)).toBeNull()
+        // And the binary is there, which is the other half of "the application is one file".
+        expect(runtime).toContain("COPY --from=builder")
     })
 })
 

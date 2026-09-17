@@ -75,23 +75,36 @@ jobs:
       # Reported either way, because "how big is it" is a question somebody asks long before it
       # fails a threshold.
       #
-      # **The ceiling was 150 MB and is now 350.** Renegotiated rather than relaxed quietly, with
-      # the numbers: Phase 11 measured 47 MB, the shell worth having took it to 68 (decision
-      # 11.183), and 15.4 measured the image actually shipping at **287 MB** — the gate had been
-      # red since the browser surface landed. The three figures in the docs (47, 68, 83) could not
-      # all be current and none of them was.
+      # **The ceiling, renegotiated twice in one day and each time with the measurement attached.**
+      # 150 MB (Phase 11) → 350 (15.4, when the image actually shipping measured 287 and the gate
+      # had been red since the browser surface landed) → 700 (15.5, on the base-image change).
       #
-      # 350 is a ceiling and not a target. The deliberate position is that the image carries
-      # everything an agent needs — a shell, `git`, a Python interpreter and the web UI — and the
-      # cost of that is stated rather than traded away. Phase 15.5 replaces the base image
-      # entirely, so this number is expected to move again and must be re-measured, not carried.
+      # Measured on arm64 at 15.5, by layer, because "it got bigger" is not a finding:
+      #
+      #   debian:trixie-slim          109 MB
+      #   apt packages                180 MB   ← of which `git` alone is 92
+      #   uv + uvx                     47 MB
+      #   the compiled binary          85 MB
+      #   ────────────────────────────────────
+      #                               570 MB
+      #
+      # `git` at 92 MB is the price of glibc: Debian's git pulls perl and git-man, where alpine's
+      # is a fraction of that. It buys prebuilt Python wheels, which is the trade 15.5.1 argues —
+      # musl has no compiler here, so a wheel without a `musllinux` build is a *failure* inside a
+      # tool call rather than a slow install.
+      #
+      # 700 is a ceiling, not a target, and the stated position is that the image carries
+      # everything an agent needs. The known trims, in order and each with a cost: drop `uvx`
+      # (-23 MB, `uv run` is the documented path); remove perl after installing git (-~60 MB, and
+      # `git add -i`/`send-email` stop working); drop `python3` and let `uv` fetch its own (-37 MB,
+      # and the first Python tool call becomes a download).
       - name: image size
         run: |
           bytes=$(docker image inspect dispach:ci --format '{{.Size}}')
           mb=$(( bytes / 1000000 ))
           echo "image is ${mb} MB"
-          if [ "$mb" -gt 350 ]; then
-            echo "::error::image is ${mb} MB, over the 350 MB ceiling"
+          if [ "$mb" -gt 700 ]; then
+            echo "::error::image is ${mb} MB, over the 700 MB ceiling"
             exit 1
           fi
 
@@ -102,7 +115,7 @@ jobs:
       - name: the shell the agent gets
         run: |
           missing=""
-          for tool in sh bash git python3 curl wget node; do
+          for tool in sh bash git python3 curl jq uv dispach; do
             docker run --rm --entrypoint sh dispach:ci -c "command -v $tool >/dev/null" \
               || missing="$missing $tool"
           done
@@ -111,11 +124,58 @@ jobs:
             exit 1
           fi
           echo "toolchain present"
+
+          # **Absent on purpose, and asserted.** Since 15.5 the runtime stage has no Bun and no
+          # Node: the application is one compiled binary, which is what deletes the runtime
+          # `bun install` — and with it the ~17 MB of `react-devtools-core` that `--production`
+          # could not skip, because `ink` declares it a peerDependency. A change that reintroduced
+          # either would quietly restore that cost, so it fails here instead.
+          #
+          # No pager and no editor either: `exec` hands a child a file descriptor and never a TTY,
+          # so anything that pages or prompts blocks until `deadlineMs` and reads as a hung agent.
+          present=""
+          for tool in bun node less nano vi; do
+            docker run --rm --entrypoint sh dispach:ci -c "command -v $tool >/dev/null" \
+              && present="$present $tool"
+          done
+          if [ -n "$present" ]; then
+            echo "::error::these should not be in the image:$present"
+            exit 1
+          fi
+          echo "no runtime, no pager, no editor"
+
+          # glibc, which is the whole reason the base image changed. A revert to musl passes every
+          # test above and then fails inside a tool call, on a machine nobody is watching.
+          docker run --rm --entrypoint sh dispach:ci -c 'ldd --version 2>&1 | head -1' | grep -qi glibc \
+            || { echo "::error::the image is not glibc — a Python wheel without a musllinux build will try to compile, and there is no compiler"; exit 1; }
+
+          # A C-extension wheel, with no compiler present. The payoff measured rather than argued.
+          docker run --rm --entrypoint sh dispach:ci -c '
+            command -v cc gcc >/dev/null && exit 9
+            uv pip install --quiet --system --break-system-packages --target /tmp/w msgpack >/dev/null 2>&1 || exit 1
+            python3 -c "import sys; sys.path.insert(0, \"/tmp/w\"); import msgpack" ' \
+            || { echo "::error::a prebuilt C-extension wheel did not install and import"; exit 1; }
+          echo "wheels install with no compiler"
+
+          # `tzdata`, for schedules. `zone.ts` walks local calendar fields through Intl, and with no
+          # zone database a cron silently runs in UTC — the failure the DST handling exists to stop.
+          docker run --rm --entrypoint sh dispach:ci -c 'TZ=Asia/Dhaka date +%z' | grep -q '+0600' \
+            || { echo "::error::a named timezone does not resolve — schedules would silently run in UTC"; exit 1; }
+          echo "named timezones resolve"
+
           # Non-root is the other half, and it is what the containment in docker-compose.yml
           # assumes. A base-image change that reverted to root would make every cap_drop moot.
           uid=$(docker run --rm --entrypoint sh dispach:ci -c 'id -u')
           [ "$uid" = "1000" ] || { echo "::error::image runs as uid $uid, expected 1000"; exit 1; }
           echo "runs as uid 1000"
+
+          # `$HOME` is load-bearing since 15.5: `lib/sandbox.ts` resolves `~/.dispach`, and `USER`
+          # does **not** set `$HOME` in Docker — it is inherited from the build environment. Unset,
+          # the sandbox lands under `/root`, which is writable while building and refused at run
+          # time, so the failure arrives on the first turn rather than at start.
+          home=$(docker run --rm --entrypoint sh dispach:ci -c 'echo $HOME')
+          [ "$home" = "/home/dispach" ] || { echo "::error::HOME is '$home', expected /home/dispach"; exit 1; }
+          echo "HOME is a real home"
 
       # Start to ready, the number the container claim is actually about. `minimal` needs only a
       # key-shaped string to load — nothing here calls an endpoint.
@@ -147,6 +207,48 @@ jobs:
             exit 1
           fi
           docker rm -f probe
+
+      # **One agents directory, which is the defect 15.5 exists to fix.**
+      #
+      # It was two: `DISPACH_HOME=/state` put `init`'s output in `/state/agents` while the CMD served
+      # `/agent`, so an agent created inside the container was invisible to every listing and nothing
+      # would ever serve it. Found by using the container, not by reading it — and an earlier draft of
+      # the plan wrote it up as a supported feature.
+      #
+      # The guard is a listing rather than a unit test, because the thing that was wrong was not a
+      # function's return value: every piece worked and none of them was connected. Both halves below
+      # fail on the pre-15.5 image.
+      - name: one agents directory
+        run: |
+          set -e
+          docker volume rm -f ci-home >/dev/null 2>&1 || true
+          run() {
+            docker run --rm \
+              -v ci-home:/home/dispach \
+              -v "$PWD/examples/minimal:/agent" \
+              -e MODEL_ID=gpt-4o-mini \
+              -e MODEL_BASE_URL=https://api.openai.com/v1 \
+              -e MODEL_API_KEY=ci-not-a-real-key \
+              dispach:ci "$@"
+          }
+
+          # The mounted manifest, reached by **bare ref** through the link the entrypoint makes —
+          # the same `resolveAgentRef` path a laptop uses, rather than a second special path.
+          run validate primary --plain | tee /tmp/v.txt
+          grep -q "agents/primary/agent.yaml" /tmp/v.txt \
+            || { echo "::error::the mounted agent is not reachable as 'primary' in the sandbox"; exit 1; }
+
+          # An agent created *inside* the container has to land in the same directory.
+          run init --yes --user ci --name probe \
+            --model gpt-4o-mini --base-url https://api.openai.com/v1 | tail -3
+
+          # …and both have to appear in one listing, after a fresh container on the same volume.
+          run run --plain > /tmp/list.txt 2>&1 || true
+          cat /tmp/list.txt
+          grep -q "^primary" /tmp/list.txt || { echo "::error::the mounted agent is missing from the listing"; exit 1; }
+          grep -q "^probe"   /tmp/list.txt || { echo "::error::the agent created in the container is missing from the listing"; exit 1; }
+          echo "one directory, both agents, across container lifetimes"
+          docker volume rm -f ci-home >/dev/null 2>&1 || true
 
       # The front door, exercised the way a reader of the README will. The step above proves the
       # *image*; this proves the compose file — which is where the traps are, because every one of

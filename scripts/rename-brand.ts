@@ -111,6 +111,11 @@ function walk(dir: string, onFile: (path: string) => void): void {
 const inScope: string[] = [
     join(ROOT, "packages", "core", "src", "brand.ts"),
     join(ROOT, "docker", "Dockerfile"),
+    // The entrypoint carries the state directory, because it links the mounted agent into the
+    // sandbox and `<slug>` is half that path. Left out, a rename would leave a script that
+    // silently linked nothing into a directory nothing reads — the link is made at start, so
+    // there is no build to fail and no straggler report to notice.
+    join(ROOT, "docker", "entrypoint.sh"),
     // The compose file and its example environment carry the env var prefix, the image tag and
     // the state volume's name — all derived from the slug exactly like the package scope is.
     // Left out, they are reported as "left alone — review these", which makes a rename two

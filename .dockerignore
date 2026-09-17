@@ -14,6 +14,9 @@
 node_modules
 **/node_modules
 
+# The compiled binaries. 61-103 MB each, and the builder compiles its own.
+dist-bin
+
 # Build output. The builder stage runs `bun run build` itself; shipping a stale local `dist/`
 # would be the recorded stale-dist hazard with a container around it.
 dist
@@ -60,3 +63,8 @@ docs
 # The compose file and the Dockerfile itself. Read by the daemon from outside the context.
 docker-compose.yml
 docker
+# …with one exception: the entrypoint is `COPY`d into the image, so it has to be *in* the context.
+# Excluding the directory was correct while the Dockerfile was the only thing in it — the daemon
+# reads that from outside — and the failure when it stopped being true is legible but points at the
+# COPY rather than at here: `"/docker/entrypoint.sh": not found`.
+!docker/entrypoint.sh

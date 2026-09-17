@@ -3912,6 +3912,91 @@ consistent with the 84/92 ms recorded in 11.202.
 - [ ] npm publishing — **out of scope here.** Open item O.2 (registering the `@dispach` scope) has to
       land first, and a pipeline that cannot be run is not a pipeline
 
+### 15.5 — The container the agent lives in — **built** (2026-09-17)
+
+The image was a **process wrapper**: `oven/bun:1-alpine`, a `bun install --production` of nine
+manifests, seven copied `dist/` directories, `DISPACH_HOME=/state`, and `/home/bun` as a 128 MB
+tmpfs wiped on every restart. Right when the deliverable was "run `serve` in a container"; wrong for
+what this is. **The agent has a shell, and containment is the deployment's job** — so the container
+is the small Linux machine the agent works on, with a home that persists, one place an agent can
+live, and the tooling its own documented features require.
+
+**Deliverables**
+
+- `debian:trixie-slim` runtime on glibc; builder moved from `oven/bun:1-alpine` to `oven/bun:1`, so
+  both stages are Debian 13 / glibc 2.41 and no cross-compilation happens
+- the runtime stage is **one file** — no Bun, no Node, no `node_modules`, no `bun install`
+- a real `/home/dispach` with `ENV HOME`, one volume, and **`DISPACH_HOME` dropped from the image**
+- `docker/entrypoint.sh`, which links the mounted manifest into the sandbox as `primary`
+- `apt` set with a reason each: `git bash python3 python3-venv curl ca-certificates jq tzdata`, plus
+  `uv` 0.12.15 copied from its own image; no pager, no editor, no `wget`
+- compose: one `dispach-home` volume, one tmpfs, `read_only` intact
+- `lib/config-env.ts` grows `sourceOf`/`describeOrigin`/`envProvenance`; `validate` prints the
+  winning source when it is surprising
+- CI: glibc asserted, a C-extension wheel installed with no compiler, a named timezone resolved,
+  Bun and Node asserted **absent**, `$HOME` checked, and a one-agents-directory listing guard
+
+**Measured, arm64**
+
+| layer | |
+| --- | --- |
+| `debian:trixie-slim` | 109 MB |
+| apt packages | 180 MB — of which **`git` alone is 92** |
+| `uv` + `uvx` | 47 MB |
+| the compiled binary | 85 MB |
+| **total** | **570 MB** |
+
+`git` at 92 MB is the price of glibc: Debian's git pulls perl and git-man. It buys wheels that
+install rather than compile. Start-to-ready is **5.7 s**, unchanged from 13.5's 5.8 s — almost all
+of it waiting for the first healthcheck probe rather than for the runtime.
+
+**Five things found by building it**
+
+- **Two agents directories, and only one was ever served.** `DISPACH_HOME=/state` put `init`'s output
+  in `/state/agents` while the CMD served `/agent`, so an agent created inside the container was
+  invisible to every listing and nothing would serve it. Found by *using* the container (Moeen), not
+  by reading it — and an earlier draft of the plan wrote it up as a supported feature ("two ways an
+  agent exists, and both stay supported"). The fix needs no code change: `listAgents` calls
+  `statSync(...).isDirectory()` and **`stat` follows symlinks**, so a link at
+  `~/.dispach/agents/primary` makes the mounted agent an ordinary sandbox agent, and `CMD` became
+  `serve primary` through the one `resolveAgentRef` path a laptop uses.
+- **The link has to be made at start, not at build.** A volume mounted at `$HOME` replaces whatever
+  the image put there. A *named* volume is seeded from the image on first use, so a build-time link
+  survives that one case — and is absent for a bind mount, and absent for a named volume made by an
+  older image. Three shapes, one of which works. `entrypoint.sh` makes it idempotently and `exec`s,
+  so `/proc/7/cmdline` still reads `dispach serve primary --host 0.0.0.0`.
+- **`USER` does not set `$HOME` in Docker.** It is inherited from the build environment, so without
+  the explicit `ENV HOME` the sandbox resolves against `/root` — writable while building, refused
+  under `USER dispach`, and the failure arrives on the first turn. Asserted in CI.
+- **`process.title` is a no-op under Bun**, which means a recorded property has been false in the
+  primary runtime the whole time and is now false everywhere it ships. Measured three ways on the
+  same manifest: `node packages/cli/dist/index.js serve …` shows **`dispach minimal`**, while
+  `bun packages/cli/src/index.ts serve …` and the compiled binary both show raw argv. So "a
+  long-running process names itself in Activity Monitor" holds only on the soft-compat runtime. Not
+  fixable from here — Bun ignores the setter — so the claim is narrowed rather than kept.
+- **Deleting the runtime install is what removes `react-devtools-core`.** ~17 MB reached every
+  shipped image because `ink` declares it a **peerDependency**, which `--production` does not skip.
+  It cannot arrive now, and `boundaries.test.ts` asserts the runtime stage runs no `bun install` —
+  the guard that makes copying each workspace manifest *once* correct rather than accidental.
+
+**Acceptance**
+
+- [x] glibc in both stages; a C-extension wheel installs and imports with **no compiler present**
+- [x] A named timezone resolves (`TZ=Asia/Dhaka date` → `+0600`), so schedules do not silently run
+      in UTC
+- [x] `$HOME` is `/home/dispach`; `~/.dispach` holds `store.db` and `agents/`
+- [x] `dispach validate primary` resolves the mounted manifest **by bare ref**
+- [x] `dispach init` inside the container writes to `~/.dispach/agents/probe`, and a fresh container
+      on the same volume lists **both** `primary` and `probe`
+- [x] `docker compose up -d --wait` healthy in 5.7 s; `/`, `/assets/app.js` and `/v1/ready` answer,
+      `/v1/agents` is 401 without a token and 200 with one
+- [x] Bun, Node, `wget`, `less`, `nano` and `vi` are all absent, asserted
+- [x] Both new Dockerfile guards revert-checked red: a reintroduced runtime `bun install`, and a
+      removed manifest copy
+- [x] `sourceOf` revert-checked — disabling the ambiguity branch fails exactly one test
+- [ ] amd64 is unbuilt here. Every figure above is arm64, and the release workflow's buildx leg is
+      the first thing that will produce the other architecture
+
 ---
 
 ## Carried backlog

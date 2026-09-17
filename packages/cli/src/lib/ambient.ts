@@ -39,7 +39,14 @@ import { existsSync, readFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { type EnvSource, parseDotEnv } from "@dispach/core"
 
-function readDotEnv(dir: string): Record<string, string> {
+/**
+ * The `.env` in a directory, or nothing.
+ *
+ * Exported because `config-env.ts` needs the same three layers this module resolves in order to say
+ * *which* of them a value came from, and two readers of one file is how two answers to one question
+ * come about.
+ */
+export function readDotEnv(dir: string): Record<string, string> {
     const path = join(dir, ".env")
     if (!existsSync(path)) return {}
     try {

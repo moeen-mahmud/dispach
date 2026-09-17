@@ -60,11 +60,22 @@ services:
             # an agent boots and then fails the first time it is asked to remember something.
             - "${AGENT_DIR:-./examples/minimal}:/agent"
 
+            # **The agent's home, and now the only state volume.** It was `/state` with
+            # `DISPACH_HOME` pointing at it, which produced two disjoint agents directories: `init`
+            # wrote to `/state/agents` while the CMD served `/agent`, so an agent created inside the
+            # container was invisible to every listing and nothing would ever serve it. The image
+            # sets no `DISPACH_HOME` at all now — `HOME` decides, so the paths are a laptop's
+            # (`~/.dispach/store.db`, `~/.dispach/agents/`) and the mounted manifest appears in that
+            # one directory as `primary`, linked at start by the entrypoint.
+            #
             # A **named** volume, which is the whole reason the most common first-run failure is
             # unreachable here: a named volume inherits uid 1000 from the image, while a host path
-            # keeps host ownership and a non-root container cannot write its own store. Swap this
-            # for a bind mount and `chown 1000:1000` it first.
-            - dispach-state:/state
+            # keeps host ownership and a non-root container cannot write its own home. Swap this for
+            # a bind mount and `chown 1000:1000` it first.
+            #
+            # It now also holds the `uv` cache and the cloned skills catalogues, which used to sit on
+            # a tmpfs and be thrown away on every restart.
+            - dispach-home:/home/dispach
 
         # ─── Containment ──────────────────────────────────────────────────────────────────
         #
@@ -107,19 +118,18 @@ services:
 
         # **A read-only root filesystem**, with writable scratch where things genuinely write.
         #
-        # `/agent` and `/state` are mounts and stay writable — the skills cache writes to
+        # `/agent` and `/home/dispach` are mounts and stay writable — the skills cache writes to
         # `<agentDir>/.dispach/` and `memory_write` appends beside the manifest. Everything else
         # is immutable, so a shell cannot leave anything behind that survives a restart.
         #
-        # The two tmpfs entries are the exceptions, and each is load-bearing: `/tmp` because
-        # `exec` hands children a file descriptor there rather than buffering their output, and
-        # `$HOME` because `uv` materialises its cache under it the first time a Python skill runs.
-        # Both are wiped on restart, which is the trade: a cold `uv` cache on every boot, in
-        # exchange for a filesystem an agent cannot modify.
+        # **One tmpfs now, not two.** `/tmp` stays because `exec` hands children a file descriptor
+        # there rather than buffering their output. The second entry was `/home/bun`, and it existed
+        # only because the home directory was not a real one: `uv` materialises its cache under
+        # `$HOME`, so a tmpfs meant a cold Python environment on every boot and a re-clone of ~22 MB
+        # of skills catalogues. `$HOME` is a volume now, so the trade is gone rather than accepted.
         read_only: true
         tmpfs:
             - /tmp:size=256m,mode=1777
-            - /home/bun:size=128m,uid=1000,gid=1000
 
         # Compose's default is 10 s, which can SIGKILL an outbox flush mid-write. Exactly-once is
         # held per crash point rather than claimed outright, and the window a hard kill lands in is
@@ -155,10 +165,10 @@ services:
     #         MODEL_API_KEY: ${MODEL_API_KEY:?}
     #     volumes:
     #         - "./my-other-agent:/agent"
-    #         - dispach-state-two:/state
+    #         - dispach-home-two:/home/dispach
     #     init: true
     #     stop_grace_period: 30s
 
 volumes:
-    dispach-state:
-    # dispach-state-two:
+    dispach-home:
+    # dispach-home-two:
