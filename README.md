@@ -228,14 +228,25 @@ in flight, and exits 0.
 
 ## Hosting with Compose
 
-The one-command path. `docker compose up` brings up a server with an agent and an exposed API — a
-living agent server, reachable over HTTP, with nothing to configure but a token and a model key.
+The one-command path. `docker compose up` brings up a server with an agent, an exposed API and the
+**web UI on the same origin** — nothing to configure but a token and a model key.
 
 ```bash
-cp .env.example .env          # then DISPACH_API_TOKEN and MODEL_API_KEY
-docker compose up -d --wait
+cp .env.example .env               # then DISPACH_API_TOKEN and MODEL_API_KEY
+docker compose up -d --build --wait
 curl localhost:7420/v1/ready
+docker compose logs agent          # the claim link — open it once to get a browser key
 ```
+
+Then open `http://localhost:7420` and paste nothing: the claim link in the logs carries a one-time
+token the page exchanges for a key it keeps. Reading the container's own output is what confers
+first ownership, which grants nothing new to anyone who could already run `docker compose logs`.
+
+**`--build` is not optional after the first run.** `image: dispach:local` names a tag, and compose
+builds only when that tag is *absent* — so a second `up` reuses whatever was built before, reports
+healthy, and serves it. Measured while writing this: a two-day-old image came up green and answered
+every request from a binary that predated two whole phases. The recorded stale-`dist` hazard with a
+container around it, and the same tell — everything works, nothing is current.
 
 ```bash
 curl -s -H "Authorization: Bearer $DISPACH_API_TOKEN" \
@@ -248,6 +259,13 @@ curl -s -H "Authorization: Bearer $DISPACH_API_TOKEN" \
 `docker-compose.yml` is at the repo root so a fresh clone needs no `-f`. The full wire surface is
 in [`docs/04-SPEC-WIRE.md`](docs/04-SPEC-WIRE.md); `docker compose down` stops it and
 `docker compose down -v` also discards the state volume.
+
+Every compose subcommand reads `.env`, not just `up` — so passing the variables inline works for
+`up` and then `logs`, `ps` and `down` fail on the same interpolation. Copy the file.
+
+One thing the claim link cannot know: it is built from the port the server **bound**, which is
+always 7420 inside the container. Set `HOST_PORT` to anything else and the link needs that port
+substituted by hand.
 
 Four things in that file are answers to defaults that bite, and they are commented there rather
 than left to be discovered:

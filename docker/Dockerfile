@@ -109,6 +109,19 @@ COPY --from=builder /build/packages/tools-system/dist ./packages/tools-system/di
 COPY --from=builder /build/packages/tools-composio/dist ./packages/tools-composio/dist
 COPY --from=builder /build/packages/tools-web/dist ./packages/tools-web/dist
 
+# A `dispach` on the PATH, so the command is the command everywhere.
+#
+# The entrypoint already runs the CLI, but `docker exec` bypasses an entrypoint — so inspecting a
+# running agent meant `bun /app/packages/cli/dist/index.js validate /agent/agent.yaml`, which is
+# both a mouthful and a path a person has to know. With this, `docker compose exec agent dispach
+# sessions /agent/agent.yaml` is the same command as on a laptop.
+#
+# `exec` in the shim rather than a plain call, so signals reach bun instead of stopping at a shell
+# that would then have nothing to forward them to. Written before `USER bun`, because
+# `/usr/local/bin` is root's.
+RUN printf '#!/bin/sh\nexec bun /app/packages/cli/dist/index.js "$@"\n' > /usr/local/bin/dispach \
+    && chmod 0755 /usr/local/bin/dispach
+
 RUN mkdir -p /state /agent && chown -R bun:bun /state /agent
 USER bun
 
@@ -138,5 +151,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 # A non-loopback bind requires an API token, deliberately (decision 11.29's neighbour). So a
 # published container needs `<ENVPREFIX>API_TOKEN` set, and refuses to start without it rather than
 # binding the world unauthenticated. The refusal names the variable.
-ENTRYPOINT ["bun", "/app/packages/cli/dist/index.js"]
+# The shim, not the long form — so `docker inspect` and a `ps` line both read `dispach serve …`,
+# and there is one spelling of how this image is entered rather than two.
+ENTRYPOINT ["dispach"]
 CMD ["serve", "/agent/agent.yaml", "--host", "0.0.0.0"]

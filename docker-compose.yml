@@ -1,8 +1,14 @@
 # Dispach as a hosted agent server.
 #
-#   cp .env.example .env     # then a token and a model key
-#   docker compose up -d --wait
+#   cp .env.example .env               # then a token and a model key
+#   docker compose up -d --build --wait
 #   curl localhost:7420/v1/ready
+#   docker compose logs agent          # the claim link, for the web UI at localhost:7420
+#
+# **`--build` is not optional after the first run**, and leaving it off is a trap rather than a
+# slow path: `image:` below names a tag, compose builds only when that tag is *absent*, so a second
+# `up` reuses whatever was built before and reports healthy. Measured — a two-day-old image came up
+# green and served a binary that predated two phases.
 #
 # At the **repo root** rather than in `docker/`, so `git clone && docker compose up` needs no `-f`.
 # The Dockerfile stays where it is; `build.dockerfile` points at it.
