@@ -206,6 +206,27 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+
+    # **Required, and deleting it turns every step below red.** No committed example validates with
+    # an empty environment, and that is the feature rather than a gap: `validate` refuses a manifest
+    # whose key env vars are unset, because an unset variable expanding to an empty string surfaces
+    # later as a confusing auth error. Measured on a fresh checkout — `minimal` and `team` fail
+    # `env_var_missing @ model.main.id`, `reference` and `shell-agent` fail
+    # `manifest_validation_failed @ model.main.apiKeyEnv`.
+    #
+    # The values are deliberately fake and nothing here reaches a network: `validate` loads and
+    # checks, and `serve` binds loopback. Same shape and the same placeholders as the `docker` job
+    # above, so the two cannot drift into disagreeing about what a CI environment looks like.
+    #
+    # This step was written and verified locally, where it passed — because `ambientEnv` layers the
+    # **cwd's** `.env`, and the repo root had one. That is the recorded hazard twice over: verify a
+    # workflow change against a fresh clone rather than against your working tree, and remember the
+    # cwd's `.env` is a participating layer.
+    env:
+      MODEL_ID: gpt-4o-mini
+      MODEL_BASE_URL: https://api.openai.com/v1
+      MODEL_API_KEY: ci-not-a-real-key
+
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2

@@ -3876,6 +3876,19 @@ consistent with the 84/92 ms recorded in 11.202.
 - **The linux binaries are ~1.6× the darwin ones** — 103.3 MB and 96.2 MB against 61.0 MB. Bun's
   embedded linux runtime is simply larger. This matters beyond the download: it is the figure 15.5's
   image budget has to be built on, not the 61 MB one that gets quoted.
+- **The CI step for the binary was verified locally, passed, and failed on the first real run** —
+  `env_var_missing: MODEL_ID is referenced by model.main.id but is not set`, from `validate` on
+  `examples/minimal`. The binary was fine; the step was wrong twice over. `examples/minimal` is the
+  one example that deliberately uses `${MODEL_ID}` (its own comment says the indirection *is* the
+  point) and its `.env` is gitignored, so a fresh checkout cannot expand it. It passed here because
+  **`ambientEnv` layers the *cwd's* `.env`** and the repo root had one — the recorded contamination
+  hazard, hit as a *verification* hazard rather than a runtime one. Measured on a clean tree from a
+  cwd with no `.env`: `minimal` and `team` fail `env_var_missing @ model.main.id`, `reference` and
+  `shell-agent` fail `manifest_validation_failed @ model.main.apiKeyEnv`. **No committed example
+  validates with an empty environment, and that is the feature** — so the job carries the same fake
+  `MODEL_*` values the `docker` job already used, at job level so all three steps share one source.
+  Transferable, and already written down once: *verify a workflow change against a fresh clone,
+  never against your working tree.*
 - **The documented image size was wrong in all three places, and the CI gate had been red.** 47 MB
   (13.5), 68 MB (11.183) and 83 MB (Phase 11) could not all be current; the image actually shipping
   measures **287 MB**, so the 150 MB gate has been failing since the browser surface landed.
