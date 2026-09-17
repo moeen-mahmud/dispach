@@ -44,6 +44,7 @@ import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
 import type { ClaimTicket } from "./keys.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
+import { serveAsset, WEB_PATHS } from "./web.ts"
 
 /** Bodies larger than this are refused before a channel plugin sees them. */
 const MAX_BODY_BYTES = 1_000_000
@@ -564,6 +565,46 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             return json({ approvalId, granted: input.granted })
         }),
     )
+
+    // ─── The browser surface ─────────────────────────────────────────────────────────────
+
+    /**
+     * Three paths, named explicitly, with **no catch-all**.
+     *
+     * Registered in the router rather than short-circuited ahead of it, so `HEAD` and `OPTIONS`
+     * answer correctly and `Allow` is derived from the same table as everything else — a second
+     * dispatch path is how one surface comes to disagree with another about what a method does. The
+     * `GET /v1/ws` exemption exists because an upgrade cannot be a `Response`; a file can.
+     *
+     * A wildcard falling back to `index.html` is the usual arrangement and is wrong here: it makes
+     * every mistyped API path answer `200` with a web page, so a client calling `/v1/agentss` gets
+     * HTML where it expected JSON and the failure surfaces as a parse error far from the typo. The
+     * page has no client-side routes, so nothing needs the fallback.
+     */
+    /**
+     * Three paths, as three literal registrations, and the literal is load-bearing.
+     *
+     * A `for (const path of WEB_PATHS)` loop is one line shorter and **invisible to the spec
+     * guard**, which reads this file for registrations whose method and path are string literals —
+     * so the routes would have been undocumented, unchecked, and reported as compliant. Found by
+     * writing the loop first and noticing the guard stayed green. (This sentence deliberately does
+     * not spell the call out: the scanner is a regex over the source, and a comment quoting the
+     * shape it matches becomes a phantom route in its output — which is how it first read
+     * `METHOD path` as an undocumented endpoint.) `webRoutesMatchAssets` in `spec.test.ts` is what keeps these
+     * three in step with `WEB_ASSETS` now that they are written out.
+     *
+     * Registered in the router rather than short-circuited ahead of it, so `HEAD` and `OPTIONS`
+     * answer correctly and `Allow` derives from the same table as everything else. The `GET /v1/ws`
+     * exemption exists because an upgrade cannot be a `Response`; a file can.
+     *
+     * **No catch-all.** A wildcard falling back to `index.html` is the usual arrangement and is
+     * wrong here: it makes every mistyped API path answer `200` with a web page, so a client
+     * calling `/v1/agentss` gets HTML where it expected JSON and the failure surfaces as a parse
+     * error far from the typo. The page has no client-side routes, so nothing needs it.
+     */
+    router.add("GET", "/", (context) => web("/", context))
+    router.add("GET", "/assets/app.js", (context) => web("/assets/app.js", context))
+    router.add("GET", "/assets/app.css", (context) => web("/assets/app.css", context))
 
     // ─── Operator keys ───────────────────────────────────────────────────────────────────
 
@@ -1266,6 +1307,25 @@ async function writeSchedule(
     }
 }
 
+/**
+ * One asset lookup for the three routes above, so the table is consulted in a single place.
+ *
+ * The throw is an invariant rather than a 404: every path passed here is a literal that
+ * `spec.test.ts` has already matched against `WEB_ASSETS`, so a miss means the build produced
+ * something other than what the source imports — which is a broken deployment, not a missing file,
+ * and a 404 would read as the latter.
+ */
+function web(path: string, context: RequestContext): Response {
+    const response = serveAsset(path, context.request)
+    if (response === undefined)
+        throw new HarnessError({
+            code: "web_asset_missing",
+            message: `No web asset for ${path}.`,
+            hint: "The routes in handler.ts and the table in web.ts have diverged, which spec.test.ts asserts cannot happen — so this build is inconsistent. Rebuild with `bun run build`.",
+        })
+    return response
+}
+
 function json(body: unknown, status = 200): Response {
     return new Response(JSON.stringify(body), {
         status,
@@ -1307,7 +1367,20 @@ function isOpenPath(pathname: string): boolean {
     return (
         pathname === "/v1/health" ||
         pathname === "/v1/ready" ||
-        pathname.startsWith("/v1/channels/")
+        pathname.startsWith("/v1/channels/") ||
+        /**
+         * The UI shell and its two assets.
+         *
+         * Not a relaxation: a page load has no header to carry a bearer in, so a credential-gated
+         * shell is a shell nobody can reach. **The page holds no data** — every value it displays
+         * comes from `/v1` with a key, and an unauthenticated reader learns only that a Dispach
+         * server is here, which `/v1/health` already tells them.
+         *
+         * Derived from `WEB_PATHS` rather than matched by prefix. `startsWith("/assets/")` would
+         * open any future path under it, and the set of things served from a directory is exactly
+         * the kind of list that grows without anybody re-reading the auth rule.
+         */
+        WEB_PATHS.includes(pathname)
     )
 }
 

@@ -16,7 +16,7 @@ export {
     type PendingApproval,
 } from "./approvals.ts"
 export { createHandler, type HandlerOptions } from "./handler.ts"
-export { type ClaimTicket, claimCommand, createClaimTicket } from "./keys.ts"
+export { type ClaimTicket, claimCommand, claimUrl, createClaimTicket } from "./keys.ts"
 export { type Route, type RouteMatch, Router } from "./router.ts"
 export { isLoopback, type RunningServer, type ServeOptions, serve } from "./serve.ts"
 export {
@@ -26,4 +26,5 @@ export {
     type SseStreamOptions,
     sseResponse,
 } from "./sse.ts"
+export { serveAsset, WEB_ASSETS, WEB_PATHS, type WebAsset } from "./web.ts"
 export { attachWebSocket, type WebSocketBridge, type WsSession } from "./ws.ts"

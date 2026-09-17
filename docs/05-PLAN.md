@@ -3732,22 +3732,114 @@ remaining case — a live key whose secret is lost.
 **Left for 15.3.** The claim URL form, once a page exists to consume it; a `?claim=` query then puts
 the token in browser history, which is a cost to state at that point rather than assume now.
 
-### 15.3 — The UI — **not started**
+### 15.3 — Dispach Web — **built, browser check outstanding** (2026-09-17)
 
-`packages/web`, built to static assets, mounted by `packages/server` at `/`, consuming
-`packages/client`. Chat with per-token streaming, session list and switch, tool calls and results,
-approval prompts, key management.
+**Goal.** Chat, sessions, approvals and key management in a browser, same origin, no CORS.
+`docker compose up` brings the UI with it; `dispach serve` on a laptop does too.
 
-15.1 and 15.2 are both in, so this stage now has everything it consumes: a revocable browser
-credential, and an approval request on the stream with a POST to answer it. Two things it inherits
-rather than designs — the claim URL form (11.195), and the sentence `GET /v1/keys` already returns
-in its `scope` field, which says keys are authentication and not authorisation and must be shown
-rather than left to be discovered.
+React 19 + Vite (Moeen, 2026-09-17). `packages/web` has **zero runtime dependencies** — a bundled
+browser app compiles its framework into the output, so `react`, `react-dom`, `vite` and
+`@vitejs/plugin-react` are devDependencies and the image's production install pulls none of them
+(11.201). What "lightweight" governs is the browser payload, guarded by a ceiling on a real bundle
+the way `packages/client`'s is.
 
-Two costs to weigh before starting. The image is 83 MB against a 150 MB CI ceiling, so the bundle
-has a budget. And the framework choice is a dependency decision that belongs in `00-DECISIONS.md` —
-11.10 caps the CLI's runtime deps at the renderer pair, and this is the first thing to test whether
-that discipline generalises.
+**Assets are inlined as text, not read from disk** (11.200). Measured across the three shapes a
+standalone command has to work in — source checkout, bundled `dist/`, compiled executable —
+`with { type: "file" }` **fails in the bundled one**, handing back a relative spec that resolves
+against the process cwd. `with { type: "text" }` works in all three with no sidecar files, so there
+is nothing to copy into the image and nothing to list in `files`. The constraint shapes the UI: no
+binary assets, favicon as an inline SVG data URI.
+
+**Prerequisite, done 2026-09-17 (11.199).** `packages/client`'s browser bundle was **1.18 MB** — one
+barrel import from core putting Zod and a YAML parser in a page that can never load a manifest.
+`@dispach/core/wire` carries the two runtime values the client needs; the bundle is **14.7 KB**, the
+published subpath **3.22 KB**. Three guards, revert-checked both ways. That was the UI's entire JS
+budget, spent before a component existed.
+
+15.1 and 15.2 are both in, so this stage has everything it consumes: a revocable browser credential,
+and an approval request on the stream with a POST to answer it. It also closes 15.1's one loose end —
+with a page to consume it, `serve` prints the **claim URL** (11.195) instead of a curl line.
+
+**Deliverables**
+
+- `packages/web` — Vite build to `packages/web/dist`, stable filenames so the import list is static
+- A static seam in `packages/server`, checked after `/v1`, with the shell and assets on `isOpenPath`
+  because a page load carries no bearer — the shell holds no data, everything comes from `/v1`
+- Chat with per-token streaming, session list and switch, tool calls and results, approval prompts,
+  key management
+- `serve` prints the claim URL; the page exchanges it
+- Vite dev server proxying `/v1`, for UI work without rebuilding
+
+**Acceptance**
+
+- [x] The shell is served at `/` with no credential, and `/v1` still refuses one — verified live on
+      the same server, which is the pair that matters: either half alone is satisfied by a server
+      that is entirely open or entirely closed
+- [x] A turn streams token by token, fed through the real reducer from a real DeepSeek stream:
+      `reasoning → tool → reasoning → reply`
+- [x] Reattach: the live turn id is parked in `sessionStorage` and re-followed on mount
+- [x] An approval is a row where it happened, with the three outcomes kept apart
+- [x] A key can be minted, listed and revoked from the page
+- [x] The browser payload is under its ceiling, measured on the built output and refusing stale output
+- [x] The spec guard covers the new routes; its `/v1`-only parser is widened by *naming* the three
+      paths rather than accepting any path, so it still cannot match prose
+- [ ] **The page itself opened in a browser.** Everything below the rendering was verified against a
+      live server; the Chrome extension was unreachable in this session, so nobody has yet watched
+      the UI paint. That is the one outstanding item and it is the owner's to do.
+
+**Findings, in the order they cost time.**
+
+*Before starting:* the spec guard's route regex was `/v1`-only, so registering `GET /` would have
+made "every registered route is documented" red with no way to go green. Widened by naming the three
+paths. And the docs carry **three** image sizes — 47 MB (13.5), 68 MB (11.183), 83 MB (Phase 11,
+arm64) — which cannot all be current; still unreconciled, and worth a re-measure before any of them
+is treated as a budget.
+
+*The prerequisite:* `packages/client`'s browser bundle was **1.18 MB** (11.199).
+
+*Four invented event fields* (11.205) — the chat would have rendered a blank reply and empty tool
+rows, with fifteen tests agreeing. The fixture is typed against `EventDataMap` now, and
+`packages/web/tsconfig.json` had omitted `test/**` so that guard was not being checked at all.
+
+*The asset import shape* (11.200) — `with { type: "file" }` fails in the bundled shape;
+`with { type: "text" }` works in all three. And the package-subpath form is destroyed by the
+server's own build, because `--packages=external` drops the import attribute silently: every test
+stayed green because tests import `src`.
+
+*The stream filter* (11.203, 11.204) — the wire is unfiltered, so `ACTION: now / format: human /
+END` reached a chat bubble; and `endStep()` turned out to be mandatory after three wrong answers,
+because an incomplete probe measured the wrong thing.
+
+*A loop hid three routes from the spec guard.* `router.add("GET", path, …)` over `WEB_PATHS` is one
+line shorter and invisible to a scanner that reads string literals, so the routes were
+undocumented, unchecked and reported as compliant. Literals now, with a drift guard against
+`WEB_ASSETS`.
+
+*The catch-all guard was not a guard.* `Router` has no wildcard — `:name` captures one segment — so
+`"/*rest"` registers a route matching the literal segment `*rest` and never fires. The reachable
+mistake is a fallback in the dispatcher, which is what the test catches.
+
+**What the UI deliberately does not show.** Tool arguments and tool output. `tool.call` carries
+`argsHash` and `tool.result` carries `bytes`, because arguments can hold a file's contents or a
+shell script and an observation is text a stranger wrote — and the firehose is seen by every
+observer of a session. A live row says what was called and how it went; the text is on the reattach
+path, in the stored messages.
+
+### 15.4 — The standalone binary — **not started**
+
+Split from 15.3 (11.202), because a combined stage cannot be reviewed: the UI would be unverifiable
+until a four-platform release pipeline worked, and the pipeline untestable without the UI.
+
+`dispach` installed from brew, npm or the image, everything under one command. **Already proven
+reachable**: `bun build --compile` produces a working 60.2 MB binary that validates a manifest,
+opens a `bun:sqlite` store and renders a catalogue with nothing beside it — and it is *faster* than
+the npm shape, 84 ms against 92 ms on `validate --json`.
+
+- `--compile` in the release pipeline, four platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64
+- **macOS ad-hoc codesigning**, which is mandatory rather than polish: unsigned is SIGKILLed with
+  exit 137 and no message, which reads as a crash
+- A brew formula, and GHCR for the image (a stated Phase 11 non-goal, now in scope)
+- A compile smoke test in CI, so a dependency that breaks `--compile` is caught at the commit
 
 ---
 

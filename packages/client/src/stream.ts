@@ -19,7 +19,12 @@
  * truncated replay rather than quietly returning a short answer.
  */
 
-import { type AnyEvent, EVENT_TYPES, parseSSE } from "@dispach/core"
+// `@dispach/core/wire`, not `@dispach/core`. These are the client's only two *runtime* values
+// from core, and importing them from the barrel bundles the whole runtime: 1.18 MB and 159 modules
+// for a browser, against 2.82 KB for the same two symbols — Zod 550 times over and a YAML parser
+// 149, shipped to a page that can never load a manifest. Measured, not estimated. The type imports
+// elsewhere in this package stay on the barrel, because `import type` is erased and costs nothing.
+import { type AnyEvent, EVENT_TYPES, parseSSE } from "@dispach/core/wire"
 import { DispachError } from "./errors.ts"
 
 /** What a replay says about itself, from the `stream.replay` preamble. */

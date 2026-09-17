@@ -30,6 +30,7 @@ COPY packages/core/package.json ./packages/core/
 COPY packages/client/package.json ./packages/client/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/server/package.json ./packages/server/
+COPY packages/web/package.json ./packages/web/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
@@ -87,6 +88,7 @@ COPY packages/core/package.json ./packages/core/
 COPY packages/client/package.json ./packages/client/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/server/package.json ./packages/server/
+COPY packages/web/package.json ./packages/web/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
@@ -96,6 +98,12 @@ RUN bun install --frozen-lockfile --production --ignore-scripts
 COPY --from=builder /build/packages/core/dist ./packages/core/dist
 COPY --from=builder /build/packages/cli/dist ./packages/cli/dist
 COPY --from=builder /build/packages/server/dist ./packages/server/dist
+# No `packages/web/dist` here, deliberately. The browser assets are **inlined as text** into the
+# server's bundle at build time (decision 11.200), so they ride inside `cli/dist/index.js` and there
+# is nothing to copy. Adding a line for them would be harmless and misleading — it would suggest the
+# runtime reads them from disk, which is exactly the arrangement that was measured and rejected:
+# a bundled build hands back a *relative* asset path that resolves against the process cwd, and this
+# container runs with cwd `/agent`.
 COPY --from=builder /build/packages/channel-telegram/dist ./packages/channel-telegram/dist
 COPY --from=builder /build/packages/tools-system/dist ./packages/tools-system/dist
 COPY --from=builder /build/packages/tools-composio/dist ./packages/tools-composio/dist

@@ -16,7 +16,13 @@
  */
 
 import { BRAND, EventBus, HarnessError, loadManifest, Runtime } from "@dispach/core"
-import { claimCommand, createApprovalRegistry, createClaimTicket, serve } from "@dispach/server"
+import {
+    claimCommand,
+    claimUrl,
+    createApprovalRegistry,
+    createClaimTicket,
+    serve,
+} from "@dispach/server"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
@@ -257,12 +263,13 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             // opens is a bootstrap nobody performs. Reading it is what confers first ownership, and
             // that is a real boundary — `docker logs` already reveals the agent's conversations, so
             // this grants nothing new to anyone who can see it.
+            // The URL first, because opening it is what most people will do and the page does the
+            // exchange properly — it POSTs the token rather than spending it on a GET. The `curl`
+            // line stays for the case a browser cannot reach: a headless box, a CI step, a platform
+            // minting its first key.
             process.stdout.write(
-                `  one-time claim — exchange it once for an operator key you can revoke:\n    ${claimCommand(
-                    host,
-                    running.port,
-                    claim.token,
-                )}\n`,
+                `  open once to claim this server:\n    ${claimUrl(host, running.port, claim.token)}\n` +
+                    `    without a browser: ${claimCommand(host, running.port, claim.token)}\n`,
             )
             if (token === undefined || token === "") {
                 // The latch in `createHandler`: a live key makes this server demand a credential.

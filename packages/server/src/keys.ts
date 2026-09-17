@@ -70,22 +70,37 @@ export function createClaimTicket(): ClaimTicket {
 }
 
 /**
- * The line to print, given where the server is actually listening.
+ * Where to send a person to claim this server, given where it is actually listening.
  *
- * **A command rather than a URL, and the plan said URL.** Two reasons, and the second is the one
- * that decides it. A claim mints a credential, so it has to be a `POST` — a `GET` that spends a
- * single-use token is one a link preview, a crawler or a browser pre-fetch can burn before the
- * person clicks it, and the failure would look like a ticket that never worked. And a URL implies a
- * page that reads it, which is 15.3's job: printing one now would be printing a link to a `404`.
+ * **A URL again, now that there is a page to receive it.** 15.1 printed a `curl` line and said why:
+ * a claim mints a credential, so it has to be a `POST`, and a `GET` that spends a single-use token
+ * can be burned by a link preview before the person clicks. Both halves still hold — this URL is
+ * *not* the claim endpoint. It is the UI, carrying the token in a query parameter, and the page
+ * reads it and issues the `POST` itself. So nothing is spent by loading the page.
  *
- * So the claim travels as a bearer token like every other credential here, on the one code path
- * where a second format would mean a second parser. When the UI lands it can carry the same token
- * in a query string to a page that POSTs it — at which point the token is in a browser's history,
- * which is a cost worth stating then rather than assuming now.
+ * The cost 11.195 said would be worth stating at this point, stated: the token is in the address
+ * bar, which means it is in the browser's history and in anything that syncs it. The page removes it
+ * with `history.replaceState` on arrival, which shrinks the window to one paint but does not close
+ * it — a preview fetch by a chat client that expands links will have seen the URL either way. That
+ * is acceptable *for this token specifically*: it is good for one exchange, it dies with the
+ * process, and it only ever yields a key the operator can revoke from the page it just opened.
  *
- * The host is the *bound* one rather than the manifest's, because a manifest can say `0.0.0.0` and
- * a command naming that is one nobody can run. The wildcard forms are shown as loopback for display
+ * The host is the *bound* one rather than the manifest's, because a manifest can say `0.0.0.0` and a
+ * URL naming that is one nobody can open. The wildcard forms are shown as loopback for display
  * only; the server really is on every interface.
+ */
+export function claimUrl(host: string, port: number, token: string): string {
+    const shown = host === "0.0.0.0" || host === "::" || host === "" ? "127.0.0.1" : host
+    const bracketed = shown.includes(":") && !shown.startsWith("[") ? `[${shown}]` : shown
+    return `http://${bracketed}:${port}/?claim=${token}`
+}
+
+/**
+ * The same exchange without a browser, for a server nobody is going to point one at.
+ *
+ * Kept beside the URL rather than replaced by it: a headless box, a CI step and a platform minting
+ * its first key all need the `POST`, and telling them to open a page would be telling them to do
+ * something they cannot. `serve` prints the URL and mentions this.
  */
 export function claimCommand(host: string, port: number, token: string): string {
     const shown = host === "0.0.0.0" || host === "::" || host === "" ? "127.0.0.1" : host

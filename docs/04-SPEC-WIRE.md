@@ -54,6 +54,7 @@ and WebSocket surfaces can return:
 | `key_label_required` | 400 | `POST /v1/keys` with no string `label`. Required rather than defaulted — it is the only thing distinguishing two credentials. |
 | `key_label_invalid` | 400 | The label is empty, over 64 characters, or carries a control character. |
 | `claim_spent` | 401 | The boot claim was recognised and has already been exchanged. A claim from an earlier boot is `unauthorized` instead — this process has never seen it. |
+| `web_asset_missing` | 500 | The routes serving the browser surface and the table backing them diverged. A broken build, not a missing file. |
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
 | `reload_not_supported` | 409 | An agent's configuration is fixed for its process lifetime, deliberately. |
@@ -279,6 +280,30 @@ concatenating rather than after.
 
 `deliver` accepts `"none"` (result via API only), a channel id, or `{ channel, to }`.
 
+
+### The browser surface
+
+```
+GET /
+GET /assets/app.js
+GET /assets/app.css
+```
+
+Three paths, **no catch-all**. A wildcard falling back to `index.html` is the usual single-page
+arrangement and is wrong here: it makes every mistyped API path answer `200` with a web page, so a
+client calling `/v1/agentss` receives HTML where it expected JSON and the failure surfaces as a
+parse error far from the typo. The page has no client-side routes.
+
+**These three need no credential**, and that is not a relaxation: a page load has no header to carry
+a bearer token in, so a credential-gated shell is a shell nobody can reach. The page holds no data —
+every value it displays comes from `/v1` with an operator key. An unauthenticated reader learns that
+a Dispach server is here, which `GET /v1/health` already tells them.
+
+Filenames are **stable rather than content-hashed**, because the server embeds these assets as text
+at build time (decision 11.200) and an embedded asset list is a list of import statements, which
+cannot name a file whose hash moves every build. Freshness is an `ETag` over the bytes with
+`Cache-Control: no-cache`, so a browser may store the file and revalidate. `immutable` would be a
+promise that the bytes at this URL never change, and a rebuild changes them.
 
 ### Operator keys
 

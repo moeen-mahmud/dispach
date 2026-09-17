@@ -22,6 +22,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { readdirSync, readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { EVENT_TYPES } from "@dispach/core"
+import { WEB_PATHS } from "../src/web.ts"
 import { cleanupWorkspaces, harness } from "./harness.ts"
 
 afterAll(cleanupWorkspaces)
@@ -187,9 +188,15 @@ describe("the routes match the spec", () => {
 
     function specRoutes(): Set<string> {
         return new Set(
-            [...SPEC.matchAll(/^(GET|POST|PATCH|DELETE|PUT)\s+(\/v1[^\s?→]*)/gm)].map(
-                (match) => `${match[1]} ${match[2]}`,
-            ),
+            // `/v1` **or** the three browser-surface paths, which are the only routes this
+            // server answers outside the API. Widened by naming them rather than by accepting any
+            // path: a bare `\/\S*` would match a line of prose that happens to start with a verb
+            // and a slash, and a guard that matches prose is one that goes green on a typo.
+            [
+                ...SPEC.matchAll(
+                    /^(GET|POST|PATCH|DELETE|PUT)\s+(\/(?:v1[^\s?→]*|assets\/[^\s?→]*|))(?=[\s?]|$)/gm,
+                ),
+            ].map((match) => `${match[1]} ${match[2]}`),
         )
     }
 
@@ -207,6 +214,36 @@ describe("the routes match the spec", () => {
     test("every registered route is documented", () => {
         const undocumented = [...codeRoutes()].filter((route) => !specRoutes().has(route))
         expect(undocumented).toEqual([])
+    })
+})
+
+describe("the browser surface", () => {
+    /**
+     * The three routes and the asset table are two lists, so they get a guard.
+     *
+     * Writing them as literals is what made the spec guard able to see them at all — a
+     * `for (const path of WEB_PATHS)` loop registered the same routes and stayed invisible to a
+     * scanner that reads string literals, so they were undocumented and reported as compliant.
+     * Literals bought that visibility and cost this: `WEB_ASSETS` can now gain a file that nothing
+     * serves, or lose one that a route still points at. Both are red here.
+     */
+    test("every asset has a route and every route has an asset", () => {
+        const handler = readFileSync(join(SERVER_SRC, "handler.ts"), "utf8")
+        const registered = new Set(
+            [...handler.matchAll(/router\.add\(\s*"GET",\s*"(\/(?!v1)[^"]*)"/g)].map(
+                (match) => match[1] ?? "",
+            ),
+        )
+        expect([...registered].sort()).toEqual([...WEB_PATHS].sort())
+    })
+
+    test("the shell and its assets need no credential", () => {
+        // Derived from `WEB_PATHS` in `isOpenPath` rather than matched by prefix, so this asserts
+        // the *set* rather than a rule. A `startsWith("/assets/")` would open any future path under
+        // that directory, and the list of things served from a directory grows without anybody
+        // re-reading the auth rule.
+        const handler = readFileSync(join(SERVER_SRC, "handler.ts"), "utf8")
+        expect(handler).toContain("WEB_PATHS.includes(pathname)")
     })
 })
 
