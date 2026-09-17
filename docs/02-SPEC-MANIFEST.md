@@ -783,24 +783,63 @@ Load order is manifest order; middleware composes outermost-first. A plugin whos
 
 ---
 
-## Multi-agent manifests
+### `team`
 
-A runtime-level file lists agents and declares the team:
+Sub-agents this agent may delegate to. **Declaring the block is what registers the `handoff`
+tool** — there is no separate switch, for the reason decision 4.53 gives one level down: a
+capability reachable only by someone who already knows the field name is one the manifest is
+hiding.
 
 ```yaml
-apiVersion: dispach/v1
-kind: Runtime
-agents:
-  - ./agents/supervisor.yaml
-  - ./agents/researcher.yaml
-  - ./agents/writer.yaml
 team:
-  supervisor: supervisor
-  members: [researcher, writer]
+  members:
+    - id: researcher              # must equal the member manifest's own `id`
+      manifest: ./team/researcher.yaml
+      task: >                     # rendered as the handoff tool's guidance
+        Gathers facts on a narrow technical topic and returns them as short claims.
+      artifact:                   # JSON Schema the returned artifact must satisfy
+        type: object
+        properties:
+          claims:
+            type: array
+            items: { type: string }
+          confidence:
+            type: string
+            enum: [high, medium, low]
+        required: [claims, confidence]
 ```
 
-The supervisor gets the `handoff` local tool. Members do not, unless they declare their own
-team — nesting is permitted but each level must be declared explicitly.
+| Field | |
+| --- | --- |
+| `id` | Required, and checked against the member manifest's own `id` at load. Two ids would let the `handoff` argument, the session key, the `handoff.*` events and the stored row disagree about who ran. |
+| `manifest` | Required. Path to the member's own manifest, relative to this one. |
+| `task` | Required. What the member is for. The supervisor's only basis for choosing between members, so a team described only by name is one the model picks from by name-similarity. |
+| `artifact` | Required. A JSON Schema object. Becomes the parameter schema of a `submit_artifact` tool layered onto the member for one handoff, so "did it work" is decided by the same coercion every tool call uses. |
+
+**A member is a full agent with its own manifest file**, not a nested block — it needs `model`,
+`tools` and `context` to be an agent at all, `extends:` already exists for the shared parts, and a
+separate file is what lets a member be `validate`d and `run` on its own.
+
+**Members are loaded and not served.** `Runtime.list()` excludes them, so `GET /v1/agents` and every
+route behind it cannot address one — a member is an implementation detail of its supervisor, and an
+addressable member is a route around whatever policy the supervisor was carrying. `GET
+/v1/agents/:id` reports the roster instead.
+
+**Members run one at a time.** `handoff` is `mutating` (a member can write files and run `exec`),
+and a mutating call is alone in its execution group — so three handoffs in one step take three times
+as long as one. The alternative asserts something false: two members are separate agents sharing a
+filesystem, `writeRoots` can overlap, and `exec` is bound by no root at all.
+
+**At most two levels**, refused at load by walking the manifest graph, along with any cycle. The
+depth is a constant with no manifest field: every level multiplies the worst-case spend of one turn,
+and there is no evidence anybody needs three.
+
+> **What this replaced.** This section previously specified a `kind: Runtime` file listing `agents:`
+> and a `team: {supervisor, members}` block. That file was never built and is not going to be: it
+> needs a second manifest kind, a second loader, and a `serve` that accepts two shapes — all to
+> express something one optional key on the supervisor already expresses, while contradicting
+> one-agent-per-container by making the *unit of deployment* a list. Found by implementing 10B
+> against a spec that described a design nobody had chosen.
 
 ---
 

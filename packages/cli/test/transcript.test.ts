@@ -34,7 +34,7 @@ function run(actions: readonly TranscriptAction[], from = EMPTY_TRANSCRIPT): Tra
 
 const START = {
     kind: "event",
-    event: ev("turn.start", { source: "repl", inputTokens: 4 }),
+    event: ev("turn.start", { source: "repl", inputTokens: 4, trust: "trusted" }),
 } as const
 
 function chunk(delta: string, kind: "text" | "reasoning" = "text"): TranscriptAction {
@@ -168,7 +168,9 @@ describe("failure", () => {
             chunk("I was saying"),
             {
                 kind: "event",
-                event: ev("agent.error", {
+                // `error`, not `agent.error`. The latter was declared and never emitted, so this
+                // test was the only thing in the tree that could produce one.
+                event: ev("error", {
                     code: "model_http_error",
                     message: "502 from the endpoint",
                     hint: "The provider is failing; retry or switch base URL.",
@@ -275,6 +277,7 @@ describe("events the transcript does not own", () => {
                 event: ev("model.result", {
                     outputTokens: 5,
                     promptTokens: 10,
+                    promptTokensReported: true,
                     finishReason: "stop",
                     latencyMs: 100,
                 }),
@@ -700,6 +703,7 @@ describe("a multi-step turn reads in the order it happened", () => {
             event: ev("model.result", {
                 outputTokens: 10,
                 promptTokens: 100,
+                promptTokensReported: true,
                 finishReason: "tool_calls",
                 latencyMs: 200,
             }),

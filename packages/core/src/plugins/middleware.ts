@@ -40,6 +40,7 @@
 
 import type { ContextBlock } from "../context/blocks.ts"
 import type { AnyEvent } from "../events/types.ts"
+import type { TurnSender } from "../loop/sender.ts"
 import type { StepResult } from "../loop/step.ts"
 import type { ChatRequest } from "../model/provider.ts"
 import type { ToolIntent, ToolResult, ToolSpec } from "../tools/types.ts"
@@ -53,6 +54,15 @@ export interface TurnMiddlewareContext {
     readonly input: string
     /** Where it came from: `repl`, `api`, `schedule`, a channel id. */
     readonly source: string
+    /**
+     * Who sent it, when it was not the operator. Absent means the operator's own surface.
+     *
+     * The fact an approval or audit middleware most wants about a turn and could not otherwise
+     * reach: `source` says the message came in over the API and says nothing about who was on the
+     * other end of it. `ToolCallMiddlewareContext.tainted` is the consequence of this one — a peer
+     * sender makes it true from the first call.
+     */
+    readonly from?: TurnSender
     /** The turn's cancellation. A middleware that ignores it makes stop unreliable. */
     readonly signal: AbortSignal
 }

@@ -650,6 +650,16 @@ export const COMMANDS: readonly CommandSpec[] = [
                 help: "address to bind — a non-loopback host requires an API token",
                 defaultHelp: "server.host, or 127.0.0.1",
             },
+            {
+                // The escape from a lockout, and the reason it needs to exist: a claim is printed
+                // only while no operator key is live, so an operator who loses the only key on a
+                // server with no configured token has no route back in. A person able to run
+                // `serve` on that machine already holds the store file, so the flag confers nothing
+                // they could not get with sqlite3 — it just makes the recovery nameable.
+                name: "claim",
+                kind: "boolean",
+                help: "print a one-time claim even when a key already exists",
+            },
             STORE,
             JSON_FLAG,
         ],

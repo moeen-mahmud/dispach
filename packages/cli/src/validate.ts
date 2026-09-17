@@ -235,6 +235,18 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
                               )
                               .join(" ")
                 }\n` +
+                // Printed unconditionally, `none` included, for the reason `memory` above it is —
+                // and with a sharper edge here: declaring `team:` is what loads extra *manifests*
+                // and registers the `handoff` tool, so a `validate` that stayed silent about it
+                // would approve an agent while reporting nothing about two thirds of what boots.
+                // A check one surface performs is a check the two surfaces disagree on.
+                `  team         ${
+                    manifest.team === undefined
+                        ? "none — no delegation; `handoff` is not registered"
+                        : `${manifest.team.members
+                              .map((member) => `${member.id} (${member.manifest})`)
+                              .join(" ")} — run one at a time`
+                }\n` +
                 `  limits       maxSteps=${manifest.limits.maxSteps} turnTimeoutMs=${manifest.limits.turnTimeoutMs}\n` +
                 findings.map((warning) => `  warning      ${warning.message}\n`).join(""),
         )

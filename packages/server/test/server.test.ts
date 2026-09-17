@@ -7,194 +7,26 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { Runtime } from "@dispach/core"
 import { createHandler } from "../src/handler.ts"
 import { Router } from "../src/router.ts"
 import { isLoopback, serve } from "../src/serve.ts"
 import { encodeFrame } from "../src/sse.ts"
 import { attachWebSocket } from "../src/ws.ts"
+import {
+    cleanupWorkspaces,
+    fakeSocket,
+    harness,
+    PHASED_MANIFEST,
+    PINNED_MANIFEST,
+    readSse,
+    readUntil,
+    replyFetch,
+    TOKEN,
+} from "./harness.ts"
 
-const TOKEN = "test-token-abcdef"
-const ENV = { MODEL_API_KEY: "sk-test" }
-
-const MANIFEST = `apiVersion: dispach/v1
-id: assistant
-name: Assistant
-model:
-  main:
-    id: gpt-4o-mini
-    baseUrl: https://api.example.com/v1
-    apiKeyEnv: MODEL_API_KEY
-`
-
-const dirs: string[] = []
-afterAll(() => {
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
-})
-
-function workspace(): string {
-    const dir = mkdtempSync(join(tmpdir(), "server-test-"))
-    dirs.push(dir)
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, "agent.yaml"), MANIFEST)
-    return dir
-}
-
-/**
- * A model endpoint that answers one fixed reply, streamed as the loop expects.
- *
- * The reply arrives as **two** deltas rather than one, which is what makes the token-streaming test
- * below mean anything: with a single delta, "the frames concatenate to the reply" is satisfied by a
- * stream carrying one frame, and a client that ignored ordering would pass.
- */
-function replyFetch(text = "hello from the model"): typeof fetch {
-    const half = Math.ceil(text.length / 2)
-    return (async () => {
-        const body = [
-            `data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(0, half) } }] })}\n\n`,
-            `data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(half) } }] })}\n\n`,
-            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 4 } })}\n\n`,
-            "data: [DONE]\n\n",
-        ].join("")
-        return new Response(body, {
-            status: 200,
-            headers: { "content-type": "text/event-stream" },
-        })
-    }) as unknown as typeof fetch
-}
-
-async function harness(
-    options: {
-        token?: string
-        fetch?: typeof fetch
-        /** Tune the per-turn buffer cap, so a test can reach the truncation path deliberately. */
-        streams?: { maxEventsPerTurn?: number; retainEndedMs?: number }
-        /** The shared cancel registry, so a test can hand the same one to the WS bridge. */
-        running?: Map<string, AbortController>
-    } = {},
-) {
-    const dir = workspace()
-    const runtime = await Runtime.create({
-        agents: [join(dir, "agent.yaml")],
-        env: ENV,
-        fetch: options.fetch ?? replyFetch(),
-        ...(options.streams === undefined ? {} : { streams: options.streams }),
-    })
-    const handler = createHandler({
-        runtime,
-        ...(options.token === undefined
-            ? { allowUnauthenticated: true }
-            : { token: options.token }),
-        ...(options.running === undefined ? {} : { running: options.running }),
-    })
-
-    const call = (
-        method: string,
-        path: string,
-        init: { body?: unknown; token?: string | null } = {},
-    ) => {
-        const headers: Record<string, string> = { "content-type": "application/json" }
-        const auth = init.token === undefined ? options.token : (init.token ?? undefined)
-        if (auth !== undefined && auth !== null) headers.authorization = `Bearer ${auth}`
-        return handler(
-            new Request(`http://127.0.0.1:7420${path}`, {
-                method,
-                headers,
-                ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
-            }),
-        )
-    }
-
-    return { runtime, handler, call, dir }
-}
-
-/** Read an SSE body to completion, returning the frames as `[event, data]`. */
-async function readSse(response: Response, max = 200): Promise<[string, unknown][]> {
-    const reader = response.body?.getReader()
-    if (reader === undefined) return []
-    const decoder = new TextDecoder()
-    const frames: [string, unknown][] = []
-    let buffer = ""
-
-    while (frames.length < max) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const blocks = buffer.split("\n\n")
-        buffer = blocks.pop() ?? ""
-        for (const block of blocks) {
-            if (block.startsWith(":")) continue
-            const event = /^event: (.*)$/m.exec(block)?.[1] ?? "message"
-            const data = block
-                .split("\n")
-                .filter((line) => line.startsWith("data: "))
-                .map((line) => line.slice(6))
-                .join("\n")
-            frames.push([event, data === "" ? undefined : JSON.parse(data)])
-        }
-    }
-    return frames
-}
-
-/**
- * Read an SSE body until `done` is satisfied, then cancel.
- *
- * `readSse` reads to completion, which is right for a turn stream and wrong for the firehose: that
- * one never ends, so a frame budget either blocks forever waiting for the last frame or stops
- * early. This stops on a condition instead.
- */
-async function readUntil(
-    response: Response,
-    done: (frames: [string, unknown][]) => boolean,
-    limit = 400,
-): Promise<[string, unknown][]> {
-    const reader = response.body?.getReader()
-    if (reader === undefined) return []
-    const decoder = new TextDecoder()
-    const frames: [string, unknown][] = []
-    let buffer = ""
-    while (frames.length < limit && !done(frames)) {
-        const read = await reader.read()
-        if (read.done) break
-        buffer += decoder.decode(read.value, { stream: true })
-        const blocks = buffer.split("\n\n")
-        buffer = blocks.pop() ?? ""
-        for (const block of blocks) {
-            if (block.startsWith(":") || block === "") continue
-            const event = /^event: (.*)$/m.exec(block)?.[1] ?? "message"
-            const data = block
-                .split("\n")
-                .filter((line) => line.startsWith("data: "))
-                .map((line) => line.slice(6))
-                .join("\n")
-            frames.push([event, data === "" ? undefined : JSON.parse(data)])
-        }
-    }
-    await reader.cancel()
-    return frames
-}
-
-/**
- * A socket the bridge can drive without a platform WebSocket, so these run under Node too.
- *
- * Module-scoped because two describe blocks need it: the bridge's own frames, and the shared
- * cancel registry, which is about two surfaces agreeing and therefore cannot live inside either.
- */
-function fakeSocket(agentId?: string, chunks = false) {
-    const sent: string[] = []
-    return {
-        sent,
-        frames: () => sent.map((raw) => JSON.parse(raw) as { type: string; [k: string]: unknown }),
-        ws: {
-            data: { agentId, chunks },
-            send: (message: string) => sent.push(message),
-            close: () => {},
-        },
-    }
-}
+afterAll(cleanupWorkspaces)
 
 // ─── Router ──────────────────────────────────────────────────────────────────────────────
 
@@ -345,14 +177,16 @@ describe("agents", () => {
         await runtime.stop()
     })
 
-    test("skills report supported: false rather than a bare empty list", async () => {
-        // An empty array alone cannot be told apart from "this build has no skills".
+    test("an agent with no skills block reports configured: false, not a bare empty list", async () => {
+        // An empty array alone cannot be told apart from an agent whose skills directory is empty.
+        // This route used to answer `supported: false` unconditionally — true when it was written
+        // and false from the moment Phase 5 shipped, several phases before anyone read it again.
         const { call, runtime } = await harness()
         const body = (await (await call("GET", "/v1/agents/assistant/skills")).json()) as {
             skills: unknown[]
-            supported: boolean
+            configured: boolean
         }
-        expect(body).toEqual({ skills: [], supported: false })
+        expect(body).toEqual({ skills: [], configured: false })
         await runtime.stop()
     })
 
@@ -965,22 +799,22 @@ describe("whoever hands out a turn id opens its buffer first", () => {
 
     test("every newTurnId() in a route is followed by streams.open before agent.send", () => {
         const offenders: string[] = []
-        for (const match of SOURCE.matchAll(/newTurnId\(\)/g)) {
-            // The window from the mint to the first `send` in the same route body. Generous on
-            // purpose — the assertion is about *order*, not proximity — and it has to be, because
-            // the comments explaining these two fixes are themselves ~1,400 characters. At 1,200
-            // this guard went red for code that was correct, which is its own kind of useless.
-            const after = SOURCE.slice(match.index ?? 0, (match.index ?? 0) + 3000)
+        // Bounded by the **next** mint site rather than by a character count. A fixed window has
+        // now been wrong twice — red at 1,200 characters for correct code, widened to 3,000, red
+        // again when 10A added the idempotency claim between the mint and the open — and each time
+        // the failure was about how much prose the fix needed rather than about the ordering. The
+        // next mint is the real boundary: it is where the route being checked stops mattering, so
+        // an `open` belonging to a *later* route can no longer cover for a missing one here, which
+        // a generous window silently permitted.
+        const mints = [...SOURCE.matchAll(/newTurnId\(\)/g)].map((m) => m.index ?? 0)
+        for (const [position, start] of mints.entries()) {
+            const after = SOURCE.slice(start, mints[position + 1] ?? SOURCE.length)
             // Matches the call, not its arity — the signature grew a `{ chunks }` argument and an
             // exact-string match would have gone red for a fix that was still in place.
             const opened = after.indexOf("streams.open(turnId")
             const sent = after.indexOf(".send(")
             if (opened === -1 || (sent !== -1 && opened > sent)) {
-                offenders.push(
-                    SOURCE.slice(0, match.index ?? 0)
-                        .split("\n")
-                        .length.toString(),
-                )
+                offenders.push(SOURCE.slice(0, start).split("\n").length.toString())
             }
         }
         expect({ routesMintingATurnIdWithoutOpening: offenders }).toEqual({
@@ -1146,6 +980,199 @@ describe("the websocket subscribe frame", () => {
         )
         expect(runtime.bus.chunkSubscribers).toBe(before)
         bridge.closeAll()
+        await runtime.stop()
+    })
+})
+
+// ─── HEAD and OPTIONS ────────────────────────────────────────────────────────────────────
+
+describe("HEAD and OPTIONS come from the route table", () => {
+    test("OPTIONS answers 204 with an Allow derived from the routes", async () => {
+        const { call, runtime } = await harness()
+        const response = await call("OPTIONS", "/v1/agents/assistant/messages")
+
+        expect(response.status).toBe(204)
+        expect(await response.text()).toBe("")
+        const allow = (response.headers.get("allow") ?? "").split(", ").sort()
+        // POST from the table, OPTIONS always, and no HEAD — this path answers no GET.
+        expect(allow).toEqual(["OPTIONS", "POST"])
+        await runtime.stop()
+    })
+
+    test("OPTIONS advertises HEAD wherever a GET is really answered", async () => {
+        const { call, runtime } = await harness()
+        const allow = (
+            (await call("OPTIONS", "/v1/agents/assistant")).headers.get("allow") ?? ""
+        ).split(", ")
+        expect(allow).toContain("GET")
+        expect(allow).toContain("HEAD")
+        await runtime.stop()
+    })
+
+    test("OPTIONS on a path that does not exist is 404, not a 204 listing nothing", async () => {
+        // A 204 with an empty Allow reads as "this path exists and accepts no methods", which is a
+        // different statement from "there is no such path".
+        const { call, runtime } = await harness()
+        const response = await call("OPTIONS", "/v1/nope")
+        expect(response.status).toBe(404)
+        await runtime.stop()
+    })
+
+    test("HEAD returns the headers GET would, with no body", async () => {
+        const { call, runtime } = await harness()
+        const get = await call("GET", "/v1/agents/assistant")
+        const head = await call("HEAD", "/v1/agents/assistant")
+
+        expect(head.status).toBe(get.status)
+        expect(head.headers.get("content-type")).toBe(get.headers.get("content-type"))
+        expect(await head.text()).toBe("")
+        expect((await get.text()).length).toBeGreaterThan(0)
+        await runtime.stop()
+    })
+
+    test("HEAD still requires the token", async () => {
+        // A method that skipped the check would be a read of every authenticated route's status.
+        const { call, runtime } = await harness({ token: "secret" })
+        expect((await call("HEAD", "/v1/agents/assistant", { token: null })).status).toBe(401)
+        expect((await call("HEAD", "/v1/agents/assistant")).status).toBe(200)
+        // And the probes stay open, the reason the exemption exists at all.
+        expect((await call("HEAD", "/v1/ready", { token: null })).status).toBe(200)
+        await runtime.stop()
+    })
+
+    test("HEAD on a stream is refused rather than leaking a subscription", async () => {
+        // Answering it as GET would run the handler — which subscribes to the bus — and then throw
+        // the body away, so nothing ever reads the stream, its cancel() never fires and the
+        // subscription is never torn down. One leaked listener per probe, and a monitoring system
+        // polling every thirty seconds would walk the process into the ground with every endpoint
+        // still answering correctly. Asserted against the bus's own subscriber bookkeeping, not
+        // just the status code.
+        const { call, runtime } = await harness()
+        const before = runtime.bus.chunkSubscribers
+
+        for (const path of ["/v1/events", "/v1/agents/assistant/turns/t_x/stream"]) {
+            const response = await call("HEAD", path)
+            expect(response.status).toBe(405)
+            const body = (await response.json()) as { error: { code: string; hint: string } }
+            expect(body.error.code).toBe("method_not_allowed")
+            expect(body.error.hint).toContain("stream")
+            expect(response.headers.get("allow")).toContain("GET")
+        }
+
+        expect(runtime.bus.chunkSubscribers).toBe(before)
+        // And OPTIONS does not advertise a HEAD the server refuses.
+        const allow = ((await call("OPTIONS", "/v1/events")).headers.get("allow") ?? "").split(", ")
+        expect(allow).not.toContain("HEAD")
+        expect(allow).toContain("GET")
+        await runtime.stop()
+    })
+})
+
+// ─── The values that used to be constants ────────────────────────────────────────────────
+
+describe("introspection reports facts rather than placeholders", () => {
+    test("the agent resource counts its own tools, skills and schedules", async () => {
+        const { call, runtime } = await harness({ manifest: PHASED_MANIFEST })
+        const agent = runtime.list()[0]
+        if (agent === undefined) throw new Error("no agent")
+        await agent.store.schedules.upsert({
+            agentId: agent.id,
+            id: "nightly",
+            kind: "cron",
+            expr: "0 3 * * *",
+            timezone: "UTC",
+            task: "brief me",
+            sessionMode: "shared",
+            enabled: true,
+            origin: "api",
+            anchorAt: new Date().toISOString(),
+            nextRunAt: undefined,
+            // Both required rather than optional, and the interface says why: a conditional
+            // spread is not excess-property-checked, so a provenance field that silently
+            // defaulted would be one that silently stopped protecting anything.
+            sourcePath: "",
+            now: new Date().toISOString(),
+        })
+
+        const body = (await (await call("GET", "/v1/agents/assistant")).json()) as {
+            tools: number
+            skills: number
+            schedules: number
+        }
+        // `skills` and `schedules` were both the literal 0 for every agent, whatever was
+        // configured, while the spec advertised them as counts. A number that is always zero is
+        // worse than an absent field: it reads as a measurement.
+        expect(body.schedules).toBe(1)
+        expect(body.tools).toBeGreaterThan(0)
+        expect(body.skills).toBe(0)
+        await runtime.stop()
+    })
+
+    test("an unphased agent omits `phases` rather than sending an empty one", async () => {
+        // `[]` would read as "visible in no phase", which is the opposite of the truth for an
+        // agent that shows every tool always.
+        const { call, runtime } = await harness({ manifest: PINNED_MANIFEST })
+        const tools = (await (await call("GET", "/v1/agents/assistant/tools")).json()) as {
+            slug: string
+            tags: string[]
+            phases?: string[]
+        }[]
+        expect(tools.length).toBeGreaterThan(0)
+        for (const tool of tools) expect(tool).not.toHaveProperty("phases")
+        await runtime.stop()
+    })
+
+    test("tools report their tags and the phases that actually show them", async () => {
+        // The spec's own description of this route promises "tags, mutating, phase visibility",
+        // and it carried none of the first or third. Both are computed by core's `phasesFor`, so
+        // the introspection answer and the runtime's own filtering cannot disagree.
+        const { call, runtime } = await harness({ manifest: PHASED_MANIFEST })
+        const tools = (await (await call("GET", "/v1/agents/assistant/tools")).json()) as {
+            slug: string
+            tags: string[]
+            phases?: string[]
+        }[]
+        const bySlug = new Map(tools.map((tool) => [tool.slug, tool]))
+
+        // `now` is tagged `read`, so `triage`'s `allow: [tag:read]` reaches it — and `act`'s `*`
+        // reaches everything. `memory_write` is tagged `write`, so only `act` shows it.
+        expect(bySlug.get("now")?.tags).toContain("read")
+        expect(bySlug.get("now")?.phases).toEqual(["triage", "act"])
+        expect(bySlug.get("memory_write")?.tags).toContain("write")
+        expect(bySlug.get("memory_write")?.phases).toEqual(["act"])
+        // **`phase_set` is deliberately absent, and this pins that.** It is a *turn* tool
+        // (`turn.ts:515`), built per turn because its description names the current phase and what
+        // each other phase would add — so there is no static description for this route to report,
+        // and listing it here would mean inventing one. `phases.*.allow` gets it added by
+        // `allowFor` regardless of whether a phase names it, so nothing is lost at runtime.
+        expect(bySlug.has("phase_set")).toBe(false)
+        await runtime.stop()
+    })
+
+    test("an agent has an entryPhase, never a current phase", async () => {
+        // A phase is per session — an agent hosting three conversations is in three at once — so
+        // the agent-level fact is where a new session starts, under a name a reader cannot mistake
+        // for the other thing.
+        const { call, runtime } = await harness({ manifest: PHASED_MANIFEST })
+        const listing = (await (await call("GET", "/v1/agents")).json()) as Record<
+            string,
+            unknown
+        >[]
+        expect(listing[0]).not.toHaveProperty("phase")
+        // `entry: true` wins over declaration order, which is what `entryPhase` is for.
+        expect(listing[0]?.entryPhase).toBe("triage")
+        expect(listing[0]?.phases).toEqual(["triage", "act"])
+        await runtime.stop()
+    })
+
+    test("an unphased agent reports a null entryPhase and no phase list", async () => {
+        const { call, runtime } = await harness()
+        const listing = (await (await call("GET", "/v1/agents")).json()) as Record<
+            string,
+            unknown
+        >[]
+        expect(listing[0]?.entryPhase).toBeNull()
+        expect(listing[0]).not.toHaveProperty("phases")
         await runtime.stop()
     })
 })

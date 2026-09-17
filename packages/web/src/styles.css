@@ -1,0 +1,412 @@
+/*
+ * One stylesheet, no framework, no external font.
+ *
+ * Not austerity — two constraints. The server embeds this file as *text* (decision 11.200), so a
+ * webfont would be the one binary asset that could not ride inside the bundle; and the page is
+ * served by the agent itself over loopback as often as not, where a font request is a round trip
+ * for a typeface the operator's terminal is already using.
+ *
+ * The palette is the CLI's: an off-black ground, warm off-white text, one accent. A person moving
+ * between `dispach` in a terminal and this page should not feel they changed product.
+ */
+
+:root {
+    --ground: #0b0b0c;
+    --raised: #151517;
+    --line: #26262a;
+    --text: #e8e6e3;
+    --dim: #8b8b93;
+    --accent: #7aa2f7;
+    --warn: #e0af68;
+    --bad: #f7768e;
+    --ok: #9ece6a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--text);
+    font: 14px / 1.55 var(--sans);
+    -webkit-font-smoothing: antialiased;
+}
+
+button {
+    font: inherit;
+    color: inherit;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 5px 11px;
+    cursor: pointer;
+}
+button:hover:not(:disabled) {
+    border-color: var(--dim);
+}
+button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0b0b0c;
+    font-weight: 600;
+}
+button.bad {
+    color: var(--bad);
+}
+
+input,
+textarea {
+    font: inherit;
+    color: inherit;
+    background: var(--ground);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    width: 100%;
+}
+input:focus,
+textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* ─── shell ─────────────────────────────────────────────────────────────── */
+
+.shell {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    height: 100vh;
+}
+
+.side {
+    background: var(--raised);
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.side header {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+}
+
+.brand {
+    font-weight: 650;
+    letter-spacing: 0.01em;
+}
+
+.side nav {
+    padding: 8px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+}
+
+.side footer {
+    padding: 10px 12px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.row-button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    padding: 7px 9px;
+    font-family: var(--mono);
+    font-size: 12px;
+}
+.row-button:hover {
+    background: var(--ground);
+}
+.row-button[aria-current="true"] {
+    background: var(--ground);
+    color: var(--accent);
+}
+
+.group {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--dim);
+    padding: 12px 9px 5px;
+}
+
+/* ─── main ──────────────────────────────────────────────────────────────── */
+
+.main {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.bar {
+    display: flex;
+    gap: 14px;
+    align-items: baseline;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--dim);
+    /* Fixed height, because the status line is what every other row is laid out against — the same
+       reason the TUI's status bar must never change height. */
+    min-height: 44px;
+}
+.bar strong {
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+}
+.bar .spacer {
+    flex: 1;
+}
+
+.scroll {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    padding: 20px;
+}
+
+.pad {
+    max-width: 780px;
+    margin: 0 auto;
+}
+
+/* ─── transcript ────────────────────────────────────────────────────────── */
+
+.row {
+    margin: 0 0 16px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.row.user {
+    background: var(--raised);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 13px;
+}
+
+.label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    margin-bottom: 4px;
+    /* Its own line, never a hanging indent. A 14-column prefix re-applied to every wrapped row
+       makes the longest item the narrowest — measured in the TUI at 86 of 100 columns. */
+}
+
+.tool {
+    border-left: 2px solid var(--line);
+    padding-left: 11px;
+    font-family: var(--mono);
+    font-size: 12px;
+}
+.tool .slug {
+    color: var(--accent);
+}
+.tool .out {
+    color: var(--dim);
+    max-height: 13em;
+    overflow-y: auto;
+    margin-top: 5px;
+}
+.tool.failed .slug {
+    color: var(--bad);
+}
+.tool .mut {
+    color: var(--warn);
+    font-size: 11px;
+}
+.tool .out {
+    display: inline;
+}
+
+.fence {
+    border: 1px dashed var(--warn);
+    border-radius: 6px;
+    padding: 7px 9px;
+    margin-top: 5px;
+}
+.fence .why {
+    color: var(--warn);
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.note {
+    font-size: 12px;
+    color: var(--dim);
+    border-left: 2px solid var(--line);
+    padding-left: 11px;
+}
+.note.bad {
+    color: var(--bad);
+    border-left-color: var(--bad);
+}
+
+.ask {
+    border: 1px solid var(--warn);
+    border-radius: 8px;
+    padding: 12px 14px;
+    background: #17140e;
+}
+.ask .what {
+    font-family: var(--mono);
+    font-size: 12px;
+    margin: 6px 0 10px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.ask .buttons {
+    display: flex;
+    gap: 8px;
+}
+.ask .settled {
+    font-size: 12px;
+    color: var(--dim);
+}
+
+details.fold summary {
+    cursor: pointer;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 11px;
+}
+details.fold[open] summary {
+    margin-bottom: 5px;
+}
+details.fold .body {
+    color: var(--dim);
+    font-size: 13px;
+}
+
+/* ─── composer ──────────────────────────────────────────────────────────── */
+
+.composer {
+    border-top: 1px solid var(--line);
+    padding: 12px 20px;
+}
+.composer .inner {
+    max-width: 780px;
+    margin: 0 auto;
+    display: flex;
+    gap: 9px;
+    align-items: flex-end;
+}
+.composer textarea {
+    resize: none;
+    min-height: 40px;
+    max-height: 190px;
+    font-family: var(--sans);
+}
+.hint {
+    font-size: 11px;
+    color: var(--dim);
+    max-width: 780px;
+    margin: 6px auto 0;
+}
+
+/* ─── panels ────────────────────────────────────────────────────────────── */
+
+.card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+    background: var(--raised);
+}
+.card h2 {
+    margin: 0 0 4px;
+    font-size: 15px;
+}
+.card p {
+    margin: 0 0 12px;
+    color: var(--dim);
+    font-size: 13px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+th {
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--dim);
+    font-weight: 500;
+    padding: 0 10px 7px 0;
+}
+td {
+    padding: 8px 10px 8px 0;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 12px;
+}
+td.revoked {
+    color: var(--dim);
+    text-decoration: line-through;
+}
+
+.secret {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--ground);
+    border: 1px solid var(--ok);
+    border-radius: 6px;
+    padding: 9px 11px;
+    overflow-wrap: anywhere;
+    margin-bottom: 8px;
+}
+
+.gate {
+    display: grid;
+    place-items: center;
+    height: 100vh;
+    padding: 20px;
+}
+.gate .card {
+    max-width: 460px;
+    width: 100%;
+}
+
+.dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    background: var(--dim);
+}
+.dot.live {
+    background: var(--ok);
+}
+.dot.busy {
+    background: var(--warn);
+}
+
+@media (max-width: 720px) {
+    .shell {
+        grid-template-columns: 1fr;
+    }
+    .side {
+        display: none;
+    }
+}

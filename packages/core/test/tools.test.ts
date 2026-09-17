@@ -7,7 +7,7 @@
  * of them surface days later as "the agent just talks instead of doing the thing".
  */
 
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ConfigError } from "../src/errors.ts"
@@ -523,9 +523,22 @@ async function runTools(
         untrustedSource?: string
         policy?: PolicyConfig
         approve?: (request: ApprovalRequest) => Promise<boolean>
+        /** The turn's signal, so the abandoned-approval path is reachable. */
+        signal?: AbortSignal
+        /**
+         * Bring your own bus.
+         *
+         * Only the approval tests need it, and they need it for a reason worth stating: an
+         * `approve` callback cannot read the `events` array this function *returns* — that binding
+         * is still in its temporal dead zone while the approver runs, so referencing it throws a
+         * `ReferenceError` which `decideAndRun` catches as a denial. The test then sees an empty
+         * capture and a `by: "error"` outcome, and the real claim — that the event is out before
+         * anybody is asked — goes unasserted while looking asserted.
+         */
+        bus?: EventBus
     } = {},
 ) {
-    const bus = new EventBus({ runtimeId: "rt_test" })
+    const bus = over.bus ?? new EventBus({ runtimeId: "rt_test" })
     const events = capture(bus)
     const outcome = await executeIntents({
         registry,
@@ -534,6 +547,7 @@ async function runTools(
             now: () => new Date("2026-08-13T09:00:00Z"),
             ...(over.dir === undefined ? {} : { dir: over.dir }),
             ...(over.writeTarget === undefined ? {} : { writeTarget: over.writeTarget }),
+            ...(over.signal === undefined ? {} : { signal: over.signal }),
         }),
         bus,
         eventContext: { agentId: "a", sessionKey: "s", turnId: "t" },
@@ -1188,5 +1202,193 @@ describe("telling the model what it was not given", () => {
     test("native's slot 1 stays empty when there is nothing to say", async () => {
         const registry = await withAvailable(["exec", "file_write"])
         expect(nativeDialect.renderCatalogue(registry.specs(), registry.notEnabled)).toEqual([])
+    })
+})
+
+// ─── approvals ───────────────────────────────────────────────────────────────────────────
+
+describe("asking a person", () => {
+    /**
+     * Phase 15.2. `ToolContext.approve` had existed since Phase 3 with **no caller anywhere** — a
+     * grep found only the definition — so every assertion here is about a path that had never once
+     * run in production. The events are the part a front end depends on and the part core owns.
+     *
+     * No `toMatchObject` and no `toBeInstanceOf`: core's suite also runs under Node's runner
+     * against a closed matcher list, so the field reads are spelled out. That is not only a
+     * constraint — a named field that is `undefined` fails loudly, where a partial object match on
+     * an absent event quietly compares nothing.
+     */
+    const ASK: PolicyConfig = { ...DEFAULT_POLICY, mode: "ask" }
+    /** A target that refuses the write, for the tests where only the *question* matters. */
+    const REFUSED = { name: "MEMORY.md", mode: "refused", reason: "none" } as const
+
+    const resolution = (events: readonly AnyEvent[]) =>
+        events.find((event) => event.type === "approval.resolved")?.data as
+            | { approvalId?: string; granted?: boolean; by?: string }
+            | undefined
+
+    test("a question is announced before it is asked, and resolved after", async () => {
+        const registry = await ToolRegistry.create({ local: ["memory_write"] })
+        // The test's own bus and its own capture, because the `events` `runTools` *returns* is a
+        // `const` still in its temporal dead zone while the approver runs — referencing it there
+        // throws, `decideAndRun` catches that as a denial, and the assertion below then reads an
+        // empty array while looking like it proved something. Cost two rounds to see.
+        const bus = new EventBus({ runtimeId: "rt_test" })
+        const live: string[] = []
+        bus.on("*", (event) => live.push(event.type))
+        const seenInside: string[] = []
+
+        const { events } = await runTools(registry, [intent("memory_write", { text: "a note" })], {
+            policy: ASK,
+            bus,
+            writeTarget: REFUSED,
+            approve: async (request) => {
+                // Ordering, asserted from **inside** the approver: the event has to already be out,
+                // or a client that renders prompts from the stream has nothing to render while the
+                // turn sits blocked. Asserting it from the finished array afterwards would only
+                // prove `requested` precedes `resolved` — true even if both fire after the answer,
+                // which is the strictly weaker claim.
+                seenInside.push(...live)
+                expect(request.approvalId.startsWith("a_")).toBe(true)
+                // `toBeInstanceOf` is outside the harness's closed matcher list, and this is the
+                // more useful assertion anyway: what an approver needs is something it can listen
+                // to, not a particular constructor.
+                expect(typeof request.signal.addEventListener).toBe("function")
+                expect(request.signal.aborted).toBe(false)
+                return false
+            },
+        })
+
+        expect(seenInside.includes("approval.requested")).toBe(true)
+        expect(seenInside.includes("approval.resolved")).toBe(false)
+
+        const requested = events.find((event) => event.type === "approval.requested")?.data as
+            | { approvalId?: string; slug?: string; mutating?: boolean; reason?: string }
+            | undefined
+        expect(requested?.slug).toBe("memory_write")
+        expect(requested?.mutating).toBe(true)
+        expect((requested?.reason ?? "").length > 0).toBe(true)
+        // Paired on the id: a request with no matching resolution leaves a prompt on screen
+        // forever, which is the state the pairing exists to make impossible. The `startsWith`
+        // assertion is what stops `undefined === undefined` passing this.
+        expect(resolution(events)?.approvalId).toBe(requested?.approvalId)
+        expect((requested?.approvalId ?? "").startsWith("a_")).toBe(true)
+        expect(resolution(events)?.granted).toBe(false)
+        expect(resolution(events)?.by).toBe("approver")
+    })
+
+    test("the approval id is not the call id, and is unique across calls", async () => {
+        // A dialect numbers calls within a step (`c1`, `c2`, …), so two steps of one turn both have
+        // a `c1`. An approval id reaches a client, comes back in a URL, and decides which blocked
+        // call resumes — a colliding one resumes the wrong call.
+        const registry = await ToolRegistry.create({ local: ["memory_write"] })
+        const ids: string[] = []
+        for (let round = 0; round < 3; round += 1) {
+            await runTools(registry, [intent("memory_write", { text: "n" })], {
+                policy: ASK,
+                writeTarget: REFUSED,
+                approve: async (request) => {
+                    expect(request.callId).toBe("c1")
+                    ids.push(request.approvalId)
+                    return false
+                },
+            })
+        }
+        expect(new Set(ids).size).toBe(3)
+    })
+
+    test("a granted call runs", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "approve-"))
+        try {
+            const path = join(dir, "MEMORY.md")
+            writeFileSync(path, "# Notes\n")
+            const registry = await ToolRegistry.create({ local: ["memory_write"] })
+            const { outcome, events } = await runTools(
+                registry,
+                [intent("memory_write", { text: "approved note" })],
+                {
+                    dir,
+                    policy: ASK,
+                    writeTarget: { path, name: "MEMORY.md", mode: "append" },
+                    approve: async () => true,
+                },
+            )
+            expect(outcome.results[0]?.ok).toBe(true)
+            expect(resolution(events)?.granted).toBe(true)
+            expect(resolution(events)?.by).toBe("approver")
+            // The far end: the file, not the decision. A granted approval that did not run the
+            // call would satisfy every assertion above.
+            expect(readFileSync(path, "utf8").includes("approved note")).toBe(true)
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
+    test("a thrown approver denies, and reports an error rather than a decision", async () => {
+        const registry = await ToolRegistry.create({ local: ["memory_write"] })
+        const { outcome, events } = await runTools(
+            registry,
+            [intent("memory_write", { text: "a note" })],
+            {
+                policy: ASK,
+                writeTarget: REFUSED,
+                approve: async () => {
+                    throw new Error("the prompt crashed")
+                },
+            },
+        )
+        expect(outcome.results[0]?.ok).toBe(false)
+        // `by: "error"` rather than a plain denial. A crashed prompt and a considered no are
+        // different facts, and collapsing them hides a fault behind a plausible outcome.
+        expect(resolution(events)?.granted).toBe(false)
+        expect(resolution(events)?.by).toBe("error")
+        // And the model is not told a person declined, because nobody did.
+        expect(outcome.results[0]?.output.includes("approver failed")).toBe(true)
+    })
+
+    test("an abandoned turn resolves the question without waiting for an answer", async () => {
+        // The guarantee that makes "wait for an answer" safe to implement at all. Without the race
+        // against the turn's signal, an unanswered question holds the step open forever: the turn
+        // never reaches its own timeout check, and a `running` row outlives the process with
+        // nothing able to tell it from a live one.
+        const registry = await ToolRegistry.create({ local: ["memory_write"] })
+        const controller = new AbortController()
+        // Aborted from outside, on a timer, which is what the turn's own timeout does. Aborting
+        // after `runTools` returns would never happen: the approver never resolves, so the await
+        // below is the thing being unblocked.
+        const abort = setTimeout(() => controller.abort(), 20)
+        const { outcome, events } = await runTools(
+            registry,
+            [intent("memory_write", { text: "a note" })],
+            {
+                policy: ASK,
+                signal: controller.signal,
+                writeTarget: REFUSED,
+                // Never resolves. Exactly an approver holding a question for somebody who never
+                // answers.
+                approve: () => new Promise<boolean>(() => {}),
+            },
+        )
+        expect(outcome.results[0]?.ok).toBe(false)
+        expect(resolution(events)?.granted).toBe(false)
+        expect(resolution(events)?.by).toBe("abandoned")
+        // "Nobody declined it" is the load-bearing half: the model must not be told a person said
+        // no when the turn was simply stopped underneath the question.
+        expect(outcome.results[0]?.output.includes("Nobody declined it")).toBe(true)
+        clearTimeout(abort)
+    })
+
+    test("with no approver at all, nothing is announced", async () => {
+        // `authorize` resolves `ask` through `onNoApprover` when nobody is reachable, so there is
+        // no question and there must be no event. A `requested` with no possible `resolved` is the
+        // orphan-frame shape `tool.gated` was written to avoid.
+        const registry = await ToolRegistry.create({ local: ["memory_write"] })
+        const { events } = await runTools(registry, [intent("memory_write", { text: "n" })], {
+            policy: ASK,
+            writeTarget: REFUSED,
+        })
+        const types = events.map((event) => event.type)
+        expect(types.includes("approval.requested")).toBe(false)
+        expect(types.includes("tool.gated")).toBe(true)
     })
 })

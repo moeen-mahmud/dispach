@@ -451,6 +451,92 @@ export const DeliverySchema = z
     })
     .strict()
 
+/**
+ * A JSON Schema node, as a manifest may write one.
+ *
+ * Recursive, and deliberately the **same shape** `ToolSpec.parameters` takes — because a team
+ * member's declared artifact schema *becomes* a tool's parameter schema (see `team/artifact.ts`).
+ * Reusing it means the artifact is validated by `coerceArgs` and repaired by the same one-attempt
+ * path every tool call already uses, rather than by a second validator that would disagree with it
+ * at the edges.
+ *
+ * Not `.strict()`: a JSON Schema in the wild carries keywords this runtime does not read
+ * (`title`, `minimum`, `$comment`), and refusing a schema for carrying one would make every
+ * copy-pasted schema an error. Unknown keywords are dropped rather than honoured, which is
+ * narrower than the author may expect and is said so in the spec.
+ */
+const JsonSchemaNodeSchema: z.ZodType<{
+    type: "string" | "number" | "integer" | "boolean" | "array" | "object"
+    // `| undefined` on each, not merely optional: under `exactOptionalPropertyTypes` an optional
+    // field and one that may hold `undefined` are different types, and Zod's inferred output is
+    // the second. Annotating it as the first makes the recursive type unassignable to itself.
+    description?: string | undefined
+    enum?: (string | number | boolean)[] | undefined
+    items?: unknown
+    properties?: Record<string, unknown> | undefined
+    required?: string[] | undefined
+}> = z.lazy(() =>
+    z.object({
+        type: z.enum(["string", "number", "integer", "boolean", "array", "object"]),
+        description: z.string().optional(),
+        enum: z.array(z.union([z.string(), z.number(), z.boolean()])).optional(),
+        items: JsonSchemaNodeSchema.optional(),
+        properties: z.record(z.string(), JsonSchemaNodeSchema).optional(),
+        required: z.array(z.string()).optional(),
+    }),
+)
+
+export const TeamMemberSchema = z
+    .object({
+        /**
+         * How the supervisor names this member, and it must equal the member manifest's own `id`.
+         *
+         * Two ids would mean the `handoff` argument, the session key, the `handoff.*` events and the
+         * stored row could disagree about who ran — and the one a reader has is whichever surface
+         * they happened to look at. Checked at load rather than trusted.
+         */
+        id: slug,
+        /** Path to the member's own manifest, relative to this one. A member is a full agent. */
+        manifest: z.string().min(1),
+        /**
+         * What this member is for, rendered as the `handoff` tool's guidance.
+         *
+         * Required, because the supervisor's only basis for choosing between members is this
+         * sentence. A team whose members are described as "researcher" and "writer" and nothing
+         * else is a team the model picks from by name-similarity.
+         */
+        task: z.string().min(1),
+        /**
+         * JSON Schema the member's returned artifact must satisfy.
+         *
+         * Becomes the parameter schema of a `submit_artifact` tool layered onto the member for the
+         * duration of one handoff — so "did it work" is a boolean decided by the same coercion the
+         * rest of the tool layer uses, which is what decision 10.3 asks for.
+         */
+        artifact: z
+            .object({
+                type: z.literal("object"),
+                properties: z.record(z.string(), JsonSchemaNodeSchema),
+                required: z.array(z.string()).optional(),
+            })
+            .strict(),
+    })
+    .strict()
+
+/**
+ * Sub-agents this agent may delegate to.
+ *
+ * Declaring it is what registers the `handoff` tool, which is why there is no separate switch —
+ * decision 4.53's rule, one level up: a capability reachable only by someone who already knows the
+ * field name is a capability the generated manifest is hiding, and a `team` block with no members
+ * is a team.
+ */
+export const TeamSchema = z
+    .object({
+        members: z.array(TeamMemberSchema).min(1),
+    })
+    .strict()
+
 export const ScheduleSchema = z
     .object({
         id: slug,
@@ -556,6 +642,7 @@ export const AgentManifestSchema = z
         channels: z.array(ChannelSchema).default([]),
         delivery: DeliverySchema.optional(),
         schedules: z.array(ScheduleSchema).default([]),
+        team: TeamSchema.optional(),
         plugins: z.array(PluginRefSchema).default([]),
         limits: LimitsSchema.prefault({}),
         server: ServerSchema.prefault({}),
@@ -578,6 +665,8 @@ export type MemoryConfig = z.infer<typeof MemorySchema>
 export type ChannelConfig = z.infer<typeof ChannelSchema>
 export type DeliveryConfig = z.infer<typeof DeliverySchema>
 export type ScheduleConfig = z.infer<typeof ScheduleSchema>
+export type TeamMemberConfig = z.infer<typeof TeamMemberSchema>
+export type TeamConfig = z.infer<typeof TeamSchema>
 export type PluginRef = z.infer<typeof PluginRefSchema>
 export type LimitsConfig = z.infer<typeof LimitsSchema>
 export type ServerConfig = z.infer<typeof ServerSchema>

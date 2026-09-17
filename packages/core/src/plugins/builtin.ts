@@ -13,7 +13,8 @@
  */
 
 import type { ModelError } from "../errors.ts"
-import type { ApprovalRequest } from "../tools/execute.ts"
+import { newApprovalId } from "../loop/ids.ts"
+import { type ApprovalRequest, abandonedWhen } from "../tools/execute.ts"
 import type { Middleware } from "./middleware.ts"
 
 export interface RetryOptions {
@@ -134,16 +135,32 @@ export function approvalMiddleware(options: ApprovalOptions): Middleware {
             })
             if (!wanted) return next()
 
-            const granted = await options
-                .ask({
-                    slug: context.tool.slug,
-                    callId: context.intent.callId,
-                    mutating: context.tool.mutating,
-                    reason: context.tainted
-                        ? `${context.tool.slug} changes something, and untrusted content has already entered this turn.`
-                        : `${context.tool.slug} changes something.`,
-                })
-                .catch(() => false)
+            // Raced against the turn's signal for the same reason core's own seam is: an
+            // unanswered question otherwise holds the step open forever, the turn never reaches its
+            // timeout check, and a `running` row outlives the process.
+            //
+            // Unlike core's seam this gate does **not** reach the event stream, and that is a
+            // stated limit rather than an oversight: `ToolCallMiddlewareContext` carries no bus, and
+            // giving a plugin one would hand every middleware the ability to forge runtime events.
+            // A plugin author supplying `ask` is the same person rendering the prompt, so the
+            // question is not invisible to whoever asked it — but anything that needs a *second*
+            // observer belongs on `AgentOptions.approve`, which core emits around.
+            const { granted } = await Promise.race([
+                options
+                    .ask({
+                        approvalId: newApprovalId(),
+                        slug: context.tool.slug,
+                        callId: context.intent.callId,
+                        mutating: context.tool.mutating,
+                        reason: context.tainted
+                            ? `${context.tool.slug} changes something, and untrusted content has already entered this turn.`
+                            : `${context.tool.slug} changes something.`,
+                        signal: context.signal,
+                    })
+                    .then((answer) => ({ granted: answer }))
+                    .catch(() => ({ granted: false })),
+                abandonedWhen(context.signal),
+            ])
 
             if (granted) return next()
 

@@ -2450,29 +2450,184 @@ not from the terminal. Stated rather than implied: the warning fires for a CLI r
 
 ## Phase 10 — Multi-agent
 
+**Split into 10A and 10B** after auditing VelaCrew on 2026-09-15 (`docs/06-VELAOPS-INTEGRATION.md`
+is the consumer-facing half). They are different features answering different problems, and only
+one of them blocks anything.
+
+### What the audit changed, and what it deliberately did not
+
+VelaCrew's Team Space is **peer ↔ peer**: one owner *per agent*, one container each, and a message
+the recipient judges under **its own** owner's grants. There is no supervisor anywhere in it.
+Phase 10 as written is **supervisor → sub-agent**: one owner, one runtime, the parent's authority
+*narrowed* for the child, a typed artifact handed back. Neither substitutes for the other.
+
+The first instinct was to re-scope Phase 10 onto what the consumer needs, and it is rejected —
+`CLAUDE.md` says why in as many words: *VelaOps is a consumer, not the owner.* Intra-agent
+decomposition is a harness feature whether or not this consumer wants it, and moving the roadmap
+because one consumer does not need something is exactly the pressure that sentence exists to
+refuse. **10B is unchanged.**
+
+What the audit *did* find is three gaps in the **existing** API, each of which passes the test
+`CLAUDE.md` sets for consumer-driven work — *would this make the runtime less useful to someone who
+has never heard of VelaOps?* — so they are ours rather than theirs:
+
+| Gap | Why it is the runtime's, not a consumer's |
+| --- | --- |
+| **No sender identity** on `POST /messages` | The channel path has `InboundMessage`, carrying `peerId`, `senderHandle` and `senderName`, and `allowFrom` reasons over them. The API path carries **nothing** — so "who am I talking to", "this is not my owner typing", and any multi-user front end are all unavailable on half the runtime's own inbound surface. An asymmetry in our surface, not a request. |
+| **No idempotency key** | `grep -c idempot` in `handler.ts` returns 0. Our *outbox* is idempotent by a derived key (decision 8.x); our *inbox* is not, so a retried POST — a proxy timeout, a queue redelivery, a client's own retry — runs the turn twice and bills twice. Anyone who retries a POST needs this. |
+| **No untrusted framing for an inbound message** | We fence tool output because a stranger wrote it (`tools/trust.ts`, decision 4.25). A peer agent's message is the same class of text, and measured worse: AgentLeak reports inter-agent messages leaking sensitive data 68.8% of the time against 27.2% in final outputs. "A tool result is not automatically trustworthy" applies verbatim to a message. |
+
+**Sequencing.** 10A precedes Phase 15 (the web UI) and 10B does not. The earlier argument here was
+that delegation changes what a transcript is; true, and the weaker form. A **peer message** changes
+it more — held by a scan, flagged, needing a reply composer, attributable to someone who is not the
+operator — and it is 10A that makes those legible on the wire. 10B could honestly follow the UI.
+
+**What stays on the consumer's side**, recorded so it is not picked up here by drift: the
+`space_*` collaboration surface (theirs, and it should be a **tool-provider plugin** against the
+9A seam rather than the eight shell scripts in a skill it is today — two-hop, which decision 4.7
+refuses), the A2A endpoint and its owner-minted keys, and identity, cost control, provisioning and
+isolation as `06-VELAOPS-INTEGRATION.md` already says.
+
+---
+
+### Phase 10A — The inbound peer surface — **complete** (2026-09-15)
+
+**Goal.** A message can say who sent it, can be retried safely, and is treated as data when it did
+not come from the operator.
+
+**Deliverables**
+
+- `TurnSender` in core: `{ id, name?, kind: "user" | "agent" }`. Threaded through
+  `AgentSendOptions` → `TurnInput` → the `SLOT.input` block → the turn row → `turn.start`.
+- **Trust is derived from `kind`, never settable beside it.** `agent` ⇒ untrusted, `user` ⇒
+  trusted, `from` absent ⇒ trusted and today's behaviour byte for byte. One field, so the two
+  cannot disagree — the `writeRoots` and `tools.providers` lesson.
+- An untrusted input is wrapped by the **existing** `wrapUntrusted` fence and **starts the turn
+  tainted** (`untrustedSeen` seeded from the input rather than always `false`), so the write gate
+  applies from step one. The fence is advisory; the gate is the part that holds.
+- `Idempotency-Key` request header on `POST /messages`. A replay answers `200
+  { turnId, sessionKey, replayed: true }` — the original turn id, so the caller reattaches through
+  the routes that already exist. `202` is reserved for a turn that was actually accepted.
+- Migration 12: `inbound_keys (agent_id, key) → turn_id`, claimed **synchronously in the handler
+  before `agent.send`**, because the 202 returns before the turn row is written and a race between
+  two retries is the only case the feature exists for. Retention enforced lazily on claim, never on
+  a timer (`buffer.ts`'s recorded rule), and `purgeAgent` deletes it.
+- Spec: `04-SPEC-WIRE.md` gains `from`, the header, the `replayed` response and the error codes;
+  `09-API-GUIDE.md` gains a worked peer-message call.
+
+**Files.** `packages/core/src/loop/turn.ts`, `runtime/agent.ts`, `tools/trust.ts`,
+`store/store.ts`, `store/sqlite/{migrations,store}.ts`, `events/types.ts`,
+`packages/server/src/handler.ts`, `packages/client/src/index.ts`.
+
+**Acceptance**
+
+- [ ] `from: { kind: "agent" }` fences the input and gates a mutating call on **step one** — asserted
+      on the assembled request body, not on the handler's arguments
+- [ ] `from: { kind: "user" }` and no `from` at all leave the prompt byte-identical to today
+- [ ] Two POSTs with one `Idempotency-Key` run **one** turn; the second returns the first's `turnId`
+      with `replayed: true` and `200`
+- [ ] The same key under a *different* agent is a different turn — one `store.db` per sandbox root,
+      so this is a property of the query rather than of the file
+- [ ] A key reused with different `text` is refused rather than silently answering the old turn
+- [ ] The sender survives a restart: it is on the turn row, and `GET /turns/:turnId` reports it
+- [ ] `turn.start` carries `from` and `trust`, and the spec table says so
+
+**Non-goals.** A2A agent cards. Peer *discovery*. Outbound agent-to-agent calls — a Dispach agent
+reaching another one is a tool, and a tool is 10B's or a plugin's. Per-sender authorisation beyond
+`allowFrom`, which is inbound-only and stays that way.
+
+---
+
+### Phase 10B — Supervisor delegation — **complete** (2026-09-16)
+
 **Goal.** A supervisor delegates to members with isolated context and typed results.
 
 **Deliverables**
 
-- `team/handoff.ts` — envelope, artifact validation against declared JSON Schema
-- `team/supervisor.ts`
-- `handoff` local tool, supervisor only
-- Runtime-kind manifest with `agents` and `team`
-- Sub-agent budget enforcement; `handoff.start` / `handoff.result`
-- Migration 006: `handoffs`
+- `team/artifact.ts` — the member's return channel. The declared JSON Schema **becomes
+  `submit_artifact`'s parameter schema**, so validation is `coerceArgs` and a bad shape earns the
+  loop's existing one repair. Zero new validation code (10.10).
+- `team/handoff.ts` — the runner. Four outcomes: `ok`, `no_artifact`, `budget`, `error`.
+- `team/supervisor.ts` — the `handoff` tool, `policyArg: "member"`, and `checkTeamGraph`.
+- `team/expand.ts` — member manifests loaded alongside their supervisor; cycles and depth refused
+  at load (10.12).
+- `team.members[]` on the **supervisor's own manifest**. The spec's `kind: Runtime` file was
+  deleted rather than built (10.9).
+- `handoff.start` / `handoff.result`, migration 13 (`handoffs`), `ToolRegistry.withTools`,
+  `TurnInput.turnTools`, `RuntimeOptions` unchanged.
+- `evals/handoff/` + `bun run eval:handoff` — **built and verified against a fixture, not yet run
+  against a real endpoint.**
 
-**Files.** `packages/core/src/team/`, `manifest/schema.ts`, `examples/team/`
+**Files.** `packages/core/src/team/`, `manifest/schema.ts`, `examples/team/`, `scripts/eval-handoff.ts`
 
 **Acceptance**
 
-- [ ] Supervisor delegates to two members; both return validated artifacts
-- [ ] Parent context contains the artifact and **not** the sub-agent transcript — asserted on token counts
-- [ ] Schema-violating artifact is a typed failure the supervisor can handle, not an exception
-- [ ] Budget exceeded terminates the sub-agent and reports honestly
-- [ ] Measured: delegation uses fewer parent tokens than the equivalent in-context approach; recorded in `evals/`
-- [ ] Members lack the `handoff` tool unless they declare their own team
+- [x] Supervisor delegates to two members; both return validated artifacts
+- [x] Parent context contains the artifact and **not** the sub-agent transcript — asserted on
+      character counts: 12,000 characters of member work moves the supervisor's prompt by under 200
+- [x] Schema-violating artifact is a typed failure the supervisor can handle, not an exception —
+      `no_artifact`, carrying the member's own explanation, and the supervisor's turn completes
+- [x] Budget exceeded terminates the sub-agent and reports honestly — `budget`, distinct from
+      `error`, because "the task was too large" and "the member is broken" want opposite responses
+- [x] Members lack the `handoff` tool unless they declare their own team
+- [x] Two handoffs to one member do not share history (10.13)
+- [ ] **Measured: delegation uses fewer parent tokens than the in-context equivalent.** The script
+      exists and both its branches are verified; the run is deliberately left to the owner, since it
+      spends on a real key. Against a fixture endpoint it reported parent −31.6% and **total up**,
+      which is the honest shape — delegation *moves* tokens, and whether the total falls depends on
+      the members running a cheaper model.
 
-**Non-goals.** A2A. Free-form agent chat. Dynamic team formation.
+**Non-goals.** A2A. Free-form agent chat. Dynamic team formation. Parallel handoffs — deferred
+rather than refused, see 10.11.
+
+**Verified live** against DeepSeek through `examples/team`: `researcher -> ok` with a validated
+artifact on the row, the member's transcript in its own session, and the supervisor answering from
+the artifact alone. Getting there took three real runs and found two defects no fixture could reach
+(10.14, 10.15) — which is the argument for running the example as part of the phase rather than
+after it.
+
+**One live limit, stated rather than fixed.** A *chained* delegation — where the second member needs
+the first's artifact verbatim — failed twice on this model, first by inventing a `Claims` argument
+and then by writing a multi-line value without NLT's heredoc. Both are the recorded NLT
+multi-line-value hazard reached through a long composed `task`. Single delegations work; chaining
+through a text-only channel is fragile and belongs in `evals/` before it is claimed.
+
+**Seven things found by building it.**
+
+- **The spec described a design nobody had chosen.** `kind: Runtime` with an `agents:` list and a
+  `team: {supervisor, members}` block, never built, contradicting one-agent-per-container. Deleted
+  with the reason (10.9).
+- **The `### Planned` guard worked, exactly as advertised.** Adding `handoff.start` to
+  `EVENT_TYPES` turned `spec.test.ts` red in both directions until the rows moved into the live
+  table — and the move corrected two field names the planned rows had guessed at (`member` not
+  `to`, `outcome` not `ok`). The table is now empty, which broke its *own* non-empty assertion; the
+  guard now proves its parser by requiring an empty table to be declared empty in prose.
+- **`model.result` documented a `costUsd?` that has never existed** and omitted `promptTokens`,
+  which it always carried. Field-level drift is **not** guarded — the guard compares event *names* —
+  and that gap is now stated in the spec.
+- **The first isolation test was worthless and passing.** Reverting the fresh session key left it
+  green, because a member is a different `agent_id`. The real leak needs two handoffs (10.13).
+- **The client's frame-mapper fixture inverted itself again.** It had used `approval.requested`
+  until 15.2 made that real, then `handoff.start` — which this stage made real one phase later. The
+  `expect(EVENT_TYPES).not.toContain(...)` line is what caught it both times; the name is now one no
+  roadmap mentions.
+- **`submit_artifact` was executable and undocumented, and the first fix was also wrong.** A turn
+  tool is layered onto the registry while slot 1's catalogue is rendered at load, so three live
+  handoffs came back `no_artifact`. Describing it in the *input* then contradicted the NLT
+  preamble's "use only the tools listed below", which a real model quoted back while declining to
+  call it. `turnTools` re-renders the catalogue now — safe because a handoff's session is fresh, not
+  because the rule it was reasoning against was wrong in general (10.14).
+- **`handoff`'s `task` did not say it was the only channel**, so the supervisor invented a `Claims`
+  argument carrying the researcher's artifact — reasonable, and one repair away from losing the turn
+  (10.15).
+
+> **One finding worth carrying to the consumer.** VelaCrew's `apps/engine/src/lib/space/run-watch.ts`
+> exists entirely because `POST /hooks/agent` returns a hook-delivery id that appears in **zero** of
+> a turn's event frames — its own header records the measurement, and `evt.runId !== watch.runId`
+> dropped every event of every run, so **0 of 62 dev runs ever reached COMPLETED**. `POST
+> /v1/agents/:id/messages` returns the real `turnId`, and 13.1 made the buffer open *at acceptance*,
+> so attaching in the next statement is a guarantee rather than a race. Suffix matching, run
+> claiming and a watchdog doing identity work do not get easier — they stop existing.
 
 ---
 
@@ -2487,12 +2642,14 @@ not from the terminal. Stated rather than implied: the warning fires for a CLI r
 - CI gate failing above 1200 ms
 - README with the measured number and how to reproduce it
 - Complete `examples/`
-- API docs generated from types
+- ~~API docs generated from types~~ — answered in Phase 14.2 **without** a generator: the spec is the contract and is now machine-checked, and `@dispach/client`'s types are the reference. `docs/09-API-GUIDE.md` is the walkthrough. A generated third description would drift from both and read as the most authoritative.
 - v0.1.0 tagged
 
 **Acceptance**
 
-- [x] Image under 150 MB — **83 MB**, arm64
+- [x] Image under its ceiling — **287 MB** measured 2026-09-17, against a ceiling renegotiated
+  from 150 to 350 MB in 15.4. The 83 MB recorded here was arm64 at Phase 11, before the shell
+  (11.183) and the browser surface
 - [x] Container start → `/v1/ready` 200 under 2 s — **147 ms**, healthcheck healthy
 - [x] In-process boot under 1000 ms; CI enforces 1200 ms — **53 ms**, and the README now carries the
   machine state beside the figure, because a boot number without one is a number about somebody's
@@ -2536,33 +2693,136 @@ the argument for the CI job rather than for reading the Dockerfile more carefull
 
 ---
 
-## Phase 12 — VelaOps compat adapter
+## Phase 12 — VelaOps compat adapter — **deleted**
 
-**Goal.** A VelaOps agent container runs Dispach instead of OpenClaw, with `apps/engine`
-unchanged.
+Not deferred, not descoped: **removed, with the work it described replaced by a migration.**
 
-**Deliverables**
+It was to be `packages/compat-openclaw` — a WS RPC server on 18789 reproducing OpenClaw's
+protocol, so `apps/engine` could stay untouched and both runtimes could run side by side per
+agent. Four reasons it is gone, in the order that matters:
 
-- `packages/compat-openclaw` — WS RPC on 18789, `x-openclaw-scopes`, `auth.token`, TUI client id, subscribe, terminal phase `result`
-- `/healthz`
-- `openclaw.json` → `agent.yaml` translation incl. `modelByChannel`, `delivery`, `deliveryTargets`
-- `model: "openclaw/main"` indirection accepted and rewritten
-- Gateway channel ids incl. `msteams`
-- `[boot-phase]` markers on stdout for `boot-progress.ts`
-- Cron RPC surface mapped to native schedules
-- Compatibility test suite recorded against a live OpenClaw gateway
+1. **It asks Dispach to impersonate the thing it replaces**, bug-compatibly. A model field that
+   accepts only `openclaw/main`, `auth.token` rather than `auth.password`, a terminal phase called
+   `result` rather than `end`, `teams` spelled `msteams` — all reproduced exactly, including the
+   ones that are defects. A runtime whose case for existing is being better cannot also be
+   faithful to that.
+2. **It is a second protocol with no guard.** `04-SPEC-WIRE.md` is machine-checked against the
+   code as of 13.7; an adapter would be a second surface with nothing checking it, and the one
+   nobody checks is the one that drifts.
+3. **`/v1` is the better target.** Detached turns and reattach are core here, which *fixes*
+   "generation dies on browser refresh" — a gotcha the adapter would have had to preserve the
+   shape of while fixing the behaviour underneath.
+4. **The engine change is smaller than the adapter.** One typed client replacing a hand-rolled WS
+   RPC client and its reconnect logic, against a call-by-call mapping.
+
+**The cost, stated rather than hidden.** The old plan explicitly budgeted for weeks of
+side-by-side dogfooding, and without an adapter there is no incremental path: an agent runs one
+runtime or the other, and switching is a redeploy. `docs/06-VELAOPS-INTEGRATION.md` carries the
+cutover sequence, the RPC mapping, the file-by-file engine diff, and the row most likely to be
+missed — `POST /reload` answers `409`, so engine code expecting a live reload to apply anything
+has to change.
+
+Two claims in that document were **false** when this was written and are corrected there: it
+promised a channel change "applies on `reload` without restart" and that reload "returns a diff".
+Neither was ever true. A manifest change takes effect at the next boot, which at ~55 ms is cheaper
+than the hot-patch it replaces.
+
+---
+
+## Phase 13 — The agent server — **complete**
+
+**Goal.** `docker compose up` brings up a server with an agent and an exposed API, and the wire
+surface tells the truth about itself. The protocol was already largely specified in
+`04-SPEC-WIRE.md` — Phase 4 arrived at the reattachable-session shape independently, and OpenAI
+shipped the same shape as their Agents API on 2026-09-10 — so this phase is not new design. It is
+the gap between a specified protocol and a working one.
+
+**What the inventory found, and this phase fixed**
+
+| # | Found | Stage |
+| --- | --- | --- |
+| 1 | Token streaming reached the wire **never** in a served process. `emitChunks` was a process-wide boolean whose setter had no caller. | 13.2 |
+| 2 | A replay could lose its front silently: the cap dropped the oldest events and set a flag nothing read. | 13.3 |
+| 3 | Two attach races, and a docstring describing behaviour nobody wrote. | 13.1, 13.4 |
+| 4 | `subscribe` read the agent id out of `sessionKey`, muting the socket and reporting success. Two disjoint cancel registries. | 13.1, 13.4 |
+| 5 | The spec disagreed with the code in about twelve places, and its own text claimed it had finished cleaning up. | 13.7 |
+| 6 | No compose file, **no `.dockerignore`** (and `.gitignore` ignored one), `HEAD /v1/health` 405, four introspection values hardcoded. | 13.5, 13.6 |
+
+**Stages**
+
+- **13.1** Honesty fixes: `open()` unconditional and at acceptance, `subscribe` reads `agentId`, the
+  409 says what is true.
+- **13.2** Per-subscriber chunk opt-in. An exact `model.chunk` subscription *is* the opt-in;
+  `emitChunks` deleted so two gates cannot be ANDed with the unset one winning.
+- **13.3** `TurnAttachment` gains `truncated`/`dropped`/`chunks`, and `stream.replay` precedes the
+  replay frames.
+- **13.4** Four states and three answers when attaching; one cancel registry per process;
+  per-socket WS chunk filtering.
+- **13.5** `docker-compose.yml`, `.env.example`, a committed `.dockerignore`, compose in the rename
+  script's scope, README, CI.
+- **13.6** `HEAD`/`OPTIONS` from the route table; skills, schedules, tags, phase visibility and
+  `entryPhase` report facts.
+- **13.7** `EVENT_TYPES` with a compile-time assertion, `agent.error` deleted, `?types=` validated,
+  and `packages/server/test/spec.test.ts`.
 
 **Acceptance**
 
-- [ ] A VelaOps agent container with `runtime: dispach` boots and serves chat with **zero** engine changes
-- [ ] Telegram and WhatsApp work through the existing wiring
-- [ ] `boot-progress.ts` renders the stepper correctly
-- [ ] Cron round-trips through the existing UI including all three kinds and disabled jobs
-- [ ] Detached chat reattach works via existing `stream-hub.ts`
-- [ ] Both runtimes run side by side, selected per agent
-- [ ] Documented deviations recorded in `06-VELAOPS-INTEGRATION.md`
+- [x] A reply is reconstructible from `model.chunk` frames on the wire; **none arrive without
+  asking** — verified live against DeepSeek, 29 frames asked, 0 not asked
+- [x] A truncated replay announces the hole before the frames it is missing them from
+- [x] An unknown turn id is `404`, an evicted turn is `stream.ended`, a turn running elsewhere is
+  `stream.unavailable` — four states, three answers
+- [x] A turn is stoppable from whichever surface asks, not only the one that started it
+- [x] `docker compose up -d --wait` reaches healthy with no compose edit — **5.8 s** at 13.5 and
+  **5.7 s** re-measured at 15.4, so start-to-ready did not move even though the image went from
+  47 MB to 287 MB. Worth knowing why: readiness is tens of milliseconds in-process, and almost all
+  of that 5.7 s is waiting for the first healthcheck probe rather than for the runtime
+- [x] An unauthenticated write is refused `401`; `store.db` lands on the state volume as uid 1000
+- [x] `HEAD` answers as `GET`, `OPTIONS` reports a derived `Allow`, and a stream refuses `HEAD`
+  rather than leaking a subscription per probe
+- [x] `?types=` refuses an unknown type and names the nearest real one
+- [x] `tsc` goes red when `EventDataMap` and `EVENT_TYPES` disagree, in both directions
+- [x] The spec is checked against the code: events, planned events, emitters, envelope, routes,
+  error codes, and a hint on every reachable failure — nine assertions, each revert-checked
 
-**Non-goals.** Migrating existing agents. Changing engine code. Feature parity with OpenClaw.
+**Non-goals, deliberately.** CORS (the UI is same-origin). Webhook rate limiting (needs a
+trusted-proxy decision first; `X-Forwarded-For` is attacker-controlled). A core-owned in-flight
+turn registry, so `POST /stop` still cannot reach a channel- or schedule-started turn — 13.1's
+honest 409 is the interim. WS replay. Multi-agent `serve`. Per-key sessions or memory. Skills
+`lastSelectedAt`. GHCR and multi-arch.
+
+**Still owed to Phase 15.** Operator keys, approvals over the wire, and `packages/web`.
+
+---
+
+## Phase 14 — The client and the docs — **complete**
+
+**Goal.** Calling the agent server feels like an SDK, and VelaOps has something to act on.
+
+- **14.1** `packages/client` — `createClient`, `agent(id).send()`, a turn handle with `stream()`,
+  `tokens()`, `text()`, `get()` and `stop()`, the firehose, and `DispachError` carrying the wire's
+  own `code`/`hint`/`field`/`status`. No dependency beyond the standard library and core, which
+  supplies `parseSSE` and `EventDataMap` so the client cannot drift from the catalogue.
+- **14.2** `docs/09-API-GUIDE.md` — the walkthrough, and the answer to Phase 11's "API docs
+  generated from types" **without** a generator.
+- **14.3** `docs/06-VELAOPS-INTEGRATION.md` rewritten as a migration: the cutover sequence, the
+  RPC surface mapped call by call, the file-by-file engine diff, and two false claims corrected.
+
+**Acceptance**
+
+- [x] The client's own tests drive the **real** handler, not a mocked `fetch` — no port, no process
+- [x] Tokens reconstruct a reply and exclude the model's reasoning, verified live against
+  deepseek-v4-pro through the built binary
+- [x] Reattach by turn id works from a handle the sending code never held
+- [x] A truncated replay is **refused** by `tokens()` and reported by `stream()`
+- [x] Every failure is a `DispachError` — including a transport failure and a non-JSON 502 — so one
+  `catch` is a complete answer
+- [x] An unknown event type is refused at the call, naming the nearest real one
+- [x] Phase 12 deleted with its reason, and `compat-openclaw` gone from every directory map
+
+**Non-goals.** A generated HTML reference. A browser bundle budget — that is Phase 15's, where the
+client is consumed by `packages/web` and the image has 150 MB to stay under. WebSocket support in
+the client: `/v1/ws` is 501 under Node and everything it offers is reachable over SSE.
 
 ---
 
@@ -3356,6 +3616,301 @@ where it is decided, in the source. Verified red in both directions.
 The window is narrowed, not eliminated, and that is stated in the test: anything before
 `Runtime.create` returns is still unprotected. What is pinned is that nothing else gets inserted
 between the handlers and the bind.
+
+---
+
+## Phase 15 — Dispach Web
+
+**Goal.** Chat, sessions and approvals in a browser, same origin, no CORS.
+
+Three stages with **one** hard dependency: 15.3 needs 15.1. 15.2 needs neither, which is why it
+went first — 10A made the write gate fire on step one, so "I was blocked and had to ask" became the
+live experience of a peer-driven turn while nothing anywhere could be asked.
+
+### 15.2 — Approvals over the wire — **complete** (2026-09-15)
+
+**Goal.** Fill `ToolContext.approve`, which has existed since Phase 3 with **no caller anywhere** —
+a grep found only the definition — so `tools.untrusted.onMutate: "confirm"` was unreachable and a
+`tools.policy` rule with `ask` fell through to `onNoApprover`.
+
+Deliberately **not** over WebSocket: `/v1/ws` answers `501` under Node, and a capability half the
+supported runtimes cannot reach is not a capability. The request goes out on the stream every reader
+already has; the answer is an ordinary POST.
+
+- `newApprovalId()`, `approval.requested`, `approval.resolved` — emitted by **core**, before and
+  after asking, so a suspended turn is visible to the firehose, an audit log and a second observer
+  rather than only to the surface drawing the prompt (11.188).
+- `RuntimeOptions.approve`, threaded to `Agent.create` — which also silences
+  `confirm_without_approver`, since that warning keys on the seam being empty.
+- `createApprovalRegistry()` in `packages/server` — `approver` for `Runtime.create`, `pending()`
+  for the recovery path, `resolve()` for the route. No persistence: what a pending approval resolves
+  is a suspended turn *in this process* (11.190).
+- `GET /v1/agents/:id/approvals`, `POST /v1/agents/:id/approvals/:approvalId`.
+- No approval clock. The turn's own timeout bounds the wait, and core races the approver against the
+  turn's signal (11.189).
+
+**Acceptance**
+
+- [x] A blocked turn is listable while it waits, and the row is still `running` — asserted, because
+      "it worked" is also true of a runtime that asked nobody
+- [x] Granting runs the call; denying refuses it and the model is told a *person* declined
+- [x] `approval.requested` reaches the firehose carrying the turn, session and agent it belongs to
+- [x] An unanswered question ends with its turn as `by: "abandoned"`, and the model is told
+      **"nobody declined it"** — nobody did
+- [x] A thrown approver is `by: "error"`, not a considered no
+- [x] Answering twice is a `404`; a body with no boolean `granted` is a `400` (11.191)
+- [x] With no approver wired, both routes answer something true and the agent keeps its warning
+- [x] Verified live: real server, real model, a turn suspended and released by curl
+
+**Three findings.** `serve` builds its `createHandler` argument by hand, so `approvals` was
+declared, accepted and **dropped** — the seventh instance of the conditional-spread shape recorded
+in `CLAUDE.md`, and every test passed because they all construct the handler directly. There is now
+a real-bind guard that goes red when the one forwarding line is removed. Second: the client's
+frame-mapper test used `approval.requested` as its stand-in for a *hypothetical* future frame, so
+this stage silently inverted what it tested; the fixture now uses `handoff.start` and **asserts it
+is absent from `EVENT_TYPES`**, so the day 10B lands the premise fails loudly. Third: an `approve`
+callback cannot read the `events` array its own test helper returns — temporal dead zone, caught by
+`decideAndRun` as a denial, so the capture reads empty and the assertion passes on no data.
+
+### 15.1 — Operator keys — **complete** (2026-09-17)
+
+**Goal.** A credential a browser can hold and an operator can revoke without restarting the
+process, which the container's `server.tokenEnv` value cannot be: it is the one secret every
+scheduled caller also uses, so pasting it into a web form makes the least rotatable thing the most
+widely handled.
+
+Migration **14** (10A took 12, 10B took 13): one table — `key_id`, `label`, `fingerprint`,
+`created_at`, `last_used_at`, `revoked_at`. `POST /v1/keys`, `GET /v1/keys`,
+`DELETE /v1/keys/:keyId`. `authorise` replaces `checkToken` and tries three credentials in a fixed
+order: the configured token, an operator key, the boot claim.
+
+**Three places this departs from the plan, each with the reason recorded.**
+
+- **`SHA-256`, not `scrypt`** (11.192). A slow KDF protects a *guessable* secret; a 160-bit CSPRNG
+  token has no candidate space. What it would have cost is concrete: a per-key salt cannot be
+  indexed, so one request means one derivation *per key in the table*, on every call including each
+  SSE open.
+- **A claim exchanged by `POST`, not a URL** (11.195). A `GET` that spends a single-use token can be
+  burned by a link preview before the person clicks, and a URL implies a page 15.3 has not built.
+- **A live key closes an otherwise-open server** (11.193), which the plan did not mention and which
+  the feature is hollow without: on loopback with no token, minting a key would otherwise do
+  nothing at all.
+
+**Acceptance**
+
+- [x] The secret appears in one response and nowhere else — asserted against the whole serialised
+      listing, not field by field, because a conditional spread would be invisible to the latter
+- [x] A key authenticates every non-open route, and the configured token keeps working beside it
+- [x] A revoked key, a wrong key and no token are one answer; only a recognised-but-spent claim is
+      distinguished, which discloses nothing the caller does not already hold
+- [x] The claim exchanges once, opens `POST /v1/keys` and no other route, and survives a refused body
+- [x] `last_used_at` is written, coarsely, and the threshold is the store's rather than each caller's
+- [x] `purgeAgent` leaves the keys alone, asserted with two agents in one store
+- [x] Verified live: real server, real model — the claim matrix across three restarts, the latch, a
+      turn taken through a key, and the token still working with keys present
+
+**Four defects, three found by tests and one by reading real output.**
+
+The claim route asked `presentedClaim(request) !== undefined`, which means "did this request present
+*any* bearer" — true of the token and of every key — so **every ordinary mint was answered
+`claim_spent`**. Scoping the claim by path alone let it read `GET /v1/keys`, enumerating every
+credential on the server before exchanging itself for one; a claim opens a method *and* a path.
+Spending it before validation burned the ticket on a malformed label, leaving a restart as the only
+way back. And `key_not_found` inherited `notFound`'s default hint — *"a session key includes its
+channel segment"* — which is advice to look in the wrong place; its guard now names what the
+sentence must mention, because a non-empty-hint assertion passed happily on the wrong sentence.
+
+**Two guards that could not fail on the first write**, both fixed:
+
+- The real-bind test (`serve` forwarding `claim` — the **eighth** instance of the hand-built-object
+  shape) had no token, so the server was open and the request succeeded whether or not the claim
+  reached the handler. A token is what makes the claim the only thing that can authorise the call.
+- Nothing guarded the spend *ordering* until a test asserted that a `400` leaves the ticket live.
+
+All told, eleven guards revert-checked red in both directions.
+
+**A CLI surface is not part of this.** `keys` is already the keyboard byte probe, and the recovery
+path a person needs turned out to be one flag: a claim prints whenever no key is live, so revoking
+your last one recovers on the next boot with nothing to remember. `serve --claim` covers the
+remaining case — a live key whose secret is lost.
+
+**Left for 15.3.** The claim URL form, once a page exists to consume it; a `?claim=` query then puts
+the token in browser history, which is a cost to state at that point rather than assume now.
+
+### 15.3 — Dispach Web — **built, browser check outstanding** (2026-09-17)
+
+**Goal.** Chat, sessions, approvals and key management in a browser, same origin, no CORS.
+`docker compose up` brings the UI with it; `dispach serve` on a laptop does too.
+
+React 19 + Vite (Moeen, 2026-09-17). `packages/web` has **zero runtime dependencies** — a bundled
+browser app compiles its framework into the output, so `react`, `react-dom`, `vite` and
+`@vitejs/plugin-react` are devDependencies and the image's production install pulls none of them
+(11.201). What "lightweight" governs is the browser payload, guarded by a ceiling on a real bundle
+the way `packages/client`'s is.
+
+**Assets are inlined as text, not read from disk** (11.200). Measured across the three shapes a
+standalone command has to work in — source checkout, bundled `dist/`, compiled executable —
+`with { type: "file" }` **fails in the bundled one**, handing back a relative spec that resolves
+against the process cwd. `with { type: "text" }` works in all three with no sidecar files, so there
+is nothing to copy into the image and nothing to list in `files`. The constraint shapes the UI: no
+binary assets, favicon as an inline SVG data URI.
+
+**Prerequisite, done 2026-09-17 (11.199).** `packages/client`'s browser bundle was **1.18 MB** — one
+barrel import from core putting Zod and a YAML parser in a page that can never load a manifest.
+`@dispach/core/wire` carries the two runtime values the client needs; the bundle is **14.7 KB**, the
+published subpath **3.22 KB**. Three guards, revert-checked both ways. That was the UI's entire JS
+budget, spent before a component existed.
+
+15.1 and 15.2 are both in, so this stage has everything it consumes: a revocable browser credential,
+and an approval request on the stream with a POST to answer it. It also closes 15.1's one loose end —
+with a page to consume it, `serve` prints the **claim URL** (11.195) instead of a curl line.
+
+**Deliverables**
+
+- `packages/web` — Vite build to `packages/web/dist`, stable filenames so the import list is static
+- A static seam in `packages/server`, checked after `/v1`, with the shell and assets on `isOpenPath`
+  because a page load carries no bearer — the shell holds no data, everything comes from `/v1`
+- Chat with per-token streaming, session list and switch, tool calls and results, approval prompts,
+  key management
+- `serve` prints the claim URL; the page exchanges it
+- Vite dev server proxying `/v1`, for UI work without rebuilding
+
+**Acceptance**
+
+- [x] The shell is served at `/` with no credential, and `/v1` still refuses one — verified live on
+      the same server, which is the pair that matters: either half alone is satisfied by a server
+      that is entirely open or entirely closed
+- [x] A turn streams token by token, fed through the real reducer from a real DeepSeek stream:
+      `reasoning → tool → reasoning → reply`
+- [x] Reattach: the live turn id is parked in `sessionStorage` and re-followed on mount
+- [x] An approval is a row where it happened, with the three outcomes kept apart
+- [x] A key can be minted, listed and revoked from the page
+- [x] The browser payload is under its ceiling, measured on the built output and refusing stale output
+- [x] The spec guard covers the new routes; its `/v1`-only parser is widened by *naming* the three
+      paths rather than accepting any path, so it still cannot match prose
+- [ ] **The page itself opened in a browser.** Everything below the rendering was verified against a
+      live server; the Chrome extension was unreachable in this session, so nobody has yet watched
+      the UI paint. That is the one outstanding item and it is the owner's to do.
+
+**Findings, in the order they cost time.**
+
+*Before starting:* the spec guard's route regex was `/v1`-only, so registering `GET /` would have
+made "every registered route is documented" red with no way to go green. Widened by naming the three
+paths. And the docs carry **three** image sizes — 47 MB (13.5), 68 MB (11.183), 83 MB (Phase 11,
+arm64) — which cannot all be current; still unreconciled, and worth a re-measure before any of them
+is treated as a budget.
+
+*The prerequisite:* `packages/client`'s browser bundle was **1.18 MB** (11.199).
+
+*Four invented event fields* (11.205) — the chat would have rendered a blank reply and empty tool
+rows, with fifteen tests agreeing. The fixture is typed against `EventDataMap` now, and
+`packages/web/tsconfig.json` had omitted `test/**` so that guard was not being checked at all.
+
+*The asset import shape* (11.200) — `with { type: "file" }` fails in the bundled shape;
+`with { type: "text" }` works in all three. And the package-subpath form is destroyed by the
+server's own build, because `--packages=external` drops the import attribute silently: every test
+stayed green because tests import `src`.
+
+*The stream filter* (11.203, 11.204) — the wire is unfiltered, so `ACTION: now / format: human /
+END` reached a chat bubble; and `endStep()` turned out to be mandatory after three wrong answers,
+because an incomplete probe measured the wrong thing.
+
+*A loop hid three routes from the spec guard.* `router.add("GET", path, …)` over `WEB_PATHS` is one
+line shorter and invisible to a scanner that reads string literals, so the routes were
+undocumented, unchecked and reported as compliant. Literals now, with a drift guard against
+`WEB_ASSETS`.
+
+*The catch-all guard was not a guard.* `Router` has no wildcard — `:name` captures one segment — so
+`"/*rest"` registers a route matching the literal segment `*rest` and never fires. The reachable
+mistake is a fallback in the dispatcher, which is what the test catches.
+
+**What the UI deliberately does not show.** Tool arguments and tool output. `tool.call` carries
+`argsHash` and `tool.result` carries `bytes`, because arguments can hold a file's contents or a
+shell script and an observation is text a stranger wrote — and the firehose is seen by every
+observer of a session. A live row says what was called and how it went; the text is on the reattach
+path, in the stored messages.
+
+### 15.4 — The standalone binary — **built** (2026-09-17)
+
+Split from 15.3 (11.202), because a combined stage cannot be reviewed: the UI would be unverifiable
+until a four-platform release pipeline worked, and the pipeline untestable without the UI.
+
+`dispach` installed from brew or the image, everything under one command.
+
+**Deliverables**
+
+- `scripts/build-binary.ts` — `--compile` for four targets (darwin-arm64, darwin-x64, linux-x64,
+  linux-arm64), ad-hoc signing on darwin, and a run of every target it can execute
+- `scripts/brew-formula.ts` — the formula generated from the digests of assets that exist
+- `.github/workflows/release.yml` — tag-driven: binaries, checksums, a GitHub release, the generated
+  formula attached, and a two-architecture image pushed to GHCR
+- A `binary` job in CI over `ubuntu-latest` and `macos-latest`, each compiling its host target and
+  **running** it
+- `README.md` leads with the binary; the stale "not built yet" list is corrected
+
+**Measured, on this machine (M-series, bun 1.3.5)**
+
+| target | size | signed here | ran here |
+| --- | --- | --- | --- |
+| darwin-arm64 | 61.0 MB | yes | yes, 0.1.0 |
+| darwin-x64 | 66.8 MB | yes | no, cross-compiled |
+| linux-x64 | 103.3 MB | n/a | no, cross-compiled |
+| linux-arm64 | 96.2 MB | n/a | no, cross-compiled |
+
+`validate --json`: **70–90 ms compiled against 90–110 ms** through `node packages/cli/dist/index.js`,
+consistent with the 84/92 ms recorded in 11.202.
+
+**Four things found by building it**
+
+- **A compiled binary is already ad-hoc signed, and macOS kills it anyway.** 11.202 recorded that
+  signing is mandatory; what it did not record is that bun *already signs* — `codesign -dv` reports
+  `flags=0x20002(adhoc,linker-signed)` and `Signature=adhoc`, and the binary then dies on exec with
+  exit 137 and no output. So the obvious diagnostic passes on a dead file, and anyone reading the
+  signature concludes the work is done. An explicit `codesign --force -s -` replaces it with a plain
+  ad-hoc signature (`flags=0x2`) and it runs. Signing is *re*-signing, not signing.
+- **`codesign` is macOS-only, so a darwin target cross-compiled on Linux cannot be repaired on the
+  machine that built it.** The script refuses that combination by name rather than emitting a file
+  that exits 137 for every user who downloads it, and the release workflow splits its matrix by
+  *runner* for that reason. Signing a darwin-x64 binary from an arm64 mac works, so one macOS runner
+  covers both darwin targets.
+- **The linux binaries are ~1.6× the darwin ones** — 103.3 MB and 96.2 MB against 61.0 MB. Bun's
+  embedded linux runtime is simply larger. This matters beyond the download: it is the figure 15.5's
+  image budget has to be built on, not the 61 MB one that gets quoted.
+- **The CI step for the binary was verified locally, passed, and failed on the first real run** —
+  `env_var_missing: MODEL_ID is referenced by model.main.id but is not set`, from `validate` on
+  `examples/minimal`. The binary was fine; the step was wrong twice over. `examples/minimal` is the
+  one example that deliberately uses `${MODEL_ID}` (its own comment says the indirection *is* the
+  point) and its `.env` is gitignored, so a fresh checkout cannot expand it. It passed here because
+  **`ambientEnv` layers the *cwd's* `.env`** and the repo root had one — the recorded contamination
+  hazard, hit as a *verification* hazard rather than a runtime one. Measured on a clean tree from a
+  cwd with no `.env`: `minimal` and `team` fail `env_var_missing @ model.main.id`, `reference` and
+  `shell-agent` fail `manifest_validation_failed @ model.main.apiKeyEnv`. **No committed example
+  validates with an empty environment, and that is the feature** — so the job carries the same fake
+  `MODEL_*` values the `docker` job already used, at job level so all three steps share one source.
+  Transferable, and already written down once: *verify a workflow change against a fresh clone,
+  never against your working tree.*
+- **The documented image size was wrong in all three places, and the CI gate had been red.** 47 MB
+  (13.5), 68 MB (11.183) and 83 MB (Phase 11) could not all be current; the image actually shipping
+  measures **287 MB**, so the 150 MB gate has been failing since the browser surface landed.
+  Renegotiated to 350 MB with the measurement attached rather than relaxed quietly — and 15.5
+  replaces the base image, so it must be re-measured there rather than carried.
+
+**Acceptance**
+
+- [x] Four targets compile; every one that can run here does, and reports the package's version
+- [x] A darwin binary refuses to ship unsigned, and the refusal names why
+- [x] `shasum -a 256 -c` verifies a downloaded asset — the sequence in the README was run
+- [x] The formula's ruby parses (`ruby -c`), and its digests come from files rather than placeholders
+- [x] CI compiles and *runs* the binary on Linux and macOS
+- [x] The compiled binary **serves the browser surface** — `/`, `/assets/app.js` and
+      `/assets/app.css` answer 200 with 1,290 / 224,813 / 4,919 bytes, byte-identical to the node
+      shape. 11.200 measured `type: "text"` against the source and bundled shapes; `--compile` is
+      the third, and it is the one a release ships
+- [ ] A real tag produces a release, a formula and a GHCR image — **unverified until v0.1.0 is
+      tagged.** The workflow is `workflow_dispatch`-able so the matrix can be proven first, and it
+      publishes nothing without a tag
+- [ ] npm publishing — **out of scope here.** Open item O.2 (registering the `@dispach` scope) has to
+      land first, and a pipeline that cannot be run is not a pipeline
 
 ---
 

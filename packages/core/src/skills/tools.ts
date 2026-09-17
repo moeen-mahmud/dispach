@@ -7,7 +7,7 @@
  * documented as "Slot 1, rendered once at agent load. Byte-stable, or prompt caching stops working".
  * Both cannot be satisfied in slot 1. So the *catalogue* never sees these: they are described inside the
  * skill's own slot-5 block, which is after breakpoint A and varies per turn by design, and the executor
- * is handed them for the turn through `ToolRegistry.withTurnTools`.
+ * is handed them for the turn through `ToolRegistry.withTools`.
  *
  * That failure had no symptom worth mentioning, which is why the placement is written down twice. A
  * per-turn slot-1 entry would have worked perfectly and quietly multiplied the bill.

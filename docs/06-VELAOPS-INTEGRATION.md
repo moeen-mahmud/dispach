@@ -30,56 +30,94 @@ Write this list somewhere you'll see it during code review:
 | `velaops-net` DNS assumptions | compose | Network topology |
 | Billing, entitlements, tier quotas | engine | Business logic |
 | Better Auth sessions, user identity | engine | Dispach has no user model |
-| `[boot-phase]` marker **format** | compat adapter | Core emits structured events; the adapter formats them |
+| `[boot-phase]` marker **format** | engine | Core emits `runtime.ready` with a `phases` breakdown; whatever wants a stepper subscribes and formats it |
 
 The last one is the pattern for all of these. Core emits `runtime.ready` with a `phases`
-breakdown. The compat adapter subscribes and prints `[boot-phase]` lines. Core never learns
-that `boot-progress.ts` exists.
+breakdown; anything that wants `[boot-phase]` lines subscribes to `GET /v1/events` and formats
+them. Core never learns that `boot-progress.ts` exists — and as it happens, boot is now fast
+enough that the stepper is deletable rather than reformattable.
 
 **The test:** if a feature request would make the runtime less useful to someone who has
 never heard of VelaOps, it belongs in the adapter or the engine.
 
 ---
 
-## Migration strategy
+## Migration strategy — a cutover, not a coexistence
 
-Add `agents.runtime` — `'openclaw' | 'dispach'` — plus a second agent image tag. Both
-runtimes coexist per-agent. There is no cutover event.
+**There is no compat adapter, and that is a decision rather than a delay.**
+
+The original plan was Phase 12: `packages/compat-openclaw`, a WS RPC server on 18789 reproducing
+OpenClaw's protocol, so `apps/engine` could stay untouched and both runtimes could run side by side
+per agent. That phase is **deleted**. The reasons, in the order they matter:
+
+1. **It asks Dispach to impersonate the thing it replaces.** Every quirk in the table below — a
+   model field that only accepts `openclaw/main`, `auth.token` rather than `auth.password`, a
+   terminal phase called `result` rather than `end`, `teams` spelled `msteams` — would have to be
+   reproduced *exactly*, including the ones that are bugs. A runtime whose job is to be a better
+   OpenClaw cannot also be bug-compatible with it.
+2. **The adapter is a second protocol to keep working.** `04-SPEC-WIRE.md` is now machine-checked
+   against the code; an adapter would be a second surface with no such guard, and the one nobody
+   checks is the one that drifts.
+3. **`/v1` is a better target than the surface it would emulate.** Detached turns and reattach are
+   core here, which is the fix for "generation dies on browser refresh" — a gotcha the adapter
+   would have had to preserve the *shape* of while fixing the behaviour.
+4. **Engine changes are smaller than the adapter.** The call-by-call mapping below is the whole of
+   it: one client, typed, replacing a hand-rolled WS RPC client and its reconnect logic.
+
+**The cost is real and is stated rather than hidden.** Without the adapter there is no incremental
+path: an agent runs OpenClaw or it runs Dispach, and the switch is a redeploy of that agent's
+container. The original plan budgeted for weeks of side-by-side dogfooding; this trades that for a
+per-agent cutover that is reversible only by redeploying back. That is why this document has to be
+good enough to act on, and why the sequence below moves one agent at a time.
 
 ```
-Week 1   Phase 12 ships. runtime='dispach' on your own agent only.
-Week 2-4 Dogfood. Every gotcha in 02-GOTCHAS.md gets checked against the new runtime.
-Week 5+  Opt-in for new agents. Existing agents untouched.
-Later    Default for new agents. Existing agents migrate on request.
-Never    Forced migration. OpenClaw agents keep working until nobody runs one.
+Step 1   One agent — yours. `runtime: dispach`, new image, `agent.yaml` mounted.
+Step 2   Every row in the gotchas table below, checked against it.
+Step 3   The engine's OpenClaw client replaced by @dispach/client behind the same
+         internal interface, so the UI does not change in the same commit.
+Step 4   Opt-in for new agents. Existing agents untouched.
+Step 5   Default for new agents. Existing agents migrate on request, one redeploy each.
+Never    Forced migration. An OpenClaw agent keeps working until nobody runs one.
 ```
 
-The provisioner emits the same workspace either way. Only `openclaw.json` versus
-`agent.yaml` differs, and during compat mode the adapter reads `openclaw.json` directly, so
-even that is deferred.
+`agents.runtime` — `'openclaw' | 'dispach'` — still earns its place: it selects an image and a
+config generator, not two protocols inside one process. What it no longer buys is a *shared* RPC
+surface, so step 3 is a real piece of engine work rather than a no-op.
 
 ---
 
-## The compat adapter
+## The OpenClaw RPC surface, mapped onto `/v1`
 
-`@dispach/compat-openclaw` translates. It is not part of the public protocol and it is
-deletable the day you're willing to touch `openclaw-ws.ts` and `openclaw-sync.ts`.
+Call by call. This is the table to work from in step 3.
 
-**Surface it must reproduce** (from `01-SYSTEM-CONTEXT.md` §8 and `02-GOTCHAS.md`):
+| OpenClaw | Dispach | Notes |
+| --- | --- | --- |
+| WS `auth.token` on 18789 | `Authorization: Bearer` on every request | No handshake. The token is `server.tokenEnv`; a non-loopback bind refuses to start without one. |
+| WS `subscribe` then chat | `POST /v1/agents/:id/messages` → `202 {turnId}` | The turn is already running when this returns. No subscription needed to start one. |
+| Streamed reply over the same socket | `GET /v1/agents/:id/turns/:turnId/stream?chunks=true` | A separate connection **on purpose**: the turn is not bound to it, so a refresh reattaches with the same turn id. |
+| Terminal phase `"result"` | `turn.end` event, with `reason` | `reason` distinguishes `final`, `stopped`, `timeout`, `max_steps`, `no_progress`, `truncated` — the states OpenClaw collapsed into one. |
+| Abort | `POST /v1/agents/:id/turns/:turnId/stop` | Partial content persists on this path and never on a disconnect. |
+| `x-openclaw-scopes` header | — | No scope model. One token, one runtime, one agent per container; authorisation is the container boundary. Phase 15's operator keys are authentication, not scopes. |
+| `/healthz` | `GET /v1/health`, `GET /v1/ready` | Two questions, deliberately: `/ready` flips at `runtime.ready`, **before** channels connect, so a Telegram outage does not read as an unhealthy container. Both need no token. |
+| `cron.list` / `add` / `update` / `remove` | `GET/POST/PATCH/DELETE /v1/agents/:id/schedules` | Disabled schedules are listed by default. `POST …/:sid/run` fires one out of band. |
+| `[boot-phase]` stdout markers | `runtime.ready` event, `phases` breakdown | Subscribe to `GET /v1/events` and format. Or delete the stepper: boot is ~55 ms. |
+| Model hot-patch of `openclaw.json` | `agent.yaml` `model.main.id` + a restart | **Not a live reload** — see the warning below. |
+| `mcp.update()` to rebind tools | — | No MCP in this path. Composio is called directly; a pinned slug resolves at boot. |
+| Nothing equivalent | `GET /v1/agents/:id/context` | The assembled prompt with per-slot token counts. "Why did it do that?" is almost always a context question. |
+| Nothing equivalent | `GET /v1/events` | Every lifecycle event, filterable. This is where `sub_agent_invocations` and `tool_calls` come from. |
 
-| Contract | Detail |
-| --- | --- |
-| WS RPC on 18789 | `auth.token` (not `auth.password`), TUI client id, explicit subscribe, terminal phase `"result"` (not `"end"`) |
-| HTTP scopes | `x-openclaw-scopes` header |
-| Health | `/healthz` |
-| Model field | Accepts only `"openclaw/main"`; rewrite to the real model id |
-| Config | `openclaw.json` incl. `modelByChannel`, `delivery`, `deliveryTargets`, `memorySearch`, bootstrap caps |
-| Channels | Gateway ids, notably `teams` → **`msteams`** |
-| Boot | `[boot-phase]` markers on stdout |
-| Cron | RPC surface mapped onto native schedules |
-| Workspace | Ten persona markdown files listed under `context.files` |
+> **`POST /v1/agents/:id/reload` answers `409` and always will.** Two rows of this document
+> previously promised that a channel change "applies on `reload` without restart" and that reload
+> "returns a diff". Both were false and are corrected here: an agent's configuration is fixed for
+> the lifetime of its process, because the tool catalogue resolves once and the cached prompt
+> prefix depends on it staying fixed. A config change is a container restart — which at a ~55 ms
+> boot is a cheaper operation than the hot-patch it replaces. Engine code that expects reload to
+> apply anything must be changed, and this is the row most likely to be missed.
 
 ### Config translation
+
+The provisioner emits `agent.yaml` instead of `openclaw.json`. There is no adapter reading the old
+format, so this is a generator change rather than a translation layer.
 
 ```
 openclaw.json                        agent.yaml
@@ -94,23 +132,40 @@ subagents                         →  team
 cron jobs (SQLite)                →  schedules
 ```
 
-The two bootstrap caps are worth care. In OpenClaw, raising only the per-file cap starved
-`MEMORY.md`. Dispach has one budget with explicit per-slot accounting, so the translation
-is lossy in the direction of correctness — record it as a deviation and verify `MEMORY.md`
-actually lands in context via `GET /v1/agents/:id/context`.
+Two things to get right. The **bootstrap caps**: in OpenClaw, raising only the per-file cap starved
+`MEMORY.md`. Dispach has one budget with explicit per-slot accounting, so the translation is lossy
+in the direction of correctness — verify `MEMORY.md` actually lands via `GET /v1/agents/:id/context`
+rather than assuming it. And **secrets are env var names, never values**: a manifest carrying a
+literal key fails validation, so the LiteLLM virtual key reaches the container through the
+environment exactly as it does today.
+
+### What the engine actually changes
+
+| File | Change |
+| --- | --- |
+| `openclaw-ws.ts` | Deleted. Replaced by `@dispach/client`, which owns reconnect, SSE parsing and typed errors. |
+| `openclaw-sync.ts` | Deleted. The config generator writes `agent.yaml`. |
+| `stream-hub.ts` | Kept, and simplified: reattach is now a server-side guarantee rather than something the hub reconstructs. |
+| `docker.ts` | The image tag, the `/agent` and `/state` mounts, and `DISPACH_API_TOKEN`. |
+| `composio-proxy` | Deleted. Composio is called directly, never through MCP. |
+| the embed-service | Deleted. Memory is FTS5. |
+| `use-boot-progress.ts` | Deletable. Boot is ~55 ms; the stepper exists because boot was slow. |
+| `check:openclaw` | Deleted. The version pin inverts — see *Operational notes*. |
 
 ---
 
 ## Gotchas that become acceptance tests
 
-`02-GOTCHAS.md` is an executable spec for Phase 12. Each row is a test that must pass.
+`02-GOTCHAS.md` is an executable spec for the migration. Each row is a thing to check against a
+real Dispach agent in step 2 — not against an adapter reproducing the old behaviour, which is what
+makes the right-hand column a claim about the runtime rather than about a translation layer.
 
 | VelaOps gotcha | Dispach behaviour to verify |
 | --- | --- |
-| Model field only accepts `openclaw/main` | Adapter rewrites; native manifest takes a real id |
+| Model field only accepts `openclaw/main` | `model.main.id` is the real model id, written literally — only secrets go behind `${VAR}` |
 | Config silently rolls back on version skew | `apiVersion` mismatch fails loudly at boot |
 | Two bootstrap caps truncate `MEMORY.md` | One budget; `/context` shows `MEMORY.md` present with token count |
-| Channel change needs external gateway restart | Channel config change applies on `reload` without restart |
+| Channel change needs external gateway restart | Still a restart — but of **this** process, not an external gateway, and boot is ~55 ms. `POST /reload` answers `409` by design. |
 | Plugin crash-loop from install-record trust gate | No runtime install, no trust gate; version mismatch fails by name |
 | `dmPolicy: "open"` boots healthy, drops every DM | Incoherent channel config fails validation, not a warning |
 | OpenAI-compat HTTP drops tool + thinking streams | One transport; thinking blocks replayed per capabilities |
@@ -129,10 +184,12 @@ actually lands in context via `GET /v1/agents/:id/context`.
 | Generation dies on browser refresh | Detached turns + reattach are core |
 | Tokens arrive in ~40ms clumps | Server sets `TCP_NODELAY` |
 | Turn aborts at `stopReason=aborted` | `limits.turnTimeoutMs`, reported as `turn.end.reason=timeout` |
-| `openclaw.json` regeneration must fire on deploy/reload/restart | Single load path; `reload` returns a diff |
+| `openclaw.json` regeneration must fire on deploy/reload/restart | Single load path, and one writer (`core/manifest/edit.ts`). No reload: a manifest change takes effect at the next boot, which `manifest_changed` says out loud. |
 
-Phase 12 is not done until each of these has a passing test or a recorded, justified
-deviation.
+Step 2 is not done until each of these has been checked against a real agent, or has a recorded
+and justified deviation. Several already have automated coverage in this repo — detached turns and
+reattach, `resolve()` throwing on a dead slug, the reasoning-budget fix, disabled schedules being
+listed — and those are the rows to spend the least time on.
 
 ---
 
@@ -188,5 +245,14 @@ engine-side work. Dispach itself has `bun test`, and those are different questio
 of its own dependency. Same discipline, but a bump is now a decision rather than an
 emergency.
 
-**Two runtimes means two debugging paths** for as long as both exist. Budget for that. It is
-the price of not doing a cutover, and it is much cheaper than the alternative.
+**Two runtimes means two debugging paths** for as long as both exist, and the cutover shape does
+not remove that — it removes the *protocol* sharing, not the coexistence. An agent on OpenClaw and
+an agent on Dispach are two systems to reason about until nobody runs the first. What changed is
+that the boundary between them is now a container rather than an adapter, so a confusing failure
+belongs to one of them rather than to the seam.
+
+**The thing to watch during step 3.** The engine's OpenClaw client handles reconnect, and
+`@dispach/client` handles it differently: a dropped stream is reattached by turn id rather than
+replayed from a socket buffer, because the turn never stopped. Code written against the old model
+will look like it works — the reply arrives — and then differ on exactly the case the old model
+got wrong, which is a refresh mid-generation. Test that case first.

@@ -27,8 +27,10 @@ WORKDIR /build
 # Copying the whole tree here instead would make `bun install` run on every edit.
 COPY package.json bun.lock ./
 COPY packages/core/package.json ./packages/core/
+COPY packages/client/package.json ./packages/client/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/server/package.json ./packages/server/
+COPY packages/web/package.json ./packages/web/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
@@ -59,10 +61,34 @@ ENV NODE_ENV=production
 # Where the store, logs and sandbox agents live. A volume mounts here.
 ENV DISPACH_HOME=/state
 
+# ─── What the agent's shell can reach ─────────────────────────────────────────────────────
+#
+# `exec` gives the agent a shell, and a shell is only as useful as what is on the PATH. The base
+# image ships busybox `sh`, `wget` and node — and **nothing else**, which is a bigger hole than it
+# reads as:
+#
+# - **`git`** is how `skills install`, `sources search` and `sources update` fetch catalogues. Its
+#   absence does not degrade the feature, it deletes it: 440+ skills across two catalogues are
+#   unreachable, and the symptom is `git: not found` rather than anything that explains itself.
+# - **`python3`** is what a skill shipping scripts declares. The documented `uv run` path — which
+#   materialises `.venv/` inside the skill directory on first call — cannot start without it.
+# - **`bash`** is the shebang on a good fraction of third-party skill scripts. `exec` itself runs
+#   `sh -c` and does not need it; a `#!/bin/bash` script does.
+# - **`curl`** is what a model reaches for first. `wget` is a substitute it will not think of.
+# - **`ca-certificates`** so an HTTPS call from the shell verifies rather than failing oddly.
+#
+# Measured: 21 MB, taking the image from 47 MB to 68 MB against the 150 MB CI ceiling. The
+# alternative considered and rejected was a second `dispach:dev` image — which makes the
+# production one the variant nobody tests, and leaves a shipped feature unusable in the only
+# supported deployment.
+RUN apk add --no-cache git python3 bash curl ca-certificates
+
 COPY package.json bun.lock ./
 COPY packages/core/package.json ./packages/core/
+COPY packages/client/package.json ./packages/client/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/server/package.json ./packages/server/
+COPY packages/web/package.json ./packages/web/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
@@ -72,10 +98,29 @@ RUN bun install --frozen-lockfile --production --ignore-scripts
 COPY --from=builder /build/packages/core/dist ./packages/core/dist
 COPY --from=builder /build/packages/cli/dist ./packages/cli/dist
 COPY --from=builder /build/packages/server/dist ./packages/server/dist
+# No `packages/web/dist` here, deliberately. The browser assets are **inlined as text** into the
+# server's bundle at build time (decision 11.200), so they ride inside `cli/dist/index.js` and there
+# is nothing to copy. Adding a line for them would be harmless and misleading — it would suggest the
+# runtime reads them from disk, which is exactly the arrangement that was measured and rejected:
+# a bundled build hands back a *relative* asset path that resolves against the process cwd, and this
+# container runs with cwd `/agent`.
 COPY --from=builder /build/packages/channel-telegram/dist ./packages/channel-telegram/dist
 COPY --from=builder /build/packages/tools-system/dist ./packages/tools-system/dist
 COPY --from=builder /build/packages/tools-composio/dist ./packages/tools-composio/dist
 COPY --from=builder /build/packages/tools-web/dist ./packages/tools-web/dist
+
+# A `dispach` on the PATH, so the command is the command everywhere.
+#
+# The entrypoint already runs the CLI, but `docker exec` bypasses an entrypoint — so inspecting a
+# running agent meant `bun /app/packages/cli/dist/index.js validate /agent/agent.yaml`, which is
+# both a mouthful and a path a person has to know. With this, `docker compose exec agent dispach
+# sessions /agent/agent.yaml` is the same command as on a laptop.
+#
+# `exec` in the shim rather than a plain call, so signals reach bun instead of stopping at a shell
+# that would then have nothing to forward them to. Written before `USER bun`, because
+# `/usr/local/bin` is root's.
+RUN printf '#!/bin/sh\nexec bun /app/packages/cli/dist/index.js "$@"\n' > /usr/local/bin/dispach \
+    && chmod 0755 /usr/local/bin/dispach
 
 RUN mkdir -p /state /agent && chown -R bun:bun /state /agent
 USER bun
@@ -106,5 +151,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 # A non-loopback bind requires an API token, deliberately (decision 11.29's neighbour). So a
 # published container needs `<ENVPREFIX>API_TOKEN` set, and refuses to start without it rather than
 # binding the world unauthenticated. The refusal names the variable.
-ENTRYPOINT ["bun", "/app/packages/cli/dist/index.js"]
+# The shim, not the long form — so `docker inspect` and a `ps` line both read `dispach serve …`,
+# and there is one spelling of how this image is entered rather than two.
+ENTRYPOINT ["dispach"]
 CMD ["serve", "/agent/agent.yaml", "--host", "0.0.0.0"]

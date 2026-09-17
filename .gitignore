@@ -5,6 +5,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# compiled standalone binaries — `bun build --compile` output, 61-103 MB each
+dist-bin/
+
 # secrets — manifests reference env var names; values live here and never in git
 .env
 .env.*

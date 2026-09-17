@@ -7,6 +7,7 @@
  */
 
 import type { ErrorDetail } from "../errors.ts"
+import type { SenderKind } from "../loop/sender.ts"
 import type { OnMutate, Trust } from "../tools/trust.ts"
 
 /** Envelope fields shared by every event. */
@@ -98,7 +99,6 @@ export interface EventDataMap {
     }
     "runtime.stopping": { reason: string }
     "agent.loaded": { tools: number; skills: number; schedules: number; model: string }
-    "agent.error": ErrorDetail
     "agent.warning": ErrorDetail
     /**
      * One plugin registered, with what it cost and what it declared.
@@ -121,7 +121,85 @@ export interface EventDataMap {
      * where a refusal would turn a performance smell into an agent that will not start.
      */
     "plugin.slow": { name: string; setupMs: number }
-    "turn.start": { source: string; inputTokens: number }
+    /**
+     * `trust` and `from` are additive within `v: 1` and both are always meaningful.
+     *
+     * `trust` is present on every turn — `"trusted"` for the operator, the REPL, a schedule and a
+     * channel turn alike — rather than only when it is `"untrusted"`. A field that appears only in
+     * the interesting case makes its absence ambiguous between "this turn was trusted" and "this
+     * server predates the field", and an observability surface has to be able to tell those apart.
+     * `from` *is* omitted when there was no sender, because an absent sender is a real third state
+     * and synthesising one would put the operator's own turn behind a fake identity.
+     */
+    /**
+     * A call is waiting on a person, and the runtime emitted this **before** asking.
+     *
+     * Core emits it, not the front end, and that placement is the whole reason every surface gets
+     * approvals for free. The plan had the approver emitting its own event, which makes the request
+     * visible only to whichever front end implements it — so a second observer of a REPL session,
+     * or an audit log, or the firehose, would see a turn simply stop. Core already holds the
+     * `EventContext` (agent, session, turn) that a client needs to correlate the prompt with what it
+     * is showing, and an `ApprovalRequest` deliberately does not carry any of it.
+     *
+     * Paired with exactly one `approval.resolved`. A request with no resolution is a bug, not a
+     * state — the same reasoning that keeps `tool.gated` from emitting a `tool.call` it will never
+     * follow with a `tool.result`.
+     */
+    "approval.requested": {
+        approvalId: string
+        slug: string
+        callId: string
+        /** The command or path a rule would match. Terminal escapes already stripped. */
+        match?: string
+        mutating: boolean
+        reason: string
+    }
+    /**
+     * How it ended, including the ways nobody chose.
+     *
+     * `by` matters more than `granted` to a client with a prompt on screen: `"abandoned"` means
+     * take it down because the turn is gone, `"error"` means the approver itself is broken and the
+     * denial says nothing about what a person wanted. Collapsing all three into `granted: false`
+     * would make a crashed approver indistinguishable from a considered no.
+     */
+    "approval.resolved": {
+        approvalId: string
+        slug: string
+        granted: boolean
+        by: "approver" | "error" | "abandoned"
+    }
+    /**
+     * A delegation began. Emitted on the **supervisor's** context, so the envelope's `turnId` is
+     * the turn that is waiting rather than the member's.
+     *
+     * `sessionKey` is the member's fresh session, which is the answer to "what did it actually
+     * say" — the artifact is all that reaches the supervisor's prompt, deliberately, so without
+     * this a `no_artifact` would be unexplainable from the outside.
+     */
+    "handoff.start": { member: string; task: string; sessionKey: string }
+    /**
+     * How it ended. `outcome` rather than a boolean, and that is the same reasoning
+     * `approval.resolved.by` carries: four outcomes collapse badly into `ok: false`.
+     *
+     * `no_artifact` is the member declining or failing to fit the schema — its own prose says which.
+     * `budget` is its `limits` stopping it, which is a task-too-large signal rather than a fault.
+     * `error` is a fault. Reporting the first two as failure would send a reader debugging the
+     * member when the thing to change is the task.
+     */
+    "handoff.result": {
+        member: string
+        sessionKey: string
+        outcome: "ok" | "no_artifact" | "budget" | "error"
+        steps: number
+        tokens: { prompt: number; output: number }
+        errorCode?: string
+    }
+    "turn.start": {
+        source: string
+        inputTokens: number
+        trust: Trust
+        from?: { id: string; kind: SenderKind }
+    }
     "context.assembled": { slots: ContextSlotReport[]; total: number }
     /**
      * History that did not fit the prompt budget and was left out by `assembleContext`.
@@ -199,6 +277,20 @@ export interface EventDataMap {
     "model.result": {
         outputTokens: number
         promptTokens: number
+        /**
+         * Whether `promptTokens` came from the endpoint or from `estimateTokens`.
+         *
+         * The event carried the number and not whether it was measured, so every consumer summing
+         * it was mixing the two silently — and the estimator runs **16-20% low** on exactly the
+         * observation-heavy prompts worth summing (`evals/budget`). `StepResult` has carried this
+         * flag since Phase 7A for the compaction ladder, which refuses to calibrate without it; a
+         * ladder that would not trust the figure while an observability surface reported it as fact
+         * is the same asymmetry `cachedPromptTokens`' three states exist to prevent.
+         *
+         * Added by 10B's eval, which needs to compare two token figures and must refuse to print a
+         * ratio of two estimates.
+         */
+        promptTokensReported: boolean
         finishReason: string
         latencyMs: number
     }
@@ -405,6 +497,87 @@ export interface EventDataMap {
 }
 
 export type EventType = keyof EventDataMap & string
+
+/**
+ * Every event type, as a value.
+ *
+ * `EventDataMap` is a *type*, so nothing at runtime could enumerate it — which is why
+ * `GET /v1/events?types=` accepted any string at all and streamed nothing forever for a typo, and
+ * why `04-SPEC-WIRE.md` could carry six rows for events that did not exist. Both are the same
+ * missing thing: a list a program can read.
+ *
+ * Kept in the same order as `EventDataMap` so the two can be diffed by eye, though nothing depends
+ * on the order.
+ */
+export const EVENT_TYPES = [
+    "runtime.ready",
+    "store.ready",
+    "runtime.stopping",
+    "agent.loaded",
+    "agent.warning",
+    "plugin.loaded",
+    "plugin.slow",
+    "approval.requested",
+    "approval.resolved",
+    "handoff.start",
+    "handoff.result",
+    "turn.start",
+    "context.assembled",
+    "context.dropped",
+    "context.pressure",
+    "compaction.stage",
+    "context.reset",
+    "phase.changed",
+    "model.call",
+    "model.chunk",
+    "model.retry",
+    "model.result",
+    "tool.call",
+    "tool.result",
+    "tool.gated",
+    "tool.repair",
+    "tools.refreshed",
+    "agent.channel.status",
+    "agent.channel.error",
+    "agent.channel.rejected",
+    "delivery.sent",
+    "delivery.retry",
+    "delivery.failed",
+    "delivery.uncertain",
+    "runtime.released",
+    "schedules.reconciled",
+    "schedule.fired",
+    "schedule.skipped",
+    "schedule.deferred",
+    "schedule.error",
+    "turn.end",
+    "error",
+] as const satisfies readonly EventType[]
+
+/** Declared in `EventDataMap` and absent from `EVENT_TYPES`. Should always be `never`. */
+export type EventTypesMissing = Exclude<EventType, (typeof EVENT_TYPES)[number]>
+
+/** Named in `EVENT_TYPES` and absent from `EventDataMap`. Should always be `never`. */
+export type EventTypesUnknown = Exclude<(typeof EVENT_TYPES)[number], EventType>
+
+/**
+ * **The drift check, and it is `tsc` rather than a test on purpose.**
+ *
+ * A test can only run where somebody runs it; a type error stops the build, and the whole problem
+ * being solved here is a list that was correct when written and wrong at the next addition. Adding
+ * a type to `EventDataMap` without adding it here makes the annotation `never`, so `= true` fails
+ * to compile — and `EventTypesMissing` above names which one, because an error reading "true is
+ * not assignable to never" would send somebody looking in the wrong place.
+ *
+ * `satisfies readonly EventType[]` on the tuple covers the other direction: a typo'd member is
+ * rejected at the literal itself, where the mistake is.
+ *
+ * Exported because `noUnusedLocals` is on and an unused local would be deleted by the next person
+ * tidying up — the check has to be load-bearing to survive.
+ */
+export const EVENT_TYPES_COMPLETE: [EventTypesMissing, EventTypesUnknown] extends [never, never]
+    ? true
+    : never = true
 
 export type AnyEvent = {
     [K in EventType]: EventEnvelope<K, EventDataMap[K]>

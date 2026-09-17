@@ -1,0 +1,24 @@
+# A team member: an ordinary agent that happens to be delegated to.
+#
+# Nothing here mentions the team or the artifact schema. The supervisor declares what shape it
+# wants back, and `submit_artifact` is layered on for the duration of one handoff — so this agent
+# stays useful on its own, and two supervisors can ask it for different shapes.
+apiVersion: dispach/v1
+id: writer
+name: Writer
+model:
+  main:
+    id: ${MODEL_ID}
+    baseUrl: ${MODEL_BASE_URL}
+    apiKeyEnv: MODEL_API_KEY
+context:
+  workspace: .
+  static:
+    - SOUL.md
+tools:
+  dialect: nlt
+  local: [now]
+limits:
+  # Smaller than the supervisor's on purpose: a member does one bounded thing, and a member that
+  # can spend forty steps is a member that can spend a supervisor's whole budget on one delegation.
+  maxSteps: 8

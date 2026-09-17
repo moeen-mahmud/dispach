@@ -15,6 +15,7 @@
  */
 
 import type { TurnEndReason } from "../events/types.ts"
+import type { SenderKind, TurnSender } from "../loop/sender.ts"
 import type { ChatMessage, ToolCallRequest } from "../model/provider.ts"
 
 /**
@@ -103,6 +104,17 @@ export interface TurnRecord {
     readonly cachedPromptTokens?: number
     /** The wire field the figure came from, so a surprising ratio is traceable. */
     readonly cacheSource?: string
+    /**
+     * Who sent the input, when it was not the operator. Absent means the operator's own surface.
+     *
+     * Absent is not "unknown": the REPL, a schedule, an `allowFrom`-gated channel turn and an API
+     * call with the container's token are all the operator, and putting a synthesised identity on
+     * those would make the column useless for the one question it exists to answer. Trust is
+     * derived from `senderKind` rather than stored beside it — see `loop/sender.ts`.
+     */
+    readonly sender?: string
+    readonly senderName?: string
+    readonly senderKind?: SenderKind
     readonly errorCode?: string
     readonly errorMessage?: string
     readonly errorHint?: string
@@ -165,7 +177,15 @@ export interface TurnStore {
         readonly agentId: string
         readonly sessionKey: string
         readonly source: string
+        /**
+         * The text as it was sent — **raw**, never the fenced form the prompt carries.
+         *
+         * The row is the audit record of what was said, and `sender` sits beside it, so the framing
+         * is reconstructible without baking runtime decoration into the evidence. History goes the
+         * other way and keeps the fence, because history is prompt material.
+         */
         readonly input: string
+        readonly sender?: TurnSender
     }): Promise<TurnRecord>
     finish(
         turnId: string,
@@ -209,6 +229,182 @@ export interface TurnStore {
      * Rows belonging to no live lease are still reachable — see `LeaseStore.orphans`.
      */
     reapRunning(agentIds: readonly string[], reason: string): Promise<readonly string[]>
+    /**
+     * Claim an inbound idempotency key for a turn, or report the turn that already holds it.
+     *
+     * Called **before** the turn runs, which is what makes it useful: `POST /messages` answers
+     * `202` and writes its turn row asynchronously, so a claim that waited for the row would leave
+     * the window between two retries — the only window the feature exists to close — wide open.
+     *
+     * `inputHash` is compared, not merely stored. A key reused with different text is a *client
+     * bug*, and answering it with the first turn's id would tell that client its second message
+     * succeeded when nothing ran; `mismatch` lets the surface refuse instead. Hashing rather than
+     * keeping the text avoids a second copy of every message in a table that exists for minutes.
+     */
+    claimInboundKey(claim: {
+        readonly agentId: string
+        readonly key: string
+        readonly turnId: string
+        readonly inputHash: string
+        readonly now: Date
+    }): Promise<InboundKeyClaim>
+}
+
+/**
+ * What claiming an idempotency key produced.
+ *
+ * Three outcomes rather than a boolean, because "already claimed by an identical request" and
+ * "already claimed by a different one" want opposite answers on the wire — a replay and a 409.
+ */
+export type InboundKeyClaim =
+    | { readonly kind: "claimed" }
+    /** This key already belongs to a turn whose input hashed the same. Answer with that turn. */
+    | { readonly kind: "replay"; readonly turnId: string }
+    /** This key already belongs to a turn whose input was different. Refuse. */
+    | { readonly kind: "mismatch"; readonly turnId: string }
+
+export type HandoffOutcomeStatus = "running" | "ok" | "no_artifact" | "budget" | "error"
+
+export interface HandoffRecord {
+    readonly handoffId: string
+    /** The supervisor. */
+    readonly agentId: string
+    readonly sessionKey: string
+    readonly turnId: string
+    readonly memberId: string
+    /**
+     * Where the member's transcript is.
+     *
+     * The load-bearing column. A supervisor's prompt only ever sees the artifact (decision 10.2),
+     * so without a pointer back, "what did the member actually say" is unanswerable from any
+     * surface — and a `no_artifact` outcome is exactly the case where somebody needs to look.
+     */
+    readonly memberSession: string
+    readonly task: string
+    readonly outcome: HandoffOutcomeStatus
+    /** JSON, present only when `outcome` is `ok`. */
+    readonly artifact?: string
+    readonly errorCode?: string
+    readonly errorMessage?: string
+    readonly steps: number
+    readonly promptTokens: number
+    readonly outputTokens: number
+    readonly startedAt: string
+    readonly endedAt?: string
+}
+
+export interface HandoffStore {
+    /**
+     * Written `running` before the member starts, for the same reason a turn row is.
+     *
+     * A crash mid-delegation then leaves a durable record that one was in flight, rather than
+     * nothing at all — which is the difference between "the supervisor's turn died during a
+     * handoff" and "the supervisor never delegated".
+     */
+    start(record: {
+        readonly handoffId: string
+        readonly agentId: string
+        readonly sessionKey: string
+        readonly turnId: string
+        readonly memberId: string
+        readonly memberSession: string
+        readonly task: string
+        readonly startedAt: string
+    }): Promise<void>
+    finish(
+        handoffId: string,
+        outcome: {
+            readonly outcome: Exclude<HandoffOutcomeStatus, "running">
+            readonly artifact?: string
+            readonly errorCode?: string
+            readonly errorMessage?: string
+            readonly steps: number
+            readonly promptTokens: number
+            readonly outputTokens: number
+            readonly endedAt: string
+        },
+    ): Promise<void>
+    /** What one turn delegated, oldest first. The question a transcript view asks. */
+    forTurn(agentId: string, turnId: string): Promise<readonly HandoffRecord[]>
+}
+
+/**
+ * How stale `last_used_at` is allowed to get: one minute.
+ *
+ * The figure the column answers is "is anybody still using this credential", which is read by the
+ * day. A per-request `UPDATE` would buy second-level precision nobody looks at and pay for it on
+ * every route including each SSE open.
+ */
+export const DEFAULT_KEY_TOUCH_MS = 60_000
+
+/**
+ * One operator key, as every surface but the issue response sees it.
+ *
+ * **There is no secret field, and there is no way to add one.** The secret exists for the length of
+ * `POST /v1/keys` and is never stored — only its fingerprint is — so a record that carried one
+ * would be a record that could not be produced. That absence is the whole security property, which
+ * is why it is a fact about the type rather than a rule about the queries.
+ */
+export interface OperatorKeyRecord {
+    readonly keyId: string
+    /** What distinguishes this credential from the others in a listing. */
+    readonly label: string
+    readonly createdAt: string
+    /**
+     * Coarse: written at most once a minute per key, so a live credential is distinguishable from a
+     * forgotten one without an `UPDATE` on the hot path of every request.
+     */
+    readonly lastUsedAt?: string
+    /** Set rather than deleted. Present means the key is dead and can never be revived. */
+    readonly revokedAt?: string
+}
+
+/**
+ * Bearer credentials for this server, independent of any agent.
+ *
+ * The only store in this file with no `agent_id` parameter anywhere, for the reason migration 14
+ * records: a key authenticates a caller to a *server*, and `purgeAgent` deliberately leaves them.
+ */
+export interface OperatorKeyStore {
+    /**
+     * Store a new key's fingerprint under a label. The secret itself is never passed in.
+     *
+     * Takes the fingerprint rather than the secret precisely so this interface cannot be the place
+     * a secret is accidentally logged, retained or compared.
+     */
+    issue(record: {
+        readonly keyId: string
+        readonly label: string
+        readonly fingerprint: string
+        readonly createdAt: string
+    }): Promise<OperatorKeyRecord>
+    /**
+     * The live key with this fingerprint, if any. One indexed read.
+     *
+     * A revoked key answers `undefined` — the caller must not have to remember to check, because
+     * "forgot to filter on `revoked_at`" is a revocation that silently does nothing.
+     */
+    findLive(fingerprint: string): Promise<OperatorKeyRecord | undefined>
+    /**
+     * Note that a key was just used, if the stored stamp is older than `coarseMs`.
+     *
+     * The threshold lives here rather than at the call site so every caller gets the same
+     * behaviour: a per-caller decision about how often to write is how one route comes to keep a
+     * column fresh while another leaves it null.
+     */
+    touch(keyId: string, at: string, coarseMs?: number): Promise<void>
+    /** Every key, newest first, live and revoked. Revoked ones are shown, never hidden. */
+    list(): Promise<readonly OperatorKeyRecord[]>
+    /**
+     * Revoke one key. `undefined` when no such id exists; the record when it does.
+     *
+     * Revoking an already-revoked key keeps the original stamp and is not an error — the caller
+     * asked for a state that already holds, and a 404 there would make a retried request look like
+     * a mistake.
+     */
+    revoke(keyId: string, at: string): Promise<OperatorKeyRecord | undefined>
+    /** How many keys can still authenticate. Read at boot to decide whether a claim is needed. */
+    liveCount(): Promise<number>
 }
 
 /** How a runtime was started. Reported in a refusal, so it has to be a fact rather than a guess. */
@@ -297,10 +493,16 @@ export interface KVStore {
 }
 
 /**
- * Everything one agent owns in the store, by table.
+ * Everything one agent owns that a person might weigh before deleting it, by table.
  *
  * One shape for two questions — what would go, and what went — so a listing shown before a deletion
  * and the report printed after it cannot disagree. `agentFootprint` and `purgeAgent` both return this.
+ *
+ * Deliberately **not** every table. `inbound_keys` is deleted by `purgeAgent` and counted here by
+ * nothing: it is request plumbing with a 24-hour TTL, and `inboundKeys: 3` on a deletion
+ * confirmation is a line that means nothing to anybody reading it. The listing's whole value is
+ * that somebody reads it, so a row nobody can act on costs more than it adds. Anything a person
+ * would hesitate over — a conversation, a memory passage, a pending delivery — is here.
  */
 export interface AgentFootprint {
     readonly sessions: number
@@ -816,6 +1018,15 @@ export interface Store {
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
+    readonly handoffs: HandoffStore
+    /**
+     * Server credentials. The one store here that is not per-agent — see migration 14.
+     *
+     * Which is why `purgeAgent` does not clean it and `AgentFootprint` does not count it: removing
+     * one agent from a shared sandbox root must not revoke the credential still authenticating
+     * calls about the others.
+     */
+    readonly operatorKeys: OperatorKeyStore
     /** Human-readable location, for `store.ready` and the `sessions` command. */
     readonly location: string
     /**

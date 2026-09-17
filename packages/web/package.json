@@ -1,0 +1,36 @@
+{
+    "name": "@dispach/web",
+    "version": "0.1.0",
+    "description": "The browser surface \u2014 chat, sessions, approvals and keys, served by the agent itself.",
+    "license": "Apache-2.0",
+    "author": "Moeen Mahmud",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/moeen-mahmud/dispach.git",
+        "directory": "packages/web"
+    },
+    "private": true,
+    "type": "module",
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "build": "vite build",
+        "dev": "vite",
+        "typecheck": "tsc -p tsconfig.json"
+    },
+    "devDependencies": {
+        "@dispach/client": "workspace:*",
+        "@dispach/core": "workspace:*",
+        "@types/react": "19.2.18",
+        "@types/react-dom": "19.2.3",
+        "@vitejs/plugin-react": "5.1.1",
+        "react": "19.2.8",
+        "react-dom": "19.2.8",
+        "vite": "7.2.4"
+    },
+    "exports": {
+        "./dist/*": "./dist/*",
+        "./package.json": "./package.json"
+    }
+}

@@ -15,7 +15,9 @@ agents. Bun-first TypeScript.
 
 Its first consumer is VelaOps, an agent provisioning platform, where it replaces the
 OpenClaw gateway process inside each agent container. **VelaOps is a consumer, not the
-owner.** Nothing VelaOps-specific belongs in this repo outside `packages/compat-openclaw`.
+owner.** Nothing VelaOps-specific belongs in this repo at all — there is no adapter and no
+quarantine package. VelaOps calls `/v1` like any other client; Phase 12's compat adapter was
+deleted rather than built, and `docs/06-VELAOPS-INTEGRATION.md` carries the migration.
 
 **The owner is Moeen** — senior engineer, sole author. Assume fluency. Skip tutorials, skip
 framework explainers, go straight to the specific thing.
@@ -174,9 +176,9 @@ Full detail: `docs/01-ARCHITECTURE.md`.
 packages/core/       the loop, context, tools, skills, memory, store, schedule, plugins
 packages/cli/        `dispach` binary — lib/ plumbing, components/ Ink, pure reducers at top level
 packages/server/     HTTP/SSE/WS surface
+packages/client/     typed client for the API — reattach, streams, typed errors
 packages/channel-*/  Telegram, WhatsApp
 packages/tools-*/    system (shell, files), Composio, web, MCP
-packages/compat-openclaw/   VelaOps bridge — quarantined, deletable
 docs/                design + plan (read these)
 evals/               fixtures/ the shared catalogue and tasks; tools/ committed results.
                      Every performance claim has a number here

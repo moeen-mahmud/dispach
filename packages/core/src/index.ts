@@ -5,6 +5,13 @@
  * surface — CLI, server, Docker image — is a consumer of what is exported here.
  */
 
+export {
+    keyFingerprint,
+    keyLabelProblem,
+    MAX_KEY_LABEL,
+    newKeySecret,
+    OPERATOR_KEY_PREFIX,
+} from "./auth/keys.ts"
 export type { Brand } from "./brand.ts"
 export {
     BRAND,
@@ -78,7 +85,22 @@ export type {
     EventType,
     TurnEndReason,
 } from "./events/types.ts"
-export { newRunId, newStepId, newTurnId } from "./loop/ids.ts"
+export { EVENT_TYPES } from "./events/types.ts"
+export { newKeyId, newRunId, newStepId, newTurnId } from "./loop/ids.ts"
+export {
+    entryPhase,
+    isPhased,
+    type PhaseMap,
+    phasesFor,
+} from "./loop/phases.ts"
+export {
+    frameSenderInput,
+    SENDER_KINDS,
+    type SenderKind,
+    senderLabel,
+    type TurnSender,
+    trustOfSender,
+} from "./loop/sender.ts"
 export { runStep, type StepInput, type StepResult } from "./loop/step.ts"
 export {
     runTurn,
@@ -141,6 +163,8 @@ export type {
     ScheduleConfig,
     ServerConfig,
     SkillsConfig,
+    TeamConfig,
+    TeamMemberConfig,
     ThresholdsConfig,
     ToolsConfig,
 } from "./manifest/schema.ts"
@@ -385,9 +409,14 @@ export type {
     DeliveryStatus,
     EnqueueDelivery,
     EnqueueResult,
+    HandoffOutcomeStatus,
+    HandoffRecord,
+    HandoffStore,
     KVStore,
     MessagePage,
     MessageStore,
+    OperatorKeyRecord,
+    OperatorKeyStore,
     OutboxStore,
     ScheduleFired,
     ScheduleOrigin,
@@ -404,6 +433,27 @@ export type {
     TurnStore,
     UpsertSchedule,
 } from "./store/store.ts"
+export { DEFAULT_KEY_TOUCH_MS } from "./store/store.ts"
+export {
+    type ArtifactSink,
+    describeArtifact,
+    SUBMIT_ARTIFACT,
+    submitArtifactTool,
+} from "./team/artifact.ts"
+export { type ExpandedTeams, expandTeams } from "./team/expand.ts"
+export {
+    type HandoffCost,
+    type HandoffOutcome,
+    type HandoffTarget,
+    runHandoff,
+} from "./team/handoff.ts"
+export {
+    checkTeamGraph,
+    HANDOFF,
+    handoffTool,
+    MAX_TEAM_DEPTH,
+    type ResolvedMember,
+} from "./team/supervisor.ts"
 export {
     type Coercion,
     type CoercionFailure,

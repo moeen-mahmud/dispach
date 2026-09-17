@@ -12,8 +12,7 @@ see Status. Bun-first TypeScript, Apache-2.0.
 
 ## Status
 
-**Pre-release, and it runs.** Not published to npm during v0.1 — install it from a checkout
-(below).
+**Pre-release, and it runs.** Install a single binary, or work from a checkout (both below).
 
 Built and in use: the manifest and agent loop, the store and sessions, tools with the NLT and
 native dialects, the tiered workspace, system and web tool providers with a policy engine, the
@@ -21,7 +20,12 @@ Telegram channel, the HTTP/SSE server, an idempotent outbox, launchd services, s
 catalogues, the full-screen TUI, the compaction ladder, phase-scoped tools, memory that carries
 across sessions, and scheduling — cron, interval and one-shot, DST-correct, on one timer.
 
-Not built yet: the plugin API, WhatsApp, multi-agent delegation, and the Docker image. `docs/05-PLAN.md` has every phase with its acceptance criteria and what is ticked.
+Also built since: the plugin API with all four middleware wrap points, supervisor delegation with
+typed handoffs, the Docker image and a compose front door, a typed client, operator keys, approvals
+over the wire, and a browser UI on the same origin as the API.
+
+Not built yet: WhatsApp. `docs/05-PLAN.md` has every phase with its acceptance criteria and what is
+ticked.
 
 ## Scope
 
@@ -59,8 +63,47 @@ Full rationale for every decision, including the negative ones, is in `docs/00-D
 
 ## Getting set up
 
-There is no published package yet, so the binary comes from a checkout. The order matters:
-`bin` points at `dist/`, so a link made before the build points at nothing.
+### Install the binary
+
+One file, no Node and no `node_modules`. `bun build --compile` embeds the runtime, which is also
+why it starts *faster* than a `node_modules` install — there is no module resolution left to do at
+boot. Measured on an M-series mac, `validate --json`: **70–90 ms compiled against 90–110 ms through
+Node**.
+
+```bash
+brew tap moeen-mahmud/dispach https://github.com/moeen-mahmud/dispach
+brew install moeen-mahmud/dispach/dispach
+```
+
+Or take the asset straight from a release — `darwin-arm64`, `darwin-x64`, `linux-x64` and
+`linux-arm64`, each with a `.sha256` beside it:
+
+```bash
+base=https://github.com/moeen-mahmud/dispach/releases/latest/download
+curl -fsSL -O "$base/dispach-darwin-arm64"
+curl -fsSL -O "$base/dispach-darwin-arm64.sha256"
+shasum -a 256 -c dispach-darwin-arm64.sha256      # must print "OK"
+chmod +x dispach-darwin-arm64
+sudo mv dispach-darwin-arm64 /usr/local/bin/dispach
+```
+
+Download with `-O`, not `-o dispach`: the checksum file names the asset, so renaming before the
+check makes `shasum -c` look for a file that is not there.
+
+Two things worth knowing about the macOS asset, because the failure has no error message:
+
+- **The release binary is ad-hoc signed, and it has to be.** A compiled Bun binary arrives
+  *linker-signed*, which macOS refuses on exec — **exit 137 with no output at all**, which reads as
+  a crash rather than as a policy. `codesign -dv` reports such a file as signed, so the obvious
+  check passes on a binary that cannot run. The release re-signs every darwin asset, and
+  `scripts/build-binary.ts` refuses to produce an unsigned one.
+- **Gatekeeper still applies to a downloaded file.** A binary fetched with a browser carries a
+  quarantine attribute; `xattr -d com.apple.quarantine dispach` clears it. `curl` does not set it.
+
+### Or from a checkout
+
+For working on Dispach itself. The order matters: `bin` points at `dist/`, so a link made before
+the build points at nothing.
 
 ```bash
 git clone https://github.com/moeen-mahmud/dispach && cd dispach
@@ -228,14 +271,25 @@ in flight, and exits 0.
 
 ## Hosting with Compose
 
-The one-command path. `docker compose up` brings up a server with an agent and an exposed API — a
-living agent server, reachable over HTTP, with nothing to configure but a token and a model key.
+The one-command path. `docker compose up` brings up a server with an agent, an exposed API and the
+**web UI on the same origin** — nothing to configure but a token and a model key.
 
 ```bash
-cp .env.example .env          # then DISPACH_API_TOKEN and MODEL_API_KEY
-docker compose up -d --wait
+cp .env.example .env               # then DISPACH_API_TOKEN and MODEL_API_KEY
+docker compose up -d --build --wait
 curl localhost:7420/v1/ready
+docker compose logs agent          # the claim link — open it once to get a browser key
 ```
+
+Then open `http://localhost:7420` and paste nothing: the claim link in the logs carries a one-time
+token the page exchanges for a key it keeps. Reading the container's own output is what confers
+first ownership, which grants nothing new to anyone who could already run `docker compose logs`.
+
+**`--build` is not optional after the first run.** `image: dispach:local` names a tag, and compose
+builds only when that tag is *absent* — so a second `up` reuses whatever was built before, reports
+healthy, and serves it. Measured while writing this: a two-day-old image came up green and answered
+every request from a binary that predated two whole phases. The recorded stale-`dist` hazard with a
+container around it, and the same tell — everything works, nothing is current.
 
 ```bash
 curl -s -H "Authorization: Bearer $DISPACH_API_TOKEN" \
@@ -248,6 +302,13 @@ curl -s -H "Authorization: Bearer $DISPACH_API_TOKEN" \
 `docker-compose.yml` is at the repo root so a fresh clone needs no `-f`. The full wire surface is
 in [`docs/04-SPEC-WIRE.md`](docs/04-SPEC-WIRE.md); `docker compose down` stops it and
 `docker compose down -v` also discards the state volume.
+
+Every compose subcommand reads `.env`, not just `up` — so passing the variables inline works for
+`up` and then `logs`, `ps` and `down` fail on the same interpolation. Copy the file.
+
+One thing the claim link cannot know: it is built from the port the server **bound**, which is
+always 7420 inside the container. Set `HOST_PORT` to anything else and the link needs that port
+substituted by hand.
 
 Four things in that file are answers to defaults that bite, and they are commented there rather
 than left to be discovered:
@@ -268,6 +329,54 @@ One agent per container: `serve` takes one manifest. A second agent is a second 
 own port, its own agent directory and **its own state volume** — a commented example in the
 compose file shows the shape, including why sharing a volume would have two boots deleting each
 other's schedules.
+
+## Developing against the container
+
+The container is the honest place to exercise an agent that has a shell, and not only for
+containment. Every `exec` test in this repo otherwise runs on macOS, where the shell is a real
+bash and `realpath` resolves `/var` through a symlink — the exact conditions the recorded
+`$PWD`-comparison bug lived in. In the image it is busybox `sh` on Linux, with a different PATH
+and different `realpath` semantics. Those have never been exercised until now.
+
+```bash
+cp .env.example .env                                  # token + a model key
+echo 'AGENT_DIR=./examples/shell-agent' >> .env       # an agent that can actually run things
+docker compose up -d --build --wait
+```
+
+Then the loop. `--build` on `up` rebuilds only what changed, and layer caching means a source-only
+edit re-runs `bun run build` and nothing before it:
+
+```bash
+docker compose up -d --build --wait     # after any source change
+docker compose logs -f                  # what it is saying
+docker compose exec agent sh            # a shell in the container, as uid 1000
+docker compose down                     # stop;  down -v also discards /state
+```
+
+Verified: `exec` runs inside the container as **uid 1000**, cwd `/agent/workspace`, with output
+fenced as untrusted. What the agent's shell can reach is `sh`, `bash`, `git`, `python3`, `curl`,
+`wget` and `node` — `git` because the skills catalogue is fetched with it and its absence *deletes*
+that feature rather than degrading it, `python3` because a skill shipping scripts needs it. The
+CI `docker` job asserts all of them, and that the image still runs as uid 1000.
+
+### What containment the compose file adds
+
+`tools.policy` decides *whether* a command runs. It does not decide *where*, and it cannot: a
+write root does not bind `exec`, because `echo x > file` carries its target inside a shell string
+nothing can inspect. So the deployment supplies the other half:
+
+| | |
+| --- | --- |
+| `cap_drop: [ALL]` | The process is uid 1000 and binds 7420, above 1024. Nothing asks for a capability, so an empty set is the true requirement rather than a compromise. |
+| `no-new-privileges` | A setuid binary cannot raise privileges. There should be none; this makes that a property rather than an audit. |
+| `pids_limit: 512` | **A fork bomb is one `exec` call away.** `init: true` reaps children; only this bounds them. |
+| `mem_limit: 2g`, `cpus: 2.0` | An agent asked to process a large file can allocate until the host swaps. Here it is OOM-killed and restarts, which is legible. |
+| `read_only: true` | An immutable root filesystem. `/agent` and `/state` are mounts and stay writable — the skills cache and `memory_write` both need that. |
+| `tmpfs` on `/tmp` and `$HOME` | The two places something genuinely writes: `exec` hands children a file descriptor in `/tmp`, and `uv` caches under `$HOME`. **Wiped on restart**, so a Python skill rebuilds its venv after each boot. |
+
+`examples/shell-agent` is the agent to mount for this, and its README is blunt about the
+consequence: run it on a laptop and the policy is the only boundary there is.
 
 ## Docker
 
@@ -296,7 +405,7 @@ deliberately. A Telegram outage must not read as an unhealthy container and get 
 the same outage, so the probe answers "can it serve a turn" rather than "is everything connected".
 Channel state lives on the agent resource instead.
 
-Measured on an arm64 Docker Desktop, 2026-09-15: the image is **47 MB** against the 150 MB target,
+Measured on an arm64 Docker Desktop, 2026-09-17: the image is **287 MB** against a 350 MB ceiling,
 `docker compose up -d --wait` reaches healthy in **5.8 s**, the healthcheck reports healthy, an
 unauthenticated write is refused with 401, `store.db` lands on the state volume owned by uid 1000,
 and a real streaming turn against DeepSeek reconstructs from 26 `model.chunk` frames. The CI
@@ -426,6 +535,8 @@ thing that will distinguish a plugin from a scramble when enforcement lands.
 | `docs/03-SPEC-PLUGIN-API.md` | Plugin and middleware contracts |
 | `docs/04-SPEC-WIRE.md` | HTTP/SSE surface and lifecycle event schema |
 | `docs/05-PLAN.md` | Every phase with acceptance criteria, and what is ticked |
+| `docs/09-API-GUIDE.md` | The agent server, walked through from `compose up` to a streamed reply |
+| `packages/client/README.md` | The typed client — turns, streams, reattach, typed errors |
 | `docs/07-SPEC-WORKSPACE.md` | Workspace file tiers, budgets, and prompt-style rendering |
 | `CLAUDE.md` | The standing brief: hard rules and the hazards already paid for |
 | `evals/` | Every performance claim, with the number and a script to reproduce it |

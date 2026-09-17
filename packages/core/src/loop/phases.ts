@@ -137,6 +137,24 @@ export function isPhased(phases: PhaseMap | undefined): phases is PhaseMap {
 }
 
 /**
+ * Which declared phases make this tool visible — the inverse of `visibleIn`, per tool.
+ *
+ * In core rather than in the HTTP layer, because it is a statement about phase semantics: `allow`
+ * takes `*`, `tag:<name>` and slugs, with the registry's own slug normalisation, and a second
+ * implementation of that in a route handler is a second answer to "is this tool in that phase".
+ * The introspection surface and the runtime have to agree, for the same reason `validate` and
+ * `run` call one `ruleBudgetFailure`.
+ *
+ * Declared order, and `phase_set` is included in every phase's effective allow list by `allowFor`
+ * — so `phase_set` correctly reports every phase rather than only the ones that name it.
+ */
+export function phasesFor(phases: PhaseMap, spec: ToolSpec): readonly string[] {
+    return Object.keys(phases).filter((name) =>
+        allowFor(phases, name).some((entry) => allowMatches(entry, spec)),
+    )
+}
+
+/**
  * What each other phase would add, as counts rather than slugs.
  *
  * This is what `phase_set` tells the model, and the form is the point. A model in `triage` that is told

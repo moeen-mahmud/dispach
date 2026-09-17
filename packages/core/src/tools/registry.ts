@@ -278,7 +278,20 @@ export class ToolRegistry {
      * the skill's own block, are bounded by `skills.maxActive`, and dropping one silently would leave the
      * model reading an instruction naming a tool the executor would then refuse.
      */
-    withTurnTools(extra: readonly Tool[]): ToolRegistry {
+    /**
+     * The same registry with extra tools appended.
+     *
+     * Named `withTools` rather than `withTurnTools`, which is what it was called while every caller
+     * was per-turn. A **load-time** caller arrived with Phase 10B — `handoff` is registered because
+     * the manifest declared a team, so it belongs in the catalogue slot 1 renders from, exactly like
+     * a pinned tool — and a method whose name says "turn" being correct at load is the kind of thing
+     * somebody later reads as a bug and "fixes".
+     *
+     * The distinction that *is* real lives at the call site: a registry built at load is rendered
+     * into slot 1 and must stay byte-identical for the prompt cache, while one built per turn must
+     * never reach it. This method does not know which it is doing, and should not.
+     */
+    withTools(extra: readonly Tool[]): ToolRegistry {
         if (extra.length === 0) return this
         const base = this.#order
             .map((spec) => this.#bySlug.get(spec.slug))

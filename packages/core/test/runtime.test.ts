@@ -85,6 +85,11 @@ describe("boot", () => {
             // than vanishing, so the phase that could grow is one somebody is already watching.
             "plugins",
             "manifest",
+            // Beside `manifest` rather than inside it, because a team member *is* a manifest load
+            // and loading three of them is a cost worth seeing separately from loading the one the
+            // command named. Present even with no `team:` block, for the reason `plugins` is:
+            // reporting 0 ms keeps the phase that can grow one somebody is already watching.
+            "teams",
             "store",
             "tools",
             "agents",

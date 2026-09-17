@@ -48,13 +48,13 @@ dispach/
 │   ├── core/                    @dispach/core
 │   ├── cli/                     @dispach/cli          bin: dispach
 │   ├── server/                  @dispach/server
+│   ├── client/                  @dispach/client             typed client for /v1
 │   ├── channel-telegram/        @dispach/channel-telegram
 │   ├── channel-whatsapp/        @dispach/channel-whatsapp   (Baileys)
 │   ├── tools-composio/          @dispach/tools-composio
 │   ├── tools-system/            @dispach/tools-system       shell + files
 │   ├── tools-web/               @dispach/tools-web          search + fetch
-│   ├── tools-mcp/               @dispach/tools-mcp
-│   └── compat-openclaw/         @dispach/compat-openclaw
+│   └── tools-mcp/               @dispach/tools-mcp
 ├── examples/
 │   ├── minimal/                 # smallest thing that runs: one model, no tools
 │   ├── reference/               # every agent.yaml field; future phases commented with their phase

@@ -11,6 +11,7 @@
  * ones, so mapping is also where the two runtimes stop being distinguishable.
  */
 
+import type { SenderKind } from "../../loop/sender.ts"
 import { sessionSource } from "../../memory/conversation.ts"
 import type { ChatMessage, ToolCallRequest } from "../../model/provider.ts"
 import { parseSessionKey } from "../session-key.ts"
@@ -20,6 +21,9 @@ import type {
     ArtifactStore,
     DeliveryRecord,
     DeliveryStatus,
+    HandoffRecord,
+    HandoffStore,
+    InboundKeyClaim,
     KVStore,
     LeaseClaim,
     LeaseRecord,
@@ -29,6 +33,8 @@ import type {
     MemoryStore,
     MessagePage,
     MessageStore,
+    OperatorKeyRecord,
+    OperatorKeyStore,
     OutboxStore,
     RuntimeMode,
     ScheduleOrigin,
@@ -44,11 +50,24 @@ import type {
     TurnStatus,
     TurnStore,
 } from "../store.ts"
+import { DEFAULT_KEY_TOUCH_MS } from "../store.ts"
 import type { OpenOptions, SqlDatabase, SqlStatement } from "./driver.ts"
 import { openDatabase } from "./driver.ts"
 import { type MigrationReport, migrate } from "./migrations.ts"
 
 const DEFAULT_PAGE = 50
+
+/**
+ * How long an inbound idempotency key is remembered.
+ *
+ * Twenty-four hours, and the figure is about *clients* rather than about storage. A retry that
+ * matters happens within seconds — a proxy timeout, a queue redelivery, a client's own backoff —
+ * and a day covers an operator re-running a script after lunch, which is the longest honest reading
+ * of "the same request". Longer would make the table grow for no protection anybody could use;
+ * shorter would make a key silently stop being idempotent, which is the failure it exists to
+ * prevent, arriving late.
+ */
+const INBOUND_KEY_TTL_MS = 24 * 60 * 60 * 1000
 
 interface SessionRow {
     agent_id: string
@@ -161,12 +180,52 @@ interface TurnRow {
     output_tokens: number
     cached_prompt_tokens: number | null
     cache_source: string | null
+    sender: string | null
+    sender_name: string | null
+    sender_kind: string | null
     error_code: string | null
     error_message: string | null
     error_hint: string | null
     started_at: string
     ended_at: string | null
     duration_ms: number | null
+}
+
+/** No `agent_id`, deliberately — see migration 14. */
+interface OperatorKeyRow {
+    key_id: string
+    label: string
+    fingerprint: string
+    created_at: string
+    last_used_at: string | null
+    revoked_at: string | null
+}
+
+interface HandoffRow {
+    handoff_id: string
+    agent_id: string
+    session_key: string
+    turn_id: string
+    member_id: string
+    member_session: string
+    task: string
+    outcome: string
+    artifact: string | null
+    error_code: string | null
+    error_message: string | null
+    steps: number
+    prompt_tokens: number
+    output_tokens: number
+    started_at: string
+    ended_at: string | null
+}
+
+interface InboundKeyRow {
+    agent_id: string
+    key: string
+    turn_id: string
+    input_hash: string
+    created_at: string
 }
 
 interface DeliveryRow {
@@ -355,6 +414,37 @@ function toArtifact(row: ArtifactRow): ArtifactRecord {
     }
 }
 
+function toHandoff(row: HandoffRow): HandoffRecord {
+    return {
+        handoffId: row.handoff_id,
+        agentId: row.agent_id,
+        sessionKey: row.session_key,
+        turnId: row.turn_id,
+        memberId: row.member_id,
+        memberSession: row.member_session,
+        task: row.task,
+        outcome: row.outcome as HandoffRecord["outcome"],
+        ...(row.artifact === null ? {} : { artifact: row.artifact }),
+        ...(row.error_code === null ? {} : { errorCode: row.error_code }),
+        ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
+        steps: row.steps,
+        promptTokens: row.prompt_tokens,
+        outputTokens: row.output_tokens,
+        startedAt: row.started_at,
+        ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),
+    }
+}
+
+function toOperatorKey(row: OperatorKeyRow): OperatorKeyRecord {
+    return {
+        keyId: row.key_id,
+        label: row.label,
+        createdAt: row.created_at,
+        ...(row.last_used_at === null ? {} : { lastUsedAt: row.last_used_at }),
+        ...(row.revoked_at === null ? {} : { revokedAt: row.revoked_at }),
+    }
+}
+
 function toTurn(row: TurnRow): TurnRecord {
     return {
         turnId: row.turn_id,
@@ -374,6 +464,12 @@ function toTurn(row: TurnRow): TurnRecord {
             ? {}
             : { cachedPromptTokens: row.cached_prompt_tokens }),
         ...(row.cache_source === null ? {} : { cacheSource: row.cache_source }),
+        // Absent means the operator, not "unknown" — see migration 12. `sender_kind` is read back
+        // through the CHECK constraint's own vocabulary, so the cast is narrowing a value the
+        // database has already refused to hold anything else in.
+        ...(row.sender === null ? {} : { sender: row.sender }),
+        ...(row.sender_name === null ? {} : { senderName: row.sender_name }),
+        ...(row.sender_kind === null ? {} : { senderKind: row.sender_kind as SenderKind }),
         ...(row.error_code === null ? {} : { errorCode: row.error_code }),
         ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
         ...(row.error_hint === null ? {} : { errorHint: row.error_hint }),
@@ -501,6 +597,8 @@ export class SqliteStore implements Store {
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
+    readonly handoffs: HandoffStore
+    readonly operatorKeys: OperatorKeyStore
     readonly location: string
     /** What `migrate` did at open. Reported by boot rather than logged and forgotten. */
     readonly migrations: MigrationReport
@@ -658,8 +756,20 @@ export class SqliteStore implements Store {
             ),
 
             turnInsert: db.prepare(
-                `INSERT INTO turns (turn_id, agent_id, session_key, status, source, input, started_at)
-                 VALUES (?, ?, ?, 'running', ?, ?, ?)`,
+                `INSERT INTO turns
+                     (turn_id, agent_id, session_key, status, source, input,
+                      sender, sender_name, sender_kind, started_at)
+                 VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)`,
+            ),
+            // `OR IGNORE` rather than `ON CONFLICT DO UPDATE`: a second claim must **not** move the
+            // key onto the new turn id. The whole point is that the first turn keeps it.
+            inboundKeyClaim: db.prepare(
+                `INSERT OR IGNORE INTO inbound_keys (agent_id, key, turn_id, input_hash, created_at)
+                 VALUES (?, ?, ?, ?, ?)`,
+            ),
+            inboundKeyGet: db.prepare("SELECT * FROM inbound_keys WHERE agent_id = ? AND key = ?"),
+            inboundKeyEvict: db.prepare(
+                "DELETE FROM inbound_keys WHERE agent_id = ? AND created_at < ?",
             ),
             turnFinish: db.prepare(
                 `UPDATE turns
@@ -837,6 +947,50 @@ export class SqliteStore implements Store {
             // here — deleting them explicitly would work and would also mean two places had to agree
             // about the cascade. The foreign keys are the single statement of it.
             sessionsDeleteAll: db.prepare("DELETE FROM sessions WHERE agent_id = ?"),
+            handoffInsert: db.prepare(
+                `INSERT INTO handoffs
+                     (handoff_id, agent_id, session_key, turn_id, member_id, member_session,
+                      task, outcome, started_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
+            ),
+            handoffFinish: db.prepare(
+                `UPDATE handoffs
+                    SET outcome = ?, artifact = ?, error_code = ?, error_message = ?,
+                        steps = ?, prompt_tokens = ?, output_tokens = ?, ended_at = ?
+                  WHERE handoff_id = ?`,
+            ),
+            handoffsForTurn: db.prepare(
+                `SELECT * FROM handoffs WHERE agent_id = ? AND turn_id = ?
+                  ORDER BY started_at ASC, rowid ASC`,
+            ),
+            handoffDeleteAll: db.prepare("DELETE FROM handoffs WHERE agent_id = ?"),
+            keyInsert: db.prepare(
+                `INSERT INTO operator_keys (key_id, label, fingerprint, created_at)
+                 VALUES (?, ?, ?, ?)`,
+            ),
+            // `revoked_at IS NULL` is in the statement rather than in a caller's filter: a
+            // revocation that depends on every reader remembering to check is a revocation that
+            // silently does nothing the first time somebody forgets.
+            keyByFingerprint: db.prepare(
+                "SELECT * FROM operator_keys WHERE fingerprint = ? AND revoked_at IS NULL",
+            ),
+            keyGet: db.prepare("SELECT * FROM operator_keys WHERE key_id = ?"),
+            // The coarse write, expressed as a predicate rather than a read-then-write: two
+            // concurrent requests would otherwise both read a stale stamp and both write.
+            keyTouch: db.prepare(
+                `UPDATE operator_keys
+                    SET last_used_at = ?
+                  WHERE key_id = ?
+                    AND (last_used_at IS NULL OR last_used_at < ?)`,
+            ),
+            keyList: db.prepare("SELECT * FROM operator_keys ORDER BY created_at DESC, rowid DESC"),
+            keyRevoke: db.prepare(
+                "UPDATE operator_keys SET revoked_at = ? WHERE key_id = ? AND revoked_at IS NULL",
+            ),
+            keyLiveCount: db.prepare(
+                "SELECT COUNT(*) AS c FROM operator_keys WHERE revoked_at IS NULL",
+            ),
+            inboundKeyDeleteAll: db.prepare("DELETE FROM inbound_keys WHERE agent_id = ?"),
             outboxDeleteAll: db.prepare("DELETE FROM outbox WHERE agent_id = ?"),
             leaseDeleteAll: db.prepare("DELETE FROM runtime_leases WHERE agent_id = ?"),
             // A union rather than a join: an agent can own rows in any one of these and none of the
@@ -988,6 +1142,9 @@ export class SqliteStore implements Store {
                         record.sessionKey,
                         record.source,
                         record.input,
+                        record.sender?.id ?? null,
+                        record.sender?.name ?? null,
+                        record.sender?.kind ?? null,
                         ts,
                     )
                 })
@@ -1045,6 +1202,36 @@ export class SqliteStore implements Store {
                         reaped.push(...ids)
                     }
                     return reaped
+                })
+            },
+            claimInboundKey: async (claim) => {
+                return db.transaction<InboundKeyClaim>(() => {
+                    // Evicted here, on the write, and never on a timer — the rule `store/buffer.ts`
+                    // records for its own bounds. A timer would be a background write in a process
+                    // that may be seconds from exiting, and the table is only interesting for as
+                    // long as a client might still retry. Cost is one indexed range delete per
+                    // claim, which is the same order as the insert beside it.
+                    q.inboundKeyEvict.run(
+                        claim.agentId,
+                        new Date(claim.now.getTime() - INBOUND_KEY_TTL_MS).toISOString(),
+                    )
+                    const result = q.inboundKeyClaim.run(
+                        claim.agentId,
+                        claim.key,
+                        claim.turnId,
+                        claim.inputHash,
+                        claim.now.toISOString(),
+                    )
+                    if (result.changes === 1) return { kind: "claimed" }
+                    // Read back rather than trusting the conflict: the row could have been evicted
+                    // between the delete and the insert by another process sharing this file, in
+                    // which case the insert failed for a row that is no longer there. Answering
+                    // `replay` with no turn id would be worse than the extra query.
+                    const existing = q.inboundKeyGet.get<InboundKeyRow>(claim.agentId, claim.key)
+                    if (existing === undefined) return { kind: "claimed" }
+                    return existing.input_hash === claim.inputHash
+                        ? { kind: "replay", turnId: existing.turn_id }
+                        : { kind: "mismatch", turnId: existing.turn_id }
                 })
             },
         }
@@ -1429,6 +1616,67 @@ export class SqliteStore implements Store {
          */
         const placeholders = (count: number): string => new Array(count).fill("?").join(", ")
 
+        this.handoffs = {
+            start: async (record) => {
+                q.handoffInsert.run(
+                    record.handoffId,
+                    record.agentId,
+                    record.sessionKey,
+                    record.turnId,
+                    record.memberId,
+                    record.memberSession,
+                    record.task,
+                    record.startedAt,
+                )
+            },
+            finish: async (handoffId, outcome) => {
+                q.handoffFinish.run(
+                    outcome.outcome,
+                    outcome.artifact ?? null,
+                    outcome.errorCode ?? null,
+                    outcome.errorMessage ?? null,
+                    outcome.steps,
+                    outcome.promptTokens,
+                    outcome.outputTokens,
+                    outcome.endedAt,
+                    handoffId,
+                )
+            },
+            forTurn: async (agentId, turnId) =>
+                q.handoffsForTurn.all<HandoffRow>(agentId, turnId).map(toHandoff),
+        }
+
+        this.operatorKeys = {
+            issue: async (record) => {
+                q.keyInsert.run(record.keyId, record.label, record.fingerprint, record.createdAt)
+                return {
+                    keyId: record.keyId,
+                    label: record.label,
+                    createdAt: record.createdAt,
+                }
+            },
+            findLive: async (fingerprint) => {
+                const row = q.keyByFingerprint.get<OperatorKeyRow>(fingerprint)
+                return row === undefined ? undefined : toOperatorKey(row)
+            },
+            touch: async (keyId, at, coarseMs = DEFAULT_KEY_TOUCH_MS) => {
+                // `at` minus the window is the floor the stored stamp has to be below. Computed
+                // here rather than passed in so the threshold cannot differ between two callers.
+                const floor = new Date(Date.parse(at) - coarseMs).toISOString()
+                q.keyTouch.run(at, keyId, floor)
+            },
+            list: async () => q.keyList.all<OperatorKeyRow>().map(toOperatorKey),
+            revoke: async (keyId, at) => {
+                q.keyRevoke.run(at, keyId)
+                // Read back rather than trusting the UPDATE's row count, because "no rows changed"
+                // is true both of an unknown id and of an already-revoked key, and those are a 404
+                // and a success. One read settles which.
+                const row = q.keyGet.get<OperatorKeyRow>(keyId)
+                return row === undefined ? undefined : toOperatorKey(row)
+            },
+            liveCount: async () => q.keyLiveCount.get<{ c: number }>()?.c ?? 0,
+        }
+
         this.schedules = {
             upsert: async (schedule) => {
                 scheduleQ.upsert.run(
@@ -1573,6 +1821,14 @@ export class SqliteStore implements Store {
                 q.memoryDeleteAll.run(agentId)
                 q.memorySourceDeleteAll.run(agentId)
                 q.leaseDeleteAll.run(agentId)
+                // Not in the footprint and still deleted — see `AgentFootprint`. Omitting it would
+                // leave rows keyed to an agent that no longer exists, which is the `kv` table's
+                // recorded failure with a column available to avoid it.
+                q.inboundKeyDeleteAll.run(agentId)
+                // Also not in the footprint: a handoff envelope is a fact about a turn, and turns
+                // are already counted. Deleted for the reason inbound keys are — rows keyed to an
+                // agent that no longer exists.
+                q.handoffDeleteAll.run(agentId)
                 scheduleQ.deleteAll.run(agentId)
                 return went
             })

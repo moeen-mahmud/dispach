@@ -1,0 +1,74 @@
+# A supervisor with two members.
+#
+# Delegation is for work that is *self-contained*: the member starts with no history, cannot ask a
+# follow-up question, and returns one validated object. That constraint is the feature — the
+# supervisor's context grows by the size of the artifact rather than by the size of the work.
+#
+# Run it:  dispach run ./examples/team --input "Write a short blurb about SQLite's WAL mode."
+apiVersion: dispach/v1
+id: editor
+name: Editor
+
+model:
+  main:
+    id: ${MODEL_ID}
+    baseUrl: ${MODEL_BASE_URL}
+    apiKeyEnv: MODEL_API_KEY
+
+context:
+  workspace: .
+  static:
+    - SOUL.md
+
+tools:
+  dialect: nlt
+  # `handoff` is NOT pinned here, and must not be: declaring `team:` below is what registers it.
+  # A second place to name it would be a second place to forget.
+  local: [now]
+
+# ── team ──
+# Each member is a full agent with its own manifest, so it can be validated and run on its own —
+# which is the only practical way to debug one. `extends:` is there for the boring shared parts.
+#
+# Members run ONE AT A TIME. `handoff` is mutating (a member can write files and run shell
+# commands), and a mutating call is alone in its execution group — so three handoffs in one step
+# take three times as long as one. Stated because a latency property nobody wrote down is one
+# somebody reports as a hang.
+team:
+  members:
+    - id: researcher
+      manifest: ./team/researcher.yaml
+      task: >
+        Gathers facts on a narrow technical topic and returns them as short claims with sources.
+        Give it one topic and say how many claims you want.
+      # The schema becomes the parameter schema of a `submit_artifact` tool the member is handed
+      # for the duration of one handoff. So "did it work" is decided by the same coercion every
+      # tool call already uses, and a bad shape earns exactly one repair.
+      artifact:
+        type: object
+        properties:
+          claims:
+            type: array
+            items: { type: string }
+            description: One short factual claim per entry.
+          confidence:
+            type: string
+            enum: [high, medium, low]
+            description: How sure you are, overall.
+        required: [claims, confidence]
+
+    - id: writer
+      manifest: ./team/writer.yaml
+      task: >
+        Turns a list of claims into one short paragraph of prose. Give it the claims and the
+        audience.
+      artifact:
+        type: object
+        properties:
+          paragraph:
+            type: string
+            description: The finished prose. One paragraph, no headings.
+          words:
+            type: integer
+            description: How many words it is.
+        required: [paragraph]

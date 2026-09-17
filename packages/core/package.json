@@ -24,10 +24,14 @@
         "./testing": {
             "types": "./dist/testing/index.d.ts",
             "default": "./dist/testing/index.js"
+        },
+        "./wire": {
+            "types": "./dist/wire/index.d.ts",
+            "default": "./dist/wire/index.js"
         }
     },
     "scripts": {
-        "build": "bun build ./src/index.ts ./src/testing/index.ts --outdir dist --target node --format esm --splitting --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "build": "bun build ./src/index.ts ./src/testing/index.ts ./src/wire/index.ts --outdir dist --target node --format esm --splitting --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
         "typecheck": "tsc -p tsconfig.json"
     },
     "publishConfig": {

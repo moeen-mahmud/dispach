@@ -1,7 +1,7 @@
 {
     "name": "@dispach/server",
     "version": "0.1.0",
-    "description": "HTTP, SSE and WebSocket surface — the wire protocol in 04-SPEC-WIRE.md.",
+    "description": "HTTP, SSE and WebSocket surface \u2014 the wire protocol in 04-SPEC-WIRE.md.",
     "license": "Apache-2.0",
     "author": "Moeen Mahmud",
     "repository": {
@@ -29,5 +29,8 @@
     },
     "dependencies": {
         "@dispach/core": "workspace:*"
+    },
+    "devDependencies": {
+        "@dispach/web": "workspace:*"
     }
 }

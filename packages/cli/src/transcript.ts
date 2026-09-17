@@ -302,7 +302,11 @@ function reduceEvent(state: TranscriptState, event: AnyEvent): TranscriptState {
             return why === undefined ? settled : append(settled, "note", why)
         }
 
-        case "agent.error":
+        // `agent.error` used to fall through to here. It was declared in Phase 1, carried a
+        // hint, and was emitted by **nothing, ever** — so this label was reachable only from a
+        // test that constructed one by hand. Deleted rather than wired up: `error` already
+        // carries every uncaught failure, and a second error event with no emitter is vocabulary
+        // that makes the catalogue look richer than it is.
         case "error": {
             const { code, message, hint } = event.data
             return append(state, "error", `${code}: ${message}\nhint: ${hint}`)

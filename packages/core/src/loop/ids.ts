@@ -27,6 +27,24 @@ export function newStepId(now = Date.now()): string {
     return id("s", now)
 }
 
+/** One delegation's identity. Time-prefixed, so a turn's handoffs sort in the order they ran. */
+export function newHandoffId(now = Date.now()): string {
+    return id("h", now)
+}
+
+/**
+ * One approval's identity, and it has to be minted rather than derived.
+ *
+ * `callId` is the obvious candidate and cannot be used: a dialect numbers calls **within a step**
+ * (`c1`, `c2`, …), so two steps of one turn — let alone two concurrent turns — both have a `c1`.
+ * An approval id reaches a client, comes back in a URL, and decides which blocked call resumes; a
+ * colliding one would resume the wrong call in the wrong turn, which is the worst available
+ * outcome for a mechanism whose whole job is asking permission.
+ */
+export function newApprovalId(now = Date.now()): string {
+    return id("a", now)
+}
+
 /**
  * One scheduled run's identity, which becomes the thread segment of its session key.
  *
@@ -36,4 +54,16 @@ export function newStepId(now = Date.now()): string {
  */
 export function newRunId(now = Date.now()): string {
     return id("r", now)
+}
+
+/**
+ * One operator key's identity. It is **not** the secret, and it is not derived from it.
+ *
+ * The id is what `DELETE /v1/keys/:id` names and what `GET /v1/keys` lists, so it reaches logs,
+ * URLs and screens — all places the secret must never be. Deriving it from the secret (a prefix, a
+ * truncated hash) would make every one of those a partial disclosure of the credential, and a
+ * truncated hash is exactly the kind of "it is only eight characters" that turns out to be enough.
+ */
+export function newKeyId(now = Date.now()): string {
+    return id("k", now)
 }

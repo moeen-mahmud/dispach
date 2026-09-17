@@ -72,17 +72,50 @@ jobs:
       - name: build image
         run: docker build -f docker/Dockerfile -t dispach:ci .
 
-      # Phase 11's target. Reported either way, because "how big is it" is a question somebody asks
-      # long before it fails a threshold.
+      # Reported either way, because "how big is it" is a question somebody asks long before it
+      # fails a threshold.
+      #
+      # **The ceiling was 150 MB and is now 350.** Renegotiated rather than relaxed quietly, with
+      # the numbers: Phase 11 measured 47 MB, the shell worth having took it to 68 (decision
+      # 11.183), and 15.4 measured the image actually shipping at **287 MB** — the gate had been
+      # red since the browser surface landed. The three figures in the docs (47, 68, 83) could not
+      # all be current and none of them was.
+      #
+      # 350 is a ceiling and not a target. The deliberate position is that the image carries
+      # everything an agent needs — a shell, `git`, a Python interpreter and the web UI — and the
+      # cost of that is stated rather than traded away. Phase 15.5 replaces the base image
+      # entirely, so this number is expected to move again and must be re-measured, not carried.
       - name: image size
         run: |
           bytes=$(docker image inspect dispach:ci --format '{{.Size}}')
           mb=$(( bytes / 1000000 ))
           echo "image is ${mb} MB"
-          if [ "$mb" -gt 150 ]; then
-            echo "::error::image is ${mb} MB, over the 150 MB target"
+          if [ "$mb" -gt 350 ]; then
+            echo "::error::image is ${mb} MB, over the 350 MB ceiling"
             exit 1
           fi
+
+      # What the agent's shell can reach. Asserted, because the absence of `git` does not degrade
+      # the skills catalogue — it deletes it, and the symptom is `git: not found` inside somebody
+      # else's container. A slimming change to the base image would otherwise take a shipped
+      # feature with it silently.
+      - name: the shell the agent gets
+        run: |
+          missing=""
+          for tool in sh bash git python3 curl wget node; do
+            docker run --rm --entrypoint sh dispach:ci -c "command -v $tool >/dev/null" \
+              || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::absent from the image:$missing — see docker/Dockerfile for why each is there"
+            exit 1
+          fi
+          echo "toolchain present"
+          # Non-root is the other half, and it is what the containment in docker-compose.yml
+          # assumes. A base-image change that reverted to root would make every cap_drop moot.
+          uid=$(docker run --rm --entrypoint sh dispach:ci -c 'id -u')
+          [ "$uid" = "1000" ] || { echo "::error::image runs as uid $uid, expected 1000"; exit 1; }
+          echo "runs as uid 1000"
 
       # Start to ready, the number the container claim is actually about. `minimal` needs only a
       # key-shaped string to load — nothing here calls an endpoint.
@@ -150,6 +183,120 @@ jobs:
             exit 1
           fi
           docker compose down -v
+
+  # The standalone binary, built and *run* on each platform that can run it.
+  #
+  # A blocking job, because `bun test` cannot see this class of failure at all: tests import source,
+  # so a defect in how the program is bundled or signed is invisible to all 3,216 of them. The
+  # recorded instance is `--splitting` emitting a duplicate export — green suite, unparseable
+  # bundle. `--compile` is a second bundler shape with its own way to be wrong.
+  #
+  # The matrix is over *runners* rather than targets on purpose: each leg builds its own host target
+  # and executes it, so every asset in the matrix is proven rather than merely produced. The two
+  # cross-compiled legs (darwin-x64, linux-arm64) are built in the release workflow and cannot be
+  # run anywhere here, which the script says out loud rather than implying.
+  #
+  # macOS is not optional cover. Bun emits a *linker-signed* ad-hoc signature that macOS kills on
+  # exec — exit 137, no output — while `codesign -dv` reports the binary as signed, so the obvious
+  # check passes on a dead file. Only running it catches that, and only a macOS runner can.
+  binary:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    # **Required, and deleting it turns every step below red.** No committed example validates with
+    # an empty environment, and that is the feature rather than a gap: `validate` refuses a manifest
+    # whose key env vars are unset, because an unset variable expanding to an empty string surfaces
+    # later as a confusing auth error. Measured on a fresh checkout — `minimal` and `team` fail
+    # `env_var_missing @ model.main.id`, `reference` and `shell-agent` fail
+    # `manifest_validation_failed @ model.main.apiKeyEnv`.
+    #
+    # The values are deliberately fake and nothing here reaches a network: `validate` loads and
+    # checks, and `serve` binds loopback. Same shape and the same placeholders as the `docker` job
+    # above, so the two cannot drift into disagreeing about what a CI environment looks like.
+    #
+    # This step was written and verified locally, where it passed — because `ambientEnv` layers the
+    # **cwd's** `.env`, and the repo root had one. That is the recorded hazard twice over: verify a
+    # workflow change against a fresh clone rather than against your working tree, and remember the
+    # cwd's `.env` is a participating layer.
+    env:
+      MODEL_ID: gpt-4o-mini
+      MODEL_BASE_URL: https://api.openai.com/v1
+      MODEL_API_KEY: ci-not-a-real-key
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+
+      # Required, not defensive: the CLI resolves every sibling package through its `dist/`, so on a
+      # fresh checkout the compile fails on a directory that does not exist yet.
+      - name: build
+        run: bun run build
+
+      - name: compile and run the host target
+        run: bun run build:binary
+
+      # Past `--version`, which the script already asserts. This is the shape that matters: a real
+      # manifest through the whole loader, on the plain path, from a single file with no
+      # `node_modules` anywhere near it.
+      - name: the binary does real work
+        run: |
+          bin=$(ls dist-bin/dispach-*)
+          echo "using $bin"
+          "$bin" validate ./examples/minimal/agent.yaml --json | tee /tmp/out.json
+          grep -q '"ok": true' /tmp/out.json || {
+            echo "::error::the compiled binary could not validate the reference manifest"
+            exit 1
+          }
+          "$bin" --help > /dev/null
+
+      # The browser surface, from inside a single file.
+      #
+      # Decision 11.200 measured `with { type: "text" }` against source and bundled shapes;
+      # `--compile` is a third, and it is the one the release ships. The assets are inlined into
+      # the bundle, so if that stopped working here the failure would be a 500 from `/` on a
+      # binary whose every other command was fine.
+      - name: the binary serves the web UI
+        run: |
+          bin=$(ls dist-bin/dispach-*)
+          export DISPACH_HOME="$(mktemp -d)"
+          "$bin" serve ./examples/minimal/agent.yaml --port 7431 > /tmp/serve.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -fsS localhost:7431/v1/ready > /dev/null 2>&1 && break
+            sleep 1
+          done
+          for path in / /assets/app.js /assets/app.css; do
+            code=$(curl -s -o /tmp/body -w '%{http_code}' "localhost:7431$path")
+            bytes=$(wc -c < /tmp/body)
+            echo "$path -> $code, $bytes bytes"
+            if [ "$code" != "200" ] || [ "$bytes" -lt 100 ]; then
+              echo "::error::$path answered $code with $bytes bytes from the compiled binary"
+              cat /tmp/serve.log
+              exit 1
+            fi
+          done
+          kill %1
+
+      # The lazy renderer boundary, checked in the one shape that can lose it. `--compile` resolves
+      # static imports at build time, so a module that reached Ink statically would drag ~170-210 ms
+      # of React into a command whose entire runtime is less than that — and nothing would fail.
+      - name: no renderer on the plain path
+        run: |
+          bin=$(ls dist-bin/dispach-*)
+          start=$(date +%s%N)
+          "$bin" validate ./examples/minimal/agent.yaml --json > /dev/null
+          ms=$(( ($(date +%s%N) - start) / 1000000 ))
+          echo "validate --json in ${ms} ms"
+          if [ "$ms" -gt 600 ]; then
+            echo "::error::${ms} ms for validate --json — something on this path now imports a renderer"
+            exit 1
+          fi
 
   # Decision 2.2 — Node is a soft goal, tested but never a blocker. A red leg here is information,
   # not a merge gate. The floor is 24 (decision 13.5): 22 bundles SQLite 3.51.3, whose planner turns
