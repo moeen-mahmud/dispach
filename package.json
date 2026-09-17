@@ -26,6 +26,7 @@
         "changeset": "changeset",
         "version:packages": "changeset version",
         "release": "changeset publish",
+        "build:binary": "bun scripts/build-binary.ts",
         "bench:boot": "bun scripts/bench-boot.ts",
         "eval:tools": "bun scripts/eval-tools.ts",
         "eval:injection": "bun scripts/eval-injection.ts",

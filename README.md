@@ -12,8 +12,7 @@ see Status. Bun-first TypeScript, Apache-2.0.
 
 ## Status
 
-**Pre-release, and it runs.** Not published to npm during v0.1 — install it from a checkout
-(below).
+**Pre-release, and it runs.** Install a single binary, or work from a checkout (both below).
 
 Built and in use: the manifest and agent loop, the store and sessions, tools with the NLT and
 native dialects, the tiered workspace, system and web tool providers with a policy engine, the
@@ -21,7 +20,12 @@ Telegram channel, the HTTP/SSE server, an idempotent outbox, launchd services, s
 catalogues, the full-screen TUI, the compaction ladder, phase-scoped tools, memory that carries
 across sessions, and scheduling — cron, interval and one-shot, DST-correct, on one timer.
 
-Not built yet: the plugin API, WhatsApp, multi-agent delegation, and the Docker image. `docs/05-PLAN.md` has every phase with its acceptance criteria and what is ticked.
+Also built since: the plugin API with all four middleware wrap points, supervisor delegation with
+typed handoffs, the Docker image and a compose front door, a typed client, operator keys, approvals
+over the wire, and a browser UI on the same origin as the API.
+
+Not built yet: WhatsApp. `docs/05-PLAN.md` has every phase with its acceptance criteria and what is
+ticked.
 
 ## Scope
 
@@ -59,8 +63,47 @@ Full rationale for every decision, including the negative ones, is in `docs/00-D
 
 ## Getting set up
 
-There is no published package yet, so the binary comes from a checkout. The order matters:
-`bin` points at `dist/`, so a link made before the build points at nothing.
+### Install the binary
+
+One file, no Node and no `node_modules`. `bun build --compile` embeds the runtime, which is also
+why it starts *faster* than a `node_modules` install — there is no module resolution left to do at
+boot. Measured on an M-series mac, `validate --json`: **70–90 ms compiled against 90–110 ms through
+Node**.
+
+```bash
+brew tap moeen-mahmud/dispach https://github.com/moeen-mahmud/dispach
+brew install moeen-mahmud/dispach/dispach
+```
+
+Or take the asset straight from a release — `darwin-arm64`, `darwin-x64`, `linux-x64` and
+`linux-arm64`, each with a `.sha256` beside it:
+
+```bash
+base=https://github.com/moeen-mahmud/dispach/releases/latest/download
+curl -fsSL -O "$base/dispach-darwin-arm64"
+curl -fsSL -O "$base/dispach-darwin-arm64.sha256"
+shasum -a 256 -c dispach-darwin-arm64.sha256      # must print "OK"
+chmod +x dispach-darwin-arm64
+sudo mv dispach-darwin-arm64 /usr/local/bin/dispach
+```
+
+Download with `-O`, not `-o dispach`: the checksum file names the asset, so renaming before the
+check makes `shasum -c` look for a file that is not there.
+
+Two things worth knowing about the macOS asset, because the failure has no error message:
+
+- **The release binary is ad-hoc signed, and it has to be.** A compiled Bun binary arrives
+  *linker-signed*, which macOS refuses on exec — **exit 137 with no output at all**, which reads as
+  a crash rather than as a policy. `codesign -dv` reports such a file as signed, so the obvious
+  check passes on a binary that cannot run. The release re-signs every darwin asset, and
+  `scripts/build-binary.ts` refuses to produce an unsigned one.
+- **Gatekeeper still applies to a downloaded file.** A binary fetched with a browser carries a
+  quarantine attribute; `xattr -d com.apple.quarantine dispach` clears it. `curl` does not set it.
+
+### Or from a checkout
+
+For working on Dispach itself. The order matters: `bin` points at `dist/`, so a link made before
+the build points at nothing.
 
 ```bash
 git clone https://github.com/moeen-mahmud/dispach && cd dispach
@@ -362,7 +405,7 @@ deliberately. A Telegram outage must not read as an unhealthy container and get 
 the same outage, so the probe answers "can it serve a turn" rather than "is everything connected".
 Channel state lives on the agent resource instead.
 
-Measured on an arm64 Docker Desktop, 2026-09-15: the image is **47 MB** against the 150 MB target,
+Measured on an arm64 Docker Desktop, 2026-09-17: the image is **287 MB** against a 350 MB ceiling,
 `docker compose up -d --wait` reaches healthy in **5.8 s**, the healthcheck reports healthy, an
 unauthenticated write is refused with 401, `store.db` lands on the state volume owned by uid 1000,
 and a real streaming turn against DeepSeek reconstructs from 26 `model.chunk` frames. The CI

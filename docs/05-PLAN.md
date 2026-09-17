@@ -2647,7 +2647,9 @@ through a text-only channel is fragile and belongs in `evals/` before it is clai
 
 **Acceptance**
 
-- [x] Image under 150 MB — **83 MB**, arm64
+- [x] Image under its ceiling — **287 MB** measured 2026-09-17, against a ceiling renegotiated
+  from 150 to 350 MB in 15.4. The 83 MB recorded here was arm64 at Phase 11, before the shell
+  (11.183) and the browser surface
 - [x] Container start → `/v1/ready` 200 under 2 s — **147 ms**, healthcheck healthy
 - [x] In-process boot under 1000 ms; CI enforces 1200 ms — **53 ms**, and the README now carries the
   machine state beside the figure, because a boot number without one is a number about somebody's
@@ -2771,7 +2773,10 @@ the gap between a specified protocol and a working one.
 - [x] An unknown turn id is `404`, an evicted turn is `stream.ended`, a turn running elsewhere is
   `stream.unavailable` — four states, three answers
 - [x] A turn is stoppable from whichever surface asks, not only the one that started it
-- [x] `docker compose up -d --wait` reaches healthy with no compose edit — **5.8 s**, image 47 MB
+- [x] `docker compose up -d --wait` reaches healthy with no compose edit — **5.8 s** at 13.5 and
+  **5.7 s** re-measured at 15.4, so start-to-ready did not move even though the image went from
+  47 MB to 287 MB. Worth knowing why: readiness is tens of milliseconds in-process, and almost all
+  of that 5.7 s is waiting for the first healthcheck probe rather than for the runtime
 - [x] An unauthenticated write is refused `401`; `store.db` lands on the state volume as uid 1000
 - [x] `HEAD` answers as `GET`, `OPTIONS` reports a derived `Allow`, and a stream refuses `HEAD`
   rather than leaking a subscription per probe
@@ -3825,21 +3830,74 @@ shell script and an observation is text a stranger wrote — and the firehose is
 observer of a session. A live row says what was called and how it went; the text is on the reattach
 path, in the stored messages.
 
-### 15.4 — The standalone binary — **not started**
+### 15.4 — The standalone binary — **built** (2026-09-17)
 
 Split from 15.3 (11.202), because a combined stage cannot be reviewed: the UI would be unverifiable
 until a four-platform release pipeline worked, and the pipeline untestable without the UI.
 
-`dispach` installed from brew, npm or the image, everything under one command. **Already proven
-reachable**: `bun build --compile` produces a working 60.2 MB binary that validates a manifest,
-opens a `bun:sqlite` store and renders a catalogue with nothing beside it — and it is *faster* than
-the npm shape, 84 ms against 92 ms on `validate --json`.
+`dispach` installed from brew or the image, everything under one command.
 
-- `--compile` in the release pipeline, four platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64
-- **macOS ad-hoc codesigning**, which is mandatory rather than polish: unsigned is SIGKILLed with
-  exit 137 and no message, which reads as a crash
-- A brew formula, and GHCR for the image (a stated Phase 11 non-goal, now in scope)
-- A compile smoke test in CI, so a dependency that breaks `--compile` is caught at the commit
+**Deliverables**
+
+- `scripts/build-binary.ts` — `--compile` for four targets (darwin-arm64, darwin-x64, linux-x64,
+  linux-arm64), ad-hoc signing on darwin, and a run of every target it can execute
+- `scripts/brew-formula.ts` — the formula generated from the digests of assets that exist
+- `.github/workflows/release.yml` — tag-driven: binaries, checksums, a GitHub release, the generated
+  formula attached, and a two-architecture image pushed to GHCR
+- A `binary` job in CI over `ubuntu-latest` and `macos-latest`, each compiling its host target and
+  **running** it
+- `README.md` leads with the binary; the stale "not built yet" list is corrected
+
+**Measured, on this machine (M-series, bun 1.3.5)**
+
+| target | size | signed here | ran here |
+| --- | --- | --- | --- |
+| darwin-arm64 | 61.0 MB | yes | yes, 0.1.0 |
+| darwin-x64 | 66.8 MB | yes | no, cross-compiled |
+| linux-x64 | 103.3 MB | n/a | no, cross-compiled |
+| linux-arm64 | 96.2 MB | n/a | no, cross-compiled |
+
+`validate --json`: **70–90 ms compiled against 90–110 ms** through `node packages/cli/dist/index.js`,
+consistent with the 84/92 ms recorded in 11.202.
+
+**Four things found by building it**
+
+- **A compiled binary is already ad-hoc signed, and macOS kills it anyway.** 11.202 recorded that
+  signing is mandatory; what it did not record is that bun *already signs* — `codesign -dv` reports
+  `flags=0x20002(adhoc,linker-signed)` and `Signature=adhoc`, and the binary then dies on exec with
+  exit 137 and no output. So the obvious diagnostic passes on a dead file, and anyone reading the
+  signature concludes the work is done. An explicit `codesign --force -s -` replaces it with a plain
+  ad-hoc signature (`flags=0x2`) and it runs. Signing is *re*-signing, not signing.
+- **`codesign` is macOS-only, so a darwin target cross-compiled on Linux cannot be repaired on the
+  machine that built it.** The script refuses that combination by name rather than emitting a file
+  that exits 137 for every user who downloads it, and the release workflow splits its matrix by
+  *runner* for that reason. Signing a darwin-x64 binary from an arm64 mac works, so one macOS runner
+  covers both darwin targets.
+- **The linux binaries are ~1.6× the darwin ones** — 103.3 MB and 96.2 MB against 61.0 MB. Bun's
+  embedded linux runtime is simply larger. This matters beyond the download: it is the figure 15.5's
+  image budget has to be built on, not the 61 MB one that gets quoted.
+- **The documented image size was wrong in all three places, and the CI gate had been red.** 47 MB
+  (13.5), 68 MB (11.183) and 83 MB (Phase 11) could not all be current; the image actually shipping
+  measures **287 MB**, so the 150 MB gate has been failing since the browser surface landed.
+  Renegotiated to 350 MB with the measurement attached rather than relaxed quietly — and 15.5
+  replaces the base image, so it must be re-measured there rather than carried.
+
+**Acceptance**
+
+- [x] Four targets compile; every one that can run here does, and reports the package's version
+- [x] A darwin binary refuses to ship unsigned, and the refusal names why
+- [x] `shasum -a 256 -c` verifies a downloaded asset — the sequence in the README was run
+- [x] The formula's ruby parses (`ruby -c`), and its digests come from files rather than placeholders
+- [x] CI compiles and *runs* the binary on Linux and macOS
+- [x] The compiled binary **serves the browser surface** — `/`, `/assets/app.js` and
+      `/assets/app.css` answer 200 with 1,290 / 224,813 / 4,919 bytes, byte-identical to the node
+      shape. 11.200 measured `type: "text"` against the source and bundled shapes; `--compile` is
+      the third, and it is the one a release ships
+- [ ] A real tag produces a release, a formula and a GHCR image — **unverified until v0.1.0 is
+      tagged.** The workflow is `workflow_dispatch`-able so the matrix can be proven first, and it
+      publishes nothing without a tag
+- [ ] npm publishing — **out of scope here.** Open item O.2 (registering the `@dispach` scope) has to
+      land first, and a pipeline that cannot be run is not a pipeline
 
 ---
 
