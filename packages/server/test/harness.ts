@@ -156,6 +156,18 @@ export async function harness(
         manifest?: string
         /** The one-time bootstrap ticket, for the claim path. */
         claim?: ClaimTicket
+        /**
+         * The bind, for the origin guard.
+         *
+         * Omitted by every other test on purpose: a handler built without it does no origin
+         * checking, which is what lets a constructed `Request` with no `Host` header reach a route
+         * at all. A real server always has one; `new Request(url)` does not.
+         */
+        origin?: {
+            host: string
+            allowedOrigins?: readonly string[]
+            allowedHosts?: readonly string[]
+        }
     } = {},
 ) {
     const dir = workspace(options.manifest)
@@ -172,6 +184,7 @@ export async function harness(
             : { token: options.token }),
         ...(options.running === undefined ? {} : { running: options.running }),
         ...(options.claim === undefined ? {} : { claim: options.claim }),
+        ...(options.origin === undefined ? {} : { origin: options.origin }),
     })
 
     const call = (

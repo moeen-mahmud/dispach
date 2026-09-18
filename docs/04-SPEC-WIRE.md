@@ -33,6 +33,8 @@ and WebSocket surfaces can return:
 | Code | Status | Means |
 | --- | --- | --- |
 | `unauthorized` | 401 | Missing or invalid token. Never distinguishes which, and never says the token was absent rather than wrong. |
+| `origin_not_allowed` | 403 | A browser sent an `Origin` this server does not answer to. Checked **before** authentication, because `POST /v1/channels/…` needs no credential and changes state. An absent `Origin` is allowed — a curl, a webhook and a healthcheck all send none. Port is not compared: a published port mapping and a dev proxy both change it legitimately. |
+| `host_not_allowed` | 403 | A request reached a **loopback** bind addressed to a name that is not a loopback name. That is what a DNS-rebinding attack cannot hide, since the browser sends the name it resolved — so this is the check that closes the hole. Widen it with `server.allowedHosts`; ignored on a public bind, where the legitimate names are the operator's to know. |
 | `not_found` | 404 | No route for this method and path. |
 | `agent_not_found` | 404 | No agent with that id in this runtime. |
 | `session_not_found` | 404 | No session with that key for this agent. |

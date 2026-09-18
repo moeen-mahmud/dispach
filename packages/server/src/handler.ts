@@ -42,6 +42,7 @@ import {
 } from "@dispach/core"
 import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
 import type { ClaimTicket } from "./keys.ts"
+import { type OriginPolicy, originProblem } from "./origin.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
@@ -114,6 +115,16 @@ export interface HandlerOptions {
      * logs, which is the opposite of what a one-time ticket is for.
      */
     readonly claim?: ClaimTicket
+    /**
+     * What the bind is, so the origin guard can decide how strict to be.
+     *
+     * Optional because a great many tests build a handler with nothing but a runtime, and a guard
+     * that refused those would be a guard nobody could write a test around. Absent means **no
+     * origin checking at all**, which is the honest reading of "the caller did not say what it
+     * bound" — `serve` always passes it, so every real server is covered, and
+     * `spec.test.ts` asserts that it does.
+     */
+    readonly origin?: OriginPolicy
 }
 
 type Handler = (context: RequestContext) => Promise<Response> | Response
@@ -169,6 +180,16 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * Only the genuinely open case asks each time, where the query is a count over an index on a
      * table with no rows in it.
      */
+    /**
+     * The origin guard, closed over the bind. `undefined` policy means the caller did not say what
+     * it bound, and a claim about cross-origin safety cannot be made from nothing.
+     */
+    const refuseOrigin = (request: Request): Response | undefined => {
+        if (options.origin === undefined) return undefined
+        const problem = originProblem(request, options.origin)
+        return problem === undefined ? undefined : fail(problem, 403)
+    }
+
     let closed = false
     const authRequired = async (): Promise<boolean> => {
         if (token !== undefined || closed) return true
@@ -1189,6 +1210,9 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                     )
                 }
 
+                const crossOrigin = refuseOrigin(request)
+                if (crossOrigin !== undefined) return crossOrigin
+
                 if (!isOpenPath(url.pathname) && (await authRequired())) {
                     const unauthorized = await authorise({
                         request,
@@ -1234,6 +1258,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 404,
             )
         }
+
+        // **Before the open-path check, not after.** `POST /v1/channels/…` is open by prefix and
+        // changes state, so a guard sitting behind authentication would leave the one
+        // state-changing unauthenticated route unprotected — which is the half of the DNS-rebinding
+        // hole that a configured token does not close.
+        const crossOrigin = refuseOrigin(request)
+        if (crossOrigin !== undefined) return crossOrigin
 
         if (!isOpenPath(url.pathname) && (await authRequired())) {
             const unauthorized = await authorise({

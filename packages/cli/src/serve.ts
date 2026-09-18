@@ -184,6 +184,11 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             host,
             port,
             approvals,
+            // The origin allowlists, from the manifest. Passed rather than defaulted, because the
+            // guard's *default* behaviour is what protects a server whose operator configured
+            // nothing — these two only widen it.
+            allowedOrigins: config.allowedOrigins,
+            allowedHosts: config.allowedHosts,
             ...(claim === undefined ? {} : { claim }),
             ...(token === undefined || token === "" ? {} : { token }),
         })

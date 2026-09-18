@@ -485,6 +485,21 @@ server:
   port: 7420
   tokenEnv: DISPACH_API_TOKEN
 
+  # Which browsers may call this server, and which names it answers to.
+  #
+  # Both default to empty and both only *widen* what is already allowed — the guard protects a
+  # server whose operator configured nothing, which is the one that needs protecting. What is
+  # allowed without either: any page this server itself served, anything on loopback whatever port
+  # it is on (a published `-p 8080:7420` mapping and a dev proxy both change the port and neither is
+  # an attacker), and — on a public bind — a page on the same host the request was addressed to.
+  #
+  # What is refused, and the reason this exists: a request to a *loopback* bind addressed to any
+  # name that is not a loopback name. That is a DNS-rebinding attack, and it is what let a web page
+  # drive a local agent that has a shell. There is no wildcard for `allowedOrigins`, deliberately —
+  # a `*` would be worst exactly here, where the spec permits omitting the token entirely.
+  allowedOrigins: []              # e.g. ["https://app.example.com"] — full origins, scheme included
+  allowedHosts: []                # e.g. ["agent.local"] — only consulted on a loopback bind
+
 # ── schedules ─────────────────────────────────────────────────────────────────────────────
 # Validated at write time rather than fire time. `deliver` is required — `{channel,to}` or the
 # literal "none" to return results through the event stream only.

@@ -621,6 +621,26 @@ export const ServerSchema = z
         /** Loopback by default. A public bind is explicit, and requires a token. */
         host: z.string().min(1).default("127.0.0.1"),
         tokenEnv: z.string().min(1).default(`${BRAND.envPrefix}API_TOKEN`),
+        /**
+         * Origins a browser may call this server from, written in full — `https://app.example.com`.
+         *
+         * Not needed for the ordinary cases and deliberately not defaulted: a page served by this
+         * server is always allowed, and so is anything on loopback whatever port it is on, because
+         * a published port mapping (`-p 8080:7420`) and a dev proxy both change the port and
+         * neither is an attacker. **There is no wildcard.** A `*` here would be worst exactly where
+         * this matters most — a loopback bind, where the spec permits omitting the token entirely.
+         */
+        allowedOrigins: z.array(z.string().min(1)).default([]),
+        /**
+         * Extra `Host` values a *loopback* bind will answer to.
+         *
+         * A loopback server refuses a request addressed to any other name, because that is what a
+         * DNS-rebinding attack cannot hide — the browser sends the name it resolved. This is the
+         * escape for the legitimate version: a reverse proxy on the same machine, or a hosts-file
+         * entry somebody added on purpose. Ignored on a public bind, where the set of legitimate
+         * names is the operator's to know and not ours to guess.
+         */
+        allowedHosts: z.array(z.string().min(1)).default([]),
     })
     .strict()
 

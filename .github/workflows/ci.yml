@@ -385,6 +385,47 @@ jobs:
           done
           kill %1
 
+      # **The origin guard, against a real loopback bind.** `origin.test.ts` covers the decision
+      # table; this covers the thing a unit test cannot: real headers, on the strict bind, with the
+      # server the release ships.
+      #
+      # The `Host: evil.example` row is the DNS-rebinding shape, and it is asserted on the **open**
+      # webhook route as well — that route needs no credential and changes state, so it is the half
+      # of the hole a configured token does not close, and the guard sits before the auth check
+      # precisely for it.
+      - name: a real bind refuses a rebinding request
+        run: |
+          set -e
+          bin=$(ls dist-bin/dispach-*)
+          export DISPACH_HOME="$(mktemp -d)"
+          "$bin" serve ./examples/minimal/agent.yaml --port 7452 > /tmp/origin.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -fsS localhost:7452/v1/ready > /dev/null 2>&1 && break
+            sleep 1
+          done
+
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          fail=0
+          check() {
+            if [ "$2" != "$3" ]; then
+              echo "::error::$1 answered $2, expected $3"
+              fail=1
+            else
+              echo "  ok  $1 -> $2"
+            fi
+          }
+
+          check "no Origin"                 "$(code localhost:7452/v1/ready)" 200
+          check "web UI's own origin"       "$(code -H 'Origin: http://localhost:7452' localhost:7452/)" 200
+          check "dev proxy on another port" "$(code -H 'Origin: http://localhost:5173' localhost:7452/v1/ready)" 200
+          check "hostile Origin"            "$(code -H 'Origin: https://evil.example' localhost:7452/v1/ready)" 403
+          check "rebinding Host"            "$(code -H 'Host: evil.example' localhost:7452/v1/ready)" 403
+          check "rebinding on open webhook" "$(code -X POST -H 'Host: evil.example' -H 'content-type: application/json' -d '{}' localhost:7452/v1/channels/tg/webhook/minimal)" 403
+          check "ws handshake, hostile"     "$(code -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Origin: https://evil.example' 'localhost:7452/v1/ws?token=x')" 403
+
+          kill %1
+          [ "$fail" = 0 ] || { cat /tmp/origin.log; exit 1; }
+
       # The lazy renderer boundary, checked in the one shape that can lose it. `--compile` resolves
       # static imports at build time, so a module that reached Ink statically would drag ~170-210 ms
       # of React into a command whose entire runtime is less than that — and nothing would fail.

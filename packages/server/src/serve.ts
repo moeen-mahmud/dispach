@@ -13,12 +13,17 @@
 
 import { HarnessError } from "@dispach/core"
 import { createHandler, type HandlerOptions } from "./handler.ts"
+import { isLoopback, originProblem } from "./origin.ts"
 import { HEARTBEAT_MS } from "./sse.ts"
 import { attachWebSocket, type WsSession } from "./ws.ts"
 
-export interface ServeOptions extends Omit<HandlerOptions, "allowUnauthenticated"> {
+export interface ServeOptions extends Omit<HandlerOptions, "allowUnauthenticated" | "origin"> {
     readonly port: number
     readonly host: string
+    /** `server.allowedOrigins`. The bind host is already known here, so the policy is derived. */
+    readonly allowedOrigins?: readonly string[]
+    /** `server.allowedHosts`. Only consulted on a loopback bind. */
+    readonly allowedHosts?: readonly string[]
 }
 
 export interface RunningServer {
@@ -30,12 +35,10 @@ export interface RunningServer {
     stop(): Promise<void>
 }
 
-/** Loopback in every spelling that resolves to this machine, including IPv6 and the wildcard form. */
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost", "[::1]"])
-
-export function isLoopback(host: string): boolean {
-    return LOOPBACK.has(host.toLowerCase())
-}
+// `isLoopback` moved to `origin.ts` — the module that decides what a host string means — because
+// `handler.ts` needs it too and `serve.ts` imports `handler.ts`. Re-exported so every existing
+// caller and the public surface are unchanged.
+export { isLoopback }
 
 /**
  * Start listening.
@@ -87,6 +90,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // whose token authenticates nothing — a first-run failure with no way to tell it from a
         // mistyped paste.
         ...(options.claim === undefined ? {} : { claim: options.claim }),
+        // **Derived, not forwarded.** The bind host is already an argument here, so a caller cannot
+        // hand over a policy that disagrees with what was actually bound — which is the whole input
+        // to how strict the guard is. `origin` is `Omit`ted from `ServeOptions` for the same reason:
+        // two ways to say one thing is how they come to differ.
+        origin: {
+            host: options.host,
+            ...(options.allowedOrigins === undefined
+                ? {}
+                : { allowedOrigins: options.allowedOrigins }),
+            ...(options.allowedHosts === undefined ? {} : { allowedHosts: options.allowedHosts }),
+        },
     })
 
     const underBun = typeof Bun !== "undefined" && typeof Bun.serve === "function"
@@ -115,6 +129,31 @@ function serveWithBun(
         fetch: (request, self) => {
             const url = new URL(request.url)
             if (url.pathname !== "/v1/ws") return handler(request)
+
+            /**
+             * **The origin guard again, because this path never reaches `handler`.**
+             *
+             * Duplicated deliberately and it is the more important of the two: a browser does
+             * **not** apply same-origin to `WebSocket`, so the handshake is cross-origin reachable
+             * by construction — no preflight, no opt-in, nothing to refuse it but this. And
+             * `/v1/ws` authenticates from a query parameter, which a rebinding page can supply as
+             * easily as any other.
+             */
+            const problem = originProblem(request, {
+                host: options.host,
+                ...(options.allowedOrigins === undefined
+                    ? {}
+                    : { allowedOrigins: options.allowedOrigins }),
+                ...(options.allowedHosts === undefined
+                    ? {}
+                    : { allowedHosts: options.allowedHosts }),
+            })
+            if (problem !== undefined) {
+                return new Response(JSON.stringify({ error: problem }), {
+                    status: 403,
+                    headers: { "content-type": "application/json; charset=utf-8" },
+                })
+            }
 
             const attempt = bridge.accept(url)
             if (attempt.kind === "reject") return attempt.response

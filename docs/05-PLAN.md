@@ -3997,6 +3997,80 @@ of it waiting for the first healthcheck probe rather than for the runtime.
 - [ ] amd64 is unbuilt here. Every figure above is arm64, and the release workflow's buildx leg is
       the first thing that will produce the other architecture
 
+## Phase 16 — the always-on server
+
+**Goal.** The server is not something a command starts; it exists and the front ends are views onto
+it. `dispach run` and `dispach web run` attach, provisioning reaches a running process, and
+`dispach stop <agent>` is the only thing that makes an agent unreachable.
+
+Stages: **16.1** origin hardening · 16.2 `Runtime` adopt/replace · 16.3 per-agent lifecycle ·
+16.4 one service unit, first-run bootstrap, systemd · 16.5 `POST /v1/agents` · 16.6 the
+human-input seam on channel status.
+
+### 16.1 — Origin and Host hardening — **built** (2026-09-17)
+
+First in the phase because it is the one item whose cost *rises* with everything else in it. Today a
+server has to be started deliberately, so the exposure is one developer. An always-on server makes
+it every user, always.
+
+**The hole.** Nothing read an `Origin` or a `Host` header anywhere, and a loopback bind is permitted
+to carry no token (`serve` only refuses a token-less *non-loopback* bind). So any page an operator
+visited could **DNS-rebind** to `127.0.0.1:7420` and drive an agent with a shell — no credential
+stolen, none needed. With a token configured it still reached `POST /v1/channels/…`, which
+`isOpenPath` matches by **prefix** and which changes state. MCP made `Origin` validation mandatory
+after CVE-2026-11624 in the same shape.
+
+**Deliverables**
+
+- `packages/server/src/origin.ts` — `originProblem`, `hostOf`, and `isLoopback` moved here
+- wired at **both** handler dispatch sites, *before* the open-path check
+- wired again in `serve.ts`'s `/v1/ws` branch, which never reaches `handler`
+- `server.allowedOrigins` and `server.allowedHosts` in the schema, the reference manifest, and
+  `docs/02-SPEC-MANIFEST.md`; two error codes in `docs/04-SPEC-WIRE.md`
+- `origin.test.ts` — 21 tests over Origin (absent / allowed / hostile) × bind (loopback / public) ×
+  route (open / authenticated / HEAD / no-policy)
+- a CI step asserting seven cases against a **real** loopback bind, including the ws handshake
+
+**The rules, and why they differ by bind**
+
+| | loopback bind | public bind |
+| --- | --- | --- |
+| may be token-less | yes — the dangerous case | no, `serve` refuses |
+| `Host` | must be a loopback name, or in `allowedHosts` | not checked; the operator's name is not ours to guess |
+| `Origin` | loopback (any port), or `allowedOrigins` | same host as `Host`, loopback, or `allowedOrigins` |
+| absent `Origin` | allowed | allowed |
+
+**Four decisions inside it**
+
+- **Absent `Origin` is allowed.** A curl, a channel provider, a scheduled job and the healthcheck
+  all send none; refusing them to guard against a browser breaks every non-browser caller. A browser
+  always sends one on the requests worth refusing.
+- **Port is not compared.** `-p 8080:7420` means the browser sends `Origin: http://localhost:8080`
+  at a server bound to 7420, and `vite dev` proxies from 5173 — both legitimate, and an exact-match
+  rule breaks the web UI in the two most common deployments. The discriminator a rebinding attack
+  cannot fake is the *hostname*. Stated cost: another local program on another loopback port can
+  still call this one, which is a different concern from the one Origin checking is for.
+- **`Host` is checked first, and an absent one is refused.** A rebinding request has both headers
+  agreeing on the attacker's name, so reporting `origin_not_allowed` would point at the wrong
+  setting. HTTP/1.1 requires a `Host`, so absent is malformed rather than permissive.
+- **`isLoopback` moved out of `serve.ts`.** `handler.ts` needs it and `serve.ts` imports
+  `handler.ts`, so leaving it there made the dependency a cycle. Re-exported, so no caller changed.
+
+**Acceptance**
+
+- [x] 21 unit tests, revert-checked three ways: Host check disabled → 5 red; Origin check disabled →
+      6 red; and **the guard moved *after* the open-path check → 2 red**, which is the one that
+      proves its position rather than its logic
+- [x] Verified against a real loopback bind with real headers: no Origin 200, dev-proxy origin 200,
+      web UI's own origin 200, hostile Origin 403, `Host: evil.example` 403, and **403 on the open
+      webhook POST** where a token would not have helped
+- [x] The `/v1/ws` handshake refuses a hostile `Origin` and a hostile `Host` with 403, and answers
+      401 for a bad token on loopback — so origin is checked before the credential there too
+- [x] A handler built with no bind does no checking, which is what keeps 3,200 constructed-`Request`
+      tests working: `new Request(url)` carries no `Host`
+- [ ] CORS response headers are **not** here. 18.4 adds them, consuming the same allowlist — one
+      list, two consumers, never two lists
+
 ---
 
 ## Carried backlog
