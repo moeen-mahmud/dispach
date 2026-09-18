@@ -178,6 +178,40 @@ export interface AgentClient {
      * reason.
      */
     approve(approvalId: string, granted: boolean): Promise<void>
+    /**
+     * Switch this agent off — durably, and out of the host now.
+     *
+     * Two effects in one call and both are needed: the store row survives a restart, and the host
+     * drops the agent immediately. It is not a signal — since one process hosts several agents,
+     * signalling the process would take the others with it.
+     *
+     * Throws `agent_turn_in_flight` (409) while a turn is running. The row is written first either
+     * way, so the agent is off at the next start even when the teardown is refused.
+     */
+    stop(reason?: string): Promise<AgentLifecycleState>
+    /**
+     * Switch it back on, and have the host adopt it now.
+     *
+     * Throws `start_not_supported` (501) on a server with no way to look up a manifest for an agent
+     * it is not hosting — an embedder over its own agent store, or the container image, which
+     * passes none on purpose.
+     */
+    start(): Promise<AgentLifecycleState>
+}
+
+/** What `stop` and `start` report back. */
+export interface AgentLifecycleState {
+    readonly id: string
+    readonly status: "loaded" | "disabled"
+    /**
+     * When it was last switched off, and why — **kept through a later start**, as the record of
+     * what happened. So a started agent legitimately carries both, and a reader has to look at
+     * `status` rather than at their presence.
+     */
+    readonly disabledAt?: string
+    readonly reason?: string
+    /** Which agents the host took on. A supervisor brings its team, so this can be several. */
+    readonly adopted?: readonly string[]
 }
 
 /** A question waiting on somebody. */
@@ -194,20 +228,33 @@ export interface PendingApproval {
     readonly requestedAt: string
 }
 
+/**
+ * An agent in the listing, or at the head of its own resource.
+ *
+ * **Most fields are optional because a stopped agent is listed too.** `GET /v1/agents` carries a
+ * thin `{ id, name, status: "disabled", reason? }` row for one — it is not loaded, so there is no
+ * manifest in memory to report a model or a window from, and loading one to fill the row in would
+ * make a listing depend on the agent's credentials being present, which is the defect
+ * `readManifestHeader` exists to avoid. Read `status` first: `"disabled"` means the rest is absent
+ * by design rather than missing by accident.
+ */
 export interface AgentDescriptionLike {
     readonly id: string
     readonly name: string
     readonly status: string
-    readonly model: string
-    readonly dialect: string
-    readonly window: number
-    readonly tools: number
-    readonly skills: number
-    readonly schedules: number
-    readonly entryPhase: string | null
+    readonly model?: string
+    readonly dialect?: string
+    readonly window?: number
+    readonly tools?: number
+    readonly skills?: number
+    readonly schedules?: number
+    readonly entryPhase?: string | null
     readonly phases?: readonly string[]
-    readonly channels: readonly unknown[]
-    readonly warnings: readonly WireError[]
+    readonly channels?: readonly unknown[]
+    readonly warnings?: readonly WireError[]
+    /** Set on a `disabled` row: when it was switched off, and why if anybody said. */
+    readonly disabledAt?: string
+    readonly reason?: string
 }
 
 export interface ToolSummary {
@@ -470,6 +517,13 @@ export function createClient(options: ClientOptions): DispachClient {
                     body: { granted },
                 })
             },
+
+            stop: (reason) =>
+                json<AgentLifecycleState>("POST", at("/stop"), {
+                    body: reason === undefined ? {} : { reason },
+                }),
+
+            start: () => json<AgentLifecycleState>("POST", at("/start"), { body: {} }),
 
             context: (opts) => {
                 const params = new URLSearchParams()

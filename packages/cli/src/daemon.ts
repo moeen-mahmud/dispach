@@ -419,8 +419,22 @@ async function statusAction(
     }
 
     const reports = await Promise.all(ids.map((id) => gatherStatus(id, manager)))
+    /**
+     * Agents that are switched off, which no other source here can see.
+     *
+     * `installedAgentIds` reads service labels and lease rows, and a stopped agent has neither — so
+     * without this it is simply **absent** from the status of the thing it belongs to, which is the
+     * "I set this up and it is gone" failure the durable switch exists to make explicable. The same
+     * reason `listAgents` shows a broken directory rather than skipping it.
+     */
+    const switchedOff = (await disabledAgents()).filter(
+        (entry) => options.manifestPath === undefined || ids.includes(entry.agentId),
+    )
+
     if (options.json === true) {
-        process.stdout.write(`${JSON.stringify({ agents: reports }, null, 2)}\n`)
+        process.stdout.write(
+            `${JSON.stringify({ agents: reports, disabled: switchedOff }, null, 2)}\n`,
+        )
     } else {
         for (const report of reports) {
             process.stdout.write(`${renderStatus(report.report)}\n`)
@@ -442,10 +456,50 @@ async function statusAction(
             }
             process.stdout.write("\n")
         }
+
+        if (switchedOff.length > 0) {
+            const count = `${switchedOff.length} ${switchedOff.length === 1 ? "agent" : "agents"}`
+            process.stdout.write(`  ${count} switched off, so nothing is hosting them:\n`)
+            for (const entry of switchedOff) {
+                process.stdout.write(
+                    `    ${entry.agentId}${entry.reason === undefined ? "" : ` — ${entry.reason}`}` +
+                        `${entry.disabledAt === undefined ? "" : ` (since ${entry.disabledAt})`}\n`,
+                )
+            }
+            process.stdout.write(
+                `  \`${BRAND.slug} start <agent>\` switches one back on — a restart alone will not.\n\n`,
+            )
+        }
     }
+    // A switched-off agent is **not** unhealthy: it is in the state somebody asked for, and exiting
+    // non-zero over it would make a deliberate stop look like a fault to a monitor.
+    //
     // Non-zero when anything is unhealthy. Reporting a restart loop and exiting 0 is the shape hard
     // rule 8 forbids, and it is what makes this usable from a monitor without parsing text.
     return reports.every((report) => report.report.healthy) ? EXIT_OK : EXIT_FAILURE
+}
+
+/** Every agent with a `disabled` row, for the status block above. */
+async function disabledAgents(): Promise<
+    readonly { agentId: string; reason?: string; disabledAt?: string }[]
+> {
+    try {
+        const store = await SqliteStore.open({ path: storePath() })
+        try {
+            return (await store.agentState.list())
+                .filter((state) => !state.enabled)
+                .map((state) => ({
+                    agentId: state.agentId,
+                    ...(state.reason === undefined ? {} : { reason: state.reason }),
+                    ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+                }))
+        } finally {
+            await store.close()
+        }
+    } catch {
+        // No store is the ordinary first-run state, not an error for a status command.
+        return []
+    }
 }
 
 async function installedAgentIds(

@@ -260,6 +260,14 @@ export class Runtime {
     /** Plugin `onEvent` subscriptions, by agent id. See `prepareAgents`. */
     #unwatch = new Map<string, () => void>()
     /**
+     * Where this runtime serves HTTP, once something has told it. See `publishAddress`.
+     *
+     * Held as well as written, because `adopt` claims a *new* lease row and that row has to carry
+     * the address too — otherwise an agent provisioned into a running host is the one agent
+     * `stop` cannot reach, which is the reverse of what provisioning is for.
+     */
+    #baseUrl: string | undefined
+    /**
      * Agents that exist only to receive handoffs, excluded from `list()`.
      *
      * A member is an implementation detail of its supervisor, and an addressable one is a route
@@ -857,6 +865,31 @@ export class Runtime {
             })
         }
 
+        /**
+         * A stopped agent is not adopted, however it is asked for.
+         *
+         * The durable switch has to be honoured on *this* path too, or provisioning is a way round
+         * it: `POST /v1/agents/:id/start` enables the agent and then adopts, so the refusal never
+         * fires for the one caller that means to reverse a stop, and fires for every caller that
+         * does not know about one. Refused rather than silently skipped, because `adopt` was asked
+         * for a specific agent and returning an empty list would read as success.
+         */
+        const stopped = await this.store.agentState.disabledAmong(
+            prepared.loaded.map((entry) => entry.manifest.id),
+        )
+        if (stopped.length > 0) {
+            for (const off of prepared.unwatch.values()) off()
+            const first = stopped[0] ?? ""
+            const state = await this.store.agentState.get(first)
+            throw new HarnessError({
+                code: "agent_stopped",
+                message: `Agent "${first}" is stopped${
+                    state?.reason === undefined ? "" : ` (${state.reason})`
+                }, so it will not be hosted.`,
+                hint: `\`${BRAND.slug} start ${first}\` switches it back on. A stop persists across restarts on purpose — that is the whole difference between it and killing the process.`,
+            })
+        }
+
         const leases =
             this.#options.lease === false
                 ? { owned: [], tookOver: [], declined: [] }
@@ -908,6 +941,12 @@ export class Runtime {
         for (const [id, team] of prepared.teams) this.#teams.set(id, team)
         for (const [id, off] of prepared.unwatch) this.#unwatch.set(id, off)
         this.#owned.push(...leases.owned)
+        // The freshly claimed rows have no address — `claim` clears it, deliberately, so a takeover
+        // cannot inherit a dead holder's. Re-published here rather than left for the next heartbeat,
+        // because `stop` may be typed a second after the provision that created the agent.
+        if (this.#baseUrl !== undefined && leases.owned.length > 0) {
+            await this.store.leases.publish(this.runtimeId, this.#baseUrl)
+        }
         for (const agent of admitted) this.#admit(agent)
         // The root's source only. A member is reloaded by replacing its supervisor.
         const root = hosted[0]
@@ -1173,6 +1212,22 @@ export class Runtime {
         // Schedules arrive in Phase 8. A caller-supplied store is not closed here: it was open
         // before this runtime existed and may outlive it.
         if (this.#ownsStore) await this.store.close()
+    }
+
+    /**
+     * Record where this runtime can be reached, on every lease it holds.
+     *
+     * Called by whoever bound the socket, after it is bound — which is the only moment the answer
+     * exists, since `--port 0` picks a port and a container republishes it. The runtime does not
+     * bind anything itself and must not guess: a manifest's `server.port` is what the file asked
+     * for, and a host reachable on 7421 whose lease says 7420 is invisible to the one command that
+     * must never miss it.
+     *
+     * Kept as well as written, so an agent adopted later lands on a lease that carries the address.
+     */
+    async publishAddress(baseUrl: string): Promise<void> {
+        this.#baseUrl = baseUrl
+        await this.store.leases.publish(this.runtimeId, baseUrl)
     }
 
     /** Agent ids this runtime holds the serving lease for. */

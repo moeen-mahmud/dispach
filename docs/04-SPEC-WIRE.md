@@ -60,6 +60,9 @@ and WebSocket surfaces can return:
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
 | `reload_not_supported` | 409 | An agent's configuration is fixed for its process lifetime, deliberately. |
+| `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting. An embedder over its own agent store, or the container image, which passes none on purpose. |
+| `agent_turn_in_flight` | 409 | `stop` was asked for an agent with a turn running. Tearing it down would close its store under a turn recorded as running. |
+| `agent_stopped` | 400 | Adoption was asked for an agent that is switched off. `start` is the way back, and it is the one caller that enables before adopting. |
 | `turn_not_running` | 409 | No cancel handle for that turn **on this API** — a channel- or schedule-started turn has none. |
 | `internal_error` | 500 | An unexpected throw. The event stream carries what happened around it. |
 | `websocket_unavailable` | 501 | `/v1/ws` under Node, which has no upgrade path without a dependency. |
@@ -108,10 +111,28 @@ connect must not make the process look dead to an orchestrator.
 
 ```
 GET /v1/agents           → [{ id, name, status, model, channels[], entryPhase, phases? }]
+                           plus a thin { id, name, status: "disabled", disabledAt?, reason? }
+                           row per stopped agent
 GET /v1/agents/:id       → the above plus dialect, window, tool count, skills indexed,
                            schedule count, warnings[], team? [{ id, task, artifact[] }]
+POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disabledAt, reason? }
+POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }
 POST /v1/agents/:id/reload
 ```
+
+**`stop` and `start` are the durable switch, not a signal.** `stop` writes the agent off in the
+store *and* drops it from this host now; the row is what makes it survive a restart, and the drop is
+what makes the request mean something today — one process hosts several agents, so killing the
+process that holds a lease takes every other agent down with it. Both are idempotent: asking for a
+state that already holds is `200`, never `404`. `stop` answers `409 agent_turn_in_flight` while a
+turn is running, and `404` only when the id is neither hosted nor recorded. `start` answers
+`501 start_not_supported` on a server built without a manifest lookup — an embedder over its own
+agent store, or the Docker image, which passes none deliberately.
+
+**A stopped agent is listed and its resource is `404`**, and the asymmetry is deliberate: the
+listing answers "what exists" and the resource answers "what is running". The row is thin because a
+stopped agent is not loaded — there is no manifest in memory to report a model or channels from, and
+loading one to fill the row in would make a listing depend on credentials being present.
 
 **Team members are not listed and not addressable.** `GET /v1/agents` returns only served agents,
 and every route above resolves through the same list — so a member has no URL. That is a boundary

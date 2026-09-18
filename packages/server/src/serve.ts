@@ -90,6 +90,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // whose token authenticates nothing — a first-run failure with no way to tell it from a
         // mistyped paste.
         ...(options.claim === undefined ? {} : { claim: options.claim }),
+        // Same trap, ninth field. Dropped, `POST /v1/agents/:id/start` would answer 501 on a server
+        // whose caller had supplied the lookup — a route reporting "this server cannot" about a
+        // capability it was given, which reads as a product limitation rather than a wiring bug.
+        ...(options.resolveAgent === undefined ? {} : { resolveAgent: options.resolveAgent }),
         // **Derived, not forwarded.** The bind host is already an argument here, so a caller cannot
         // hand over a policy that disagrees with what was actually bound — which is the whole input
         // to how strict the guard is. `origin` is `Omit`ted from `ServeOptions` for the same reason:

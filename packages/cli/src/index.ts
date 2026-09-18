@@ -45,6 +45,7 @@ import { sessionsCommand } from "#sessions"
 import { skillsCommand } from "#skills"
 import { soulCommand } from "#soul"
 import { sourcesCommand } from "#sources"
+import { startCommand } from "#start"
 import { stopCommand } from "#stop"
 import { terminalSetupCommand } from "#terminal-setup"
 import { toolsCommand } from "#tools"
@@ -343,11 +344,27 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 confirm: askExactly,
             })
 
-        case "stop":
+        case "stop": {
+            const reason = flags.str("reason")
             return await stopCommand({
-                // Optional on purpose: bare `stop` is the point of the command.
+                // Optional on purpose: bare `stop` is the whole host, and naming an agent is a
+                // different command rather than the same one with a filter — see stop.ts.
                 ...(manifestPath === undefined ? {} : { manifestPath: resolved() }),
                 dryRun: flags.bool("dry-run"),
+                ...(reason === undefined ? {} : { reason }),
+                ...(flags.str("store") === undefined
+                    ? {}
+                    : { store: flags.str("store") as string }),
+                json: flags.bool("json"),
+            })
+        }
+
+        case "start":
+            return await startCommand({
+                manifestPath: resolved(),
+                ...(flags.str("store") === undefined
+                    ? {}
+                    : { store: flags.str("store") as string }),
                 json: flags.bool("json"),
             })
 

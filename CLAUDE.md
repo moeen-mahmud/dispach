@@ -1984,6 +1984,35 @@ Never claim a performance property without a number in `evals/` and a script to 
   is already set **in `nextQuestion`**, not as a courtesy from `fromFlags`: a caller assembling `given`
   by hand — the wizard's own tests do — would otherwise be asked where to put an agent whose path is
   already decided.
+- **A lease says who is serving an agent now; it cannot say whether anybody should.** Conflating
+  the two is why `stop <agent>` killed a process: right while a process served one agent, and since
+  16.2a it takes every other agent in that process down. The durable answer is a row (`agent_state`),
+  and the live one is an HTTP request naming the agent — a signal cannot name one. Three things that
+  are easy to get wrong around it. The address `stop` posts to comes off the **lease**, published
+  after the bind, because `--port 0` means the port does not exist until the socket does and a
+  manifest's `server.port` is only what the file asked for; and a takeover must **clear** the
+  inherited address, or `stop` posts at a dead process or at whatever now owns that port. `start`
+  cannot look for "the host holding this agent" — the stop released that lease — so it asks any live
+  host. And the switch is read where the *host* is, never inside `Runtime.create`: a read-only
+  command builds a runtime too, so filtering there would refuse to inspect the agent somebody just
+  switched off in order to go and look at it.
+- **An absent row means enabled, and that direction is the safe one.** The alternative is a
+  provisioning path that has to remember to write an "on" row, where a forgotten write is an agent
+  that is silently unhosted — and `init` would have to know about a table it has no other reason to
+  touch. The cost is that "has anybody touched this" and "is this on" are the same question, which
+  is why `disabled_at` and `reason` survive an enable: they are the record of what happened, so a row
+  that forgot it was ever off cannot answer "why was this down last Tuesday".
+- **A durable switch is only defensible where the thing it switches off says so.** launchd's
+  `disable` persists across boots and no verb deletes the row, which is how a job installs cleanly,
+  reports success and silently never starts. So every surface that could be asked "why is this not
+  running" answers it: the `serve` banner names each stopped agent and the command that reverses it,
+  `daemon status` prints them even though they have neither a service label nor a lease, and
+  `GET /v1/agents` carries a thin `disabled` row rather than omitting one — the same reason
+  `listAgents` shows a broken directory. Its resource still answers 404, and the asymmetry is the
+  point: the listing says what exists, the resource says what is running.
+- **A backtick inside a SQL comment in a template literal terminates the string.** The error points
+  at the line *after* it, so the five minutes go on the wrong statement. Write SQL comments in plain
+  prose and keep the code spans in the TypeScript docblock above.
 - **Anything held flattened can only be torn down all at once, and `stop()` is the only caller that
   wants that.** The runtime kept `#providers` as one array, so disposing a single agent either left
   its backgrounded `exec` children unreaped — the failure that took a machine to load average 351 —

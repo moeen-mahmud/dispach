@@ -168,6 +168,14 @@ export async function harness(
             allowedOrigins?: readonly string[]
             allowedHosts?: readonly string[]
         }
+        /**
+         * How `POST /v1/agents/:id/start` finds a manifest for an agent this host is not holding.
+         *
+         * Omitted by every other test, which is the state an embedder is in and the state the
+         * container image is in deliberately — so the route answers `501` and says why rather than
+         * writing a row and reporting a success that hosts nothing.
+         */
+        resolveAgent?: (agentId: string) => string | undefined
     } = {},
 ) {
     const dir = workspace(options.manifest)
@@ -185,6 +193,7 @@ export async function harness(
         ...(options.running === undefined ? {} : { running: options.running }),
         ...(options.claim === undefined ? {} : { claim: options.claim }),
         ...(options.origin === undefined ? {} : { origin: options.origin }),
+        ...(options.resolveAgent === undefined ? {} : { resolveAgent: options.resolveAgent }),
     })
 
     const call = (

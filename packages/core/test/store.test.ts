@@ -19,6 +19,7 @@ import {
     openMemoryStore,
     SqliteStore,
 } from "../src/store/sqlite/store.ts"
+import type { LeaseRecord } from "../src/store/store.ts"
 import { describe, expect, runner, test } from "./_harness.ts"
 
 const AGENT = "assistant"
@@ -784,6 +785,157 @@ describe("the memory queries are driven by the FTS index", () => {
             expect(plan[0]).toBe(virtual)
         },
     )
+})
+
+describe("agent state — the durable on/off switch", () => {
+    const T0 = "2026-09-18T09:00:00.000Z"
+    const T1 = "2026-09-18T10:00:00.000Z"
+
+    test("an absent row means enabled, so an untouched agent costs nothing", async () => {
+        const store = await openMemoryStore()
+        // The direction matters: the alternative is a provisioning path that has to remember to
+        // write an "on" row, where a forgotten write is an agent that is silently unhosted.
+        expect(await store.agentState.get(AGENT)).toBeUndefined()
+        expect(await store.agentState.list()).toEqual([])
+        expect(await store.agentState.disabledAmong([AGENT, "other"])).toEqual([])
+        await store.close()
+    })
+
+    test("disable, then enable, keeps the record of what happened", async () => {
+        const store = await openMemoryStore()
+        const off = await store.agentState.disable(AGENT, T0, "noisy at 3am")
+        expect(off).toEqual({
+            agentId: AGENT,
+            enabled: false,
+            disabledAt: T0,
+            reason: "noisy at 3am",
+        })
+
+        const on = await store.agentState.enable(AGENT)
+        // `disabledAt` and `reason` survive on purpose. A row that forgot it was ever off cannot
+        // answer "why was this down last Tuesday", which is the question the column exists for.
+        expect(on).toEqual({
+            agentId: AGENT,
+            enabled: true,
+            disabledAt: T0,
+            reason: "noisy at 3am",
+        })
+        await store.close()
+    })
+
+    test("disabling twice keeps the first stamp", async () => {
+        const store = await openMemoryStore()
+        await store.agentState.disable(AGENT, T0, "first")
+        const again = await store.agentState.disable(AGENT, T1, "second")
+        // Same reasoning as `OperatorKeyStore.revoke`: the interesting timestamp is when it
+        // stopped, not when somebody last asked again. The reason is replaced, because the newer
+        // note is the one somebody just wrote.
+        expect(again.disabledAt).toBe(T0)
+        expect(again.reason).toBe("second")
+        await store.close()
+    })
+
+    test("re-disabling after an enable stamps the new moment", async () => {
+        const store = await openMemoryStore()
+        await store.agentState.disable(AGENT, T0)
+        await store.agentState.enable(AGENT)
+        const off = await store.agentState.disable(AGENT, T1)
+        // The other half of the rule above, and the one that makes it a rule rather than "never
+        // update the stamp": this really is a different stop.
+        expect(off.disabledAt).toBe(T1)
+        await store.close()
+    })
+
+    test("disabledAmong answers only about the ids it was asked about", async () => {
+        const store = await openMemoryStore()
+        await store.agentState.disable("alpha", T0)
+        await store.agentState.disable("gamma", T0)
+        await store.agentState.enable("gamma")
+        await store.agentState.disable("zeta", T0)
+
+        // A host asks once for the set it is about to load. An agent disabled in this sandbox but
+        // absent from the question must not appear, or a host would report agents it never knew.
+        expect(await store.agentState.disabledAmong(["alpha", "beta", "gamma"])).toEqual(["alpha"])
+        expect(await store.agentState.disabledAmong([])).toEqual([])
+        expect(await store.agentState.disabledAmong(["zeta", "alpha"])).toEqual(["alpha", "zeta"])
+        await store.close()
+    })
+
+    test("purgeAgent deletes the state row", async () => {
+        const store = await openMemoryStore()
+        await store.agentState.disable(AGENT, T0, "gone")
+        await store.agentState.disable("keeper", T0, "stays")
+
+        await store.purgeAgent(AGENT)
+
+        // The whole argument for this table not being `kv`: there is a column to match on, so the
+        // delete exists. A state row surviving its agent would make a re-provisioned agent of the
+        // same name silently arrive switched off.
+        expect(await store.agentState.get(AGENT)).toBeUndefined()
+        expect((await store.agentState.get("keeper"))?.enabled).toBe(false)
+        await store.close()
+    })
+})
+
+describe("a lease records where its holder can be reached", () => {
+    const T0 = "2026-09-18T09:00:00.000Z"
+
+    /**
+     * Whether the field is *there*, not whether it is falsy.
+     *
+     * `exactOptionalPropertyTypes` makes absent and `undefined` different things, and `toEqual`
+     * here follows Bun's semantics of ignoring `undefined` properties — so an assertion written the
+     * obvious way could not tell a REPL's lease from a host's that forgot to publish.
+     */
+    const hasAddress = (lease: LeaseRecord | undefined): boolean =>
+        Object.hasOwn(lease ?? {}, "baseUrl")
+
+    function claim(runtimeId: string, pid: number, agentId = AGENT) {
+        return { agentId, runtimeId, pid, mode: "daemon" as const, now: T0 }
+    }
+
+    test("no address until one is published, and then on every lease held", async () => {
+        const store = await openMemoryStore()
+        await store.leases.claim(claim("rt_a", 100, "alpha"))
+        await store.leases.claim(claim("rt_a", 100, "beta"))
+        // Absent rather than `undefined`-valued, so a caller testing `"baseUrl" in lease` reads a
+        // REPL's lease correctly. A `run` session binds no socket and this stays empty for it.
+        expect(hasAddress(await store.leases.get("alpha"))).toBe(false)
+
+        await store.leases.publish("rt_a", "http://127.0.0.1:7420")
+
+        // One socket per host, so the address is a fact about the process and lands on both rows.
+        expect((await store.leases.get("alpha"))?.baseUrl).toBe("http://127.0.0.1:7420")
+        expect((await store.leases.get("beta"))?.baseUrl).toBe("http://127.0.0.1:7420")
+        await store.close()
+    })
+
+    test("publishing is scoped to the runtime, so a host cannot write on another's lease", async () => {
+        const store = await openMemoryStore()
+        await store.leases.claim(claim("rt_a", 100, "alpha"))
+        await store.leases.claim(claim("rt_b", 200, "beta"))
+
+        await store.leases.publish("rt_a", "http://127.0.0.1:7420")
+
+        expect((await store.leases.get("alpha"))?.baseUrl).toBe("http://127.0.0.1:7420")
+        expect(hasAddress(await store.leases.get("beta"))).toBe(false)
+        await store.close()
+    })
+
+    test("a takeover clears the dead holder's address rather than inheriting it", async () => {
+        const store = await openMemoryStore()
+        await store.leases.claim(claim("rt_dead", 100))
+        await store.leases.publish("rt_dead", "http://127.0.0.1:7420")
+
+        const taken = await store.leases.claim({ ...claim("rt_new", 200), stealFrom: "rt_dead" })
+        expect(taken.ok).toBe(true)
+
+        // Carried forward, this would leave `stop` posting at a dead process — or at whatever has
+        // since been given that port, which is worse than failing. The new holder publishes its
+        // own once it has actually bound.
+        expect(hasAddress(await store.leases.get(AGENT))).toBe(false)
+        await store.close()
+    })
 })
 
 describe("kv", () => {

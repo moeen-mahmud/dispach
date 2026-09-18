@@ -638,11 +638,17 @@ export const COMMANDS: readonly CommandSpec[] = [
         // beginning, and only this line pinned the product to one. The bind is process-level, so a
         // second manifest declaring a *different* `server.port`, `host` or `tokenEnv` is refused
         // rather than silently ignored.
+        //
+        // **Optional since 16.3**, which is what makes the product always-on: naming nothing hosts
+        // the sandbox's enabled agents, so a host does not have to be told which agents to serve —
+        // and one that did could never serve an agent provisioned after it started. Naming
+        // manifests is the container's shape, where the agent arrives on a mount.
         args: [
             {
                 ...MANIFEST,
+                required: false,
                 variadic: true,
-                help: "one or more paths to an agent.yaml, or sandbox agent names",
+                help: "paths to an agent.yaml, or sandbox agent names (omit for every enabled agent)",
             },
         ],
         flags: [
@@ -752,12 +758,12 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "stop",
 
         inSession: "hidden",
-        summary: "stop everything — background services and any session serving an agent",
+        summary: "stop one agent for good, or everything — named, it stays stopped across restarts",
         args: [
             {
                 name: "agent",
                 required: false,
-                help: "path or sandbox agent name (omit to stop every agent)",
+                help: "path or sandbox agent name (omit to stop the whole host)",
             },
         ],
         flags: [
@@ -766,8 +772,24 @@ export const COMMANDS: readonly CommandSpec[] = [
                 kind: "boolean",
                 help: "list what would be stopped; stop nothing",
             },
+            {
+                name: "reason",
+                kind: "string",
+                help: "why — recorded, and shown wherever the agent is reported as off",
+            },
+            STORE,
             JSON_FLAG,
         ],
+    },
+    {
+        // The other half of `stop <agent>`. Not `daemon start`, which starts a *process*: this
+        // decides what a running process holds, which since 16.2a is a different question.
+        name: "start",
+
+        inSession: "hidden",
+        summary: "switch an agent back on, and have a running host adopt it now",
+        args: [MANIFEST],
+        flags: [STORE, JSON_FLAG],
     },
     {
         // `serve` stays up only as long as its terminal, which makes an agent configured for a

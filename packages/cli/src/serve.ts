@@ -15,7 +15,14 @@
  * in a log file.
  */
 
-import { BRAND, EventBus, HarnessError, loadManifest, Runtime } from "@dispach/core"
+import {
+    AgentManifestSchema,
+    BRAND,
+    EventBus,
+    HarnessError,
+    loadManifest,
+    Runtime,
+} from "@dispach/core"
 import {
     claimCommand,
     claimUrl,
@@ -26,6 +33,7 @@ import {
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
+import { hostableAgents, manifestForId } from "#lib/lifecycle"
 import {
     BUILT_IN_PLUGINS,
     CHANNEL_IDS,
@@ -38,11 +46,16 @@ import { storePath } from "#lib/sandbox"
 
 export interface ServeOptions {
     /**
-     * One or more manifests. The process hosts every agent they produce.
+     * Zero or more manifests. The process hosts every agent they produce.
      *
      * Plural since 16.2a: decision 8.5 has said "one process hosts N agents" since the beginning
      * and core was built that way — `RuntimeOptions.agents` is already an array — so a single path
      * here was the only thing pinning the product to one agent.
+     *
+     * **Empty means the sandbox's agents**, which is what the service unit runs and what makes the
+     * product always-on: a host that has to be told which agents to serve cannot serve one that was
+     * provisioned after it started. Naming manifests is the container's shape, where the agent
+     * arrives on a mount and the sandbox is not the inventory.
      */
     readonly manifestPaths: readonly string[]
     readonly port?: number
@@ -53,27 +66,61 @@ export interface ServeOptions {
     readonly json?: boolean
 }
 
+/**
+ * The `server:` block a manifest that declares none resolves to.
+ *
+ * Asked of the **schema** rather than written out here, so a bare `serve` and a manifest with no
+ * `server:` block cannot come to disagree about the port — which they would the first time somebody
+ * changed the default in one place. Parsing an empty object is the cheapest way to ask a Zod schema
+ * what its defaults are.
+ */
+function defaultServerConfig(): ReturnType<typeof AgentManifestSchema.parse>["server"] {
+    return AgentManifestSchema.shape.server.parse({})
+}
+
 export async function serveCommand(options: ServeOptions): Promise<number> {
     const env = ambientEnv(options.manifestPaths)
-    const manifests = options.manifestPaths.map((path) => ({
-        path,
-        loaded: loadManifest(path, {
+
+    /**
+     * What to host, and what is switched off.
+     *
+     * Read before the runtime exists, because it decides which agents the runtime is *asked* for —
+     * a disabled agent is not loaded at all, so there is nothing to filter afterwards. The switch is
+     * honoured for an explicitly named manifest too, and that is deliberate: the launchd trap this
+     * table is modelled on is precisely a job that installs cleanly, reports success and silently
+     * never starts, and the cure is not to make the durable state easy to bypass — it is to say so.
+     */
+    // The same path the runtime will open, not the sandbox default: `serve --store` exists, and
+    // a host reading its on/off switch from a different database than the one it serves out of
+    // is wrong in exactly the configuration that is easiest to miss.
+    const storeFile = options.store ?? storePath()
+    const hostable = await hostableAgents(options.manifestPaths, env, storeFile)
+    const switchedOff = hostable.filter((entry) => !entry.enabled)
+    const wanted = hostable.filter((entry) => entry.enabled)
+
+    const manifests = wanted.map((entry) => ({
+        path: entry.manifestPath,
+        loaded: loadManifest(entry.manifestPath, {
             knownProviders: PROVIDER_IDS,
             knownChannels: CHANNEL_IDS,
             env,
         }),
     }))
+    /**
+     * **Zero agents is a running server, not a failure.**
+     *
+     * The whole point of an always-on host is that the API exists before there is anything to talk
+     * to: the binary is installed, the server is up, and provisioning reaches it. A refusal here
+     * would make the first-run experience "install, then find something to serve, then start", and
+     * would turn a container whose only agent somebody stopped into a crash loop.
+     *
+     * So the server config comes from the first manifest when there is one, and from the schema's
+     * defaults when there is not — which is the same thing a manifest that declares no `server:`
+     * block resolves to.
+     */
     const first = manifests[0]
-    if (first === undefined) {
-        // Unreachable through the parser, which requires the positional. Stated rather than
-        // asserted with a non-null, because a required arg becoming optional is a one-word edit.
-        throw new HarnessError({
-            code: "cli_usage",
-            message: "serve needs at least one manifest.",
-            hint: `Usage: ${BRAND.slug} serve <manifest...>`,
-        })
-    }
-    const loaded = first.loaded
+    const loaded = first?.loaded
+    const config = loaded?.manifest.server ?? defaultServerConfig()
 
     /**
      * **The bind is process-level, so a disagreement about it is refused rather than ignored.**
@@ -88,7 +135,6 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
      * an unset `port` *is* 7420, so a manifest that says 7420 and one that says nothing agree, and
      * one that says 7500 disagrees with both.
      */
-    const config = loaded.manifest.server
     for (const entry of manifests.slice(1)) {
         const other = entry.loaded.manifest.server
         for (const [field, mine, theirs, settled] of [
@@ -103,7 +149,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             if (settled || mine === theirs) continue
             throw new HarnessError({
                 code: "serve_bind_conflict",
-                message: `${first.path} sets ${field} to ${String(mine)} and ${entry.path} sets it to ${String(theirs)}.`,
+                message: `${first?.path ?? "the first manifest"} sets ${field} to ${String(mine)} and ${entry.path} sets it to ${String(theirs)}.`,
                 hint: "One process binds one socket with one token, so these have to agree. Make them match, or run the disagreeing agent in its own process — a second `serve` on its own port.",
                 field,
             })
@@ -119,7 +165,11 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     // here meant a token sitting in the agent's `.env` was invisible, and the banner said
     // "unauthenticated" while the file plainly had it. Same mistake `Agent.create` documents:
     // the manifest's live env, not the ambient one.
-    const token = loaded.env[config.tokenEnv]
+    // `loaded.env`, never `env`. `ambientEnv` returns the *process* environment; the agent's own
+    // `.env` beside the manifest is layered in by `loadManifest`. With no manifest at all there is
+    // no agent env to layer, so the process environment is the only source there is — which is the
+    // service unit's shape, where the variable comes from the unit definition.
+    const token = loaded === undefined ? env[config.tokenEnv] : loaded.env[config.tokenEnv]
 
     // Set by the generated service definition and by nothing else, so this is a fact rather than a
     // guess. `ppid === 1` would also be true of any orphaned process, and getting it wrong means
@@ -166,7 +216,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     const approvals = createApprovalRegistry()
 
     const runtime = await Runtime.create({
-        agents: [...options.manifestPaths],
+        agents: manifests.map((entry) => entry.path),
         // The seam `ToolContext.approve` declared in Phase 3 and nothing ever filled. A blocked
         // call now emits `approval.requested` and waits for a POST; an unanswered one ends with the
         // turn, because core races the approver against the turn's own signal rather than starting
@@ -192,7 +242,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         // arrived over a channel, and Phase 4's exactly-once outbox was unreachable through the
         // only command that has channels — the queue was created and destroyed per process, so a
         // crash mid-delivery lost the queue rather than recovering it.
-        store: options.store ?? storePath(),
+        store: storeFile,
         // Recorded on the runtime lease and read back only to phrase a refusal. `<PREFIX>SERVICE`
         // is set by the generated service definition and by nothing else, so this is a fact rather
         // than a guess — `ppid === 1` would also be true of any orphaned process.
@@ -243,6 +293,15 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             // nothing — these two only widen it.
             allowedOrigins: config.allowedOrigins,
             allowedHosts: config.allowedHosts,
+            /**
+             * How `POST /v1/agents/:id/start` finds a manifest for an agent this host is not
+             * holding. Injected because `packages/server` may not import the CLI, and the sandbox
+             * layout is the CLI's — the same seam 16.5's provisioning route needs.
+             *
+             * Matched on the manifest's **id**, not on the directory name, because `:id` in the
+             * route is an agent id and the two are allowed to differ for a hand-copied directory.
+             */
+            resolveAgent: (agentId) => manifestForId(agentId, env),
             ...(claim === undefined ? {} : { claim }),
             ...(token === undefined || token === "" ? {} : { token }),
         })
@@ -260,6 +319,15 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             cause: error,
         })
     }
+
+    /**
+     * Tell the lease rows where this host answers, now that the socket exists.
+     *
+     * After the bind and not before, because `--port 0` means the port is not known until then —
+     * and this is the whole mechanism behind `stop <agent>`: one process hosts several agents, so
+     * stopping one has to be a request naming it rather than a signal to the process.
+     */
+    await runtime.publishAddress(running.url)
 
     const agents = runtime.list()
 
@@ -309,6 +377,13 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                     mode: held.mode,
                     since: held.startedAt,
                 })),
+                // Same reasoning, and the more important of the two: an agent absent from this
+                // report with no line explaining it is the "I set this up and it is not running"
+                // failure the durable switch exists to make explicable.
+                disabled: switchedOff.map((entry) => ({
+                    agentId: entry.agentId,
+                    ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+                })),
             })}\n`,
         )
     } else {
@@ -347,6 +422,23 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
          * is the next command, and knowing which process to expect it to reach is the difference
          * between running it and wondering.
          */
+        /**
+         * What is switched off, and how to switch it back on.
+         *
+         * The line is the whole reason a durable stop is safe to have. launchd's `disable` persists
+         * across boots and no verb deletes the row, so a job with that label installs cleanly,
+         * reports success and never starts — 2,463 restarts into a 57 MB log, with message quality
+         * never the problem. A persistent switch is only defensible when the thing it switches off
+         * says so at the moment somebody is looking.
+         */
+        for (const entry of switchedOff) {
+            process.stdout.write(
+                `  ${entry.agentId} — stopped${
+                    entry.reason === undefined ? "" : ` (${entry.reason})`
+                }, \`${BRAND.slug} start ${entry.agentId}\`\n`,
+            )
+        }
+
         for (const held of runtime.declined) {
             process.stdout.write(
                 `  ${held.agentId} — NOT served here: pid ${held.pid} (${held.mode}) already has it\n`,

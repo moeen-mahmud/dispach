@@ -179,13 +179,22 @@ function Workspace(props: {
         clientRef.current
             .agents()
             .then((agents) => {
-                const first = agents[0]
+                // **The first agent that is actually running.** The listing carries a thin row for
+                // a stopped one so a picker can offer to start it, and taking `agents[0]` blindly
+                // would open a chat against an agent with no runtime behind it — every send a 404.
+                // Still the first rather than a choice: the picker is 17.3's.
+                const first = agents.find((entry) => entry.status !== "disabled")
                 if (first === undefined) return
                 setAgentId(first.id)
                 setAgentName(first.name)
                 // The dialect decides whether the token stream needs filtering, and it is known
-                // once and never changes for an agent —  is config, never auto-detected.
-                setState((previous) => ({ ...previous, filter: emptyFor(first.dialect).filter }))
+                // once and never changes for an agent —  is config, never auto-detected. Defaulted
+                // because the field is optional on the listing's disabled rows, and a running agent
+                // always carries it.
+                setState((previous) => ({
+                    ...previous,
+                    filter: emptyFor(first.dialect ?? "nlt").filter,
+                }))
                 document.title = `${first.name} · Dispach`
             })
             .catch((caught: unknown) => setError(describe(caught)))

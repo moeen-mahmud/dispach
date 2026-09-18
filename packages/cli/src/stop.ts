@@ -15,12 +15,31 @@
  * reaps the child processes `exec` backgrounded — so killing hard to be thorough is how you end up
  * with the orphans that took this machine to a load average of 351. SIGKILL is the last resort,
  * after a grace period, and it says out loud what may have been left behind.
+ *
+ * ## Naming an agent and naming nothing are different commands
+ *
+ * They were the same command with a filter until one process could host several agents, at which
+ * point the filter became wrong: killing the process that holds `milo`'s lease takes `alpha` and
+ * `beta` down with it. So:
+ *
+ * - **`stop <agent>`** writes that agent off in the store and asks its host to drop it. The host
+ *   keeps running, every other agent it holds keeps running, and the row is what makes it stay off
+ *   across a restart. It does **not** touch any service: a service hosting three agents is not
+ *   something to unload because one of them was switched off.
+ * - **`stop`** is unchanged — the whole host goes down, services disabled so they stay down, and
+ *   nothing per-agent is written. That asymmetry is deliberate: `daemon start` should bring back
+ *   exactly what was running, and an agent stopped by name should still be off when it does.
+ *
+ * The per-agent path falls back to signalling the process when the lease carries no address, which
+ * is a `run` REPL or an embedded runtime — real states that serve no HTTP, and the only ones where
+ * "stop this agent" and "stop that process" are still the same thing.
  */
 
 import { homedir } from "node:os"
 import { BRAND, HarnessError, processAlive, readManifestHeader, SqliteStore } from "@dispach/core"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { labelFor } from "#lib/launchd"
+import { liveHostOf, postToHost, writeAgentState } from "#lib/lifecycle"
 import { bullet, keyValue, type Row } from "#lib/render"
 import { storePath } from "#lib/sandbox"
 import { type Exec, resolveServiceManager, type ServiceManager } from "#lib/service"
@@ -30,8 +49,18 @@ const GRACE_MS = 12_000
 const POLL_MS = 250
 
 export interface StopOptions {
-    /** Absolute manifest path. Omitted means every agent — the point of the command. */
+    /**
+     * Absolute manifest path. Omitted means the whole host — see the file comment.
+     *
+     * Present and absent are two different commands rather than one with a filter: naming an agent
+     * writes the durable switch and asks its host to drop it, and naming nothing takes the host
+     * down. Conflating them is how stopping one agent stopped three.
+     */
     readonly manifestPath?: string
+    /** Why, recorded on the row and shown wherever the agent is reported as off. */
+    readonly reason?: string
+    /** The database to read leases and state from. Defaults to the sandbox's. */
+    readonly store?: string
     readonly dryRun?: boolean
     readonly json?: boolean
     /** Test seams. Nothing in `src/` outside this file passes them. */
@@ -56,6 +85,118 @@ type Outcome = Target & {
 }
 
 export async function stopCommand(options: StopOptions): Promise<number> {
+    if (options.manifestPath !== undefined) {
+        return await stopOneAgent(options, options.manifestPath)
+    }
+    return await stopEverything(options)
+}
+
+/**
+ * Switch one agent off and drop it from its host.
+ *
+ * The state is written **first**, and the order matters: a host told to drop an agent before the row
+ * exists would come back hosting it at the next restart with nobody having asked, which is the
+ * failure the row exists to prevent. This way round, a host that cannot be reached leaves the agent
+ * marked off, and the next start honours it — so the command's promise holds even when the request
+ * does not land.
+ */
+async function stopOneAgent(options: StopOptions, manifestPath: string): Promise<number> {
+    const agentId = agentIdOf(manifestPath)
+    const notes: string[] = []
+
+    if (options.dryRun === true) {
+        const host = await liveHostOf(agentId, options.store)
+        process.stdout.write(
+            `would stop 1 agent:\n${bullet(
+                `${agentId} — ${
+                    host === undefined
+                        ? "not running; would be switched off for the next start"
+                        : host.baseUrl === undefined
+                          ? `pid ${host.pid} (${host.mode}), which serves no HTTP — would be signalled`
+                          : `pid ${host.pid} (${host.mode}) at ${host.baseUrl}, which would drop it and keep serving`
+                }`,
+            )}\n`,
+        )
+        return EXIT_OK
+    }
+
+    await writeAgentState(agentId, false, options.reason, options.store)
+    notes.push("switched off for the next start")
+
+    const host = await liveHostOf(agentId, options.store)
+    let stopped = true
+    if (host === undefined) {
+        notes.push("nothing was running")
+    } else if (host.baseUrl === undefined) {
+        // A `run` REPL or an embedded runtime: no HTTP to ask, and stopping the agent really is
+        // stopping the process, because that process is hosting exactly this conversation.
+        const graceful = await signalAndWait(host.pid, "SIGTERM")
+        stopped = graceful || (await signalAndWait(host.pid, "SIGKILL", true))
+        notes.push(
+            graceful
+                ? `pid ${host.pid} stopped cleanly`
+                : stopped
+                  ? `pid ${host.pid} had to be killed`
+                  : `pid ${host.pid} would not stop — check it by hand`,
+        )
+    } else {
+        const reply = await postToHost(
+            host,
+            `/v1/agents/${encodeURIComponent(agentId)}/stop`,
+            options.reason === undefined ? {} : { reason: options.reason },
+            manifestPath,
+        )
+        if (reply.ok) {
+            notes.push(`pid ${host.pid} dropped it and kept serving`)
+        } else if (reply.status === 409) {
+            // A turn is running. The row is already written, so the agent is off at the next start
+            // either way — this is the one case where the command reports partial success, because
+            // claiming it stopped while a turn is mid-generation would be a lie.
+            stopped = false
+            notes.push(reply.detail ?? "a turn is running")
+        } else if (reply.status === 401) {
+            stopped = false
+            notes.push(
+                `pid ${host.pid} refused the request — set ${BRAND.envPrefix}API_TOKEN to the server's token`,
+            )
+        } else {
+            stopped = false
+            notes.push(
+                `pid ${host.pid} at ${host.baseUrl} could not be reached${
+                    reply.detail === undefined ? "" : `: ${reply.detail}`
+                }`,
+            )
+        }
+    }
+
+    const outcome: Outcome = {
+        agentId,
+        service: false,
+        ...(host === undefined ? {} : { pid: host.pid, mode: host.mode }),
+        stopped,
+        note: notes.join(" · "),
+    }
+
+    if (options.json === true) {
+        process.stdout.write(`${JSON.stringify({ stopped: [outcome] }, null, 2)}\n`)
+    } else {
+        process.stdout.write(
+            `${keyValue([
+                {
+                    label: agentId,
+                    value: stopped ? "stopped" : "NOT FULLY STOPPED",
+                    note: outcome.note,
+                },
+            ])}\n`,
+        )
+        process.stdout.write(
+            `\nStays off across restarts. \`${BRAND.slug} start ${agentId}\` switches it back on.\n`,
+        )
+    }
+    return stopped ? EXIT_OK : EXIT_FAILURE
+}
+
+async function stopEverything(options: StopOptions): Promise<number> {
     const platform = options.platform ?? process.platform
     // Only launchd is managed, but the lease half works everywhere — a `serve` in a terminal is a
     // process with a pid on any platform, and refusing to stop it because this is not macOS would
@@ -70,17 +211,16 @@ export async function stopCommand(options: StopOptions): Promise<number> {
               })
             : undefined
 
-    const only = options.manifestPath === undefined ? undefined : agentIdOf(options.manifestPath)
-    const targets = (await findTargets(manager)).filter(
-        (target) => only === undefined || target.agentId === only,
-    )
+    // No filter any more: naming an agent takes the per-agent path above, and this one is the
+    // whole host. A `stop <agent>` that unloaded a service hosting three agents would be the
+    // failure 16.2a's shared process introduced.
+    const targets = await findTargets(manager, options.store)
 
     if (targets.length === 0) {
-        const scope = only === undefined ? "Nothing is running" : `"${only}" is not running`
         process.stdout.write(
             options.json === true
                 ? `${JSON.stringify({ stopped: [] })}\n`
-                : `${scope} — no service is installed and no process holds an agent.\n`,
+                : "Nothing is running — no service is installed and no process holds an agent.\n",
         )
         // Zero. For a command whose job is to reach a state, already being in it is success.
         return EXIT_OK
@@ -131,7 +271,10 @@ export async function stopCommand(options: StopOptions): Promise<number> {
  * about a service that is installed but currently down. A safety switch that consulted one of them
  * would leave the other running and report success.
  */
-async function findTargets(manager: ServiceManager | undefined): Promise<readonly Target[]> {
+async function findTargets(
+    manager: ServiceManager | undefined,
+    storeFile?: string,
+): Promise<readonly Target[]> {
     const prefix = `${BRAND.slug}.agent.`
     const byId = new Map<string, Target>()
 
@@ -141,7 +284,7 @@ async function findTargets(manager: ServiceManager | undefined): Promise<readonl
     }
 
     try {
-        const store = await SqliteStore.open({ path: storePath() })
+        const store = await SqliteStore.open({ path: storeFile ?? storePath() })
         for (const lease of await store.leases.all()) {
             // Not this process, and not a row whose process is already gone — a stale lease is not
             // something to stop, and reporting it as one would make the command lie about its work.

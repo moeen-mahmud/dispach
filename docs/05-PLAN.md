@@ -4004,7 +4004,7 @@ it. `dispach run` and `dispach web run` attach, provisioning reaches a running p
 `dispach stop <agent>` is the only thing that makes an agent unreachable.
 
 Stages: **16.1** origin hardening · **16.2a** N agents in one process · **16.2b** adopt/replace ·
-16.3 per-agent lifecycle · 16.4 one service unit, first-run bootstrap, systemd ·
+**16.3** per-agent lifecycle · 16.4 one service unit, first-run bootstrap, systemd ·
 16.5 `POST /v1/agents` · 16.6 the human-input seam on channel status.
 
 16.2 was **split** (Moeen, 2026-09-18) for the reason 11.202 gives about 15.3/15.4: a stage that
@@ -4204,6 +4204,64 @@ supposed to query the store is broken.* Separately, `ChannelHub.startAgent` need
 **precondition** and not merely as a flag `start()` sets — without it, adopting into a `run`-mode
 runtime opened a Telegram long-poll, which is the surprise `startChannels` exists to prevent and the
 reason a one-shot `run --input` would then hang on exit.
+
+
+
+### 16.3 — Per-agent lifecycle: "unless stopped" made durable — **built** (2026-09-18)
+
+**What landed.**
+
+- **`agent_state`** (migration 15) — `agent_id` primary key, `enabled`, `disabled_at`, `reason`. An
+  absent row means enabled. `purgeAgent` deletes it, which is the whole argument for it not being
+  `kv`.
+- **`runtime_leases.base_url`** (migration 16) — published after the bind, cleared on takeover.
+  17.1's flagged migration, pulled forward because `stop` needs an address today.
+- **`POST /v1/agents/:id/stop`** and **`/start`** — the row *and* the live drop or adopt. Idempotent,
+  `409` while a turn runs, `404` for an id neither hosted nor recorded, `501` for a `start` on a
+  server with no manifest lookup.
+- **`serve` with no manifest** hosts the sandbox's enabled agents — the service unit's form — and
+  **zero hosted agents is a running server**, not a refusal.
+- **`start <agent>`**, a new command; `stop <agent>` reworked; `stop` bare unchanged.
+- `HandlerOptions.resolveAgent?`, the injected sandbox lookup — the seam 16.5 needs, built here.
+- `packages/client` gained `agent.stop()` / `agent.start()`; `AgentDescriptionLike` went optional
+  past `status`, because the listing now carries a thin `disabled` row.
+
+**Three decisions taken with Moeen before writing any of it** (2026-09-18): the live drop goes
+through an address on the lease rather than a boot-time-only flag or a heartbeat poll; the bare
+`serve` lands here rather than in 16.4; and `stop` with no agent keeps meaning "the whole host",
+because `daemon start` should bring back exactly what was running.
+
+**Acceptance**
+
+- [x] `bun test` 3303 / 0 · `test:node` 1428 / 0 · typecheck 9/9 · lint clean · `bench:boot` ok ·
+      `check:deps` ok
+- [x] `stop <agent>` on a live host **drops one agent and keeps serving the rest**, verified across
+      processes — the host is asked, never signalled
+- [x] `start <agent>` is adopted by the same pid, live, with no restart
+- [x] The row survives: a stopped agent is named on the next `serve` banner with the way back, and
+      is not hosted
+- [x] Zero hosted agents still binds and serves
+- [x] An explicitly named manifest is subject to the switch too
+- [x] `GET /v1/agents` carries the stopped agent; `GET /v1/agents/:id` is 404
+- [x] `stop` with nothing running still writes the switch; `stop` bare writes no per-agent state
+- [x] A failed `start` rolls the row back rather than leaving an agent marked on with nothing
+      hosting it
+- [x] **Ten guards revert-checked red**, each edit still compiling and typechecking
+
+**Two defects found by running the pair in order.** `start` cannot look for the host holding this
+agent's lease — the stop released it — so it asks *any* live host; found because `start` reported
+"nothing is serving yet" with a host sitting right there. And the lifecycle helpers opened the
+sandbox store while `serve` honours `--store`, so a host would have read its on/off switch from a
+different database than the one it serves out of: invisible in normal use, wrong in exactly the
+configuration the tests use. Also worth recording as a five-minute trap rather than a defect: a
+backtick inside a SQL comment in a template literal **terminates the string**, and the resulting
+error points at the next line.
+
+**Not done here, deliberately.** `POST /v1/agents/:id/reload` still answers `501`. `Runtime.replace`
+is what that request was reaching for, and wiring it is Phase 19's doc reconciliation — the 501's
+argument is about a session's cached prefix changing underneath a conversation, which is a decision
+to revisit rather than a wire to connect. The per-agent launchd label is still there; 16.4 retires
+it with the orphaned-`disable`-row migration note.
 
 
 ---

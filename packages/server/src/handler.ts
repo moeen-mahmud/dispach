@@ -14,6 +14,7 @@
 
 import {
     type Agent,
+    type AgentStateRecord,
     type AnyEvent,
     type ErrorDetail,
     EVENT_TYPES,
@@ -125,6 +126,22 @@ export interface HandlerOptions {
      * `spec.test.ts` asserts that it does.
      */
     readonly origin?: OriginPolicy
+    /**
+     * How to find the manifest for an agent this process is **not** hosting.
+     *
+     * `POST /v1/agents/:id/start` has to hand `Runtime.adopt` a source, and a stopped agent is by
+     * definition absent from the runtime — so the source has to come from wherever agents live,
+     * which is the sandbox layout in `cli/lib/sandbox.ts`. `packages/server` may not import the
+     * CLI, so the CLI injects the lookup. The same seam 16.5's provisioning route needs, built
+     * once for whichever stage lands first.
+     *
+     * Absent is a coherent state and answers `501` naming the reason: an embedder composing this
+     * handler over its own agent store has no sandbox to search, and inventing a path convention
+     * for it would be a guess about somebody else's filesystem. The Docker image passes none, so
+     * the route structurally does not work there — the same containment-by-construction property
+     * 16.5 relies on.
+     */
+    readonly resolveAgent?: (agentId: string) => string | undefined
 }
 
 type Handler = (context: RequestContext) => Promise<Response> | Response
@@ -230,9 +247,38 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
 
     // ─── Agents ──────────────────────────────────────────────────────────────────────────
 
-    router.add("GET", "/v1/agents", () =>
-        json(runtime.list().map((agent) => summary(runtime, agent))),
-    )
+    /**
+     * Every agent this server knows about, hosted or not.
+     *
+     * **A stopped agent is listed, with `status: "disabled"`.** Hiding it would make the listing
+     * answer a different question from the one a client is asking — an agent picker showing two
+     * entries where the operator configured three has no way to offer "start it again", and the
+     * operator's only clue is that something they set up is missing. Same reasoning as `listAgents`
+     * showing a broken directory rather than skipping it.
+     *
+     * The rows are thin on purpose: a disabled agent is not loaded, so there is no manifest in
+     * memory to report a model or a channel list from, and loading one to fill the row in would
+     * make a listing depend on credentials being present — the defect `readManifestHeader` exists
+     * to avoid. The id and the reason are what a client can act on.
+     *
+     * `GET /v1/agents/:id` still answers **404** for one of these, and the asymmetry is the point:
+     * the listing answers "what exists", the resource answers "what is running". A 200 there would
+     * have to invent a body for an agent with no tools, no window and no sessions in memory.
+     */
+    router.add("GET", "/v1/agents", async () => {
+        const hosted = runtime.list().map((agent) => summary(runtime, agent))
+        const live = new Set(hosted.map((entry) => entry.id))
+        const stopped = (await runtime.store.agentState.list())
+            .filter((state) => !state.enabled && !live.has(state.agentId))
+            .map((state) => ({
+                id: state.agentId,
+                name: state.agentId,
+                status: "disabled" as const,
+                ...(state.reason === undefined ? {} : { reason: state.reason }),
+                ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+            }))
+        return json([...hosted, ...stopped])
+    })
 
     router.add("GET", "/v1/agents/:id", (context) =>
         withAgent(runtime, context, async (agent) => {
@@ -302,6 +348,116 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             ),
         ),
     )
+
+    /**
+     * Switch an agent off, durably, and drop it from this host now.
+     *
+     * Two effects, and both are necessary. The row is what makes it survive a restart — the launchd
+     * lesson, where `bootout` unloads a job and only `disable` persists, so a thing stopped the
+     * first way comes back at the next login. The `dispose` is what makes the command mean
+     * something *today*: since one process hosts several agents, the old answer — kill the process
+     * holding the lease — takes every other agent down with it.
+     *
+     * **Order is state first, then teardown.** A dispose that succeeded before a write that failed
+     * would leave the agent down and marked running, which comes back at the next restart with
+     * nobody having asked for it. This way round, a failed dispose leaves it marked stopped and
+     * still hosted, which the next restart fixes and which `GET /v1/agents` reports honestly.
+     *
+     * Idempotent: stopping a stopped agent is `200`, not `404`, because the caller asked for a
+     * state that already holds. Refused with `409` while a turn is running — `dispose` decides
+     * that, and the refusal carries its hint rather than a second copy of the reasoning.
+     */
+    router.add("POST", "/v1/agents/:id/stop", async (context) => {
+        const id = context.params.id ?? ""
+        const hosted = runtime.list().some((agent) => agent.id === id)
+        const known = await runtime.store.agentState.get(id)
+        // Neither hosted nor ever recorded means there is nothing here by that name. A 200 would
+        // report having stopped something that does not exist, which is the shape of answer that
+        // lets a typo look like success.
+        if (!hosted && known === undefined) return notFound("agent", id)
+
+        const body = await readJson(context.request)
+        if (body.kind === "error") return fail(body.error, 400)
+        const reason = (body.value as { reason?: unknown } | null)?.reason
+        const state = await runtime.store.agentState.disable(
+            id,
+            new Date(options.now?.() ?? Date.now()).toISOString(),
+            typeof reason === "string" && reason.trim() !== "" ? reason.trim() : undefined,
+        )
+
+        if (hosted) {
+            try {
+                await runtime.dispose(id, "stopped")
+            } catch (error) {
+                if (error instanceof HarnessError && error.code === "agent_turn_in_flight") {
+                    return fail(error.toDetail(), 409)
+                }
+                throw error
+            }
+        }
+        return json({ id, status: "disabled", ...stateFields(state) })
+    })
+
+    /**
+     * Switch it back on, and adopt it into this host now.
+     *
+     * The mirror of `stop`, and the asymmetry between them is real: `stop` acts on an agent the
+     * runtime is holding, while `start` acts on one it has never seen — so it needs a manifest from
+     * outside, which is `resolveAgent`. Without that injection the route says `501` and names it
+     * rather than writing the row and reporting a success that hosts nothing.
+     *
+     * **Enabled first, then adopted**, because `adopt` refuses a stopped agent by design — that
+     * refusal is what stops every other caller reversing a stop by accident, and this is the one
+     * caller that means to.
+     */
+    router.add("POST", "/v1/agents/:id/start", async (context) => {
+        const id = context.params.id ?? ""
+        if (runtime.list().some((agent) => agent.id === id)) {
+            // Already running. Enabled anyway, because a hosted agent with a `disabled` row is a
+            // state a crash between the two writes above can leave behind, and this is the command
+            // that would otherwise have no way to clear it.
+            const state = await runtime.store.agentState.enable(id)
+            return json({ id, status: "loaded", ...stateFields(state) })
+        }
+
+        const resolve = options.resolveAgent
+        if (resolve === undefined) {
+            return fail(
+                {
+                    code: "start_not_supported",
+                    message:
+                        "This server cannot look up a manifest for an agent it is not hosting.",
+                    hint: "Starting a stopped agent needs its manifest, which lives wherever agents live — the sandbox for the CLI, a mounted path for a container. This process was built without that lookup, so pass the agent to `serve` and restart it instead.",
+                },
+                501,
+            )
+        }
+
+        const source = resolve(id)
+        if (source === undefined) return notFound("agent", id)
+
+        const state = await runtime.store.agentState.enable(id)
+        try {
+            const admitted = await runtime.adopt(source)
+            return json({
+                id,
+                status: "loaded",
+                ...stateFields(state),
+                adopted: admitted.map((agent) => agent.id),
+            })
+        } catch (error) {
+            // Put back, because the agent is not running and a row saying otherwise is the
+            // "looks live and is not" failure this table exists to prevent. Reported with the
+            // adoption's own error, which names the real fault — a missing key, a bad manifest.
+            await runtime.store.agentState.disable(
+                id,
+                new Date(options.now?.() ?? Date.now()).toISOString(),
+                "start failed",
+            )
+            if (error instanceof HarnessError) return fail(error.toDetail(), 400)
+            throw error
+        }
+    })
 
     // ─── Turns ───────────────────────────────────────────────────────────────────────────
 
@@ -1641,6 +1797,20 @@ function summary(runtime: Runtime, agent: Agent) {
         channels: runtime.channels.statusOf(agent.id),
         entryPhase: phased ? (entryPhase(phases) ?? null) : null,
         ...(phased ? { phases: Object.keys(phases) } : {}),
+    }
+}
+
+/**
+ * The state fields both lifecycle routes return, so the two cannot describe one row differently.
+ *
+ * `disabledAt` and `reason` survive an enable — they are the record of what happened — so a started
+ * agent legitimately carries both, and a client reading them has to look at `status` rather than at
+ * their presence.
+ */
+function stateFields(state: AgentStateRecord): Record<string, string> {
+    return {
+        ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+        ...(state.reason === undefined ? {} : { reason: state.reason }),
     }
 }
 
