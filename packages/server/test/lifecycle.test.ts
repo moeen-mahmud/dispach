@@ -53,9 +53,15 @@ describe("stopping an agent over the wire", () => {
         // "what is running". A 200 on the resource would have to invent a body for an agent with no
         // tools, no window and no sessions in memory.
         expect((await call("GET", "/v1/agents/assistant")).status).toBe(404)
+        // Annotated with every field asserted below, not just the two being read for the shape:
+        // `toEqual` checks the object literal against this type, so a narrower annotation makes the
+        // assertion itself a type error — which is how this file failed `tsc` while passing
+        // `bun test`, since the test runner does not typecheck.
         const listing = (await (await call("GET", "/v1/agents")).json()) as {
             id: string
+            name: string
             status: string
+            disabledAt?: string
         }[]
         expect(listing).toEqual([
             {
