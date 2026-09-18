@@ -1984,6 +1984,38 @@ Never claim a performance property without a number in `evals/` and a script to 
   is already set **in `nextQuestion`**, not as a courtesy from `fromFlags`: a caller assembling `given`
   by hand — the wizard's own tests do — would otherwise be asked where to put an agent whose path is
   already decided.
+- **Anything held flattened can only be torn down all at once, and `stop()` is the only caller that
+  wants that.** The runtime kept `#providers` as one array, so disposing a single agent either left
+  its backgrounded `exec` children unreaped — the failure that took a machine to load average 351 —
+  or reaped every other agent's with it. The map was already built per agent inside `create`; only
+  the copy kept on the class threw the keys away. Same shape one layer over: `ChannelHub.unregister`
+  has to stop the **outbox poll loop** as well as the transports, because that loop is a
+  `setInterval` scoped to one agent, so after a `replace` there would be two of them draining one
+  queue — turning the double-send the idempotency key exists to *survive* into routine. And
+  `bus.on` returns an unsubscribe that nothing was holding: harmless while an agent only ever left
+  by the process exiting, a leak with a behavioural symptom the moment one can be removed, since a
+  replaced agent's old plugin watcher goes on observing the new one's turns. The guard for the whole
+  class is one test: adopt and dispose in a loop, then assert nothing is bigger than it started.
+- **A closure that reads the array a constructor was handed reads the set that existed at boot.**
+  Both of the `Scheduler`'s agent lookups did, so an adopted agent's schedules were never in the due
+  query and a disposed agent's still were — a throw arriving on a timer with nobody watching. Read
+  the *runtime's own map* (`runtime.all()`), lazily, which is the same trick the team `handoff`
+  getter already uses and needs the same explicit type annotation to break the inference cycle.
+  Reconciling a row is also not enough to make it fire: `#arm` sleeps until the soonest due time it
+  knew about when it last looked, up to the 24-day clamp, so anything that writes a schedule calls
+  `scheduler.changed()`.
+- **A guard that queries the store cannot fail when the thing that was supposed to query the store
+  is broken.** The first test for the above asserted `store.schedules.nextDue(...)` and **stayed
+  green with both defects reverted**, because it read the source of truth directly rather than
+  anything the scheduler believes. The version that works waits for the turn to actually happen.
+  This is the "passes with the fix reverted" hazard in a new costume, and the tell is the same:
+  revert, watch it go red, and if it does not, ask which layer the assertion is really reading.
+- **`#started` is a precondition, not just a flag `start()` sets.** `ChannelHub.startAgent` was
+  extracted from `start()`'s loop so an agent adopted into a running server takes the same path a
+  booted one does — and without re-checking the flag it also started channels for an agent adopted
+  into a `run`-mode runtime, opening a Telegram long-poll nobody asked for. That is the exact
+  surprise `startChannels` exists to prevent, and the reason a one-shot `run --input` would then
+  hang on exit.
 - **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
   under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
   builds running beside it — which is a shared 2-core runner every time. Its own comment says the

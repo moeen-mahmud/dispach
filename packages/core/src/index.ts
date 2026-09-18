@@ -310,6 +310,7 @@ export {
     type AgentSource,
     type BootReport,
     buildChannels,
+    type DisposeReason,
     defaultStorePath,
     Runtime,
     type RuntimeOptions,

@@ -4003,7 +4003,7 @@ of it waiting for the first healthcheck probe rather than for the runtime.
 it. `dispach run` and `dispach web run` attach, provisioning reaches a running process, and
 `dispach stop <agent>` is the only thing that makes an agent unreachable.
 
-Stages: **16.1** origin hardening · **16.2a** N agents in one process · 16.2b adopt/replace ·
+Stages: **16.1** origin hardening · **16.2a** N agents in one process · **16.2b** adopt/replace ·
 16.3 per-agent lifecycle · 16.4 one service unit, first-run bootstrap, systemd ·
 16.5 `POST /v1/agents` · 16.6 the human-input seam on channel status.
 
@@ -4131,7 +4131,7 @@ impossible"* since the beginning, and core was built that way: `RuntimeOptions.a
 - [x] A single agent held elsewhere still refuses, unchanged — the pre-existing test passes untouched
 - [x] Revert-checked: the lease change, the declined banner line, the conflict loop, and the approvals
       filter each turn exactly the right test red
-- [ ] 16.2b owns `adopt`/`replace`. Until it lands, a provisioned agent needs a host restart
+- [x] 16.2b owns `adopt`/`replace` — **built** (2026-09-18), below
 
 **Method note, because it nearly went unrecorded.** Two of my revert-checks for the conflict loop
 produced meaningless results before one produced a real one: the first mangled the file (a `perl`
@@ -4140,6 +4140,71 @@ produced meaningless results before one produced a real one: the first mangled t
 revert-check that does not compile is not a revert-check**, and the tell is an empty result rather
 than a red one. The edit that worked leaves the code valid: `manifests.slice(1, 1)`, a loop that
 never runs.
+
+
+### 16.2b — adopt, replace and per-agent teardown — **built** (2026-09-18)
+
+The half where the quiet-failure risk lives, and it lived exactly where the plan said: six
+subsystems that had only ever been unwound at process exit.
+
+**What landed.**
+
+- `Runtime.adopt(source)` — hosts an agent that was not part of boot. Leased, served, channels
+  started, schedules reconciled *and re-armed*, providers warmed, `agent.loaded` emitted, all
+  before the call returns. Returns the agents it admitted, because a `team:` manifest is several.
+- `Runtime.replace(agentId)` — dispose then adopt, so a changed manifest is a **new instance** and
+  the frozen-configuration decision is untouched.
+- `Runtime.dispose(agentId, reason?)` — the per-agent teardown: channel bindings and the outbox poll
+  loop, that agent's tool providers, its plugin `onEvent` subscription, its lease, its entry in
+  `#agents`/`#members`/`#teams`/`#sources`. Schedule *rows* are deliberately kept — a dispose is not
+  a removal, and `purgeAgent` is the thing that removes.
+- `agent.disposed { reason: requested | replaced | stopped }`, the other half of `agent.loaded`.
+  `stopped` has no caller yet and is declared now because the event is append-only within `v: 1`.
+- `Agent.inFlight`, a count, and `dispose` refuses while it is non-zero.
+- `ChannelHub.startAgent(agentId)` / `unregister(agentId)`; `start()` is now a loop over the first.
+
+**One shared pipeline, not two.** `create` and `adopt` both go through `prepareAgents` (plugins,
+manifest, teams), `buildRegistry`, `instantiateAgent`, `#admit`, `#reconcile` and
+`refreshProviders` — extracted from `create` rather than reimplemented, because the alternative is
+"it worked from the API and the container will not start". Boot's phase names and their order are
+unchanged; `adopt` passes pass-through stopwatches and contributes to no report.
+
+**Deferred with a reason.** No new `TurnEndReason` and therefore no store migration: the plan
+offered *refuse* or *abort and record why*, and refusing is the rung that needs neither. It also
+removes the approval-abandonment step entirely rather than implementing it — an approval that is
+waiting **is** a suspended turn, so a disposable agent cannot have a question outstanding. Nothing
+in the server calls `replace` yet; `POST /reload` still answers 501 and 16.5 is what opens the door.
+
+**Acceptance**
+
+- [x] `bun test` 3275 / 0 · `test:node` 1419 / 0 · typecheck 9/9 · lint clean · `bench:boot` ok ·
+      `check:deps` ok
+- [x] Adopt: the agent is listed, leased to this runtime, and `agent.loaded` fires — with the other
+      agent untouched
+- [x] Adopt into a started hub starts that agent's transports; into a `run`-mode runtime starts
+      **nothing**, which is the distinction `startChannels` draws at boot
+- [x] A schedule adopted into a running scheduler **fires**, asserted by waiting for the turn
+- [x] Dispose releases the lease, reaps only that agent's providers, and leaves the other agent's
+      lease and providers alone
+- [x] Dispose refuses mid-turn with `agent_turn_in_flight` and tears nothing down on the way out
+- [x] A team is one unit: a member refuses, a supervisor takes its members, and a replaced
+      supervisor's members come back addressable with `handoff` still in the catalogue
+- [x] Adopt/dispose three times over: agents, leases, providers and transport start/stop counts all
+      back where they started
+- [x] **Eleven guards revert-checked red**, each edit still compiling and typechecking
+
+**Two defects the revert-checks found, and one bad test.** Both of the `Scheduler`'s agent lookups
+closed over the array `create` built — fixed at boot — so an adopted agent was never in the due
+query and a disposed one still was; and `adopt` has to call `scheduler.changed()`, because `#arm`
+sleeps until the soonest due time it knew about when it last looked. Neither was visible from the
+first version of that test, which asserted the store's own `nextDue` and **stayed green with both
+reverted** — it read the source of truth directly rather than anything the scheduler believes. New
+shape of a recorded hazard: *a guard that queries the store cannot fail when the thing that was
+supposed to query the store is broken.* Separately, `ChannelHub.startAgent` needed `#started` as a
+**precondition** and not merely as a flag `start()` sets — without it, adopting into a `run`-mode
+runtime opened a Telegram long-poll, which is the surprise `startChannels` exists to prevent and the
+reason a one-shot `run --input` would then hang on exit.
+
 
 ---
 

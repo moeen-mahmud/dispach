@@ -523,6 +523,7 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `plugin.loaded` | per plugin | `name`, `version`, `setupMs`, `permissions` |
 | `plugin.slow` | setup over budget | `name`, `setupMs` |
 | `agent.loaded` | per agent | `tools`, `skills`, `schedules` (the manifest's **declared** count — this fires before reconciliation), `model` |
+| `agent.disposed` | this process stopped hosting an agent, without exiting | `reason` (`requested` \| `replaced` \| `stopped`) |
 | `agent.warning` | a fact true for the whole session, said at load | `code`, `message`, `hint`, `field?` |
 | `agent.channel.status` | connect/disconnect | `channelId`, `channelType`, `status`, `detail?` |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |

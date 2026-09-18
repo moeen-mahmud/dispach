@@ -99,6 +99,20 @@ export interface EventDataMap {
     }
     "runtime.stopping": { reason: string }
     "agent.loaded": { tools: number; skills: number; schedules: number; model: string }
+    /**
+     * One agent stopped being hosted by this process, while the process kept running.
+     *
+     * The other half of `agent.loaded`, and it only became possible to emit when `Runtime.dispose`
+     * did: before that an agent left only by the process exiting, which `runtime.stopping` already
+     * reports. A client holding a list of agents needs both — an always-on server whose agent set
+     * changes under it, with nothing on the stream saying so, is a UI that shows a chat for an
+     * agent that has gone.
+     *
+     * `reason` rather than a boolean because the three cases read differently to whoever is
+     * watching: `requested` is an operator, `replaced` is the same agent coming back a moment
+     * later, `stopped` is 16.3's durable off switch.
+     */
+    "agent.disposed": { reason: "requested" | "replaced" | "stopped" }
     "agent.warning": ErrorDetail
     /**
      * One plugin registered, with what it cost and what it declared.
@@ -514,6 +528,7 @@ export const EVENT_TYPES = [
     "store.ready",
     "runtime.stopping",
     "agent.loaded",
+    "agent.disposed",
     "agent.warning",
     "plugin.loaded",
     "plugin.slow",

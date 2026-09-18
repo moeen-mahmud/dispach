@@ -644,6 +644,34 @@ export class Agent {
      * crash be told apart from a turn that never began.
      */
     async send(input: string, options: AgentSendOptions = {}): Promise<TurnResult> {
+        this.#inFlight += 1
+        try {
+            return await this.#send(input, options)
+        } finally {
+            this.#inFlight -= 1
+        }
+    }
+
+    /**
+     * How many turns of this agent are running in this process right now.
+     *
+     * Exists for one caller: `Runtime.dispose` refuses to tear an agent down mid-turn. It is a
+     * *count* rather than a registry of turn ids, because the question being asked is "is anything
+     * happening" and the thing that would answer it properly — an `AbortController` per turn, so a
+     * turn could be *stopped* rather than merely waited for — is the loop's cancellation model and
+     * is deferred with its own review. A number is honest about answering the smaller question.
+     *
+     * Incremented in `send` rather than in `runTurn`, so it covers the store writes either side of
+     * the loop: a dispose between `turns.start` and the first model call would otherwise close the
+     * store under a turn already recorded as `running`.
+     */
+    get inFlight(): number {
+        return this.#inFlight
+    }
+
+    #inFlight = 0
+
+    async #send(input: string, options: AgentSendOptions): Promise<TurnResult> {
         const sessionKey = options.sessionKey ?? Agent.DEFAULT_SESSION
         const turnId = options.turnId ?? newTurnId()
         const source = options.source ?? "library"

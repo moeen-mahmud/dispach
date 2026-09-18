@@ -167,32 +167,82 @@ export class ChannelHub {
         if (this.#started || this.#stopped) return
         this.#started = true
 
-        for (const [agentId, bound] of this.#agents) {
-            // Scoped to this agent, not to every row in the file. Two runtimes can share a store,
-            // and recovering the other one's in-flight chunk makes it re-send a message it has
-            // already delivered.
-            await bound.outbox.recover([agentId])
-            bound.outbox.start(agentId)
+        for (const agentId of this.#agents.keys()) await this.startAgent(agentId)
+    }
 
-            for (const binding of bound.bindings) {
-                const transport = binding.transport
-                const host = this.#hostFor(agentId, transport)
-                host.status("starting")
-                // Not awaited as a group: one transport failing to start must not prevent the
-                // others, and `start` is specified to return once running rather than connected.
-                try {
-                    await transport.start(host)
-                } catch (cause) {
-                    host.status("error", cause instanceof Error ? cause.message : String(cause))
-                    host.error({
-                        code: "channel_start_failed",
-                        message: `Channel "${transport.id}" (${transport.type}) failed to start: ${
-                            cause instanceof Error ? cause.message : String(cause)
-                        }`,
-                        hint: "The runtime is still serving — a channel that cannot start never blocks readiness. Check the channel's credentials and network access, then reload the agent.",
-                        field: `channels[${transport.id}]`,
-                    })
-                }
+    /**
+     * Start one agent's transports, whether or not the hub has been started before.
+     *
+     * Extracted from `start()` rather than duplicated, because this is the path an agent adopted
+     * into a **running** server takes and the two must not drift: a channel that connects on boot
+     * and not on adoption is the "provisioned and silently unreachable" failure the always-on model
+     * exists to remove. `start()` is a loop over this, so there is one place a transport starts.
+     *
+     * A no-op when the hub is stopped, and when the agent has no enabled channels — `register`
+     * stores nothing for an agent with none, so this is also how "adopt an agent with no channels"
+     * costs nothing rather than needing a caller-side check.
+     */
+    async startAgent(agentId: string): Promise<void> {
+        // **`#started` is a precondition, not just a flag `start()` sets.** Without this an agent
+        // adopted into a `run`-mode runtime opened a Telegram long-poll, because `adopt` calls this
+        // unconditionally — which is exactly the surprise `startChannels` exists to prevent, and
+        // the reason a one-shot `run --input` would then hang on exit. Found by the test asserting
+        // an adopted agent's channels stay registered-and-not-started.
+        if (!this.#started || this.#stopped) return
+        const bound = this.#agents.get(agentId)
+        if (bound === undefined) return
+        // Scoped to this agent, not to every row in the file. Two runtimes can share a store,
+        // and recovering the other one's in-flight chunk makes it re-send a message it has
+        // already delivered.
+        await bound.outbox.recover([agentId])
+        bound.outbox.start(agentId)
+
+        for (const binding of bound.bindings) {
+            const transport = binding.transport
+            const host = this.#hostFor(agentId, transport)
+            host.status("starting")
+            // Not awaited as a group: one transport failing to start must not prevent the
+            // others, and `start` is specified to return once running rather than connected.
+            try {
+                await transport.start(host)
+            } catch (cause) {
+                host.status("error", cause instanceof Error ? cause.message : String(cause))
+                host.error({
+                    code: "channel_start_failed",
+                    message: `Channel "${transport.id}" (${transport.type}) failed to start: ${
+                        cause instanceof Error ? cause.message : String(cause)
+                    }`,
+                    hint: "The runtime is still serving — a channel that cannot start never blocks readiness. Check the channel's credentials and network access, then reload the agent.",
+                    field: `channels[${transport.id}]`,
+                })
+            }
+        }
+    }
+
+    /**
+     * Stop and forget one agent's channels, for an agent being disposed or replaced.
+     *
+     * The transports go down and the **outbox poll loop stops**, which is the half easy to miss: it
+     * is a `setInterval` scoped to one agent, so a hub that forgot the bindings and left the loop
+     * running would keep draining rows for an agent this process no longer hosts — and after a
+     * `replace` there would be two loops on one agent's queue, which is the double-send the
+     * idempotency key exists to make survivable rather than routine.
+     *
+     * Unsent rows are left in the store on purpose. They are durable and keyed, so the replacement
+     * agent's outbox recovers them on `startAgent`; dropping them would lose a reply somebody is
+     * waiting for in order to make a teardown look tidy.
+     */
+    async unregister(agentId: string): Promise<void> {
+        const bound = this.#agents.get(agentId)
+        if (bound === undefined) return
+        this.#agents.delete(agentId)
+        bound.outbox.stop()
+        for (const binding of bound.bindings) {
+            try {
+                await binding.transport.stop()
+            } catch {
+                // Best-effort, exactly as in `stop()`: a transport that throws has already been
+                // told to stop, and the agent is going away either way.
             }
         }
     }
