@@ -96,6 +96,21 @@ export interface ApprovalRequest {
      * can be answered by, and this is it.
      */
     readonly approvalId: string
+    /**
+     * Which agent is asking.
+     *
+     * **This was deliberately absent, and the reason expired.** The division was that an
+     * `ApprovalRequest` describes the *call* while the agent, session and turn ride on the
+     * `approval.requested` event — true and tidy while a served process hosted one agent. It stops
+     * being safe the moment one hosts several: `RuntimeOptions.approve` is a single process-wide
+     * callback, so a question that cannot say who asked it cannot be listed per agent, and
+     * `GET /v1/agents/:id/approvals` returned every agent's pending questions regardless of `:id`.
+     * That is a disclosure, not an inconvenience.
+     *
+     * The event still carries the full context, for the reasons below. This is the smaller fact the
+     * approver itself cannot do without.
+     */
+    readonly agentId: string
     readonly slug: string
     readonly callId: string
     /**
@@ -332,6 +347,7 @@ async function decideAndRun(
         const approvalId = newApprovalId()
         const request: ApprovalRequest = {
             approvalId,
+            agentId: input.context.agentId,
             ...call,
             ...(match === undefined ? {} : { match: stripControl(match) }),
             mutating: spec.mutating,
@@ -341,9 +357,12 @@ async function decideAndRun(
 
         // Emitted **before** asking, and by core rather than by the approver. A front end that
         // emitted its own would make the question visible only to itself — so a second observer of
-        // the session, the firehose, or an audit log would see the turn simply stop. The event
-        // carries `eventContext`, which is the agent, session and turn an `ApprovalRequest`
-        // deliberately does not.
+        // the session, the firehose, or an audit log would see the turn simply stop.
+        //
+        // The event carries the full `eventContext` — agent, session and turn. The request carries
+        // the agent alone: that is the one part an approver cannot work without once a process hosts
+        // several agents, and the session and turn stay off it because an approver answers a
+        // *question about a call*, not about a conversation.
         input.bus.emit(
             "approval.requested",
             {

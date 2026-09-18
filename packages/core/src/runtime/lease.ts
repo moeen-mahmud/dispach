@@ -131,8 +131,23 @@ export async function claimLeases(options: ClaimOptions): Promise<LeaseOutcome> 
             if (claim.tookOver !== undefined) tookOver.push(claim.tookOver)
             continue
         }
-        if (options.exclusive) throw alreadyServing(claim.held)
         declined.push(claim.held)
+    }
+
+    /**
+     * **`exclusive` refuses the boot only when it has nothing left to serve.**
+     *
+     * This threw on the *first* conflict, which is right for one agent and wrong for several: a
+     * host asked for five agents with one of them held elsewhere refused all five, so a single
+     * stale-looking row took every other agent down with it. A lease exists to stop a second
+     * poller on one bot token, and declining that one agent is the whole of what that requires.
+     *
+     * The single-agent behaviour is unchanged by construction: one agent declined means nothing
+     * owned, which is still a refusal with the same error naming the same holder.
+     */
+    if (options.exclusive && owned.length === 0 && declined.length > 0) {
+        const first = declined[0]
+        if (first !== undefined) throw alreadyServing(first)
     }
 
     return { owned, tookOver, declined }

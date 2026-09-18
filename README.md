@@ -328,7 +328,9 @@ The model reaches the container through the *environment* rather than through a 
 manifest, which is the documented precedence: the ambient environment beats an agent's own file,
 so an operator can configure the agent their container runs.
 
-One agent per container: `serve` takes one manifest. A second agent is a second service with its
+One agent per container **by choice, not by limitation**: `serve` accepts several manifests and one
+process hosts N agents (decision 8.5), but a shared process means one agent's runaway `exec` starves
+the others, so the image runs one. A second agent is a second service with its
 own port, its own agent directory and **its own state volume** — a commented example in the
 compose file shows the shape, including why sharing a volume would have two boots deleting each
 other's schedules.

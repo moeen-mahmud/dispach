@@ -425,3 +425,119 @@ channels:
         }
     })
 })
+
+/**
+ * Several agents in one process, which is what made the all-or-nothing refusal wrong.
+ *
+ * `claimLeases` threw on the *first* conflict. Correct while a host served one manifest, and the
+ * failure the moment it serves five: one agent held by another live process refused the whole boot,
+ * taking four healthy agents down over a row that was nothing to do with them. The lease exists to
+ * stop a second poller on one bot token, and declining that one agent is all that requires.
+ */
+describe("a partial conflict across several agents", () => {
+    /** A lease held by a live process, so the claim below has something real to lose to. */
+    async function heldByAnother(agentId: string) {
+        const store = await openMemoryStore()
+        await store.leases.claim({
+            agentId,
+            runtimeId: "rt_other",
+            pid: 999,
+            mode: "daemon",
+            now: new Date(NOW).toISOString(),
+        })
+        return store
+    }
+
+    test("the agents it can claim are served, and the one it cannot is named", async () => {
+        const store = await heldByAnother("b")
+        const out = await claimLeases({
+            store,
+            agentIds: ["a", "b", "c"],
+            runtimeId: "rt_1",
+            mode: "daemon",
+            now: NOW,
+            pid: 100,
+            exclusive: true,
+            isAlive: alive,
+        })
+        expect(out.owned).toEqual(["a", "c"])
+        expect(out.declined.map((held) => held.agentId)).toEqual(["b"])
+        expect(out.declined[0]?.runtimeId).toBe("rt_other")
+        await store.close()
+    })
+
+    test("**it still refuses when there is nothing left to serve**, which keeps one agent's behaviour", () => {
+        // The single-agent case is unchanged by construction rather than by a second code path: one
+        // agent declined means nothing owned, and nothing owned is still a refusal naming the same
+        // holder. A conditional on `agentIds.length` would have been the wrong shape — it would make
+        // two agents both held elsewhere boot into a host serving nobody.
+        return (async () => {
+            const store = await heldByAnother("only")
+            await expect(
+                claimLeases({
+                    store,
+                    agentIds: ["only"],
+                    runtimeId: "rt_1",
+                    mode: "daemon",
+                    now: NOW,
+                    pid: 100,
+                    exclusive: true,
+                    isAlive: alive,
+                }),
+            ).rejects.toThrow(/already/i)
+            await store.close()
+        })()
+    })
+
+    test("every agent held elsewhere refuses too — a host serving nobody is not a host", async () => {
+        const store = await heldByAnother("a")
+        await store.leases.claim({
+            agentId: "b",
+            runtimeId: "rt_other",
+            pid: 999,
+            mode: "daemon",
+            now: new Date(NOW).toISOString(),
+        })
+        await expect(
+            claimLeases({
+                store,
+                agentIds: ["a", "b"],
+                runtimeId: "rt_1",
+                mode: "daemon",
+                now: NOW,
+                pid: 100,
+                exclusive: true,
+                isAlive: alive,
+            }),
+        ).rejects.toThrow(/already/i)
+        await store.close()
+    })
+
+    test("a dead holder is taken over rather than declined, even beside a live one", async () => {
+        // The two outcomes have to stay distinguishable: a stolen lease is a recovery and a declined
+        // one is another process still working. Reporting either as the other is how a host comes to
+        // refuse an agent nothing is serving.
+        const store = await heldByAnother("live")
+        await store.leases.claim({
+            agentId: "corpse",
+            runtimeId: "rt_gone",
+            pid: 31337,
+            mode: "daemon",
+            now: new Date(NOW).toISOString(),
+        })
+        const out = await claimLeases({
+            store,
+            agentIds: ["corpse", "live"],
+            runtimeId: "rt_1",
+            mode: "daemon",
+            now: NOW,
+            pid: 100,
+            exclusive: true,
+            isAlive: (pid) => pid === 999,
+        })
+        expect(out.owned).toEqual(["corpse"])
+        expect(out.tookOver.map((held) => held.agentId)).toEqual(["corpse"])
+        expect(out.declined.map((held) => held.agentId)).toEqual(["live"])
+        await store.close()
+    })
+})

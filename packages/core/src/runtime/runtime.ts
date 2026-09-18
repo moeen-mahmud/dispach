@@ -28,7 +28,7 @@ import { type Middleware, notify } from "../plugins/middleware.ts"
 import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams, type TurnStreamsOptions } from "../store/buffer.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
-import type { RuntimeMode, Store } from "../store/store.ts"
+import type { LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
 import { expandTeams } from "../team/expand.ts"
 import type { HandoffTarget } from "../team/handoff.ts"
 import { handoffTool } from "../team/supervisor.ts"
@@ -250,6 +250,15 @@ export class Runtime {
     #ownsStore: boolean
     /** Agent ids this runtime holds a lease for — released on stop, refreshed while alive. */
     #owned: readonly string[] = []
+    /**
+     * Leases another **live** process holds, for the agents this runtime was asked for.
+     *
+     * Read by `serve` to say which agents it is *not* hosting. Populated on both paths and meaning
+     * slightly different things: under `run` these agents are still loaded and usable, and slot 2
+     * tells them they are served elsewhere; under `serve` they are excluded from the hosted set,
+     * because a second poller on one bot token is the failure the lease exists to prevent.
+     */
+    #declined: readonly LeaseRecord[] = []
     #heartbeat: ReturnType<typeof setInterval> | undefined
 
     private constructor(init: {
@@ -263,6 +272,7 @@ export class Runtime {
         scheduler: Scheduler
         ownsStore: boolean
         owned: readonly string[]
+        declined: readonly LeaseRecord[]
     }) {
         this.runtimeId = init.runtimeId
         this.bus = init.bus
@@ -274,6 +284,7 @@ export class Runtime {
         this.scheduler = init.scheduler
         this.#ownsStore = init.ownsStore
         this.#owned = init.owned
+        this.#declined = init.declined
     }
 
     static async create(options: RuntimeOptions): Promise<Runtime> {
@@ -472,6 +483,9 @@ export class Runtime {
         // Claim before recovering anything. Recovery is scoped to what this process owns, because
         // two runtimes can share a store file and the unscoped version marked the *other* one's
         // live turn failed and made it re-send a delivery it had already sent.
+        // Only a runtime about to open a channel refuses a conflict. A REPL or a one-shot has always
+        // been allowed alongside another and simply recovers nothing.
+        const exclusive = options.startChannels === true
         const leases =
             options.lease === false
                 ? { owned: [], tookOver: [], declined: [] }
@@ -481,10 +495,32 @@ export class Runtime {
                       runtimeId,
                       mode: options.mode ?? "embedded",
                       now: Date.now(),
-                      // Only a runtime about to open a channel refuses. A REPL or a one-shot has
-                      // always been allowed alongside another and simply recovers nothing.
-                      exclusive: options.startChannels === true,
+                      exclusive,
                   })
+
+        /**
+         * What this runtime actually hosts, which is not always what it was asked to load.
+         *
+         * **Under `exclusive` a declined agent is dropped rather than hosted.** `claimLeases` used
+         * to throw on the first conflict, so this case could not arise: one agent held elsewhere
+         * refused the whole boot. That is right for one agent and wrong for several — a host asked
+         * for five with one held elsewhere took the other four down with it — so the claim now
+         * refuses only when it has *nothing* left to serve, and the agent it could not claim is
+         * excluded here. Hosting it anyway would be the second poller on one bot token that the
+         * lease exists to prevent.
+         *
+         * Filtered at exactly this point, before anything downstream is built: providers, agents and
+         * channel bindings are assembled as parallel arrays zipped by index against this list, so a
+         * filter applied later would pair an agent with another agent's providers.
+         *
+         * Not filtered when the runtime is **not** exclusive: a REPL alongside a `serve` is a
+         * supported thing to do, and slot 2 tells that agent it is `servedElsewhere` rather than
+         * pretending it does not exist.
+         */
+        const hosted =
+            exclusive && leases.declined.length > 0
+                ? loaded.filter((entry) => leases.owned.includes(entry.manifest.id))
+                : loaded
         const reaped = await store.turns.reapRunning(
             leases.owned,
             "the process exited before the turn finished",
@@ -510,7 +546,7 @@ export class Runtime {
         const providersByAgent = new Map<string, readonly ToolProvider[]>()
         const registries = await markAsync("tools", () =>
             Promise.all(
-                loaded.map((entry: LoadedManifest) => {
+                hosted.map((entry: LoadedManifest) => {
                     const providers = buildProviders(entry, supplyFor(entry.manifest.id))
                     if (providers.length > 0) providersByAgent.set(entry.manifest.id, providers)
                     return ToolRegistry.create({
@@ -526,7 +562,7 @@ export class Runtime {
         // 4. Agents: identity files, capability resolution, provider construction. Still no network
         //    — constructing a provider allocates no socket.
         const agents = mark("agents", () =>
-            loaded.map((entry: LoadedManifest, index) => {
+            hosted.map((entry: LoadedManifest, index) => {
                 const agentSupply = supplyFor(entry.manifest.id)
                 const runner = agentSupply.scriptRunner
                 /**
@@ -637,12 +673,13 @@ export class Runtime {
             scheduler,
             ownsStore,
             owned: leases.owned,
+            declined: leases.declined,
         })
 
         runtime.#providers = [...providersByAgent.values()].flat()
 
         mark("channels", () => {
-            for (const [index, entry] of loaded.entries()) {
+            for (const [index, entry] of hosted.entries()) {
                 const agent = agents[index]
                 if (agent === undefined) continue
                 const bindings = buildChannels(entry, supplyFor(entry.manifest.id))
@@ -714,7 +751,7 @@ export class Runtime {
         // manifest declares even under `run`. Nothing fires here: the acceptance criterion is that
         // an idle agent with schedules makes zero model calls until one comes due, and a catch-up
         // inside boot would break it on every start.
-        for (const [index, entry] of loaded.entries()) {
+        for (const [index, entry] of hosted.entries()) {
             const agent = agents[index]
             if (agent === undefined) continue
             if (entry.manifest.schedules.length === 0) {
@@ -830,7 +867,7 @@ export class Runtime {
         // exists to remove — just on the far side of the event. So it runs detached and reports through
         // the bus, and a failure leaves the agent serving the catalogue it resolved from disk.
         for (const [agentId, providers] of providersByAgent) {
-            const entry = loaded.find((item: LoadedManifest) => item.manifest.id === agentId)
+            const entry = hosted.find((item: LoadedManifest) => item.manifest.id === agentId)
             const slugs = entry?.manifest.tools.pinned ?? []
             for (const provider of providers) {
                 // Most providers have nothing to fetch — `system` and `web` resolve from module
@@ -989,6 +1026,17 @@ export class Runtime {
     /** Agent ids this runtime holds the serving lease for. */
     get owned(): readonly string[] {
         return this.#owned
+    }
+
+    /**
+     * Agents another live process is serving, which this runtime therefore is not.
+     *
+     * Non-empty only when a lease was refused. A caller that asked for several agents needs this to
+     * report what it is actually hosting: silently serving four of five is the looks-fine-and-is-not
+     * shape, and the alternative — refusing all five over one conflict — is what this replaced.
+     */
+    get declined(): readonly LeaseRecord[] {
+        return this.#declined
     }
 
     #startHeartbeat(): void {

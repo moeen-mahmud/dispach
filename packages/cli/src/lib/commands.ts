@@ -633,8 +633,18 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "serve",
 
         inSession: "hidden",
-        summary: "run the HTTP API and connect the agent's channels",
-        args: [MANIFEST],
+        summary: "run the HTTP API and connect the agents' channels",
+        // Variadic since 16.2a. One process hosts N agents — decision 8.5 has said so since the
+        // beginning, and only this line pinned the product to one. The bind is process-level, so a
+        // second manifest declaring a *different* `server.port`, `host` or `tokenEnv` is refused
+        // rather than silently ignored.
+        args: [
+            {
+                ...MANIFEST,
+                variadic: true,
+                help: "one or more paths to an agent.yaml, or sandbox agent names",
+            },
+        ],
         flags: [
             {
                 name: "port",

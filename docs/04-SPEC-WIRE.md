@@ -231,6 +231,12 @@ a POST resumes it. The runtime emits **`approval.resolved`** either way, and the
 so two steps of one turn both have a `c1`, and an id that decides which blocked call resumes cannot
 collide.
 
+Each entry carries `agentId`, and the listing is **scoped to the agent in the path**. It was not:
+the registry is per process and `:id` was discarded, so one operator read every agent's pending
+questions — slug, matched command and reason included. Harmless while a served process hosted one
+agent, which is precisely how it stayed unnoticed. `POST …/:approvalId` stays keyed by the approval
+id alone, because that id is minted per question and is already unique across agents.
+
 **The event comes from the runtime, not from whichever front end asks.** So the question is visible
 to the firehose, to a second observer of the same session, and to an audit log — not only to the
 surface that implements the prompt. The envelope carries `agentId`, `sessionKey` and `turnId`, which

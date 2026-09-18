@@ -306,7 +306,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
             const host = flags.str("host")
             const store = flags.str("store")
             return await serveCommand({
-                manifestPath: resolved(),
+                manifestPaths: positionals.map((ref) => resolveAgentRef(ref)),
                 ...(port === undefined ? {} : { port }),
                 ...(host === undefined ? {} : { host }),
                 ...(store === undefined ? {} : { store }),

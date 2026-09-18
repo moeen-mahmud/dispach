@@ -37,7 +37,14 @@ import {
 import { storePath } from "#lib/sandbox"
 
 export interface ServeOptions {
-    readonly manifestPath: string
+    /**
+     * One or more manifests. The process hosts every agent they produce.
+     *
+     * Plural since 16.2a: decision 8.5 has said "one process hosts N agents" since the beginning
+     * and core was built that way — `RuntimeOptions.agents` is already an array — so a single path
+     * here was the only thing pinning the product to one agent.
+     */
+    readonly manifestPaths: readonly string[]
     readonly port?: number
     readonly host?: string
     readonly store?: string
@@ -47,14 +54,61 @@ export interface ServeOptions {
 }
 
 export async function serveCommand(options: ServeOptions): Promise<number> {
-    const env = ambientEnv([options.manifestPath])
-    const loaded = loadManifest(options.manifestPath, {
-        knownProviders: PROVIDER_IDS,
-        knownChannels: CHANNEL_IDS,
-        env,
-    })
+    const env = ambientEnv(options.manifestPaths)
+    const manifests = options.manifestPaths.map((path) => ({
+        path,
+        loaded: loadManifest(path, {
+            knownProviders: PROVIDER_IDS,
+            knownChannels: CHANNEL_IDS,
+            env,
+        }),
+    }))
+    const first = manifests[0]
+    if (first === undefined) {
+        // Unreachable through the parser, which requires the positional. Stated rather than
+        // asserted with a non-null, because a required arg becoming optional is a one-word edit.
+        throw new HarnessError({
+            code: "cli_usage",
+            message: "serve needs at least one manifest.",
+            hint: `Usage: ${BRAND.slug} serve <manifest...>`,
+        })
+    }
+    const loaded = first.loaded
 
+    /**
+     * **The bind is process-level, so a disagreement about it is refused rather than ignored.**
+     *
+     * One process, one socket, one token — so with several manifests the server config can only
+     * come from one of them, and silently taking the first would make a manifest that carefully
+     * declares `port: 7500` a file whose setting does nothing. That is the "looks configured and is
+     * not" shape, and it is worse here than elsewhere because the symptom is a port somebody else
+     * is already using.
+     *
+     * Compared after defaults are applied, which is what makes this correct rather than pedantic:
+     * an unset `port` *is* 7420, so a manifest that says 7420 and one that says nothing agree, and
+     * one that says 7500 disagrees with both.
+     */
     const config = loaded.manifest.server
+    for (const entry of manifests.slice(1)) {
+        const other = entry.loaded.manifest.server
+        for (const [field, mine, theirs, settled] of [
+            // **A flag settles the question, so it also settles the disagreement.** `--port` and
+            // `--host` override every manifest, so refusing because two of them disagree about a
+            // value nothing is going to read would be a refusal the operator has already answered.
+            // `tokenEnv` has no flag, so a disagreement there is always live.
+            ["server.port", config.port, other.port, options.port !== undefined],
+            ["server.host", config.host, other.host, options.host !== undefined],
+            ["server.tokenEnv", config.tokenEnv, other.tokenEnv, false],
+        ] as const) {
+            if (settled || mine === theirs) continue
+            throw new HarnessError({
+                code: "serve_bind_conflict",
+                message: `${first.path} sets ${field} to ${String(mine)} and ${entry.path} sets it to ${String(theirs)}.`,
+                hint: "One process binds one socket with one token, so these have to agree. Make them match, or run the disagreeing agent in its own process — a second `serve` on its own port.",
+                field,
+            })
+        }
+    }
     // Flags win over the manifest: the manifest is the deployment's intent and a flag is this
     // invocation's. `--port 0` is honoured — it means "any free port", which a test wants.
     const port = options.port ?? config.port
@@ -112,7 +166,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     const approvals = createApprovalRegistry()
 
     const runtime = await Runtime.create({
-        agents: [options.manifestPath],
+        agents: [...options.manifestPaths],
         // The seam `ToolContext.approve` declared in Phase 3 and nothing ever filled. A blocked
         // call now emits `approval.requested` and waits for a POST; an unanswered one ends with the
         // turn, because core races the approver against the turn's own signal rather than starting
@@ -209,19 +263,28 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
 
     const agents = runtime.list()
 
-    // Name the process after the agent it is serving.
+    // Name the process after what it is serving.
     //
-    // Without this a long-running service is a bare `node` in Activity Monitor and in `ps`, signed
-    // by the Node Foundation, indistinguishable from every other Node process on the machine — and
-    // the one place a person looks when something is eating CPU is exactly the place it was
-    // anonymous. Set here rather than at startup because the agent id is only known once the
-    // manifest has loaded, and `serve` takes one manifest so there is only ever one name.
+    // Without this a long-running service is a bare interpreter in Activity Monitor and in `ps`,
+    // indistinguishable from every other one on the machine — and the one place a person looks when
+    // something is eating CPU is exactly the place it was anonymous.
     //
-    // The trade, stated because it costs something real: assigning `process.title` overwrites the
-    // argv region, so `ps` shows this instead of the full command line. Kept short so it survives
-    // the 16-character `comm` truncation intact, and the arguments remain visible in
-    // `launchctl print` and in `daemon status`.
-    if (agents[0] !== undefined) process.title = `${BRAND.slug} ${agents[0].id}`
+    // **One agent gets its name; several get a count.** Listing them would blow the 16-character
+    // `comm` truncation on the second id and leave a fragment, which is worse than a number.
+    //
+    // Two stated costs. Assigning `process.title` overwrites the argv region, so `ps` shows this
+    // instead of the full command line — the arguments stay visible in `launchctl print` and in
+    // `daemon status`. And **Bun ignores the assignment entirely**: measured against the same
+    // manifest, Node shows the title while `bun` and the compiled binary both show raw argv.
+    // So this works on the soft-compat runtime and nowhere else, which is worth knowing before
+    // relying on it — the line stays because it costs nothing where it does not work.
+    const firstAgent = agents[0]
+    if (firstAgent !== undefined) {
+        process.title =
+            agents.length === 1
+                ? `${BRAND.slug} ${firstAgent.id}`
+                : `${BRAND.slug} ${agents.length} agents`
+    }
     // The port is bound now, which `Runtime.create` could not know — it returns before `serve` runs.
     // Told before the first turn, so slot 2 says "on" rather than "enabled but not listening".
     for (const agent of agents) agent.reportRuntimeState({ serverListening: true })
@@ -237,6 +300,14 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                 agents: agents.map((agent) => ({
                     id: agent.id,
                     channels: runtime.channels.statusOf(agent.id),
+                })),
+                // Named even when empty, so a scripted caller can tell "nothing was declined" from
+                // "this build does not report it".
+                declined: runtime.declined.map((held) => ({
+                    agentId: held.agentId,
+                    pid: held.pid,
+                    mode: held.mode,
+                    since: held.startedAt,
                 })),
             })}\n`,
         )
@@ -261,6 +332,30 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                               : ""
                       }`
             process.stdout.write(`  ${agent.id} — ${suffix}${scheduled}\n`)
+        }
+
+        /**
+         * What this process is **not** serving, and why that has to be said.
+         *
+         * A lease refused means another live process is already serving that agent, and the claim
+         * now declines it rather than refusing the whole boot — so without this line a host asked
+         * for five agents comes up reporting four and looks entirely healthy. That is the
+         * looks-fine-and-is-not shape, one process boundary out, and the same one slot 2's
+         * `servedElsewhere` exists for.
+         *
+         * The pid is printed because it is the only actionable thing here — the `stop` command
+         * is the next command, and knowing which process to expect it to reach is the difference
+         * between running it and wondering.
+         */
+        for (const held of runtime.declined) {
+            process.stdout.write(
+                `  ${held.agentId} — NOT served here: pid ${held.pid} (${held.mode}) already has it\n`,
+            )
+        }
+        if (runtime.declined.length > 0) {
+            process.stdout.write(
+                `    \`${BRAND.slug} stop <agent>\` ends the other one, or leave it — nothing here is broken.\n`,
+            )
         }
         if (claim !== undefined) {
             // Printed here rather than logged at debug level for the reason the 57 MB log taught:

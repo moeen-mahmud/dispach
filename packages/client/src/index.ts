@@ -183,6 +183,8 @@ export interface AgentClient {
 /** A question waiting on somebody. */
 export interface PendingApproval {
     readonly approvalId: string
+    /** Which agent is asking. Always the agent in the path — a listing never crosses agents. */
+    readonly agentId: string
     readonly slug: string
     readonly callId: string
     /** The command or path a rule would match — what the person actually needs to read. */

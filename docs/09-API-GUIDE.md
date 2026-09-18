@@ -343,7 +343,7 @@ Worth knowing before you design around it, because each of these is a decision r
 | **No outbound peer calls.** | `from` is the *inbound* half. Your agent reaching another one is a tool, not a route — and `allowFrom` is inbound-only, which is a separate recorded trap. |
 | **No per-sender authorisation.** | `from` says who sent a message and confers nothing. A recipient acts under its **own** owner's grants, whoever asked. A sender cannot widen what your agent may do by declaring itself. |
 | **No OpenAI-compatible surface.** | `/v1` is its own protocol. Nothing here answers `/v1/chat/completions`. |
-| **One agent per container.** | `serve` takes one manifest. A second agent is a second service. |
+| **One agent per container, by choice.** | `serve` accepts several manifests and one process hosts N agents — that is decision 8.5 and always was. The *image* runs one, because a shared process means one agent's runaway `exec` starves the others. A second agent is a second service. |
 | **No approval history.** | A pending approval lives in the serving process's memory, because the thing it resolves is a suspended turn *in that process*. A row surviving a restart would describe a question nobody is still waiting on. |
 | **No live reload.** | An agent's configuration is fixed for its process lifetime — the tool catalogue resolves once and the cached prompt prefix depends on it staying fixed. `POST /reload` answers `409` and says so. |
 | **No CORS.** | The web UI is same-origin. A default `*` would be catastrophic on a loopback bind, where the spec permits omitting the token entirely. |

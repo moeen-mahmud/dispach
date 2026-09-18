@@ -395,6 +395,7 @@ describe("the registry itself", () => {
         for (const id of ["a_third", "a_first", "a_second"]) {
             void registry.approver({
                 approvalId: id,
+                agentId: "assistant",
                 slug: "memory_write",
                 callId: "c1",
                 mutating: true,
@@ -402,7 +403,7 @@ describe("the registry itself", () => {
                 signal,
             })
         }
-        expect(registry.pending().map((entry) => entry.approvalId)).toEqual([
+        expect(registry.pending("assistant").map((entry) => entry.approvalId)).toEqual([
             "a_first",
             "a_second",
             "a_third",
@@ -414,6 +415,7 @@ describe("the registry itself", () => {
         const controller = new AbortController()
         const answer = registry.approver({
             approvalId: "a_x",
+            agentId: "assistant",
             slug: "memory_write",
             callId: "c1",
             mutating: true,
@@ -430,5 +432,65 @@ describe("the registry itself", () => {
 
     test("resolve reports false for an id it does not hold", () => {
         expect(createApprovalRegistry().resolve("a_nothing", true)).toBe(false)
+    })
+})
+
+/**
+ * One registry, several agents — the disclosure this scoping exists to close.
+ *
+ * `GET /v1/agents/:id/approvals` discarded `:id` and returned every pending question in the
+ * process: slug, matched command and reason, for agents the caller named nothing about. Harmless
+ * only because a served process hosted one agent, which is how the same shape stayed invisible on
+ * `/v1/events` until Phase 13 went looking. Single-tenancy hides multi-tenancy bugs; it does not
+ * prevent them.
+ */
+describe("scoped to one agent", () => {
+    function ask(registry: ReturnType<typeof createApprovalRegistry>, agentId: string, id: string) {
+        void registry.approver({
+            approvalId: id,
+            agentId,
+            slug: "exec",
+            callId: "c1",
+            match: `deploy --to production # ${agentId}`,
+            mutating: true,
+            reason: "changes things",
+            signal: new AbortController().signal,
+        })
+    }
+
+    test("one agent's queue never contains another's question", () => {
+        const registry = createApprovalRegistry()
+        ask(registry, "milo", "a_milo")
+        ask(registry, "vela", "a_vela")
+
+        expect(registry.pending("milo").map((e) => e.approvalId)).toEqual(["a_milo"])
+        expect(registry.pending("vela").map((e) => e.approvalId)).toEqual(["a_vela"])
+        // And the matched command — the part that actually leaks something — does not cross over.
+        expect(JSON.stringify(registry.pending("milo"))).not.toContain("vela")
+    })
+
+    test("`size` stays process-wide, because it answers a different question", () => {
+        // What is this process holding open, for readiness and introspection. Scoping it would make
+        // "nothing is waiting" mean "nothing is waiting *for you*", which is the wrong answer to
+        // give a supervisor deciding whether a shutdown is safe.
+        const registry = createApprovalRegistry()
+        ask(registry, "milo", "a_milo")
+        ask(registry, "vela", "a_vela")
+        expect(registry.size).toBe(2)
+    })
+
+    test("an agent with nothing waiting gets an empty list, not everything", () => {
+        const registry = createApprovalRegistry()
+        ask(registry, "milo", "a_milo")
+        expect(registry.pending("triage")).toEqual([])
+    })
+
+    test("resolve stays keyed by approval id alone", () => {
+        // Deliberately not scoped: an `approvalId` is minted per ask and globally unique, so
+        // requiring an agent id to answer would add a way to get it wrong without removing any.
+        const registry = createApprovalRegistry()
+        ask(registry, "milo", "a_milo")
+        expect(registry.resolve("a_milo", true)).toBe(true)
+        expect(registry.pending("milo")).toEqual([])
     })
 })

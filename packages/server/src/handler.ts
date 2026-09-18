@@ -532,14 +532,18 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * otherwise sees a turn that has visibly stopped with no way to discover why. Same argument as
      * turn reattach, which the spec calls core rather than a convenience.
      *
-     * Not scoped by agent even though the path names one. The registry is per *process* and a
-     * pending approval's turn belongs to whichever agent raised it; filtering here would need the
-     * registry to carry an agent id it has no use for otherwise, and `serve` hosts one agent. The
-     * path keeps the agent segment so the route reads like its neighbours and so scoping later is
-     * additive rather than a URL change.
+     * **Scoped by agent, and it was not.** This discarded `:id` and returned every pending question
+     * in the process — slug, matched command and reason included — which is one operator reading
+     * another agent's queue. Unreachable only because a served process hosted one agent, which is
+     * the same shape as the cross-agent disclosure Phase 13 found on `/v1/events`: single-tenancy
+     * hides multi-tenancy bugs rather than preventing them. The old comment reasoned that the
+     * registry "has no use for" an agent id otherwise; it does now, and `pending` takes it as a
+     * required argument so the disclosing call is the one that does not compile.
      */
     router.add("GET", "/v1/agents/:id/approvals", (context) =>
-        withAgent(runtime, context, async () => json({ approvals: approvals.pending() })),
+        withAgent(runtime, context, async (agent) =>
+            json({ approvals: approvals.pending(agent.id) }),
+        ),
     )
 
     /**

@@ -4003,9 +4003,14 @@ of it waiting for the first healthcheck probe rather than for the runtime.
 it. `dispach run` and `dispach web run` attach, provisioning reaches a running process, and
 `dispach stop <agent>` is the only thing that makes an agent unreachable.
 
-Stages: **16.1** origin hardening · 16.2 `Runtime` adopt/replace · 16.3 per-agent lifecycle ·
-16.4 one service unit, first-run bootstrap, systemd · 16.5 `POST /v1/agents` · 16.6 the
-human-input seam on channel status.
+Stages: **16.1** origin hardening · **16.2a** N agents in one process · 16.2b adopt/replace ·
+16.3 per-agent lifecycle · 16.4 one service unit, first-run bootstrap, systemd ·
+16.5 `POST /v1/agents` · 16.6 the human-input seam on channel status.
+
+16.2 was **split** (Moeen, 2026-09-18) for the reason 11.202 gives about 15.3/15.4: a stage that
+bundles a CLI surface, a latent disclosure, per-agent teardown of six subsystems and two new
+lifecycle methods cannot be reviewed. 16.2a is the half that delivers multi-agent hosting; 16.2b is
+where the quiet-failure risk lives.
 
 ### 16.1 — Origin and Host hardening — **built** (2026-09-17)
 
@@ -4070,6 +4075,71 @@ after CVE-2026-11624 in the same shape.
       tests working: `new Request(url)` carries no `Host`
 - [ ] CORS response headers are **not** here. 18.4 adds them, consuming the same allowlist — one
       list, two consumers, never two lists
+
+### 16.2a — N agents in one process — **built** (2026-09-18)
+
+Decision **8.5** has read *"one process hosts N agents… forcing 1:1 would make the embedded use case
+impossible"* since the beginning, and core was built that way: `RuntimeOptions.agents` is an array,
+`#agents` is a Map, `GET /v1/agents` maps over `runtime.list()`, `runtime_leases` is keyed
+`agent_id`, and `ChannelHub` keys its bindings per agent. Three things pinned the product to one.
+
+**Deliverables**
+
+- `serve` takes a **variadic** manifest list; `agents: [...options.manifestPaths]`
+- **`ApprovalRequest.agentId`** in core, `PendingApproval.agentId` in the server and the client, and
+  `pending(agentId)` as a **required** argument
+- `claimLeases` refuses only when it has nothing left to serve; `Runtime` gains a `declined` getter
+  and drops declined agents from the hosted set under `exclusive`
+- `serve_bind_conflict` — manifests disagreeing about `server.port`/`host`/`tokenEnv` are refused
+  before anything binds, unless a flag has already settled the value
+- `process.title` reports a count rather than a truncated second id
+
+**Four things found by building it**
+
+- **`GET /v1/agents/:id/approvals` discarded `:id` and returned every agent's queue** — slug, matched
+  command and reason included. One operator reading another's pending questions, unreachable only
+  because a served process hosted one agent. The same shape as the cross-agent disclosure Phase 13
+  found on `/v1/events`: single-tenancy hides multi-tenancy bugs rather than preventing them. The old
+  comment reasoned the registry "has no use for" an agent id; `pending` now takes one as a
+  **required** argument, so the disclosing call is the one that does not compile.
+- **`ApprovalRequest` omitted the agent id *deliberately*, and the reason expired.** `execute.ts`
+  said the event carries the context "which an `ApprovalRequest` deliberately does not" — true and
+  tidy for one agent, unsafe for several, because `RuntimeOptions.approve` is a single process-wide
+  callback and a question that cannot say who asked cannot be listed per agent. The comment is
+  rewritten rather than worked around; the session and turn stay off the request, because an approver
+  answers a question about a *call*.
+- **`claimLeases` threw on the first conflict**, so five agents with one held elsewhere refused all
+  five — one row taking four healthy agents down. It now refuses only when `owned` is empty, which
+  leaves the single-agent behaviour identical **by construction** rather than by a second code path.
+  A declined agent is then dropped from the hosted set, filtered at exactly the point after the claim
+  and before anything downstream, because providers, agents and channel bindings are parallel arrays
+  zipped by index.
+- **A flag settles a disagreement, so it settles the refusal.** `--port` overrides every manifest, so
+  refusing because two of them disagree about a value nothing will read is a refusal the operator has
+  already answered. Found by writing the test: the harness passed `--port 0` unconditionally, which
+  would have made the conflict test unable to fail.
+
+**Acceptance**
+
+- [x] Two agents in one process: both on the banner, both in `GET /v1/agents`, `/v1/health` reports
+      `agents: 2`, and each `…/approvals` answers 200 while an unknown agent is 404
+- [x] A **partial conflict**, verified live across two processes: the second server prints
+      `alpha — NOT served here: pid 71098 (terminal) already has it`, hosts only `gamma`, answers
+      **404** for `alpha` while the holder answers 200, and reports `agents: 1`
+- [x] Disagreeing manifests refuse with `serve_bind_conflict` naming both files and the field; the
+      same pair with `--port` comes up
+- [x] A single agent held elsewhere still refuses, unchanged — the pre-existing test passes untouched
+- [x] Revert-checked: the lease change, the declined banner line, the conflict loop, and the approvals
+      filter each turn exactly the right test red
+- [ ] 16.2b owns `adopt`/`replace`. Until it lands, a provisioned agent needs a host restart
+
+**Method note, because it nearly went unrecorded.** Two of my revert-checks for the conflict loop
+produced meaningless results before one produced a real one: the first mangled the file (a `perl`
+`s|…|…|` whose *pattern* contained `||`), and the second made the build fail on unreachable code, so
+`&&` short-circuited and the test never ran — printing nothing, which reads like a pass. **A
+revert-check that does not compile is not a revert-check**, and the tell is an empty result rather
+than a red one. The edit that worked leaves the code valid: `manifests.slice(1, 1)`, a loop that
+never runs.
 
 ---
 
