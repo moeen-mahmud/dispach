@@ -64,7 +64,14 @@ async function serveThen(signal: NodeJS.Signals): Promise<Served> {
     const child = spawn(
         process.execPath,
         [BINARY, "serve", join(dir, "agent.yaml"), "--port", "0", "--store", store],
-        { env: { ...process.env, MODEL_API_KEY: "test-key" }, stdio: ["ignore", "pipe", "pipe"] },
+        {
+            env: {
+                ...process.env,
+                MODEL_API_KEY: "test-key",
+                [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+        },
     )
 
     let stdout = ""
@@ -132,7 +139,14 @@ async function serveAll(
     const child = spawn(
         process.execPath,
         [BINARY, "serve", ...manifests, ...portArgs, "--store", store],
-        { env: { ...process.env, MODEL_API_KEY: "test-key" }, stdio: ["ignore", "pipe", "pipe"] },
+        {
+            env: {
+                ...process.env,
+                MODEL_API_KEY: "test-key",
+                [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+        },
     )
     let out = ""
     /**
@@ -192,7 +206,11 @@ describe("one process, several agents", () => {
             process.execPath,
             [BINARY, "serve", held, "--port", "0", "--store", store],
             {
-                env: { ...process.env, MODEL_API_KEY: "test-key" },
+                env: {
+                    ...process.env,
+                    MODEL_API_KEY: "test-key",
+                    [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+                },
                 stdio: ["ignore", "pipe", "pipe"],
             },
         )
@@ -216,7 +234,11 @@ describe("one process, several agents", () => {
                 process.execPath,
                 [BINARY, "serve", held, free, "--port", "0", "--store", store],
                 {
-                    env: { ...process.env, MODEL_API_KEY: "test-key" },
+                    env: {
+                        ...process.env,
+                        MODEL_API_KEY: "test-key",
+                        [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+                    },
                     stdio: ["ignore", "pipe", "pipe"],
                 },
             )
@@ -311,7 +333,11 @@ describe("serve shuts down gracefully", () => {
         const dir = workspace()
         const store = join(dir, "store.db")
         const args = [BINARY, "serve", join(dir, "agent.yaml"), "--port", "0", "--store", store]
-        const env = { ...process.env, MODEL_API_KEY: "test-key" }
+        const env = {
+            ...process.env,
+            MODEL_API_KEY: "test-key",
+            [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+        }
 
         const first = spawn(process.execPath, args, { env, stdio: ["ignore", "pipe", "pipe"] })
         try {

@@ -4264,6 +4264,62 @@ to revisit rather than a wire to connect. The per-agent launchd label is still t
 it with the orphaned-`disable`-row migration note.
 
 
+
+### 16.4 — One service unit, first-run bootstrap, and Linux — **built** (2026-09-18)
+
+**What landed.**
+
+- **`<slug>.server`, one unit**, running `serve` with no manifest. `daemon install <agent>` is
+  refused; a bare install retires any per-agent unit it finds with `bootout` + **`enable`** + `rm`.
+- **First-run bootstrap.** `CommandSpec.needsServer` is required on every spec and read in one
+  place; `--no-bootstrap` and `<PREFIX>NO_BOOTSTRAP` are the escapes; a container, CI and the
+  service itself are skipped; a failure is announced and never thrown.
+- **A systemd user unit**, written and not driven. Lifecycle verbs refuse with the exact command,
+  `ServiceState.liveness` says the manager cannot report running, and `loginctl enable-linger` is
+  printed with its reason.
+- **`service-env.ts`** — one secret allowlist and one error for both renderers, since `systemctl
+  show` exposes `Environment=` exactly as `launchctl print` exposes `EnvironmentVariables`.
+- **The preflight split**, with three blockers deleted as false rather than moved.
+- `daemon status` bare reports the unit plus what it hosts plus what is switched off; `logs` bare
+  reads the server's log; `uninstall` says the agents were *not* switched off.
+- The brew formula's **`service do`** block, parked in 15.4 waiting for a bare `serve`.
+
+**Acceptance**
+
+- [x] `bun test` 3341 / 0 · `test:node` 1428 / 0 · typecheck 0 errors · lint clean ·
+      `bench:boot` ok · `check:deps` ok
+- [x] `daemon install milo` refused, naming the bare form and `stop`/`start`
+- [x] **Two real per-agent units retired live** — plists removed and their permanent `disable` rows
+      flipped back to `enabled`, which is the only way to clear them
+- [x] The installed unit runs and serves: `launchctl list` shows it, `/v1/ready` answers
+      `{"status":"ready","agents":1}`, and it connected a real Telegram bot
+- [x] `daemon status` reports `dispach.server — running · pid … up 1m 7s` and `hosting 1 agent: m1l0`
+- [x] `daemon uninstall` removes it and says the agents were left alone
+- [x] The bootstrap is skipped for `validate` and honours `--no-bootstrap`
+- [x] Eight guards revert-checked red, each edit compiling and typechecking
+
+**Four defects, all found by running the real install against a real machine.**
+
+1. **`labels()` read `launchctl list` alone, and a disabled job is absent from it** — the exact unit
+   whose retirement matters, since its `disable` row is the permanent part. The install found
+   nothing to retire and reported success. It reads the plist directory too now.
+2. **`bootout` returns before the job is gone.** An immediate `bootstrap` raced it, both returned 0,
+   and nothing was loaded — while the command printed "service installed". `install` waits for the
+   unload and then **verifies** the job is there.
+3. `daemon status` bare still listed per-agent labels, so it reported "no agents are installed as a
+   service" on a machine running a healthy server unit, and pointed at the retired form to fix it.
+4. **The test suite installed a real LaunchAgent on the machine running it.** `start` declares
+   `needsServer` and `CI` is absent locally, so the wreckage lands on a developer's machine rather
+   than a disposable runner. Every test that spawns the binary opts out; a boundaries test fails
+   when one forgets, and `bundle.test.ts` is exempt on purpose because its empty-`stderr` assertion
+   is what proves `--help` never bootstraps.
+
+Two of the eight revert-checks were **meaningless before they were real**: one edit did not apply at
+all (11 pass, no red), and two produced unused-variable type errors rather than a failing test. And
+one guard did not exist — the post-install verification had no test until the revert-check found it
+silent, which is the third instance of a revert-check earning its keep by failing to fail.
+
+
 ---
 
 ## Carried backlog

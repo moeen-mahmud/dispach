@@ -8,17 +8,23 @@
  * symptom here is `brew install` refusing a download that is perfectly fine. So the digests come
  * from `dist-bin/*.sha256`, written by the release workflow beside the binaries it just built.
  *
- * ## What this deliberately does not include yet
+ * ## The service block, and why it took until 16.4
  *
- * **No `service do` block.** That is what makes `brew services start` work, and it is the natural
- * home for the always-on server — but it would have to run `dispach serve` with no manifest, which
- * does not exist until Phase 16.2. A formula whose service block runs a command that refuses is
- * worse than one with no service block: `brew services start` reports success and the unit dies
- * into a log nobody has been told about. It arrives in 16.4 together with the thing it starts.
+ * `service do` is what makes `brew services start` work, and it had to wait for the command it
+ * runs: a bare `serve` with no manifest, which hosts the sandbox's enabled agents and reads that
+ * sandbox at every start. Until 16.3 `serve` required a manifest, and a formula whose service block
+ * ran a command that refuses is worse than one with no service block — `brew services start`
+ * reports success and the unit dies into a log nobody has been told about.
  *
- * **Homebrew never starts a service at install time**, whatever the formula says, so the caveat is
- * the only place a first-time user learns what to do next. It describes what works *today* and
- * gains the daemon sentence in 16.4.
+ * `run_type: :immediate` with `keep_alive: { crashed: true }` mirrors the plist this project
+ * generates itself, deliberately: a configuration fault must stop the service **once** rather than
+ * retry into a log nobody opens, which is the 57 MB lesson. `:always` would be the wrong answer
+ * here for the same reason `KeepAlive: true` was.
+ *
+ * **Homebrew never starts a service at install time**, whatever the formula says. So the caveat is
+ * the only place a first-time user learns that one command away is an always-on API — and it names
+ * both routes, because `brew services` and this project's own `daemon install` write *different*
+ * units and running both would be two hosts contending for one lease.
  *
  * ## Usage
  *
@@ -118,12 +124,31 @@ class ${slug.charAt(0).toUpperCase()}${slug.slice(1)} < Formula
 
 ${blocks.join("\n\n")}
 
+  service do
+    # No manifest: the server hosts every agent in the sandbox that is not switched off, and it
+    # re-reads the sandbox at every start — so an agent created tomorrow needs no change here.
+    run [opt_bin/"${slug}", "serve"]
+    # Not :always. A configuration fault has to stop this once rather than relaunch it thirty times
+    # an hour into a log nobody opens. ${slug} daemon status is where the reason shows up.
+    keep_alive crashed: true
+    run_type :immediate
+    working_dir Dir.home
+    log_path "#{Dir.home}/${DEFAULT_BRAND.stateDir}/logs/server/out.log"
+    error_log_path "#{Dir.home}/${DEFAULT_BRAND.stateDir}/logs/server/err.log"
+  end
+
   def caveats
     <<~EOS
-      Create an agent and talk to it:
+      Start the always-on server, then create an agent:
 
+        brew services start ${slug}
         ${slug} init
-        ${slug} run
+
+      Homebrew does not start a service at install time, so nothing is running yet. Anything
+      that needs a host will offer to start one for you; ${slug} daemon uninstall undoes that.
+
+      Use either brew services or ${slug} daemon install, not both. They write different
+      service definitions, and two hosts would contend for the same agents.
 
       The agent's state lives in ~/${DEFAULT_BRAND.stateDir}. Secrets are read from a .env beside
       each agent's manifest and are never written into a service definition.

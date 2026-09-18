@@ -106,6 +106,26 @@ export interface CommandSpec {
      * keeps the generic sentence, which is the correct one for a typo.
      */
     readonly unexpectedArgHint?: string
+    /**
+     * Whether this command wants a **running host** behind it.
+     *
+     * Read by the first-run bootstrap: `true` means that if no server is up, one is installed and
+     * started before the command runs, announced in one line. `false` means the command is answered
+     * from files and the store alone, and must not cause a service to be installed as a side effect
+     * of being asked a question — `validate`, `workspace`, `soul`, `keys` and `terminal-setup` are
+     * all in that group.
+     *
+     * **Required, for the reason `inSession` is.** The bootstrap is the most invasive thing this
+     * product does, so which commands trigger it cannot be a hand-kept list in `index.ts` that a
+     * new command is silently absent from — or silently included in. `boundaries.test.ts` fails when
+     * a spec omits it, which makes the decision one somebody has to take on purpose.
+     *
+     * Note what this is *not* about: whether the command constructs a `Runtime`. `run` builds one
+     * in-process today and still declares `true`, because the agent it talks to should be reachable
+     * from a browser and a channel at the same time. The question is "should a server exist", not
+     * "does this code path need one".
+     */
+    readonly needsServer: boolean
 }
 
 // ─── parser output ───────────────────────────────────────────────────────────────────────

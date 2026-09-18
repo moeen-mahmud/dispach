@@ -492,6 +492,89 @@ describe("help lists everything a command accepts", () => {
         }
         expect(unread).toEqual([])
     })
+
+    /**
+     * Every command declares whether it wants a running host, and one place reads it.
+     *
+     * The first-run bootstrap is the most invasive thing this product does — it installs a
+     * background service — so which commands trigger it must be a decision taken per command
+     * rather than membership of a list somebody maintains. Required on the spec for the reason
+     * `inSession` is: a new command cannot be silently absent, and cannot be silently *included*
+     * either, which is the direction that matters here.
+     *
+     * The second half is the one that would actually rot: exactly one call site reads the field,
+     * so a command cannot opt itself in or out anywhere else.
+     */
+    test("needsServer is declared by every command and read in one place", () => {
+        for (const command of COMMANDS) {
+            expect(typeof command.needsServer).toBe("boolean")
+        }
+        // The three that would be absurd. `serve` *is* the server, `daemon` manages the unit, and
+        // a command whose job is stopping things must never start one.
+        for (const name of ["serve", "daemon", "stop"]) {
+            expect(COMMANDS.find((command) => command.name === name)?.needsServer).toBe(false)
+        }
+
+        const index = FILES.find((file) => file.path === "index.ts")?.text ?? ""
+        expect(index).toContain("needsServer: command.needsServer")
+        /**
+         * Two files may *read* it and no more.
+         *
+         * A read is `.needsServer`, not `needsServer:` — `commands.ts` writes the field on every
+         * spec and `schema.ts` declares it, and neither is a policy. `index.ts` passes it across
+         * and `bootstrap.ts` acts on it. A third reader would be a second answer to "when does
+         * this product install a service", which is the one question that must have one.
+         */
+        const readers = FILES.filter((file) => file.text.includes(".needsServer")).map(
+            (file) => file.path,
+        )
+        expect(readers.sort()).toEqual(["index.ts", "lib/bootstrap.ts"])
+    })
+})
+
+/**
+ * No test may leave a background service on the machine that ran it.
+ *
+ * This is here because it happened. `start` declares `needsServer`, so the first spawn in
+ * `lifecycle.test.ts` found no live host and installed a **real LaunchAgent** — pointing at a temp
+ * store that no longer existed, loaded into launchd, still there after the suite finished. Nothing
+ * failed; it was found by listing `~/Library/LaunchAgents` during an unrelated check.
+ *
+ * `CI` suppresses the bootstrap and is absent locally, which is exactly the wrong way round: the
+ * runner is disposable and a developer's machine is the one that keeps the wreckage. So the opt-out
+ * has to be explicit in every test that drives the real binary, and this is what makes forgetting
+ * it a failing test rather than a plist somebody finds months later.
+ */
+describe("no test spawns a binary that could install a service", () => {
+    test("every test that runs the CLI opts out of the first-run bootstrap", () => {
+        const dir = resolve(import.meta.dirname)
+        const offenders: string[] = []
+        for (const name of readdirSync(dir)) {
+            if (!name.endsWith(".test.ts")) continue
+            const text = readFileSync(join(dir, name), "utf8")
+            /**
+             * Both halves: a real spawn **and** a reference to our built entry point.
+             *
+             * Each alone over-matches in a different direction, and both were tried. Matching the
+             * path alone fires on *fixture data* — `daemon-plan.test.ts` hands a `scriptPath`
+             * string to a pure function that spawns nothing. Matching the spawn alone fires on
+             * `stop.test.ts`, which spawns a bare `node -e "setInterval(…)"` as something to
+             * signal, and which cannot bootstrap because it never runs this CLI.
+             */
+            const spawns = /\b(spawn|spawnSync|spawnCaptureAsync)\s*\(/.test(text)
+            const runsOurBinary = /"dist"[^\n]*"index\.js"|dist\/index\.js|\bBINARY\b/.test(text)
+            if (!spawns || !runsOurBinary) continue
+            /**
+             * `bundle.test.ts` is exempt **on purpose**, and it is the stronger guard of the two:
+             * it runs only `--version` and `--help`, and asserts `stderr` is empty. Those return
+             * before the bootstrap is reached, so its silence is what proves asking for help never
+             * installs anything — setting the opt-out there would throw that proof away.
+             */
+            if (name === "bundle.test.ts") continue
+            if (!text.includes("NO_BOOTSTRAP")) offenders.push(name)
+        }
+        expect(offenders).toEqual([])
+    })
 })
 
 describe("only the rich path moves a cursor", () => {

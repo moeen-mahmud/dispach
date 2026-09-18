@@ -47,6 +47,21 @@ export function storePath(env?: Readonly<Record<string, string | undefined>>): s
  * and `remove` needs it too. Moved rather than duplicated: a second copy of a path derivation is how
  * one command deletes a file another command is still writing to.
  */
+/**
+ * Where the one server unit writes, in a **subdirectory** rather than beside the agent logs.
+ *
+ * `logs/<id>.err.log` is the per-agent shape, so a flat `logs/server.err.log` would collide with an
+ * agent whose id happened to be `server` — and the collision would appear as a service and an agent
+ * appending to one file, which is the kind of thing nobody diagnoses from a log.
+ */
+export function serverLogPaths(env?: Readonly<Record<string, string | undefined>>): {
+    readonly out: string
+    readonly err: string
+} {
+    const dir = join(sandboxRoot(env), "logs", "server")
+    return { out: join(dir, "out.log"), err: join(dir, "err.log") }
+}
+
 export function logPaths(
     agentId: string,
     env?: Readonly<Record<string, string | undefined>>,

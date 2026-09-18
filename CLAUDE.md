@@ -1984,6 +1984,27 @@ Never claim a performance property without a number in `evals/` and a script to 
   is already set **in `nextQuestion`**, not as a courtesy from `fromFlags`: a caller assembling `given`
   by hand — the wizard's own tests do — would otherwise be asked where to put an agent whose path is
   already decided.
+- **`launchctl list` omits a disabled job, so it cannot answer "what units exist".** Which is the
+  worst possible gap, because a *disabled* unit is exactly the one worth retiring: its `disable` row
+  persists across boots, no verb deletes it, and a future job with that label then installs cleanly
+  and silently never starts. Read the plist directory too — the filesystem is authoritative for "a
+  definition exists" and the list for "it is loaded", and retirement needs the union. Found by
+  running the real install against a real `~/Library/LaunchAgents`; the daemon tests drive a fake
+  `Exec` and could not have seen it.
+- **`launchctl bootout` returns before the job is gone, so a `bootstrap` straight after races it.**
+  Both return 0 and nothing is loaded — the command reports "service installed" while
+  `launchctl print` cannot find the service at all. A first install has nothing to wait for, so the
+  bug needs an existing *running* job and never appears in a test. Wait for the unload, and then
+  **verify**: "installed" is a claim about a running job, and this project's whole objection to the
+  service it replaces is that nobody was ever told.
+- **A test that spawns the real binary can install a background service on the machine running it.**
+  It did: `start` declares `needsServer`, the first spawn found no live host, and a LaunchAgent
+  pointing at a temp store was left loaded after the suite. `CI` suppresses the bootstrap and is
+  absent locally, which is exactly backwards — the runner is disposable and a developer's machine
+  keeps the wreckage. Every such test sets `<PREFIX>NO_BOOTSTRAP`, and a boundaries test fails when
+  one forgets. The detector needs a real spawn **and** a reference to the built entry: matching the
+  path alone fires on fixture strings, and matching the spawn alone fires on a test that spawns
+  `node -e` as something to signal.
 - **A lease says who is serving an agent now; it cannot say whether anybody should.** Conflating
   the two is why `stop <agent>` killed a process: right while a process served one agent, and since
   16.2a it takes every other agent in that process down. The durable answer is a row (`agent_state`),

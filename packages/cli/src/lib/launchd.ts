@@ -24,21 +24,17 @@
  *    simply written somewhere nobody looks, thousands of times. See `KEEP_ALIVE`.
  */
 
+import { assertNoSecrets } from "#lib/service-env"
+
 /**
- * Environment keys the generated plist may carry, as a function of the brand.
+ * Environment keys a generated service definition may carry — **moved to `service-env.ts`**.
  *
- * An allowlist rather than a denylist, and enforced by a throw rather than by review, because the
- * failure it prevents is silent and permanent: a token written here is readable by any local
- * process for as long as the service exists, and nothing about the running agent looks wrong.
- *
- * `HOME` because launchd hands a job almost nothing — measured on macOS 26: `PATH` and
- * `SSH_AUTH_SOCK`, and that is all. `PATH` because `exec` runs shell commands and launchd's default
- * has no node, bun, git or brew in it. The two brand variables are a label and a sandbox root,
- * neither of which is a credential.
+ * The systemd renderer needs the identical list: `systemctl show` exposes `Environment=` exactly as
+ * `launchctl print` exposes `EnvironmentVariables`, so a second copy is how one manager comes to
+ * permit a variable the other refuses, and the dangerous direction is the one that silently permits
+ * more. Re-exported under the old name so every existing caller is unchanged.
  */
-export function plistEnvAllowed(envPrefix: string): readonly string[] {
-    return ["HOME", "PATH", "TMPDIR", `${envPrefix}SERVICE`, `${envPrefix}HOME`]
-}
+export { serviceEnvAllowed as plistEnvAllowed } from "#lib/service-env"
 
 /**
  * Restart on a crash signal, and on nothing else.
@@ -77,18 +73,41 @@ export interface ServicePlan {
     readonly provenance: readonly string[]
 }
 
-export class PlistSecretError extends Error {
-    readonly code = "daemon_secret_in_plist"
-    readonly hint: string
-    constructor(key: string, allowed: readonly string[]) {
-        super(`The service definition would carry an environment variable named ${key}.`)
-        this.hint = `A launchd plist is world-readable and \`launchctl print\` echoes every environment value in plaintext to any process running as this user — so a credential here is a credential published. The agent reads its own secrets from the .env beside its manifest, which is what the service is pointed at. Only these may appear: ${allowed.join(", ")}.`
-    }
-}
+/**
+ * The old name, kept as an alias so nothing that caught it stops catching it.
+ *
+ * The class itself is `ServiceSecretError` in `service-env.ts` — one error for two renderers, for
+ * the reason the allowlist is one list.
+ */
+export { ServiceSecretError as PlistSecretError } from "#lib/service-env"
 
-/** `<slug>.agent.<id>`. Brand-derived so a rename moves the label with everything else. */
+/**
+ * `<slug>.agent.<id>` — the **retired** per-agent label.
+ *
+ * Kept, and now only for retirement: one service hosts every agent, so this is what a bare
+ * `daemon install` looks for in order to clean it up. Leaving a per-agent unit installed beside the
+ * server unit is a broken state rather than a redundant one — both claim the same lease, so the
+ * server reports that agent as served elsewhere indefinitely with nothing looking wrong.
+ *
+ * ⚠️ **`launchctl enable` is the only thing that clears an orphaned `disable` row**, and no verb
+ * deletes it. Deleting the plist leaves `<slug>.agent.<id> => disabled` in
+ * `/var/db/com.apple.xpc.launchd/` forever, so a future job reusing that label installs cleanly,
+ * reports success and silently never starts. Retirement is therefore `bootout` + `enable` + `rm`,
+ * in that order, and never just `rm`.
+ */
 export function labelFor(slug: string, agentId: string): string {
     return `${slug}.agent.${agentId}`
+}
+
+/**
+ * `<slug>.server` — the one unit.
+ *
+ * One service for the host rather than one per agent, because per-agent on/off is durable *state*
+ * (16.3's `agent_state`) and not a unit: `stop milo` leaves the host serving everything else, which
+ * a unit-per-agent cannot express without N processes contending for one port.
+ */
+export function serverLabel(slug: string): string {
+    return `${slug}.server`
 }
 
 export function escapeXml(value: string): string {
@@ -101,10 +120,9 @@ export function escapeXml(value: string): string {
 }
 
 export function renderPlist(plan: ServicePlan, envPrefix: string): string {
-    const allowed = plistEnvAllowed(envPrefix)
-    for (const key of Object.keys(plan.environment)) {
-        if (!allowed.includes(key)) throw new PlistSecretError(key, allowed)
-    }
+    // The check is shared with the systemd renderer, so the two cannot disagree about what counts
+    // as a secret — and it runs before a byte is written, so a throw leaves nothing half-installed.
+    assertNoSecrets(plan.environment, envPrefix, "launchd")
 
     const args = plan.programArguments
         .map((arg) => `      <string>${escapeXml(arg)}</string>`)

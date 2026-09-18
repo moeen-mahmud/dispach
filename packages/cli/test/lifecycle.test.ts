@@ -62,6 +62,20 @@ function env(home: string): Record<string, string> {
         ...process.env,
         MODEL_API_KEY: "test-key",
         [`${BRAND.envPrefix}HOME`]: join(home, BRAND.stateDir),
+        /**
+         * **Every spawn of the real binary must opt out of the first-run bootstrap.**
+         *
+         * Not caution. `start` declares `needsServer`, so the first `run(["start", …])` here found
+         * no live host and installed a **real LaunchAgent on the machine running the tests** —
+         * pointing at a temp store that no longer existed, loaded into launchd, left behind after
+         * the suite. Found by listing `~/Library/LaunchAgents` during a live check rather than by
+         * any test failing, which is the whole problem with it.
+         *
+         * `CI` covers the runners and is absent locally, which is exactly backwards: a developer's
+         * machine is the one that keeps the wreckage. So the opt-out is explicit here, and
+         * `boundaries.test.ts` fails when a test file spawns the binary without it.
+         */
+        [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
     } as Record<string, string>
 }
 
