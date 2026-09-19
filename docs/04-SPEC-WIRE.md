@@ -62,6 +62,8 @@ and WebSocket surfaces can return:
 | `reload_not_supported` | 409 | An agent's configuration is fixed for its process lifetime, deliberately. |
 | `provisioning_not_supported` | 501 | This server was built with no provisioner — an embedder over its own agent store. The container has one and is refused by the bind instead. |
 | `provisioning_not_local` | 403 | `POST /v1/agents` on a non-loopback bind. A scoped admin key opens it later; until then the refusal names `init` and mounting. |
+| `request_body_invalid` | 400 | A body failed its schema and the failing field declared no code of its own. Carries the field. |
+| `agent_stop_invalid` | 400 | `stop` was sent a `reason` that is not a string. |
 | `provision_answers_required` | 400 | The body has no `answers` object. |
 | `provision_answer_invalid` | 400 | One answer failed its step's validation, or was not a string. Carries the field. |
 | `provision_unknown_answer` | 400 | A key that is not a question this runtime asks. |
@@ -125,6 +127,9 @@ GET /v1/agents/:id       → the above plus dialect, window, tool count, skills 
 POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disabledAt, reason? }
 POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }
 POST /v1/agents/:id/reload
+
+GET  /v1/openapi.json    → the generated OpenAPI 3.1 document
+GET  /docs               → a browser reference over it
 
 GET  /v1/provision       → { available, local, steps[] }
 POST /v1/agents            { answers: {step: value, …} }

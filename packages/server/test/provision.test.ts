@@ -283,9 +283,11 @@ describe("what the route refuses", () => {
             body: { answers: { name: "x", server: true } },
         })
         expect(response.status).toBe(400)
-        expect(((await response.json()) as { error: { field: string } }).error.field).toBe(
-            "answers.server",
-        )
+        const detail = ((await response.json()) as { error: { field: string; code: string } }).error
+        expect(detail.field).toBe("answers.server")
+        // `invalid`, not `required`: the answer was present and the wrong type, and a code saying
+        // "required" would send somebody looking for a field they already sent.
+        expect(detail.code).toBe("provision_answer_invalid")
         await runtime.stop()
     })
 

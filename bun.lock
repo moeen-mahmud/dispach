@@ -68,6 +68,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@dispach/core": "workspace:*",
+        "zod": "^4.1.12",
       },
       "devDependencies": {
         "@dispach/web": "workspace:*",

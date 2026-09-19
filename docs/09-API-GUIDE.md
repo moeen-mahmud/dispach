@@ -6,7 +6,15 @@ This is the *guide*. [`04-SPEC-WIRE.md`](04-SPEC-WIRE.md) is the **contract** �
 event, every error code, checked against the code by `packages/server/test/spec.test.ts`. When the
 two disagree, the spec is right and this file is stale.
 
-> **Why there is no generated reference.** Phase 11 listed "API docs generated from types" as a
+> **There is a generated reference now, at `/docs`.** The paragraph below still holds and is why:
+> it argues against a *hand-written* description, and against a generator that produces a third
+> account of a surface nobody checks. `openapi.json` is neither — its paths come from the router
+> table and its bodies from the request schemas, and `spec.test.ts` fails when a registered route
+> has no summary or a summary has no route. What has **not** changed is that response shapes are
+> `@dispach/client`'s job: the document carries statuses and the error shape, and the types carry
+> the rest. See decision 11.218.
+>
+> **Why there is no *typedoc* reference.** Phase 11 listed "API docs generated from types" as a
 > deliverable, and this answers it deliberately without a generator. A typedoc build is a
 > dependency with its own release cadence producing a third description of a surface that already
 > has two — the spec, which is now machine-checked, and `@dispach/client`, whose types *are* the

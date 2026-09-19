@@ -1984,6 +1984,28 @@ Never claim a performance property without a number in `evals/` and a script to 
   is already set **in `nextQuestion`**, not as a courtesy from `fromFlags`: a caller assembling `given`
   by hand — the wizard's own tests do — would otherwise be asked where to put an agent whose path is
   already decided.
+- **A refusal's code and hint belong on the schema, not in the route.** Nine routes each validated
+  their body with `typeof` checks carrying their own code and a well-argued hint, and that is
+  precisely what made the wire surface undescribable from outside a route — a generated reference
+  would have had to restate all nine. Zod 4's `.meta()` carries them, `parseBody` reads the failing
+  field's metadata to rebuild the same `ErrorDetail`, and `z.toJSONSchema` puts them in the document,
+  so the reference names the error code a bad value produces. Two traps inside that. A field with
+  nothing specific to say must get **no code**, never a neighbour's — `sessionKey` carrying
+  `message_text_required` reports a text error for a session key, which is a lie about which field
+  is wrong. And the metadata lookup has to walk the **whole** path, including into a record's value
+  type: reading `shape[path[0]]` reported `provision_answers_required` for an answer that was
+  present and the wrong type, and "required" for a value somebody sent is the same lie.
+- **A generated reference is safe where a hand-written one is not, and the distinction is what to
+  check.** `09-API-GUIDE.md` refuses "a third description of a surface that already has two"; that
+  argument is about a description nothing checks. Derive paths from `Router.routes()` — whose
+  docstring already says a hand-kept copy "is right when it is written and wrong at the next
+  addition" — derive bodies from the schemas, and guard the one hand-written part (a summary per
+  route) in **both** directions. A summary for a route nothing registers is worse than a missing
+  one, because a reference describing an endpoint that answers 404 looks authoritative.
+- **Measure a dependency's payload before writing a sentence about it.** I wrote "several hundred
+  kilobytes" about Scalar's bundle twice; it is **3.6 MB raw, 1.0 MB gzipped** — sixteen times this
+  project's entire UI at 220 KB. The number is what decides CDN versus vendoring, so guessing it
+  decides the argument by accident.
 - **A path a test can redirect is a path the code must not compute itself.** `provisionAgent` called
   `agentsDir()` rather than the injected `defaults.agentDirBase`, and wrote three agents into the
   author's real `~/.dispach`. The tests did not fail — the *second* run did, on a collision, a day

@@ -4366,6 +4366,42 @@ inside the base the caller handed in, and revert-checking *that* guard pollutes 
 again, which is worth knowing before running it.
 
 
+
+### 16.7 — A generated OpenAPI document, and one request validator — **built** (2026-09-19)
+
+Not in the original plan. Moeen asked whether there were API docs and suggested Scalar; the answer
+had to get past `09-API-GUIDE.md`'s standing refusal of a generated reference, which turns out to
+be an argument against a *hand-written* one.
+
+**What landed.**
+
+- `packages/server/src/wire-schemas.ts` — six body schemas, with each field's **code and hint as
+  metadata**, plus `parseBody`, the one validator.
+- `packages/server/src/openapi.ts` — the document, generated from `Router.routes()` plus those
+  schemas. One hand-written summary per route, in a table guarded both ways.
+- `GET /v1/openapi.json` and `GET /docs`, both open.
+- Six routes stopped validating their own bodies. A guard fails on a seventh that tries.
+
+**Acceptance — run here**
+
+- [x] `bun test` 3377 / 0 · `test:node` 1428 / 0 · typecheck 0 · lint clean
+- [x] Served live: `{"openapi":"3.1.0","version":"0.1.0","paths":30}`, 36 operations, **zero**
+      without a summary, 6 with a request body
+- [x] `GET /v1/openapi.json` with no credential → **200**, and **0** mentions of the agent the
+      process was hosting
+- [x] `text`'s schema carries `code: message_text_required` and its hint verbatim
+- [x] One route's parameters come out as `[(id, path), (key, path), (limit, query), (before, query)]`
+- [x] `/docs` → 200 `text/html`, with the `noscript`, the local document URL and the CDN script
+- [x] The CDN bundle exists, defines `window.Scalar` and exposes `createApiReference` — the API the
+      page calls, checked against the shipped bundle rather than against docs
+
+**Not verified by me: the page rendering in a browser.** The Chrome extension would not create a
+tab across three attempts, so what I checked instead is everything that decides whether it renders —
+the bundle is reachable, the global and the function are the ones the page calls, and the document
+it fetches parses as OpenAPI 3.1 with 36 operations. The visual check is still worth somebody
+doing once, and it is the same outstanding item 15.3 left.
+
+
 ---
 
 ## Carried backlog

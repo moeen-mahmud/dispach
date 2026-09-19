@@ -43,10 +43,20 @@ import {
 } from "@dispach/core"
 import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
 import type { ClaimTicket } from "./keys.ts"
+import { openapiDocument } from "./openapi.ts"
 import { isLoopback, type OriginPolicy, originProblem } from "./origin.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
+import {
+    ApprovalBody,
+    KeyBody,
+    MessageBody,
+    PhaseBody,
+    ProvisionBody,
+    parseBody,
+    StopBody,
+} from "./wire-schemas.ts"
 
 /** Bodies larger than this are refused before a channel plugin sees them. */
 const MAX_BODY_BYTES = 1_000_000
@@ -214,6 +224,36 @@ interface RequestContext {
     readonly url: URL
     readonly params: Readonly<Record<string, string>>
 }
+
+/**
+ * The reference page. Two script tags and a `noscript`, and nothing else.
+ *
+ * Inline rather than an asset file because it is 1 KB and because `WEB_ASSETS` is a table the spec
+ * guard checks — adding an entry there for a page with no build step would be a route and a table
+ * row for one string. The `noscript` is load-bearing: with no network the page is blank, and a
+ * blank page with no explanation is indistinguishable from a broken server.
+ */
+const DOCS_PAGE = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispach API</title>
+</head>
+<body style="margin:0">
+<noscript style="display:block;font:14px/1.5 system-ui;padding:2rem;max-width:40rem">
+  <h1 style="font-size:1rem">This page needs JavaScript and a network</h1>
+  <p>It loads the reference viewer from a CDN. The document itself is served locally and needs
+  neither: <a href="/v1/openapi.json">/v1/openapi.json</a>.</p>
+</noscript>
+<div id="app"></div>
+<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+<script>
+  Scalar.createApiReference('#app', { url: '/v1/openapi.json', theme: 'default' })
+</script>
+</body>
+</html>
+`
 
 export function createHandler(options: HandlerOptions): (request: Request) => Promise<Response> {
     const { runtime } = options
@@ -455,6 +495,49 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * `/v1/agents/:id` is registered above, so a literal under that prefix would be swallowed as an
      * agent id and answered `404 agent_not_found` — a route that exists and cannot be reached.
      */
+    /**
+     * The generated document, and a browser reference over it.
+     *
+     * **Open, like `/v1/health`.** A description of which routes exist is not a secret — the spec is
+     * in the repository and the client package is published — and gating it would mean a developer
+     * cannot read the API of a server they have not yet obtained a credential for, which is the one
+     * moment the reference is most useful. It contains no agent ids, no session keys and no
+     * configuration: it is generated from the route *table*, not from what this process is hosting.
+     *
+     * `servers` names the URL this request arrived on, so the page's "try it" calls the server the
+     * document came from rather than a hardcoded localhost that is wrong in a container.
+     */
+    router.add("GET", "/v1/openapi.json", (context) =>
+        json(
+            openapiDocument({
+                routes: router.routes(),
+                serverUrl: `${context.url.protocol}//${context.url.host}`,
+            }),
+        ),
+    )
+
+    /**
+     * Scalar, from its CDN, over `/v1/openapi.json`.
+     *
+     * **The script is remote and that is a stated trade rather than an oversight.** This surface
+     * inlines its assets as *text* and ships no binary (11.200), and the browser payload has a
+     * measured budget after the 1.18 MB lesson. Scalar's bundle is **3.6 MB raw / 1.0 MB gzipped**,
+     * measured rather than guessed — sixteen times this project's entire UI, which is 220 KB. A
+     * `.ts` file holding that as a string is not a thing to inline, and vendoring it would need its
+     * own ceiling and its own argument. Offline, this page does not
+     * render and `/v1/openapi.json` still does, which is the failure mode worth having: the machine-
+     * readable half never depends on a network, and the pretty half says so in its own noscript.
+     */
+    router.add(
+        "GET",
+        "/docs",
+        () =>
+            new Response(DOCS_PAGE, {
+                status: 200,
+                headers: { "content-type": "text/html; charset=utf-8" },
+            }),
+    )
+
     router.add("GET", "/v1/provision", () =>
         json({
             available: options.provision !== undefined,
@@ -504,37 +587,18 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
 
         const body = await readJson(context.request)
         if (body.kind === "error") return fail(body.error, 400)
-        const input = (body.value ?? {}) as { answers?: unknown }
-        const answers = input.answers
-        if (answers === undefined || typeof answers !== "object" || Array.isArray(answers)) {
-            return fail(
-                {
-                    code: "provision_answers_required",
-                    message: "The request body has no `answers` object.",
-                    hint: 'Send { "answers": { "name": "milo", … } }. Every step you leave out takes its default, exactly as `init --yes` does with flags; GET /v1/provision lists them.',
-                    field: "answers",
-                },
-                400,
-            )
-        }
-        // Coerced per key rather than trusted: a number or a nested object here would reach
-        // `validateAnswer` as something it has no case for, and the answers arrive as text from
-        // both front doors anyway.
-        const text: Record<string, string> = {}
-        for (const [key, value] of Object.entries(answers as Record<string, unknown>)) {
-            if (typeof value !== "string") {
-                return fail(
-                    {
-                        code: "provision_answer_invalid",
-                        message: `answers.${key} is ${typeof value}, and every answer is text.`,
-                        hint: "Answers arrive as strings from the terminal and from here, and are validated per step. Send the value as a string — including a boolean-looking choice, whose values are named in GET /v1/provision.",
-                        field: `answers.${key}`,
-                    },
-                    400,
-                )
-            }
-            text[key] = value
-        }
+        /**
+         * `Record<string, string>`, checked by the schema — including the per-value type.
+         *
+         * Every answer is text on both front doors, and a number reaching `validateAnswer` would
+         * arrive as something it has no case for. The schema refuses it by path (`answers.server`),
+         * which is the field a caller has to fix; *which* steps exist is `GET /v1/provision`'s
+         * answer, not this schema's, because enumerating them here would be a second copy of
+         * `STEP_ORDER`.
+         */
+        const parsed = parseBody(ProvisionBody, body.value)
+        if (!parsed.ok) return fail(parsed.error, 400)
+        const text = parsed.value.answers
 
         let created: ReturnType<Provisioner["create"]>
         try {
@@ -597,11 +661,15 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
 
         const body = await readJson(context.request)
         if (body.kind === "error") return fail(body.error, 400)
-        const reason = (body.value as { reason?: unknown } | null)?.reason
+        const parsed = parseBody(StopBody, body.value)
+        if (!parsed.ok) return fail(parsed.error, 400)
+        const reason = parsed.value.reason?.trim()
         const state = await runtime.store.agentState.disable(
             id,
             new Date(options.now?.() ?? Date.now()).toISOString(),
-            typeof reason === "string" && reason.trim() !== "" ? reason.trim() : undefined,
+            // An empty or whitespace-only note is no note. Kept here rather than in the schema
+            // because "" is a legal string a client may genuinely send meaning "no reason".
+            reason === undefined || reason === "" ? undefined : reason,
         )
 
         if (hosted) {
@@ -685,34 +753,28 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             const body = await readJson(context.request)
             if (body.kind === "error") return fail(body.error, 400)
 
-            const input = body.value as {
-                text?: unknown
-                sessionKey?: unknown
-                deliver?: unknown
-                stream?: unknown
-                chunks?: unknown
-                from?: unknown
-            }
+            /**
+             * Shape from the schema; meaning from the two parsers below.
+             *
+             * `MessageBody` owns the types, the trim and the enum — including the trust-boundary
+             * refusal on `from.kind`, whose nearest-match suggestion moved into a custom Zod error
+             * rather than being lost. `parseDeliver` and `parseFrom` then only *build* their values.
+             * A schema that validated and a parser that re-validated would be two owners of one
+             * field, which is the drift this refactor exists to remove.
+             */
+            const parsed = parseBody(MessageBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const input = parsed.value
+
             // Per-token frames are opt-in, and the *reader* decides — so the query parameter on the
             // stream routes is the primary control and this is the writer's way to ask on the
             // inline-stream path, where there is no second request to carry one. Strict `=== true`,
-            // like `stream`: a client sending the string "false" must not be read as asking.
+            // like `stream`: the schema rejects the string "false", so this cannot be read as
+            // asking by a client that sent one.
             const wantsChunks = input.chunks === true
-            const text = typeof input.text === "string" ? input.text : ""
-            if (text.trim() === "") {
-                return fail(
-                    {
-                        code: "message_text_required",
-                        message: "The request body has no text.",
-                        hint: 'Send { "text": "..." }. An empty turn would be billed for a full prompt and produce nothing.',
-                        field: "text",
-                    },
-                    400,
-                )
-            }
+            const text = input.text
 
-            const sessionKey =
-                typeof input.sessionKey === "string" ? input.sessionKey : "api:default"
+            const sessionKey = input.sessionKey ?? "api:default"
             const deliver = parseDeliver(input.deliver)
             if (deliver.kind === "error") return fail(deliver.error, 400)
 
@@ -938,18 +1000,9 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
         withAgent(runtime, context, async () => {
             const body = await readJson(context.request)
             if (body.kind === "error") return fail(body.error, 400)
-            const input = body.value as { granted?: unknown }
-            if (typeof input.granted !== "boolean") {
-                return fail(
-                    {
-                        code: "approval_decision_required",
-                        message: "The request body has no boolean `granted`.",
-                        hint: 'Send { "granted": true } or { "granted": false }. There is no default: one direction would deny a call over a typo and the other would grant one, and neither is a decision anybody made.',
-                        field: "granted",
-                    },
-                    400,
-                )
-            }
+            const parsed = parseBody(ApprovalBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const input = parsed.value
 
             const approvalId = context.params.approvalId ?? ""
             if (!approvals.resolve(approvalId, input.granted)) {
@@ -1031,18 +1084,11 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
 
         const body = await readJson(context.request)
         if (body.kind === "error") return fail(body.error, 400)
-        const input = body.value as { label?: unknown }
-        if (typeof input.label !== "string") {
-            return fail(
-                {
-                    code: "key_label_required",
-                    message: "The request body has no string `label`.",
-                    hint: 'Send { "label": "my browser" }. A label is required rather than defaulted because it is the only thing distinguishing two credentials in a listing, and "key 2" is a name nobody can act on when deciding which to revoke.',
-                    field: "label",
-                },
-                400,
-            )
-        }
+        // Shape here; the display rule stays in `keyLabelProblem`, which decides what a label may
+        // *contain* — a wire schema has no business knowing how wide a listing row is.
+        const parsed = parseBody(KeyBody, body.value)
+        if (!parsed.ok) return fail(parsed.error, 400)
+        const input = parsed.value
         const problem = keyLabelProblem(input.label)
         if (problem !== undefined) {
             return fail(
@@ -1173,7 +1219,11 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
         withAgent(runtime, context, async (agent) => {
             const body = await readJson(context.request)
             if (body.kind === "error") return fail(body.error, 400)
-            const phase = (body.value as { phase?: unknown }).phase
+            const parsed = parseBody(PhaseBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            // Shape here; whether the agent *declares* this phase is checked below, where the
+            // manifest is — a wire schema cannot know one agent's phase names.
+            const phase = parsed.value.phase
             if (typeof phase !== "string" && phase !== null) {
                 return fail(
                     {
@@ -1790,7 +1840,21 @@ function isOpenPath(pathname: string): boolean {
          * open any future path under it, and the set of things served from a directory is exactly
          * the kind of list that grows without anybody re-reading the auth rule.
          */
-        WEB_PATHS.includes(pathname)
+        WEB_PATHS.includes(pathname) ||
+        /**
+         * The reference, and the document behind it.
+         *
+         * Open for the same reason `/v1/health` is, and for one more: a description of which routes
+         * exist is not a secret — the spec is in the repository and the client package is
+         * published — and gating it means a developer cannot read the API of a server they have not
+         * yet obtained a credential for, which is the one moment a reference is most useful.
+         *
+         * It discloses nothing about *this* process: the document is generated from the route
+         * table, so it carries no agent id, no session key and no configuration. Named explicitly
+         * rather than matched by prefix, for the reason the asset list is.
+         */
+        pathname === "/docs" ||
+        pathname === "/v1/openapi.json"
     )
 }
 
