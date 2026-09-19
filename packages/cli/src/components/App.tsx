@@ -64,8 +64,8 @@ import {
     NEW_SESSION_HINT,
     resolveSessionCommand,
     sessionHelpText,
+    type ToolsView,
     toolsReport,
-    toolsView,
     unknownCommandText,
 } from "#lib/session-commands"
 import type { SessionRowSource } from "#lib/sessions-view"
@@ -120,8 +120,7 @@ type Pane =
     | { readonly kind: "config"; readonly rows: readonly EditorRow[] }
 
 export function App({
-    agent,
-    bus,
+    source,
     sessionKey,
     model,
     agentName,
@@ -144,7 +143,7 @@ export function App({
     const { exit } = useApp()
     const size = useTerminalSize()
     const columns = screenColumns(size.columns, FALLBACK_COLUMNS)
-    const { state, busy, send, cancel, note, trim } = useTurn({ agent, bus, sessionKey, initial })
+    const { state, busy, send, cancel, note, trim } = useTurn({ source, sessionKey, initial })
     // A draft handed in by a `/restart` opens the prompt with the cursor at its end, which is where the
     // person left it. Only the initial value — a later prop change must not overwrite what is being
     // typed now, which is exactly what `useState`'s initialiser semantics give for free.
@@ -355,16 +354,39 @@ export function App({
                     // confirmation on a surface where leaving takes the screen with it.
                     setConfirming(true)
                     return
-                case "restart":
+                case "restart": {
                     // The settings an agent booted with are fixed for its lifetime, so a
-                    // configuration change needs a new one. Nothing is lost: the conversation lives
-                    // in the store and the new agent resumes the same session key.
-                    // The unsent draft rides across the restart. `/restart` rebuilds the agent to
-                    // pick up a settings change; throwing away a half-written message on the way is a
-                    // second, unasked-for consequence of asking for the first.
-                    onRestart?.(draft)
-                    exit()
+                    // configuration change needs a new one. Nothing is lost either way: the
+                    // conversation lives in the store and the same session key resumes it.
+                    //
+                    // **Attached, the screen does not come down.** The host owns the agent, so this
+                    // is a request to replace it — and there is nothing in this process to rebuild,
+                    // so tearing the frame down would be a teardown for its own sake. Embedded,
+                    // `onRestart` unmounts and the loop builds a new runtime; the unsent draft
+                    // rides across, because throwing away a half-written message is a second,
+                    // unasked-for consequence of asking for the first.
+                    const reload = source.reload
+                    if (reload === undefined) {
+                        onRestart?.(draft)
+                        exit()
+                        return
+                    }
+                    note("asking the host to reload this agent…")
+                    reload()
+                        .then((adopted: readonly string[]) =>
+                            note(
+                                // Named rather than counted: replacing a supervisor replaces its
+                                // team, and "3 agents reloaded" would leave somebody guessing which.
+                                `reloaded ${adopted.join(", ")} — this conversation continues`,
+                            ),
+                        )
+                        .catch((error: unknown) =>
+                            note(
+                                `could not reload: ${error instanceof Error ? error.message : String(error)}`,
+                            ),
+                        )
                     return
+                }
                 case "new":
                     // The same unmount-and-reopen route `/restart` and `/sessions` take, for the same
                     // reason: a transcript cannot be re-keyed in place. Nothing is destroyed — the
@@ -376,7 +398,18 @@ export function App({
                     note(sessionHelpText())
                     return
                 case "tools":
-                    note(toolsReport(toolsView(agent)))
+                    // Fire-and-report, like `/status` and `/context` beside it: a component cannot
+                    // block, so the note is the acknowledgement. Embedded this resolves off the
+                    // live registry with no await worth mentioning; attached it is a request, and
+                    // the two must not read differently to whoever typed it.
+                    source
+                        .tools()
+                        .then((view: ToolsView) => note(toolsReport(view)))
+                        .catch((error: unknown) =>
+                            note(
+                                `could not read the tools: ${error instanceof Error ? error.message : String(error)}`,
+                            ),
+                        )
                     return
                 case "context":
                     // Same shape as `status` below: a component cannot block, so the note is the
@@ -419,7 +452,7 @@ export function App({
                 case "reset":
                     // Fire-and-report rather than awaited: a component cannot block, and the note is
                     // the acknowledgement. A failure surfaces as a rejected promise, so it is caught.
-                    agent
+                    source
                         .clearSession(sessionKey)
                         .then(() => note("session cleared — memory files on disk are untouched"))
                         .catch((error: unknown) =>

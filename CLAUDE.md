@@ -2105,6 +2105,27 @@ Never claim a performance property without a number in `evals/` and a script to 
   into a `run`-mode runtime, opening a Telegram long-poll nobody asked for. That is the exact
   surprise `startChannels` exists to prevent, and the reason a one-shot `run --input` would then
   hang on exit.
+- **`run` is a view, not an owner — it attaches to a live host and never builds a runtime beside
+  one.** `components/App` takes an `AgentSource` (`lib/source.ts`), implemented twice; the lease
+  decides which, and a published `base_url` is what makes attaching possible at all. **Nothing falls
+  back from attached to embedded**: a host that holds the lease and cannot be reached is a fault to
+  report, because quietly starting a second runtime is the state this removes and it would look like
+  success. Four things around it are easy to get wrong. `send` resolves with a `TurnOutcome` rather
+  than `void`, because the plain path prints `endNote` and decides its exit status from it —
+  attached, every field comes off `turn.end` and the `error` event. **Cancellation is a request**,
+  since turns are detached from the client connection, and an abort in the window *before* the send
+  has returned a turn id is remembered and applied when it arrives, or the cancel key visibly does
+  nothing. **One SSE stream serves every subscriber**, or every token crosses the wire twice. And an
+  attached view **opens no database** — a stale `--store` would show a different conversation than
+  the one being appended to, with both looking correct. `/status` has a *second implementation*
+  rather than blanked fields: "connected in this session" and "NOT bound here" are both lies about an
+  agent hosted elsewhere, which is decision 5.17 one process boundary out.
+- **A command handled on one output path and not the other is invisible, and `/restart` proved it
+  again.** The rich path reloaded the host; the plain path still returned `"restart"`, re-bannered,
+  and printed *"the configuration on disk is now the one in force"* — a sentence about a rebuild that
+  never happened, which is worse than doing nothing because somebody would believe it. Found by
+  running it, not by reading it. `boundaries.test.ts` polices this for *events*; commands have no
+  such guard, so the rule is to change both paths in the same edit.
 - **A state a client cannot act on must not displace one it can.** `ChannelStatus` gained
   `needs_input` before anything produces it, because `status` is a **string on the wire** and adding
   a member is additive inside `v: 1` while changing the field to an object is not — so the

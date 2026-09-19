@@ -379,10 +379,19 @@ describe("every reachable failure carries a hint", () => {
             code: "unknown_event_type",
         },
         {
-            name: "reload",
+            name: "reloading an agent this server does not host",
             method: "POST",
-            path: "/v1/agents/assistant/reload",
-            code: "reload_not_supported",
+            /**
+             * The reload route's remaining reachable failure from a bare call.
+             *
+             * It answered a blanket `reload_not_supported` 501 until 17.1 wired it to
+             * `Runtime.replace`; the refusals that survive are about *this* agent — unknown here,
+             * `agent_turn_in_flight` while a turn is running (asserted in `server.test.ts`, where
+             * a turn can be held open), and `agent_not_replaceable` for a team member, which is
+             * the runtime's own refusal and belongs where the team is — `core/test/adopt.test.ts`.
+             */
+            path: "/v1/agents/nope/reload",
+            code: "agent_not_found",
         },
         {
             name: "stopping a turn with no handle",

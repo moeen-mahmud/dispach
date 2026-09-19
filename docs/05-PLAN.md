@@ -4457,6 +4457,62 @@ only one surface performs is a check the two disagree on" hazard, inverted: here
 the stricter one. Recorded below rather than fixed, because the honest fix is a two-pass load and
 that is a decision rather than an edit.
 
+## Phase 17 — the front ends
+
+### 17.1 — The runtime seam — **built** (2026-09-19)
+
+The headline of the always-on plan, and the stage everything before it was for.
+
+**The problem, stated as a sequence.** `run` declares `needsServer`, so since 16.4 it installs and
+starts a server — and then built a *second* `Runtime` for the agent that server was already
+holding. Two processes on one SQLite file are not two views of one conversation; they are two
+writers, and slot 2 told the **model** as much through `declined`.
+
+**What landed.**
+
+- `packages/cli/src/lib/source.ts` — `AgentSource`, plus `embeddedSource` (today's behaviour) and
+  `remoteSource` (the same shape over `/v1`). `components/App` and `useTurn` take a source; neither
+  knows which it has.
+- `run` probes `liveHostOf(agentId)` and attaches when a host has published a `base_url`, embedding
+  otherwise. `--ephemeral` always embeds; `--input` attaches, deviating from this plan's wording
+  for the reason in decision 11.220.
+- `runAttached` — a loop that owns no runtime, no store and no lease. `/restart` asks the host to
+  `replace`; `/exit` detaches.
+- `POST /v1/agents/:id/reload` wired to `Runtime.replace`, answering 200 with `adopted[]` and
+  **409 `agent_turn_in_flight`** rather than aborting a turn. It had been a blanket 501, and the
+  409-vs-501 contradiction across `04-SPEC-WIRE.md` and `06-VELAOPS-INTEGRATION.md` is resolved
+  rather than carried to Phase 19.
+- `@dispach/client` gains `messages`, `clearSession` and `reload`; `SessionSummary` and
+  `ToolSummary` were **under-declared** against what the routes already sent and now match.
+- The tools route carries `trustReason` and the agent resource carries `catalogueTokens` — both
+  present on the embedded path and silently absent when attached.
+- `runPlain` takes one wildcard subscription and switches, instead of seven named ones. The
+  both-paths boundaries guard now checks the same string on both, because the asymmetry it policed
+  is gone.
+
+**Acceptance — all run against a real server holding a real agent.**
+
+- [x] `dispach run vela --input "…"` with a host live: attached, streamed over SSE, stats from
+      `turn.end`. The banner and `/status` both name the host's address and pid.
+- [x] `/status` attached reports what it is attached to and reads the host's conversations — a
+      second implementation, not the embedded one with its interesting halves blanked.
+- [x] `/restart` attached on **both** paths: `reloaded vela — this conversation continues`, one
+      banner, the server's pid unchanged. The plain path took the embedded route on the first
+      attempt and printed *"the configuration on disk is now the one in force"* about a rebuild
+      that never happened — found by running it, fixed, re-run.
+- [x] Every view exited: `/v1/ready` still 200 and a `POST /messages` still answered. That is what
+      "a view" has to mean.
+- [x] Host killed: `run` embeds, banner reports the store and `ready in 72 ms`, `/status` says
+      *"this session is serving this agent"*.
+- [x] The credential needs no new mechanism — verified by accident and then on purpose:
+      `hostToken` read the same layered env `serve` read it from.
+- [x] 3394 pass / 0 fail, node 1433 / 0, typecheck 0, lint clean, `bench:boot` ok, `check:deps` ok.
+- [x] The extraction was landed **green before any remote code existed**, so a failure could only
+      be one or the other. Three attached behaviours revert-checked: resolving on any `turn.end`
+      fails 1, dropping the abort-before-id window fails 1, a stream per subscriber fails 1.
+
+**Not done here, deliberately.** `packages/web` still picks `agents[0]`; the browser is 17.3.
+
 ---
 
 ## Carried backlog

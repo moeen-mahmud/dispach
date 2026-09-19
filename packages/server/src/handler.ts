@@ -414,6 +414,10 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 dialect: agent.describe().dialect,
                 window: agent.window,
                 tools: agent.tools.size,
+                // What the catalogue costs every turn, beside how many tools there are. A count
+                // says nothing about the bill: eight system tools and eight Composio ones differ
+                // by an order of magnitude, and this is the figure a person trims against.
+                catalogueTokens: agent.describe().catalogueTokens,
                 skills: agent.skills?.skills.length ?? 0,
                 schedules: schedules.length,
                 /**
@@ -443,25 +447,53 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
     )
 
     /**
-     * Reload is refused, and the refusal is the honest answer.
+     * Re-read one agent's manifest by **replacing the agent**, never by mutating it.
      *
-     * The spec describes it as re-reading the manifest and rebuilding the tool index. That
-     * contradicts a decision this runtime is built on: the catalogue resolves once and slot 1
-     * renders once, so a session's cached prefix stays byte-stable and `config_set` cannot change
-     * behaviour underneath a conversation. `/restart` exists in the CLI for exactly this reason.
-     * Implementing a partial reload that silently did not apply would be worse than saying no.
+     * This answered 501 for four phases, and the refusal was right about the thing it was arguing
+     * against: an agent's configuration is fixed for the lifetime of its *instance* — the catalogue
+     * resolves once and slot 1 renders once, so a session's cached prefix stays byte-stable and
+     * `config_set` cannot change behaviour underneath a conversation. A *partial* reload that
+     * silently did not apply would be worse than saying no, and still would be.
+     *
+     * `Runtime.replace` is the version that keeps that decision intact: the agent is disposed and
+     * re-created from its source, so it gets a **new instance** with its own catalogue and its own
+     * frozen prefix. Nothing is mutated. What changes is only who can ask — the CLI's `/restart`
+     * rebuilt the whole runtime because it owned one, and an attached view owns nothing.
+     *
+     * It refuses while a turn is in flight rather than aborting one, which is `dispose`'s rule and
+     * not this route's: a reload that killed somebody's half-finished answer to pick up a setting
+     * would be a worse trade than waiting. `agent_turn_in_flight` names the count.
      */
     router.add("POST", "/v1/agents/:id/reload", (context) =>
-        withAgent(runtime, context, () =>
-            fail(
-                {
-                    code: "reload_not_supported",
-                    message: "An agent's configuration is fixed for the lifetime of its process.",
-                    hint: "Restart the runtime to pick up a manifest change. The tool catalogue resolves once and the cached prompt prefix depends on it staying fixed, so a live reload would change behaviour mid-conversation. This endpoint is specified in 04-SPEC-WIRE.md and deliberately not implemented.",
-                },
-                501,
-            ),
-        ),
+        withAgent(runtime, context, async (agent) => {
+            try {
+                const admitted = await runtime.replace(agent.id)
+                return json({
+                    id: agent.id,
+                    status: "loaded",
+                    // Every agent that came back, because replacing a supervisor replaces its team:
+                    // they load from one manifest as one unit, so a caller holding a list needs to
+                    // know the members are new instances too.
+                    adopted: admitted.map((entry) => entry.id),
+                })
+            } catch (error) {
+                // The runtime's own refusals carry the field and the remedy — a team member has no
+                // manifest of its own, a busy agent names its in-flight count. Paraphrasing either
+                // here would replace a precise answer with a vague one.
+                if (error instanceof HarnessError) {
+                    return fail(
+                        {
+                            code: error.code,
+                            message: error.message,
+                            hint: error.hint,
+                            ...(error.field === undefined ? {} : { field: error.field }),
+                        },
+                        error.code === "agent_turn_in_flight" ? 409 : 400,
+                    )
+                }
+                throw error
+            }
+        }),
     )
 
     /**
@@ -1381,6 +1413,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                     summary: spec.summary,
                     mutating: spec.mutating,
                     trust: spec.trust,
+                    // Why a provider tool declares itself trusted when the default is untrusted.
+                    // It exists because the boot warning fired on every start of every
+                    // system-provider agent, and a warning always present for a correct
+                    // configuration is one nobody reads — so the reason belongs where a person is
+                    // already looking at the catalogue. Omitted here, an attached reader sees the
+                    // column silently blank, which is the same failure one layer out.
+                    ...(spec.trustReason === undefined ? {} : { trustReason: spec.trustReason }),
                     provider: spec.provider ?? "local",
                     tags: spec.tags,
                     ...(phased ? { phases: phasesFor(phases, spec) } : {}),

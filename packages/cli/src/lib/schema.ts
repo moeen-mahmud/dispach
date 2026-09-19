@@ -3,10 +3,10 @@
  * receives. Domain shapes live in `types.ts`.
  */
 
-import type { Agent, EventBus } from "@dispach/core"
 import type { BrowseRow, InstallReport } from "#lib/browse"
 import type { Slice } from "#lib/scroll"
 import type { SessionRowSource } from "#lib/sessions-view"
+import type { AgentSource } from "#lib/source"
 import type { CatalogueEntry } from "#lib/source-cache"
 import type { TextSelection } from "#lib/text-selection"
 import type {
@@ -309,8 +309,15 @@ export interface PluginsOptions {
 // ─── component props ─────────────────────────────────────────────────────────────────────
 
 export interface AppProps {
-    readonly agent: Agent
-    readonly bus: EventBus
+    /**
+     * Where the agent is, not which object it is.
+     *
+     * This was an `Agent` and an `EventBus`, which is what made the screen a second *owner* of a
+     * runtime rather than a view of one — and with an always-on server that meant two writers on
+     * one store. `lib/source.ts` has the two implementations; nothing in this component knows
+     * which it has, except `/status`, whose whole job is to say.
+     */
+    readonly source: AgentSource
     readonly sessionKey: string
     readonly model: string
     /** Notes printed once above the conversation: version, session, store, any reaped turn. */

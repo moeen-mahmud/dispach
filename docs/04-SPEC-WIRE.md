@@ -59,7 +59,8 @@ and WebSocket surfaces can return:
 | `web_asset_missing` | 500 | The routes serving the browser surface and the table backing them diverged. A broken build, not a missing file. |
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
-| `reload_not_supported` | 409 | An agent's configuration is fixed for its process lifetime, deliberately. |
+| `agent_turn_in_flight` | 409 | A reload or stop was asked for while a turn is running. It names the count; retry when the turn ends, because aborting one to apply a setting is the worse trade. |
+| `agent_not_replaceable` | 400 | `reload` on a team member, which has no manifest of its own — replace its supervisor, which reloads the team as one unit. |
 | `provisioning_not_supported` | 501 | This server was built with no provisioner — an embedder over its own agent store. The container has one and is refused by the bind instead. |
 | `provisioning_not_local` | 403 | `POST /v1/agents` on a non-loopback bind. A scoped admin key opens it later; until then the refusal names `init` and mounting. |
 | `request_body_invalid` | 400 | A body failed its schema and the failing field declared no code of its own. Carries the field. |
@@ -196,15 +197,27 @@ wider, and an addressable one is a route around whatever policy the supervisor w
 nobody having asked the supervisor. `team?` on the supervisor's own resource is how they stay
 observable, and it is absent rather than `[]` for an agent with no team.
 
-`reload` re-reads the manifest and context files and rebuilds the tool and skill indexes.
-It does **not** restart channels unless their config changed, and it never drops in-flight
-turns. Returns a diff of what changed.
+`reload` **replaces the agent**: it is disposed and re-created from its source, so it comes back as
+a new instance with a freshly resolved catalogue and a freshly rendered slot 1. It answers
+`200 { id, status: "loaded", adopted[] }`, and `adopted` lists every agent that came back — a
+supervisor brings its team, because they load from one manifest as one unit.
 
-**This build answers `501 reload_not_supported`.** An agent's catalogue resolves once and slot 1
-renders once, so a session's cached prompt prefix depends on the configuration staying fixed for the
-lifetime of the process — which is also why the CLI has `/restart`. A partial reload that silently
-did not apply would be worse than a refusal, so the endpoint stays specified and declines, naming
-the reason. Decision 11.20.
+**It does not mutate a live agent, and the distinction is the whole design.** An agent's
+configuration is fixed for the lifetime of its *instance*: the catalogue resolves once and slot 1
+renders once, so a session's cached prompt prefix stays byte-stable and `config_set` cannot change
+behaviour underneath a conversation. Replacing the instance honours that where a partial in-place
+reload would quietly break it. It returns no diff — that was specified and never built, and a
+report of "what changed" between two instances is a different feature from restarting one.
+
+**Nothing in flight is discarded.** A reload while a turn is running answers
+`409 agent_turn_in_flight` naming the count, rather than aborting it: picking up a setting is not
+worth somebody's half-finished answer, and from a caller's side an aborted turn is
+indistinguishable from the runtime crashing. Retry once the turn ends.
+
+This answered `501 reload_not_supported` until 17.1, when `Runtime.replace` (16.2b) made the
+honest version possible. The old refusal's argument was correct about in-place mutation and is
+preserved above; what changed is that an **attached** view owns no runtime, so `/restart` in a CLI
+session hosted by a server has to reach it through here. Decisions 11.20 and 11.220.
 
 ### Turns
 

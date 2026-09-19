@@ -106,13 +106,21 @@ Call by call. This is the table to work from in step 3.
 | Nothing equivalent | `GET /v1/agents/:id/context` | The assembled prompt with per-slot token counts. "Why did it do that?" is almost always a context question. |
 | Nothing equivalent | `GET /v1/events` | Every lifecycle event, filterable. This is where `sub_agent_invocations` and `tool_calls` come from. |
 
-> **`POST /v1/agents/:id/reload` answers `409` and always will.** Two rows of this document
-> previously promised that a channel change "applies on `reload` without restart" and that reload
-> "returns a diff". Both were false and are corrected here: an agent's configuration is fixed for
-> the lifetime of its process, because the tool catalogue resolves once and the cached prompt
-> prefix depends on it staying fixed. A config change is a container restart — which at a ~55 ms
-> boot is a cheaper operation than the hot-patch it replaces. Engine code that expects reload to
-> apply anything must be changed, and this is the row most likely to be missed.
+> **`POST /v1/agents/:id/reload` replaces the agent; it does not hot-patch one, and it returns no
+> diff.** Two rows of this document once promised that a channel change "applies on `reload`
+> without restart" and that reload "returns a diff". Both were false. What is true since 17.1: the
+> agent is **disposed and re-created** from its manifest, so it comes back as a new instance with a
+> freshly resolved catalogue — `200 { id, status: "loaded", adopted[] }`. Nothing is mutated in
+> place, because an agent's configuration is fixed for the lifetime of its instance: the catalogue
+> resolves once and the cached prompt prefix depends on it staying fixed.
+>
+> Two consequences for engine code. A reload **during a turn** answers `409 agent_turn_in_flight`
+> rather than aborting it, so a caller applying a config change has to retry rather than assume
+> success. And the *sessions* survive — they are the store's, not the instance's — so this is not a
+> container restart and does not need to be: at a ~55 ms boot either is cheap, but a reload leaves
+> every other agent in the process untouched, which a restart does not. This document previously
+> said reload "answers 409 and always will"; that sentence is withdrawn, and 409 is now the
+> in-flight case only.
 
 ### Config translation
 

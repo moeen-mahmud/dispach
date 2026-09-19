@@ -601,23 +601,56 @@ describe("WizardApp", () => {
     })
 })
 
-/** The narrow surface `App` actually calls. Anything else it reached for would be a type error. */
-function stubAppProps(): AppProps {
+/**
+ * The narrow surface `App` actually calls. Anything else it reached for would be a type error.
+ *
+ * Now one object rather than an `agent` and a `bus`, which is 17.1's whole point: the component
+ * takes *where the agent is* instead of the agent, so this stub is the third implementation of
+ * `AgentSource` beside the embedded and attached ones — and the fact that it is a plain object with
+ * no runtime behind it is the evidence the seam is actually narrow.
+ *
+ * `reload` is deliberately absent. Absence is how this interface spells "the caller owns the
+ * runtime", so a stub with one would put the component on its *attached* `/restart` path, which is
+ * not the path an embedded frame test means to exercise.
+ */
+function stubSource(): AppProps["source"] {
     const filter = { push: (text: string) => text, endStep: () => "", end: () => "" }
-    const agent = {
-        streamFilter: () => filter,
-        describe: () => ({ dialect: "nlt", catalogueTokens: 120 }),
-        tools: { specs: () => [] },
-        clearSession: async () => {},
-        send: async () => {},
-    }
-    const bus = { on: () => () => {} }
     return {
-        // Cast through `unknown` to the real prop types: a structural stub of the surface App calls.
-        // Standing up a live runtime to check that a transcript renders would be slower and cover less,
-        // and anything else the component reached for would be a type error here rather than a pass.
-        agent: agent as unknown as AppProps["agent"],
-        bus: bus as unknown as AppProps["bus"],
+        kind: "embedded",
+        agentId: "milo",
+        describe: () => ({
+            agentId: "milo",
+            name: "milo",
+            model: "qwen3.5:9b",
+            dialect: "nlt",
+            window: 32_768,
+            catalogueTokens: 120,
+            thinking: "none",
+            warnings: [],
+        }),
+        subscribe: () => () => {},
+        send: async () => ({
+            text: "",
+            reason: "final" as const,
+            steps: 1,
+            durationMs: 1,
+            tokens: { prompt: 0, output: 0 },
+        }),
+        streamFilter: () => filter as unknown as ReturnType<AppProps["source"]["streamFilter"]>,
+        history: async () => [],
+        sessions: async () => [],
+        clearSession: async () => {},
+        tools: async () => ({ dialect: "nlt", catalogueTokens: 120, tools: [] }),
+        context: async () => {
+            throw new Error("no context in a frame test")
+        },
+        close: async () => {},
+    }
+}
+
+function stubAppProps(): AppProps {
+    return {
+        source: stubSource(),
         sessionKey: "local:default",
         model: "qwen3.5:9b",
         agentName: "milo",
@@ -729,12 +762,22 @@ describe("App", () => {
         const harness = mount(
             h(App, {
                 ...props,
-                agent: {
-                    ...props.agent,
-                    send: async (input: { text: string }) => {
-                        sent.push(input.text)
+                source: {
+                    ...props.source,
+                    // `send(text, options)` — the text is the first positional, not a field. This
+                    // stub read `input.text` and was harmless only because the assertion is that
+                    // nothing is sent at all: a paste composes rather than submitting.
+                    send: async (text: string) => {
+                        sent.push(text)
+                        return {
+                            text: "",
+                            reason: "final" as const,
+                            steps: 1,
+                            durationMs: 1,
+                            tokens: { prompt: 0, output: 0 },
+                        }
                     },
-                } as unknown as AppProps["agent"],
+                },
             }),
             { columns: 100 },
         )
@@ -874,13 +917,19 @@ describe("App, restarting", () => {
             h(App, {
                 ...props,
                 onRestart: (draft: string) => drafts.push(draft),
-                agent: {
-                    ...props.agent,
-                    // `Agent.send(input, options)` — the text is the first positional, not a field.
-                    send: async (input: string) => {
-                        sent.push(input)
+                source: {
+                    ...props.source,
+                    send: async (text: string) => {
+                        sent.push(text)
+                        return {
+                            text: "",
+                            reason: "final" as const,
+                            steps: 1,
+                            durationMs: 1,
+                            tokens: { prompt: 0, output: 0 },
+                        }
                     },
-                } as unknown as AppProps["agent"],
+                },
             }),
             { columns: 100, rows: 24 },
         )

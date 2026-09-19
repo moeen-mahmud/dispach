@@ -16,18 +16,20 @@
 import { randomBytes } from "node:crypto"
 import { existsSync } from "node:fs"
 import { createInterface, type Interface } from "node:readline"
+import { createClient } from "@dispach/client"
 import {
     type Agent,
     type AnyEvent,
     BRAND,
     defaultStorePath,
     describeWindowSource,
+    type ErrorDetail,
     endedBadly,
     endNote,
     HarnessError,
     processAlive,
     Runtime as RuntimeClass,
-    type SessionSummary,
+    readManifestHeader,
     VERSION,
     windowReport,
 } from "@dispach/core"
@@ -52,6 +54,7 @@ import {
     restoreTerminal,
 } from "#lib/exit"
 import { negotiateKeyboard } from "#lib/keyboard"
+import { hostToken, liveHostOf } from "#lib/lifecycle"
 import { ENABLE_MOUSE } from "#lib/mouse"
 import { resolveModeFromProcess } from "#lib/output"
 import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
@@ -61,14 +64,22 @@ import { listAgents, storePath } from "#lib/sandbox"
 import type { RunOptions } from "#lib/schema"
 import { screenColumns } from "#lib/screen"
 import {
+    type ContextView,
     contextReport,
     resolveSessionCommand,
     sessionHelpText,
     toolsReport,
-    toolsView,
     unknownCommandText,
 } from "#lib/session-commands"
 import { newSessionKey } from "#lib/session-key"
+import {
+    type AgentSource,
+    embeddedSource,
+    hostFrom,
+    type LiveHost,
+    remoteSource,
+    type SourceSession,
+} from "#lib/source"
 import type { CatalogueEntry } from "#lib/source-cache"
 import { openTap } from "#lib/stdin-tap"
 import type { RenderMode } from "#lib/types"
@@ -231,6 +242,43 @@ export async function runCommand(options: RunOptions): Promise<number> {
         current: undefined,
     }
 
+    /**
+     * **Attach to a live host, or build a runtime — never both.**
+     *
+     * This is 17.1, and the sequence that makes it necessary is one command long: `run` declares
+     * `needsServer`, so since 16.4 it already installs and starts a server — and then built a
+     * *second* runtime for an agent that server was holding. Two processes on one SQLite file are
+     * not two views of a conversation; they are two writers, and the runtime said so out loud, in
+     * slot 2, to the model (`declined`, decision 5.17).
+     *
+     * `--ephemeral` is excluded by definition: it asks for an in-memory store, which is a request
+     * for a runtime of one's own. Everything else attaches when something is there to attach to,
+     * `--input` included — the plan's wording put one-shots on the embedded path, but its stated
+     * reason was "starts no channels or schedules", and attaching starts none either. What a
+     * one-shot gains is the thing the phase is about: one writer.
+     *
+     * Nothing here falls back *from* attached to embedded. If a host holds the lease and cannot be
+     * reached, that is a fault to report rather than route around: quietly starting a second
+     * runtime is exactly the state this removes, and it would look like success.
+     */
+    const attached =
+        options.ephemeral === true
+            ? undefined
+            : hostFrom(await liveHostOf(agentIdFor(options.manifestPath), options.store))
+    if (attached !== undefined) {
+        return await runAttached({
+            ...options,
+            host: attached,
+            mode: mode === "rich" ? "rich" : "plain",
+            quiet,
+            oneShot,
+            reader,
+            draft,
+            session,
+            random: randomBytes,
+        })
+    }
+
     // `/restart` rebuilds the agent in this process rather than replacing the process.
     //
     // The settings an agent booted with are fixed for its lifetime — the catalogue is resolved once,
@@ -262,7 +310,7 @@ export async function runCommand(options: RunOptions): Promise<number> {
         // `/restart` rebuilds the agent and stays in the same conversation.
         if (session.current === undefined || session.current === "") {
             const resolved = await resolveSession({
-                agent,
+                list: () => source.sessions(),
                 mode,
                 asked: session.current,
                 wantsContinue: options.continueSession === true,
@@ -314,10 +362,36 @@ export async function runCommand(options: RunOptions): Promise<number> {
                 ? priorMessages(await agent.history(sessionKey), agent.describe().dialect)
                 : []
 
+        const source = embeddedSource({
+            agent,
+            bus: runtime.bus,
+            send: (text, sendOptions) => agent.send(text, sendOptions),
+            history: async (key) =>
+                priorMessages(await agent.history(key), agent.describe().dialect),
+            sessions: async () => await agent.store.sessions.list(agent.id),
+            clearSession: async (key) => {
+                await agent.clearSession(key)
+            },
+            context: async (key) => contextViewOf(agent, key),
+            streamFilter: () => agent.streamFilter(),
+            description: {
+                agentId: agent.id,
+                name: agent.describe().name,
+                model: agent.describe().model,
+                dialect: agent.describe().dialect,
+                window: agent.describe().window,
+                catalogueTokens: agent.describe().catalogueTokens,
+                thinking: agent.roles.main.capabilities.thinking,
+                // Read off the agent, never caught on the bus: `Runtime.create` emits
+                // `agent.warning` during boot, which finishes before anything could subscribe.
+                warnings: [...agent.warnings, ...agent.tools.warnings],
+            },
+        })
+
         const wired = {
             ...options,
-            agent,
-            runtime,
+            source,
+            embedded: { agent, runtime },
             sessionKey,
             banner,
             prior,
@@ -501,7 +575,16 @@ export interface ResolvedSession {
 }
 
 async function resolveSession(input: {
-    readonly agent: Agent
+    /**
+     * How to list conversations — not an `Agent`.
+     *
+     * The only thing this ever wanted from one, and taking the list instead is what lets an
+     * attached run reuse it verbatim: it asks the *host* for its sessions, where an embedded run
+     * asks its own store. A second copy of this function for the attached path would be a second
+     * set of answers to "what does `--continue` mean when there is nothing stored", and those are
+     * the cases somebody gets wrong once and never notices.
+     */
+    readonly list: () => Promise<readonly SourceSession[]>
     readonly mode: RenderMode
     /** `""` for a bare `--session`; `undefined` for not asked at all. */
     readonly asked: string | undefined
@@ -522,7 +605,7 @@ async function resolveSession(input: {
     }
 
     if (input.wantsContinue) {
-        const stored = await input.agent.store.sessions.list(input.agent.id)
+        const stored = await input.list()
         const recent = mostRecent(stored)
         if (recent === undefined) {
             // Not an error: an agent you have never talked to has no most-recent conversation, and refusing
@@ -536,7 +619,7 @@ async function resolveSession(input: {
     }
 
     if (input.asked === "") {
-        const stored = await input.agent.store.sessions.list(input.agent.id)
+        const stored = await input.list()
         if (stored.length === 0) {
             process.stdout.write(
                 "no stored conversation with this agent yet — starting a new one\n",
@@ -566,16 +649,16 @@ async function resolveSession(input: {
 }
 
 /** Most recently touched first. One comparator, so the picker and `--continue` agree about "recent". */
-function byRecency(left: SessionSummary, right: SessionSummary): number {
+function byRecency(left: SourceSession, right: SourceSession): number {
     return Date.parse(right.lastActivityAt) - Date.parse(left.lastActivityAt)
 }
 
-function mostRecent(sessions: readonly SessionSummary[]): SessionSummary | undefined {
+function mostRecent(sessions: readonly SourceSession[]): SourceSession | undefined {
     return [...sessions].sort(byRecency)[0]
 }
 
 /** The session picker, mounted the same lazy way as every other Ink surface. */
-async function pickSession(sessions: readonly SessionSummary[]): Promise<string | undefined> {
+async function pickSession(sessions: readonly SourceSession[]): Promise<string | undefined> {
     const [{ render }, { createElement }, { SessionPicker }] = await Promise.all([
         import("ink"),
         import("react"),
@@ -608,14 +691,193 @@ async function pickSession(sessions: readonly SessionSummary[]): Promise<string 
     return picked
 }
 
+/**
+ * The banner for an attached run. Shorter than the embedded one, and short for a reason.
+ *
+ * Three of `bannerLines`' facts are about a runtime *in this process* and would be lies here: the
+ * boot figure (nothing booted), the store location (none is open), and any warning read off a live
+ * agent at load. What replaces them is the one fact an attached run has and an embedded one does
+ * not — **where the agent actually is** — because "this is a view" is only useful if it says a view
+ * of *what*, and a pid plus an address is what somebody can act on.
+ *
+ * Synchronous, unlike its embedded twin: everything it prints came back with the description.
+ */
+function attachedBanner(
+    source: AgentSource,
+    sessionKey: string,
+    host: LiveHost,
+    reopened: "first" | "restart" | "switch" | "new",
+    previousKey?: string,
+): readonly string[] {
+    const described = source.describe()
+    const lines = [
+        `${BRAND.name} ${VERSION} · ${described.agentId} · ${described.model}`,
+        `session ${sessionKey} · window ${described.window} · attached to ${host.baseUrl} (pid ${host.pid})`,
+        // The sentence that makes the mode legible. Without it, `/exit` leaving a bot answering
+        // Telegram reads as a command that failed to stop something.
+        `a view — the agent keeps running when you leave · /help for commands · /exit to detach`,
+    ]
+    const note = reopenNote(reopened, previousKey)
+    if (note !== undefined) lines.push(note)
+    // Read off the description rather than caught on the stream: these are emitted during the
+    // host's boot, which finished long before this process subscribed to anything.
+    for (const warning of described.warnings) lines.push(`warning: ${warning.message}`)
+    return lines
+}
+
+/** The agent id a manifest declares, without loading it — no credentials needed for a lookup. */
+function agentIdFor(manifestPath: string | undefined): string {
+    return manifestPath === undefined ? "" : (readManifestHeader(manifestPath).id ?? "")
+}
+
+/**
+ * A run that is a **view**: no runtime, no store, no lease.
+ *
+ * The mirror of the loop below, and deliberately shorter, because most of what that loop does is
+ * about owning a runtime. There is no rebuild here — `/restart` asks the host to replace the agent
+ * and the screen stays up, since there is nothing in this process to rebuild — so the only reason
+ * to go round again is a conversation switch.
+ *
+ * It opens no database on purpose. Reading history and sessions locally would make the store path a
+ * second source of truth that can disagree with the host while both look correct: a stale `--store`
+ * would show a different conversation than the one being appended to. The lease carries a
+ * `baseUrl` (16.3) precisely so this does not have to guess a port either.
+ */
+async function runAttached(
+    input: RunOptions & {
+        readonly host: LiveHost
+        readonly mode: "rich" | "plain"
+        readonly quiet: boolean
+        readonly oneShot: boolean
+        readonly reader: { current: Interface | undefined }
+        readonly draft: { current: string }
+        readonly session: { current: string | undefined }
+        readonly random: (count: number) => Uint8Array
+    },
+): Promise<number> {
+    const manifestPath = input.manifestPath ?? ""
+    const agentId = agentIdFor(manifestPath)
+    // The credential comes from the manifest's *layered* env, which is the same place `serve` read
+    // it — never from `ambientEnv`, which answers "what is in this process" and made a token sitting
+    // beside the manifest invisible once already.
+    const token = hostToken(manifestPath)
+    const client = createClient({
+        baseUrl: input.host.baseUrl,
+        ...(token === undefined ? {} : { token }),
+    })
+
+    const described = await client.agent(agentId).describe()
+    const source = remoteSource({
+        client,
+        agentId,
+        host: input.host,
+        description: {
+            agentId,
+            name: described.name,
+            model: described.model ?? "unknown",
+            dialect: described.dialect ?? "nlt",
+            window: described.window ?? 0,
+            catalogueTokens: described.catalogueTokens ?? 0,
+            // Not on the wire: a description says what the agent is, and whether a model reasons is
+            // a capability the host resolved. Reasoning streams whenever the host sends it, which
+            // is the honest default — `--no-reasoning` still turns it off.
+            thinking: "unknown",
+            // `WireError` is the client's name for the same `{code, message, hint, field?}`. A
+            // cast rather than a remap: remapping four fields by hand is where a `field` goes
+            // missing and nothing reports it.
+            warnings: (described.warnings ?? []) as readonly ErrorDetail[],
+        },
+    })
+
+    const switchTo: { current: { key: string; reason: "switch" | "new" } | undefined } = {
+        current: undefined,
+    }
+    let reopened: "first" | "restart" | "switch" | "new" = "first"
+    const leaving: { current: string | undefined } = { current: undefined }
+    const freshSession = { current: false }
+
+    for (;;) {
+        if (input.session.current === undefined || input.session.current === "") {
+            const resolved = await resolveSession({
+                list: () => source.sessions(),
+                mode: input.mode,
+                asked: input.session.current,
+                wantsContinue: input.continueSession === true,
+                random: input.random,
+            })
+            if (typeof resolved === "number") return resolved
+            input.session.current = resolved.sessionKey
+            freshSession.current = resolved.fresh
+        }
+        const sessionKey = input.session.current ?? ""
+
+        const banner =
+            input.quiet || input.oneShot
+                ? []
+                : attachedBanner(source, sessionKey, input.host, reopened, leaving.current)
+
+        const prior =
+            input.mode === "rich" && !input.quiet && !input.oneShot
+                ? await source.history(sessionKey)
+                : []
+
+        const wired: Wired = {
+            ...input,
+            source,
+            sessionKey,
+            banner,
+            prior,
+            quiet: input.quiet,
+            reader: input.reader,
+            draft: input.draft,
+            showReasoning: input.noReasoning !== true,
+            freshSession: freshSession.current,
+            switchTo,
+            random: input.random,
+        }
+        const outcome = input.mode === "rich" ? await runRich(wired) : await runPlain(wired)
+        if (outcome !== RESTART) {
+            await source.close()
+            return outcome
+        }
+        // The only way back round: a conversation switch. `/restart` never gets here, because
+        // attached it is a request to the host and the screen never comes down.
+        if (switchTo.current === undefined) {
+            reopened = "restart"
+        } else {
+            reopened = switchTo.current.reason
+            leaving.current = sessionKey
+            input.session.current = switchTo.current.key
+            switchTo.current = undefined
+        }
+        freshSession.current = false
+    }
+}
+
 interface Wired extends RunOptions {
-    readonly agent: Agent
+    /**
+     * Where the agent is. What the screen gets, and the only one of these two an attached run has.
+     *
+     * `agent` stays beside it for the helpers that genuinely need a live one — the banner's boot
+     * figure, the manifest dump `/status` prints embedded. Those are facts about a runtime *in this
+     * process*, so an attached run answers them differently rather than not at all.
+     */
+    readonly source: AgentSource
+    /**
+     * The live runtime, when this process is the one hosting.
+     *
+     * **Absent when attached**, which is the shape of the whole change: a view of somebody else's
+     * agent has no `Agent` object and no store handle, and the compiler is what stops a helper
+     * quietly reaching for one. Everything the screen needs goes through `source`; what is left
+     * here are the facts that are only true of a runtime *in this process* — the boot figure, and
+     * the manifest dump `/status` prints embedded.
+     */
+    readonly embedded?: { readonly agent: Agent; readonly runtime: RuntimeClass }
     /**
      * Resolved, not the raw flag: on by default for a model that reasons, off under
      * `--no-reasoning`. Narrowed to a required boolean here so no renderer has to re-decide.
      */
     readonly showReasoning: boolean
-    readonly runtime: Awaited<ReturnType<typeof RuntimeClass.create>>
     readonly sessionKey: string
     readonly banner: readonly string[]
     readonly quiet: boolean
@@ -696,7 +958,7 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
     let restart = false
     const instance = render(
         createElement(App, {
-            agent: wired.agent,
+            source: wired.source,
             onSwitch: (sessionKey: string, draft: string) => {
                 // The same route a `/restart` takes, for the reason stated at `reopened`: a transcript
                 // cannot be re-keyed in place, so the conversation moves by rebuilding.
@@ -713,7 +975,11 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
                 wired.draft.current = draft
             },
             sessions: async () => {
-                const stored = await wired.agent.store.sessions.list(wired.agent.id)
+                // Through the source, so an attached view lists the conversations the *host* has
+                // rather than whatever a local store happens to hold. That is the whole reason an
+                // attached run opens no database: two readings of "which conversations exist" can
+                // disagree while both look correct, and only one of them is being written to.
+                const stored = await wired.source.sessions()
                 return [...stored].sort(byRecency).map((row) => ({
                     sessionKey: row.sessionKey,
                     messages: row.messages,
@@ -729,19 +995,15 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
                 // next mount needs it.
                 wired.draft.current = draft
             },
-            bus: wired.runtime.bus,
             sessionKey: wired.sessionKey,
-            model: wired.agent.describe().model,
-            agentName: wired.agent.describe().id,
+            model: wired.source.describe().model,
+            agentName: wired.source.describe().agentId,
             // Only before the first message, and only in a conversation with nothing behind it.
             freshSession: wired.freshSession,
             // The count in the one-line header. The messages themselves are in the banner, which scrolls;
             // on a surface with no scrollback a session-wide fact that has scrolled away is a fact nobody
             // has, so the header keeps the number and says where to find the text.
-            warnings: [
-                ...wired.agent.warnings.map((warning) => warning.message),
-                ...wired.agent.tools.warnings.map((warning) => warning.message),
-            ],
+            warnings: wired.source.describe().warnings.map((warning) => warning.message),
             // Without the title row: `titleLine` above the transcript already carries the brand, the
             // agent and the model, and printing both put one sentence on screen twice — measured at 100
             // columns, rows 6 and 8 of a fresh session. The plain path keeps it, because there is no
@@ -762,7 +1024,12 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
             // The same definition the plain REPL calls at its own `/status`, reached through a callback
             // rather than by handing the component a runtime — one function, two callers, so the two
             // paths cannot come to disagree about whether a channel is connected.
-            status: () => sessionStatus(wired),
+            // Two statuses, chosen by which kind of run this is — never one with half its
+            // sentences blanked. See `attachedStatus`.
+            status: () =>
+                wired.embedded === undefined
+                    ? attachedStatus(wired.source)
+                    : sessionStatus(wired.embedded),
             contextView: () => sessionContext(wired, wired.sessionKey),
             ...(wired.draft.current === "" ? {} : { initialDraft: wired.draft.current }),
         }),
@@ -779,7 +1046,7 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
     if (!restart) {
         process.stdout.write(
             resumeNotice({
-                ref: wired.agent.describe().id,
+                ref: wired.source.describe().agentId,
                 sessionKey: wired.sessionKey,
             }),
         )
@@ -789,7 +1056,7 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
 
 /** Line-oriented, and byte-identical whether stdout is a terminal or a pipe. */
 async function runPlain(wired: Wired): Promise<RunOutcome> {
-    const { agent, runtime, sessionKey, quiet } = wired
+    const { source, sessionKey, quiet } = wired
 
     let atLineStart = true
     const write = (text: string) => {
@@ -818,7 +1085,7 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
     // `END` in front of the person and run them into the answer. The filter comes from the agent
     // rather than being chosen here: which dialect is in play is config, and one place decides it.
     // One per turn, told where the steps end — it owns the paragraph break between them.
-    let filter = agent.streamFilter()
+    let filter = source.streamFilter()
 
     const show = (text: string) => {
         if (text === "") return
@@ -826,80 +1093,92 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
         streaming = true
     }
 
-    const subscriptions = [
-        runtime.bus.on("model.result", () => show(filter.endStep())),
+    /**
+     * One wildcard subscription, switching on type — not seven by name.
+     *
+     * Named subscriptions were right while this read a bus directly. They are not expressible over
+     * a source, which hands out one stream, and that turns out to be the better shape for the same
+     * reason `useTurn` already gives: a subscription list silently misses any event a later phase
+     * adds, while a switch with no branch simply ignores it. `{ chunks: true }` is the source's
+     * business now, which is where it belongs — this path has always needed per-token frames and
+     * had to remember to ask.
+     */
+    const unsubscribe = wired.source.subscribe((event: AnyEvent) => {
+        switch (event.type) {
+            case "model.result":
+                show(filter.endStep())
+                return
 
-        runtime.bus.on("model.chunk", (event: AnyEvent) => {
-            if (event.type !== "model.chunk") return
-            const { delta, kind } = event.data
-            if (kind === "reasoning" && wired.showReasoning !== true) return
+            case "model.chunk": {
+                const { delta, kind } = event.data
+                if (kind === "reasoning" && wired.showReasoning !== true) return
 
-            // A reasoning model streams its scratchpad and then its answer with no separator of its
-            // own, so the two run together mid-sentence. The label is worth two lines: the whole
-            // point of showing reasoning is being able to tell it apart from the reply.
-            if (kind !== lastKind) {
-                if (lastKind !== undefined) write("\n\n")
-                if (wired.showReasoning === true) {
-                    write(kind === "reasoning" ? "· reasoning ·\n" : "· reply ·\n")
+                // A reasoning model streams its scratchpad and then its answer with no separator of
+                // its own, so the two run together mid-sentence. The label is worth two lines: the
+                // whole point of showing reasoning is being able to tell it apart from the reply.
+                if (kind !== lastKind) {
+                    if (lastKind !== undefined) write("\n\n")
+                    if (wired.showReasoning === true) {
+                        write(kind === "reasoning" ? "· reasoning ·\n" : "· reply ·\n")
+                    }
+                    lastKind = kind
                 }
-                lastKind = kind
-            }
 
-            // Reasoning is not parsed for tool calls, so it is not filtered for them either.
-            if (kind === "reasoning") {
-                write(delta)
-                streaming = true
+                // Reasoning is not parsed for tool calls, so it is not filtered for them either.
+                if (kind === "reasoning") {
+                    write(delta)
+                    streaming = true
+                    return
+                }
+                show(filter.push(delta))
                 return
             }
-            show(filter.push(delta))
-        }),
 
-        runtime.bus.on("tool.result", (event: AnyEvent) => {
-            if (event.type !== "tool.result" || !showRows) return
-            const { slug, ok, latencyMs, truncated } = event.data
-            row(
-                `  · ${slug} — ${ok ? "ok" : "failed"} · ${latencyMs} ms${truncated ? " · observation trimmed" : ""}`,
-            )
-        }),
+            case "tool.result": {
+                if (!showRows) return
+                const { slug, ok, latencyMs, truncated } = event.data
+                row(
+                    `  · ${slug} — ${ok ? "ok" : "failed"} · ${latencyMs} ms${truncated ? " · observation trimmed" : ""}`,
+                )
+                return
+            }
 
-        // Every warning, and exempt from `showRows` like a gated call. It used to be one code —
-        // `manifest_changed` — so an agent that rewrote its own configuration was reported and
-        // everything else was not: a truncated reply, a repeated call, a compactor that silently fell
-        // back to a mechanical digest, a prompt over the window. `showRows` exists to keep a one-shot
-        // run free of *progress* rows, and a warning is not progress.
-        runtime.bus.on("agent.warning", (event: AnyEvent) => {
-            if (event.type !== "agent.warning") return
-            row(`  · ${event.data.message}\n    ${event.data.hint}`)
-        }),
+            // Every warning, and exempt from `showRows` like a gated call. It used to be one code —
+            // `manifest_changed` — so an agent that rewrote its own configuration was reported and
+            // everything else was not: a truncated reply, a repeated call, a compactor that silently
+            // fell back to a mechanical digest, a prompt over the window. `showRows` exists to keep a
+            // one-shot run free of *progress* rows, and a warning is not progress.
+            case "agent.warning":
+                row(`  · ${event.data.message}\n    ${event.data.hint}`)
+                return
 
-        runtime.bus.on("tool.repair", (event: AnyEvent) => {
-            if (event.type !== "tool.repair" || !showRows) return
-            // Worth a line of its own: a silent repair looks like a slow turn.
-            row(`  · ${event.data.slugs.join(", ")} — could not be used, asking again`)
-        }),
+            case "tool.repair":
+                // Worth a line of its own: a silent repair looks like a slow turn.
+                if (showRows)
+                    row(`  · ${event.data.slugs.join(", ")} — could not be used, asking again`)
+                return
 
-        // Deliberately NOT gated on `showRows`. Every other row here is for a person watching, and
-        // suppressing them in a one-shot run is right — but a blocked write is the run doing less
-        // than it was asked to, and a scripted caller parsing the output needs to know that even
-        // more than a person does.
-        runtime.bus.on("tool.gated", (event: AnyEvent) => {
-            if (event.type !== "tool.gated") return
-            row(`  · ${event.data.slug} — blocked: ${event.data.reason}`)
-        }),
+            // Deliberately NOT gated on `showRows`. Every other row here is for a person watching,
+            // and suppressing them in a one-shot run is right — but a blocked write is the run doing
+            // less than it was asked to, and a scripted caller parsing the output needs to know that
+            // even more than a person does.
+            case "tool.gated":
+                row(`  · ${event.data.slug} — blocked: ${event.data.reason}`)
+                return
 
-        // Also not gated on `showRows`. The ladder ran and the budget was still short, so history was
-        // cut anyway — the same class as a blocked write: the run did less than it was asked to, and
-        // for six phases the only trace was a field on `AssembledContext` that nothing read.
-        runtime.bus.on("context.dropped", (event: AnyEvent) => {
-            if (event.type !== "context.dropped") return
-            row(
-                `  · context: ${event.data.messages} older message(s) did not fit the ${event.data.budget}-token budget and were left out`,
-            )
-        }),
-    ]
-    const unsubscribe = () => {
-        for (const off of subscriptions) off()
-    }
+            // Also not gated on `showRows`. The ladder ran and the budget was still short, so history
+            // was cut anyway — the same class as a blocked write: the run did less than it was asked
+            // to, and for six phases the only trace was a field on `AssembledContext` nothing read.
+            case "context.dropped":
+                row(
+                    `  · context: ${event.data.messages} older message(s) did not fit the ${event.data.budget}-token budget and were left out`,
+                )
+                return
+
+            default:
+                return
+        }
+    })
 
     /**
      * A typed line that was a command rather than a prompt.
@@ -916,8 +1195,29 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
         switch (command.kind) {
             case "exit":
                 return "exit"
-            case "restart":
-                return "restart"
+            case "restart": {
+                /**
+                 * Attached, this is a request to the host — and the loop does not go round.
+                 *
+                 * The same branch `App` takes, and it has to be here too for the reason the
+                 * both-paths guard exists one file over: a command handled on one output path and
+                 * not the other is invisible. Left alone, the plain path returned `"restart"`, the
+                 * attached loop re-banners, and it printed *"the configuration on disk is now the
+                 * one in force"* — a sentence about a rebuild that never happened, which is worse
+                 * than doing nothing because somebody would believe it.
+                 */
+                const reload = source.reload
+                if (reload === undefined) return "restart"
+                try {
+                    const adopted = await reload()
+                    row(`reloaded ${adopted.join(", ")} — this conversation continues`)
+                } catch (error) {
+                    row(
+                        `could not reload: ${error instanceof Error ? error.message : String(error)}`,
+                    )
+                }
+                return "handled"
+            }
             case "new":
                 // The same outcome `/restart` returns, with a key in the box — which is exactly what the
                 // rich path's `onNew` does. No new outcome value: the loop below already turns "restart"
@@ -928,16 +1228,20 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
                 row(sessionHelpText())
                 return "handled"
             case "tools":
-                row(toolsReport(toolsView(agent)))
+                row(toolsReport(await source.tools()))
                 return "handled"
             case "status":
-                row(await sessionStatus(wired))
+                row(
+                    wired.embedded === undefined
+                        ? await attachedStatus(source)
+                        : await sessionStatus(wired.embedded),
+                )
                 return "handled"
             case "context":
                 row(await sessionContext(wired, sessionKey))
                 return "handled"
             case "reset":
-                await agent.clearSession(sessionKey)
+                await source.clearSession(sessionKey)
                 row("session cleared — memory files on disk are untouched")
                 return "handled"
             case "unknown":
@@ -975,13 +1279,9 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
         controller = new AbortController()
         streaming = false
         lastKind = undefined
-        filter = agent.streamFilter()
+        filter = source.streamFilter()
 
-        const result = await agent.send(input, {
-            sessionKey,
-            signal: controller.signal,
-            source: "repl",
-        })
+        const result = await source.send(input, { sessionKey, signal: controller.signal })
         controller = undefined
 
         // The filter withholds a trailing line break, since it cannot know whether more follows.
@@ -1117,8 +1417,20 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
  * the moment. So a configured-but-not-started channel says exactly that, and names what does start
  * it.
  */
-async function sessionStatus(wired: Wired): Promise<string> {
-    const agent = wired.agent
+/**
+ * `/status` for a run that owns its runtime — the manifest, and what is actually running here.
+ *
+ * Takes the embedded pair rather than the whole `Wired` so the compiler decides where it can be
+ * called from. Every sentence it prints is about *this process*: whether channels are connected in
+ * this session, whether the port is bound here, which store file is open. An attached run answers
+ * the same question about a different process and therefore has its own version — `attachedStatus`
+ * — rather than this one with the interesting halves blanked out.
+ */
+async function sessionStatus(embedded: {
+    readonly agent: Agent
+    readonly runtime: RuntimeClass
+}): Promise<string> {
+    const { agent, runtime } = embedded
     const described = agent.describe()
     const manifest = agent.manifest
     // `channels.started`, never "are any registered". A binding exists under `run` too, so reading
@@ -1131,7 +1443,7 @@ async function sessionStatus(wired: Wired): Promise<string> {
     const channels =
         configured === ""
             ? "none — reached through this session and the HTTP API only"
-            : wired.runtime.channels.started
+            : runtime.channels.started
               ? `${configured} — connected in this session`
               : `${configured} — configured, NOT running here; \`serve\` starts channels, \`run\` does not`
 
@@ -1159,8 +1471,53 @@ async function sessionStatus(wired: Wired): Promise<string> {
         })),
         { label: "channels", value: channels },
         { label: "http api", value: server },
-        { label: "store", value: wired.runtime.store.location },
-        { label: "background", value: await supervision(wired, described.id) },
+        { label: "store", value: runtime.store.location },
+        { label: "background", value: await supervision(runtime, described.id) },
+    ])
+}
+
+/**
+ * `/status` for a run that is a **view** — what it is attached to, and what the host says.
+ *
+ * Not `sessionStatus` with the runtime facts blanked out. The interesting sentences there are all
+ * about the process rendering them — "connected in this session", "NOT bound here", which store
+ * file is open — and every one of them would be a lie about an agent hosted somewhere else. The
+ * question a person types `/status` to ask is the same; the true answer is different.
+ *
+ * Decision 5.17's failure, one process boundary out, is exactly what this exists to avoid: an agent
+ * was told its Telegram channel was not running *in this session* while a `serve` in the next
+ * terminal was polling it. The host's own view of its channels is the honest source, so that is
+ * what is printed — with the pid and address, because "somewhere else" is not an answer somebody
+ * can act on.
+ */
+async function attachedStatus(source: AgentSource): Promise<string> {
+    const described = source.describe()
+    const host = source.host
+    const [tools, sessions] = await Promise.all([source.tools(), source.sessions()])
+    return keyValue([
+        { label: "agent", value: `${described.agentId} (${described.name})` },
+        {
+            label: "attached to",
+            value: host === undefined ? "a host" : `${host.baseUrl} · pid ${host.pid}`,
+        },
+        {
+            label: "this session",
+            value: "a view — the agent runs in the host, and stays running when this exits",
+        },
+        { label: "model", value: `${described.model} · ${described.window} token window` },
+        { label: "dialect", value: described.dialect },
+        {
+            label: "tools",
+            value: `${tools.tools.length} pinned · ${tools.catalogueTokens} catalogue tokens per turn`,
+        },
+        { label: "conversations", value: `${sessions.length} on this agent` },
+        {
+            label: "warnings",
+            value:
+                described.warnings.length === 0
+                    ? "none"
+                    : described.warnings.map((warning) => warning.message).join("; "),
+        },
     ])
 }
 
@@ -1171,10 +1528,18 @@ async function sessionStatus(wired: Wired): Promise<string> {
  * second assembly here would answer a question about a prompt nothing sends, and would drift the
  * first time a slot moved — the rule the HTTP surface's context endpoint already follows.
  */
-async function sessionContext(wired: Wired, sessionKey: string): Promise<string> {
-    const preview = await wired.agent.previewContext({ sessionKey })
-    const [main] = windowReport(wired.agent.manifest)
-    return contextReport({
+/**
+ * The view `/context` renders, from a live agent.
+ *
+ * Extracted from `sessionContext` so the source can hand one back without the formatter caring
+ * where it came from. Everything but `windowSource` is `previewContext`'s own output — which is
+ * exactly what `GET /v1/agents/:id/context` returns, because that route calls the same method with
+ * the same arguments `send` does rather than rebuilding the argument list.
+ */
+async function contextViewOf(agent: Agent, sessionKey: string): Promise<ContextView> {
+    const preview = await agent.previewContext({ sessionKey })
+    const [main] = windowReport(agent.manifest)
+    return {
         slots: preview.slots,
         history: preview.history,
         cache: preview.cache,
@@ -1188,7 +1553,11 @@ async function sessionContext(wired: Wired, sessionKey: string): Promise<string>
             preview.compactions === 0
                 ? undefined
                 : `${preview.compactions} stage${preview.compactions === 1 ? "" : "s"} run this session`,
-    })
+    }
+}
+
+async function sessionContext(wired: Wired, sessionKey: string): Promise<string> {
+    return contextReport(await wired.source.context(sessionKey))
 }
 
 /**
@@ -1199,9 +1568,9 @@ async function sessionContext(wired: Wired, sessionKey: string): Promise<string>
  * service already holds it, so an agent that had been running as a daemon for a week reported
  * itself unsupervised to the person looking straight at it.
  */
-async function supervision(wired: Wired, agentId: string): Promise<string> {
-    if (wired.runtime.owned.includes(agentId)) return "this session is serving this agent"
-    const lease = await wired.runtime.store.leases.get(agentId)
+async function supervision(runtime: RuntimeClass, agentId: string): Promise<string> {
+    if (runtime.owned.includes(agentId)) return "this session is serving this agent"
+    const lease = await runtime.store.leases.get(agentId)
     if (lease !== undefined && processAlive(lease.pid)) {
         return lease.mode === "daemon"
             ? `running as a background service · pid ${lease.pid} · \`${BRAND.slug} daemon status ${agentId}\``

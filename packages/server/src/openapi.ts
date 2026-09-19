@@ -72,8 +72,11 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     },
     "GET /v1/agents/:id": { summary: "One agent, with its dialect, window, counts and warnings." },
     "POST /v1/agents/:id/reload": {
-        summary: "Refused: an agent's configuration is fixed for its process lifetime.",
-        statuses: [{ code: 501, when: "always — see the spec for why" }],
+        summary: "Re-read the manifest by replacing the agent with a new instance.",
+        statuses: [
+            { code: 409, when: "a turn is running — it is not aborted to apply a change" },
+            { code: 400, when: "a team member, which has no manifest of its own" },
+        ],
     },
     "GET /v1/provision": {
         summary: "The questions creating an agent asks, and whether this server can answer them.",

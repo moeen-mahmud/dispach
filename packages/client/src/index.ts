@@ -158,6 +158,31 @@ export interface AgentClient {
     tools(): Promise<readonly ToolSummary[]>
     skills(): Promise<SkillsReport>
     sessions(): Promise<readonly SessionSummary[]>
+    /**
+     * A page of one conversation, newest first.
+     *
+     * Needed by anything that *resumes* rather than watches: an attached terminal or a browser tab
+     * opening onto a conversation has to paint what is already there, and the event stream only
+     * carries what happens next. Without this a resumed session shows a blank screen above a live
+     * prompt, which is the failure `seedHistory` was written for on the embedded path.
+     */
+    messages(sessionKey: string, options?: MessagesOptions): Promise<MessagePageLike>
+    /**
+     * Clear a conversation's history. Memory files on disk are untouched, and the server says so.
+     *
+     * Deliberately not called `delete`: the session key keeps working and the next message starts
+     * it again, so this empties rather than removes. A name implying removal would invite a caller
+     * to treat a cleared key as unusable.
+     */
+    clearSession(sessionKey: string): Promise<{ readonly memoryFilesKept: boolean }>
+    /**
+     * Re-read the manifest by **replacing** the agent — a new instance, not a mutated one.
+     *
+     * `adopted` lists everything that came back, which is more than one agent when the target is a
+     * supervisor: a team loads from one manifest as one unit. Answers 409 while a turn is running
+     * rather than aborting it, so a caller applying a config change retries instead of assuming.
+     */
+    reload(): Promise<{ readonly id: string; readonly adopted: readonly string[] }>
     schedules(): Promise<readonly ScheduleRecord[]>
     context(options?: { readonly sessionKey?: string; readonly input?: string }): Promise<unknown>
     /**
@@ -246,6 +271,8 @@ export interface AgentDescriptionLike {
     readonly dialect?: string
     readonly window?: number
     readonly tools?: number
+    /** What the catalogue costs per turn. A tool *count* says nothing about the bill. */
+    readonly catalogueTokens?: number
     readonly skills?: number
     readonly schedules?: number
     readonly entryPhase?: string | null
@@ -281,6 +308,8 @@ export interface ToolSummary {
     readonly summary: string
     readonly mutating: boolean
     readonly trust: string
+    /** Why a tool declares itself trusted when a provider tool defaults to untrusted. */
+    readonly trustReason?: string
     readonly provider: string
     readonly tags: readonly string[]
     /** Absent on an unphased agent — which is not the same as "visible in no phase". */
@@ -302,11 +331,57 @@ export interface SkillsReport {
     }[]
 }
 
+/**
+ * One stored message, as a page returns it.
+ *
+ * `origin` is what a resuming client filters on and the field most easily got wrong: it is set
+ * only when the *harness* wrote the row (`observation`, `call`, `repair`, `digest`), and absent for
+ * a person's message and the model's prose. So a transcript is built from an **allowlist of
+ * absent-or-prose**, never a blocklist — `lib/resume.ts` in the CLI owns that rule for the same
+ * reason `endNote` is shared: it has been written wrong twice.
+ */
+export interface StoredMessageLike {
+    /** Monotonic within a store, and the ordering key. Never sort by timestamp, which can tie. */
+    readonly id: number
+    readonly role: string
+    readonly content: string
+    readonly turnId?: string
+    readonly origin?: string
+    readonly createdAt?: string
+}
+
+export interface MessagePageLike {
+    readonly messages: readonly StoredMessageLike[]
+    /** Feed back as `before` for the previous page. Absent once the first message is included. */
+    readonly nextBefore?: number
+}
+
+/**
+ * One conversation, as `GET /v1/agents/:id/sessions` returns it.
+ *
+ * This declared four fields while the route sent the store's whole `SessionSummary` — `messages`
+ * and `phase` among them. Under-declaring is not harmless: a session picker cannot show how long a
+ * conversation is, and the field is *there*, so the only way to find out is to read the server. The
+ * same shape as `channels` being `readonly unknown[]` until 16.6.
+ */
 export interface SessionSummary {
     readonly sessionKey: string
     readonly channel: string
+    readonly peerId: string
     readonly turns: number
+    readonly messages: number
     readonly lastActivityAt: string
+    readonly createdAt: string
+    readonly updatedAt: string
+    readonly thread?: string
+    /** Phase-scoped tool visibility, persisted per session. Absent on an unphased agent. */
+    readonly phase?: string
+}
+
+export interface MessagesOptions {
+    /** The cursor from a previous page's `nextBefore`. Absent starts at the newest. */
+    readonly before?: number
+    readonly limit?: number
 }
 
 export interface EventStreamOptions {
@@ -522,6 +597,29 @@ export function createClient(options: ClientOptions): DispachClient {
             tools: () => json<readonly ToolSummary[]>("GET", at("/tools")),
             skills: () => json<SkillsReport>("GET", at("/skills")),
             sessions: () => json<readonly SessionSummary[]>("GET", at("/sessions")),
+
+            messages: (sessionKey, options) => {
+                const query = new URLSearchParams()
+                if (options?.before !== undefined) query.set("before", String(options.before))
+                if (options?.limit !== undefined) query.set("limit", String(options.limit))
+                const suffix = query.size === 0 ? "" : `?${query.toString()}`
+                return json<MessagePageLike>(
+                    "GET",
+                    at(`/sessions/${encodeURIComponent(sessionKey)}/messages${suffix}`),
+                )
+            },
+
+            clearSession: (sessionKey) =>
+                json<{ memoryFilesKept: boolean }>(
+                    "DELETE",
+                    at(`/sessions/${encodeURIComponent(sessionKey)}`),
+                ),
+
+            reload: () =>
+                json<{ id: string; adopted: readonly string[] }>("POST", at("/reload"), {
+                    body: {},
+                }),
+
             schedules: () => json<readonly ScheduleRecord[]>("GET", at("/schedules")),
 
             approvals: async () =>

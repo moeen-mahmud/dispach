@@ -166,14 +166,76 @@ describe("agents", () => {
         await runtime.stop()
     })
 
-    test("reload is refused, naming the reason rather than half-doing it", async () => {
-        // The catalogue resolves once and the cached prefix depends on it staying fixed.
+    test("reload replaces the agent rather than mutating it", async () => {
+        /**
+         * This answered 501 for four phases, and the argument behind the refusal survives: an
+         * agent's configuration is fixed for the lifetime of its *instance*, because the catalogue
+         * resolves once and slot 1 renders once. `Runtime.replace` honours that by disposing the
+         * agent and re-creating it, so what comes back is a **new instance** with its own frozen
+         * prefix — which is why the identity check below is the assertion that matters.
+         */
         const { call, runtime } = await harness()
+        const before = runtime.list()[0]
         const response = await call("POST", "/v1/agents/assistant/reload")
-        expect(response.status).toBe(501)
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as { id: string; status: string; adopted: string[] }
+        expect(body).toEqual({ id: "assistant", status: "loaded", adopted: ["assistant"] })
+
+        // Still hosted, and hosted by something else: a mutated agent would be the same object.
+        const after = runtime.list()[0]
+        expect(after?.id).toBe("assistant")
+        expect(after === before).toBe(false)
+        await runtime.stop()
+    })
+
+    test("an unknown agent is 404 before any of that", async () => {
+        const { call, runtime } = await harness()
+        expect((await call("POST", "/v1/agents/nope/reload")).status).toBe(404)
+        await runtime.stop()
+    })
+
+    test("a reload during a turn is 409, and the turn is not killed to make room", async () => {
+        /**
+         * `dispose` refuses while `inFlight > 0`, and this route inherits that rather than
+         * deciding it. The trade is deliberate: picking up a configuration change is not worth
+         * discarding somebody's half-finished answer, and a reload that aborted a turn would be
+         * indistinguishable from the runtime crashing from the caller's side.
+         *
+         * The model hangs until released, which is what makes the window real — a scripted reply
+         * completes faster than the request can be made.
+         */
+        let release: (() => void) | undefined
+        const held = new Promise<void>((resolve) => {
+            release = resolve
+        })
+        const { call, runtime } = await harness({
+            fetch: (async () => {
+                await held
+                return new Response(
+                    `data: ${JSON.stringify({ choices: [{ delta: { content: "done" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+                    { status: 200, headers: { "content-type": "text/event-stream" } },
+                )
+            }) as unknown as typeof fetch,
+        })
+
+        const turn = call("POST", "/v1/agents/assistant/messages", {
+            body: { text: "hello", deliver: "none" },
+        })
+        // Wait for the turn to actually be in flight rather than merely requested: a 409 that
+        // arrived because nothing had started yet would pass for the wrong reason.
+        for (let i = 0; i < 200 && (runtime.list()[0]?.inFlight ?? 0) === 0; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        expect(runtime.list()[0]?.inFlight).toBeGreaterThan(0)
+
+        const response = await call("POST", "/v1/agents/assistant/reload")
+        expect(response.status).toBe(409)
         const body = (await response.json()) as { error: { code: string; hint: string } }
-        expect(body.error.code).toBe("reload_not_supported")
-        expect(body.error.hint).toContain("Restart")
+        expect(body.error.code).toBe("agent_turn_in_flight")
+        expect(body.error.hint).not.toBe("")
+
+        release?.()
+        await turn
         await runtime.stop()
     })
 

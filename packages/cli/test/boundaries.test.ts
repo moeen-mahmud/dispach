@@ -757,18 +757,27 @@ test("every command in the table is wired to an implementation", () => {
 })
 
 test("an event a person must see is handled on BOTH output paths", () => {
-    // The two paths subscribe differently, and that asymmetry is a real trap. The rich path uses
-    // `bus.on("*")`, so a new event type reaches the reducer for free — and falls into its
-    // `default` case, silently doing nothing. The plain path uses named subscriptions, so the same
-    // event is simply absent. Either way the failure is invisible, which is the worst shape for a
-    // blocked write. Pinned rather than left to vigilance.
+    /**
+     * The two paths reach the same events by different routes, and a gap in either is invisible.
+     *
+     * The rich path's reducer takes everything and falls into `default`, silently doing nothing for
+     * a type it does not name. The plain path used *named* subscriptions, where the same event was
+     * simply absent — and since 17.1 it takes one wildcard from the source and switches, which
+     * makes both paths the same shape and this check the same string on both. That is a small win
+     * on its own: the asymmetry this test was written to police is gone, and what is left is the
+     * ordinary risk that somebody adds an event and handles it in one place.
+     */
     const transcript = FILES.find((file) => file.path === "transcript.ts")?.text ?? ""
     const plain = FILES.find((file) => file.path === "run.ts")?.text ?? ""
 
     for (const type of ["tool.gated", "context.dropped"]) {
         expect(transcript).toContain(`case "${type}"`)
-        expect(plain).toContain(`runtime.bus.on("${type}"`)
+        expect(plain).toContain(`case "${type}"`)
     }
+
+    // And the plain path takes its stream from the source rather than a bus it happens to hold —
+    // without which an attached run would print no tokens at all and look like a hung model.
+    expect(plain).toContain("wired.source.subscribe(")
 })
 
 test("every way a turn can end has a sentence, on one shared formatter", () => {
