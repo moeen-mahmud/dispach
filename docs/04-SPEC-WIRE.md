@@ -116,6 +116,19 @@ GET /v1/ready    → 200 when every agent has loaded; 503 { status: "starting" }
 visible on the agent resource. This distinction is deliberate: a channel that cannot
 connect must not make the process look dead to an orchestrator.
 
+Each entry of `channels[]` is `{ id, type, status, detail?, input? }`. `status` is one of
+`starting | connected | disconnected | error | needs_input`, and **a consumer must tolerate a
+sixth**: the set can grow inside `v: 1` while a field's type cannot.
+
+`needs_input` means the transport is running and cannot finish connecting until a *person* acts —
+WhatsApp's link-device QR is the first instance. It carries
+`input: { kind: "qr", payload, issuedAt, expiresAt? }`: `payload` is the bytes to render, `detail`
+the sentence explaining them, and `issuedAt` what makes staleness visible, because WhatsApp rotates
+its QR roughly every 20 seconds and a code nobody can tell is expired reads as a broken scanner.
+`kind` has one member today and a reader needs a default branch regardless. The payload is on the
+resource as well as on the event, so a page that opens *after* the QR was emitted renders it
+immediately instead of waiting for the next one.
+
 ### Agents
 
 ```
@@ -588,7 +601,7 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `agent.loaded` | per agent | `tools`, `skills`, `schedules` (the manifest's **declared** count — this fires before reconciliation), `model` |
 | `agent.disposed` | this process stopped hosting an agent, without exiting | `reason` (`requested` \| `replaced` \| `stopped`) |
 | `agent.warning` | a fact true for the whole session, said at load | `code`, `message`, `hint`, `field?` |
-| `agent.channel.status` | connect/disconnect | `channelId`, `channelType`, `status`, `detail?` |
+| `agent.channel.status` | connect/disconnect, or a channel now waiting on a person | `channelId`, `channelType`, `status` (`starting` \| `connected` \| `disconnected` \| `error` \| `needs_input`), `detail?`, `input?` (`{kind, payload, issuedAt, expiresAt?}`, present only with `needs_input`) |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |
 | `agent.channel.rejected` | inbound not turned into a turn | `channelId`, `reason` (`duplicate` \| `denied`), `sender`, `detail` |
 | `handoff.start` | a delegation began | `member`, `task`, `sessionKey` |

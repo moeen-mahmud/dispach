@@ -185,9 +185,31 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     const bus = new EventBus({ runtimeId: `rt_${Date.now().toString(36)}` })
     if (options.json !== true) {
         bus.on("agent.channel.status", (event) => {
-            const data = event.data as { channelId: string; status: string; detail?: string }
+            const data = event.data as {
+                channelId: string
+                status: string
+                detail?: string
+                input?: { kind: string; expiresAt?: string }
+            }
+            /**
+             * A `needs_input` names where the payload is, and never prints it.
+             *
+             * The payload is a QR's bytes — unreadable in a log, and hundreds of characters of it
+             * would bury the sentence that matters. But a line saying only "needs_input" is the
+             * 57 MB-log failure in one line: true, and no route to acting on it. The agent
+             * resource carries the payload because `statusOf` returns it, so that is what this
+             * points at.
+             */
+            const waiting =
+                data.input === undefined
+                    ? ""
+                    : ` (${data.input.kind}${
+                          data.input.expiresAt === undefined
+                              ? ""
+                              : `, expires ${data.input.expiresAt}`
+                      } — GET /v1/agents/${event.agentId ?? ""} carries it)`
             process.stdout.write(
-                `  ${data.channelId}: ${data.status}${data.detail === undefined ? "" : ` — ${data.detail}`}\n`,
+                `  ${data.channelId}: ${data.status}${data.detail === undefined ? "" : ` — ${data.detail}`}${waiting}\n`,
             )
         })
         bus.on("agent.channel.error", (event) => {

@@ -250,7 +250,26 @@ export interface AgentDescriptionLike {
     readonly schedules?: number
     readonly entryPhase?: string | null
     readonly phases?: readonly string[]
-    readonly channels?: readonly unknown[]
+    /**
+     * Each channel's last reported state. `unknown[]` until 16.6, which is why the web UI cast.
+     *
+     * `status` is deliberately a plain `string` and not `ChannelStatus`: the set can grow inside
+     * `v: 1`, and a closed union here would make a server one member ahead of this package a type
+     * error rather than a state a client renders generically. `input` is present only with
+     * `needs_input` and its `kind` is `string` for the same reason.
+     */
+    readonly channels?: readonly {
+        readonly id: string
+        readonly type: string
+        readonly status: string
+        readonly detail?: string
+        readonly input?: {
+            readonly kind: string
+            readonly payload: string
+            readonly issuedAt: string
+            readonly expiresAt?: string
+        }
+    }[]
     readonly warnings?: readonly WireError[]
     /** Set on a `disabled` row: when it was switched off, and why if anybody said. */
     readonly disabledAt?: string

@@ -123,7 +123,52 @@ export interface ChannelLimits {
     readonly minSendIntervalMs?: number
 }
 
-export type ChannelStatus = "starting" | "connected" | "disconnected" | "error"
+/**
+ * A channel's last reported state.
+ *
+ * `needs_input` is the one that is not about the network: the transport is running and cannot
+ * finish connecting until a *person* does something — WhatsApp's link-device QR is the first
+ * instance and a re-auth after a session expires is the second. It exists before either ships
+ * because a client that has learned to read four states will not grow a fifth quietly, and
+ * without it "live but waiting for somebody" is indistinguishable from a hang.
+ *
+ * Deliberately not a discriminated object. The states that carry nothing would gain a wrapper
+ * they do not need, and `status` is a string on the wire (`agent.channel.status`) where changing
+ * a field's type inside `v: 1` breaks every consumer that already reads it. The structured half
+ * travels beside it as `ChannelInput`.
+ */
+export type ChannelStatus = "starting" | "connected" | "disconnected" | "error" | "needs_input"
+
+/**
+ * What a person has to supply, when a channel reports `needs_input`.
+ *
+ * `kind` has one member on purpose. A second with no producer is the dead-vocabulary shape this
+ * runtime keeps finding (`kv`, `eviction: oldest`, `declined`) — and a reader needs a fallback
+ * branch for an unknown kind regardless, since the set can always grow, so growing it later
+ * costs a consumer nothing.
+ */
+export interface ChannelInput {
+    /** `qr`: render `payload` as a 2D barcode. Nothing else is defined yet. */
+    readonly kind: "qr"
+    /** The bytes to render or display, verbatim. Never a sentence — that is `detail`. */
+    readonly payload: string
+    /**
+     * When it stops working, if the transport knows. RFC 3339.
+     *
+     * WhatsApp rotates its QR roughly every 20 seconds, so a stored payload goes stale fast and a
+     * code nobody can tell is expired is worse than none — it reads as a broken scanner rather
+     * than an old picture. Absent means the transport does not know, never "it does not expire".
+     */
+    readonly expiresAt?: string
+}
+
+/**
+ * A `ChannelInput` as a reader gets it: stamped with when the runtime recorded it.
+ *
+ * The stamp is the runtime's rather than the transport's so one clock decides it, and it is
+ * required rather than optional because a payload whose age is unknown cannot be shown safely.
+ */
+export type IssuedChannelInput = ChannelInput & { readonly issuedAt: string }
 
 /** What the runtime hands a transport at `start`. The transport's only way back in. */
 export interface ChannelHost {
@@ -135,8 +180,16 @@ export interface ChannelHost {
      * of one. Failures surface as events, not as a rejected promise the poll loop has to handle.
      */
     receive(message: RawInbound): void
-    /** Report a connection state change. Reaches `agent.channel.status`. */
-    status(status: ChannelStatus, detail?: string): void
+    /**
+     * Report a connection state change. Reaches `agent.channel.status`.
+     *
+     * Two signatures rather than one optional argument: `needs_input` with nothing for a person to
+     * act on is a state no client can render, so it is a *compile* error here. A plugin written in
+     * JavaScript reaches the same refusal at runtime, where the hub keeps the previous state and
+     * reports `channel_input_missing` — a status nobody can act on must not displace one they can.
+     */
+    status(status: Exclude<ChannelStatus, "needs_input">, detail?: string): void
+    status(status: "needs_input", detail: string | undefined, input: ChannelInput): void
     /**
      * Report a failure that did not stop the channel.
      *

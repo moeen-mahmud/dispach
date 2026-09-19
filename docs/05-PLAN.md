@@ -4402,12 +4402,67 @@ it fetches parses as OpenAPI 3.1 with 36 operations. The visual check is still w
 doing once, and it is the same outstanding item 15.3 left.
 
 
+### 16.6 — The human-input seam on channel status — **built** (2026-09-19)
+
+The last stage of Phase 16, and the last thing between here and the front ends.
+
+`ChannelStatus` gains `needs_input`. Nothing produces it — Telegram never will, and WhatsApp is 9C
+— which is the point: `status` is a **string on the wire**, so a client that has learned to read
+four states must not discover a fifth after the field's type has already been frozen by use.
+Adding a member is additive inside `v: 1`; changing a field from string to object is not.
+
+**What landed.**
+
+- `ChannelStatus` is `starting | connected | disconnected | error | needs_input`, and
+  `ChannelInput { kind: "qr", payload, expiresAt? }` travels **beside** it rather than inside it.
+  `IssuedChannelInput` is the same stamped with `issuedAt`, which the runtime supplies.
+- `ChannelHost.status` is **overloaded**, so `status("needs_input")` with no payload is a compile
+  error. The hub refuses it again at runtime — a plugin written in JavaScript reaches that path —
+  keeping the previous state and emitting `channel_input_missing`.
+- The hub **stores** `detail` and `input`, and `statusOf` returns them, so `GET /v1/agents/:id`
+  carries the payload. A page that opens after the QR was issued renders it immediately.
+- `agent.channel.status` gained `input?`, and its `status` field now **imports** `ChannelStatus`
+  instead of restating the union — it had been a second literal copy for four phases.
+- `@dispach/core/wire` exports the three channel types (type-only, so the bundle is unchanged) and
+  `packages/client` types `channels[]`, which was `readonly unknown[]`. Both so 17.3 renders this
+  without a hand-written cast, which is where the fifth member would go unhandled.
+- The `serve` log names where the payload is and never prints it: a QR's bytes are unreadable in a
+  log and would bury the sentence, while a bare `needs_input` line is the 57 MB-log failure in
+  miniature — true, with no route to acting on it.
+
+**Acceptance — all run, against a real plugin and a real server.**
+
+- [x] A real agent whose channel reports `connected` then `needs_input`: the resource carries
+      `kind`, `payload`, a forwarded `expiresAt` and a runtime-stamped `issuedAt`.
+- [x] Read ~30 s **after** the emission, with no subscription: the payload is still there. This is
+      the property the storage decision exists for.
+- [x] A payload-less `needs_input` from the same transport: the previous state survives and
+      `channel_input_missing` reaches stderr with its hint.
+- [x] `/v1/ready` answers **200** with a channel waiting on a person — `start()` returns once
+      running, never once connected.
+- [x] `now` past `expiresAt` is visible to a client, which is what makes a stale QR greyable
+      rather than a scanner that appears broken.
+- [x] 3382 pass / 0 fail, node 1433 / 0, typecheck 0, lint clean, `bench:boot` ok, `check:deps` ok.
+- [x] Every guard revert-checked in both directions: dropping the stored fields from `statusOf`
+      fails 3, disabling the refusal fails 1, flattening `issuedAt` fails 1, re-inlining the event
+      union fails 1 — each with the code still compiling, since a revert that does not typecheck
+      is not a revert-check.
+
+**Found while testing, and deliberately not fixed here.** `serve` loads the manifest with
+`knownChannels: CHANNEL_IDS` — the first-party list — *before* `Runtime.create` loads the agent's
+plugins, so a manifest naming a channel a plugin supplies is refused at load with
+`channel_type_unknown`, while a bare `Runtime.create` on the same manifest boots it correctly. That
+makes `PluginContext.defineChannel` unreachable through the CLI. It is the recorded "a check that
+only one surface performs is a check the two disagree on" hazard, inverted: here the *preflight* is
+the stricter one. Recorded below rather than fixed, because the honest fix is a two-pass load and
+that is a decision rather than an edit.
+
 ---
 
 ## Carried backlog
 
-Two findings that belong to no phase, recorded here so a session with no context still finds them.
-Both were reproduced rather than reasoned about.
+Three findings that belong to no phase, recorded here so a session with no context still finds
+them. All were reproduced rather than reasoned about.
 
 ### The NLT heredoc leak — **fixed 2026-09-13**, decisions 4.96–4.98
 
@@ -4469,3 +4524,41 @@ probed, so the registry had been publishing 37.5% of the real window.
 Low urgency, and the reason is worth keeping: **a floor is the safe direction.** An under-reported
 window over-compacts and wastes tokens; it never overflows an endpoint. A cost bug, not a correctness
 one.
+
+### `defineChannel` is unreachable through the CLI — **medium urgency** *(found 2026-09-19, in 16.6)*
+
+A manifest declaring a channel type supplied by one of its own plugins is refused at load:
+
+```
+$ dispach serve wa
+manifest_validation_failed: channels[0] declares type "qrstub", which is not registered here.
+  Available: telegram.
+  field: channels[0].type
+  hint: Check the spelling against the available types.
+```
+
+The same manifest boots correctly through `Runtime.create`, which reads the manifest **header** for
+`plugins`, loads them, and only then validates `channels[].type` against the host's registrations
+*plus* the plugin's (`runtime.ts:1357` and `:1454`). Every CLI surface instead pre-loads with
+`knownChannels: CHANNEL_IDS`, the static first-party list — `serve.ts:106`, and the same line in
+`validate`, `tools`, `workspace`, `model` and `init` — so the refusal happens before the plugin that
+would have satisfied it is ever imported.
+
+Reproduced with a two-line plugin calling `context.defineChannel("qrstub", …)`. It is the recorded
+*"a check that only `run` performs is a check `validate` disagrees with"* hazard with the polarity
+reversed: here the preflight is stricter than the runtime, so the disagreement refuses a correct
+manifest rather than admitting a broken one.
+
+**Why it has stayed invisible.** Both first-party channels arrive as `channels: { telegram }` from
+the CLI's own table, never through `defineChannel`, so the plugin path has no in-tree consumer —
+the dead-vocabulary shape again, except here the vocabulary is *documented public API*
+(`03-SPEC-PLUGIN-API.md`, `PluginContext.defineChannel`) that a third-party author would find
+simply does not work.
+
+**Not fixed in 16.6, because the fix is a decision.** The CLI's pre-load exists to get `loaded.env`
+(the server token) before `Runtime.create`, so it genuinely needs a manifest in hand first. Making
+it agree with the runtime means either a two-pass load in the CLI — read header, load plugins,
+validate — or moving the channel-type check out of the pre-load and letting `Runtime.create` be the
+only place that decides it. The second is smaller and matches the existing rule that one function
+owns a load-bearing check, but it moves *when* the error is reported, which is worth choosing
+deliberately rather than as a side effect of a phase about channel status.

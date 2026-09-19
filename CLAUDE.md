@@ -2105,6 +2105,30 @@ Never claim a performance property without a number in `evals/` and a script to 
   into a `run`-mode runtime, opening a Telegram long-poll nobody asked for. That is the exact
   surprise `startChannels` exists to prevent, and the reason a one-shot `run --input` would then
   hang on exit.
+- **A state a client cannot act on must not displace one it can.** `ChannelStatus` gained
+  `needs_input` before anything produces it, because `status` is a **string on the wire** and adding
+  a member is additive inside `v: 1` while changing the field to an object is not — so the
+  structured half rides beside it as `input?: {kind, payload, issuedAt, expiresAt?}` rather than
+  turning four payload-free states into wrappers. The cost of that shape is that `needs_input` with
+  no `input` is *expressible*: `ChannelHost.status` is overloaded so TypeScript refuses it, and the
+  hub refuses it again for a JavaScript plugin — **keeping the previous state**, because recording it
+  would turn a channel that is waiting into one that looks broken, which is worse than the plugin's
+  own bug. Three things that are easy to get wrong around it. The payload is **stored** and returned
+  by `statusOf`, or a page that opens after the QR was issued holds a state it cannot act on with
+  the bytes gone — and a field the runtime has and does not hand back is one a client can only learn
+  by having been subscribed at the right moment. `issuedAt` is the runtime's and is **required**,
+  since WhatsApp rotates its QR about every 20 seconds and a code nobody can tell is expired reads
+  as a broken scanner rather than an old picture. And `kind` has one member, because a second with no
+  producer is dead vocabulary while a reader needs an unknown-kind branch regardless.
+- **`PluginContext.defineChannel` does not work through the CLI, and both first-party channels hide
+  it.** `Runtime.create` reads the manifest header for `plugins`, loads them, then validates
+  `channels[].type` against the host's registrations *plus* the plugin's. Every CLI surface
+  pre-loads with `knownChannels: CHANNEL_IDS` first, so a manifest naming a plugin-supplied channel
+  is refused with `channel_type_unknown` before the plugin that would satisfy it is imported — the
+  *"a check that only one surface performs is a check the two disagree on"* hazard with the polarity
+  reversed, refusing a correct manifest rather than admitting a broken one. Invisible because
+  `telegram` arrives as `channels: { telegram }` from the CLI's own table and never through the
+  plugin path, so documented public API has no in-tree consumer. Carried in `docs/05-PLAN.md`.
 - **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
   under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
   builds running beside it — which is a shared 2-core runner every time. Its own comment says the

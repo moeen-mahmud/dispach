@@ -20,8 +20,10 @@
 import type {
     ChannelBinding,
     ChannelHost,
+    ChannelInput,
     ChannelStatus,
     ChannelTransport,
+    IssuedChannelInput,
     RawInbound,
     WebhookDelivery,
     WebhookOutcome,
@@ -64,12 +66,25 @@ export interface ChannelHubOptions {
     readonly pollIntervalMs?: number
 }
 
+/**
+ * A channel's last report, kept so a reader that arrives afterwards still gets it.
+ *
+ * `input` is stored rather than left on the event for one reason: a browser that opens *after* a
+ * QR was emitted would otherwise see `needs_input` with nothing to render and no way to ask for
+ * it. It carries `issuedAt` so a stale payload can be shown as stale instead of as broken.
+ */
+interface ChannelState {
+    readonly status: ChannelStatus
+    readonly detail?: string
+    readonly input?: IssuedChannelInput
+}
+
 interface Bound {
     readonly agent: Agent
     readonly bindings: readonly ChannelBinding[]
     readonly inboxes: ReadonlyMap<string, Inbox>
     readonly outbox: Outbox
-    readonly status: Map<string, ChannelStatus>
+    readonly status: Map<string, ChannelState>
 }
 
 export class ChannelHub {
@@ -145,14 +160,20 @@ export class ChannelHub {
         return this.#started
     }
 
-    /** Channel ids and their last reported state, for `GET /v1/agents/:id`. */
-    statusOf(agentId: string): readonly { id: string; type: string; status: ChannelStatus }[] {
+    /**
+     * Channel ids and their last reported state, for `GET /v1/agents/:id`.
+     *
+     * Returns `detail` and `input` as well as the status, because a field the runtime has stored
+     * and does not hand back is one a client can only learn by having been subscribed at the
+     * right moment — which for `needs_input` means a page that missed the QR can never render it.
+     */
+    statusOf(agentId: string): readonly ({ id: string; type: string } & ChannelState)[] {
         const bound = this.#agents.get(agentId)
         if (bound === undefined) return []
         return bound.bindings.map((binding) => ({
             id: binding.transport.id,
             type: binding.transport.type,
-            status: bound.status.get(binding.transport.id) ?? "starting",
+            ...(bound.status.get(binding.transport.id) ?? { status: "starting" as const }),
         }))
     }
 
@@ -330,8 +351,38 @@ export class ChannelHub {
                 // execution, or one slow turn stops the runtime from seeing any further updates.
                 void this.#onInbound(agentId, transport, raw)
             },
-            status: (status, detail) => {
-                bound?.status.set(transport.id, status)
+            status: (status: ChannelStatus, detail?: string, input?: ChannelInput) => {
+                /**
+                 * A `needs_input` with nothing to act on keeps the previous state.
+                 *
+                 * The overloads on `ChannelHost.status` make this unreachable from TypeScript; a
+                 * plugin written in JavaScript arrives here. Recording it would replace a state a
+                 * client can render ("connected") with one it cannot, which is a channel that
+                 * looks broken rather than one that is waiting — so the refusal is reported and
+                 * the state is left alone rather than the other way round.
+                 */
+                if (status === "needs_input" && input === undefined) {
+                    this.#bus.emit(
+                        "agent.channel.error",
+                        {
+                            channelId: transport.id,
+                            code: "channel_input_missing",
+                            message: `Channel "${transport.id}" (${transport.type}) reported needs_input with no input to act on.`,
+                            hint: 'Pass the payload: host.status("needs_input", "scan to link", { kind: "qr", payload: "…" }). A status nobody can act on is indistinguishable from a hang.',
+                        },
+                        { agentId },
+                    )
+                    return
+                }
+                const issued: IssuedChannelInput | undefined =
+                    input === undefined
+                        ? undefined
+                        : { ...input, issuedAt: new Date().toISOString() }
+                bound?.status.set(transport.id, {
+                    status,
+                    ...(detail === undefined ? {} : { detail }),
+                    ...(issued === undefined ? {} : { input: issued }),
+                })
                 this.#bus.emit(
                     "agent.channel.status",
                     {
@@ -339,6 +390,7 @@ export class ChannelHub {
                         channelType: transport.type,
                         status,
                         ...(detail === undefined ? {} : { detail }),
+                        ...(issued === undefined ? {} : { input: issued }),
                     },
                     { agentId },
                 )

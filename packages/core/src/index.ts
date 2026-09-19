@@ -25,10 +25,12 @@ export {
 export type {
     ChannelBinding,
     ChannelHost,
+    ChannelInput,
     ChannelLimits,
     ChannelStatus,
     ChannelTransport,
     InboundMessage,
+    IssuedChannelInput,
     OutboundMessage,
     RawInbound,
     SendResult,
