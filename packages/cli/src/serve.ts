@@ -42,7 +42,8 @@ import {
     scriptRunner,
     TOOL_PROVIDERS,
 } from "#lib/providers"
-import { storePath } from "#lib/sandbox"
+import { provisionAgent, provisionSteps } from "#lib/provision"
+import { agentsDir, storePath } from "#lib/sandbox"
 
 export interface ServeOptions {
     /**
@@ -302,6 +303,25 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
              * route is an agent id and the two are allowed to differ for a hand-copied directory.
              */
             resolveAgent: (agentId) => manifestForId(agentId, env),
+            /**
+             * How `POST /v1/agents` creates one. The server owns the route and the gate; this is
+             * the implementation, injected because `packages/server` may not import the CLI.
+             *
+             * Both halves come from `lib/provision.ts`, which is also what `init` writes through —
+             * so an agent provisioned over HTTP is byte-identical to one created at a terminal, and
+             * the step list a browser renders is the walk the wizard performs.
+             *
+             * Injected **unconditionally**, including in the container. What keeps provisioning out
+             * of there is the loopback gate rather than this absence — the image's `CMD` binds
+             * `0.0.0.0`, so the route answers `403`. A container that deliberately binds loopback
+             * and wants to provision into itself is then a thing that works, which is the right
+             * answer for `docker run -it … init`'s neighbour.
+             */
+            provision: {
+                steps: () => provisionSteps({ agentDirBase: agentsDir(env) }),
+                create: (answers) =>
+                    provisionAgent({ answers, defaults: { agentDirBase: agentsDir(env) } }),
+            },
             ...(claim === undefined ? {} : { claim }),
             ...(token === undefined || token === "" ? {} : { token }),
         })

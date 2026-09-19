@@ -4320,6 +4320,52 @@ one guard did not exist — the post-install verification had no test until the 
 silent, which is the third instance of a revert-check earning its keep by failing to fail.
 
 
+
+### 16.5 — Provisioning: `POST /v1/agents` — **built** (2026-09-18)
+
+**What landed.**
+
+- **`POST /v1/agents`** — one call: validate, write, adopt. Live before the response returns.
+- **`GET /v1/provision`** — `{available, local, steps[]}`, the walk `nextQuestion` performs, with a
+  `secret` flag per step and each choice's `hint` kept separate from its label. `/v1/provision`
+  rather than `/v1/agents/steps`, because the router matches in registration order and
+  `/v1/agents/:id` would swallow the literal.
+- **`HandlerOptions.provision`** — the injected `Provisioner`. The server owns the route and the
+  gate; the CLI owns the implementation.
+- **`lib/provision.ts`** — one writer, shared with `init`: `complete`, `fillDefaults`,
+  `writeAgentFiles`, `provisionSteps`, `toProvisionStep`, `provisionAgent`.
+- The gate: loopback only (`403 provisioning_not_local`), `501` with no provisioner, and an absent
+  origin policy reads as **not** local.
+
+**Acceptance — run here, not handed over**
+
+- [x] `bun test` 3363 / 0 (twice) · `test:node` 1428 / 0 · typecheck 0 · lint clean ·
+      `bench:boot` ok · `check:deps` ok
+- [x] `GET /v1/provision` on a live server: 13 steps, `apiKey` flagged secret and optional, `preset`
+      carrying 5 choices
+- [x] **An agent provisioned into a server that had zero agents**: `{"id":"vela","adopted":["vela"]}`,
+      13 files, `.env` at `0600`, `/v1/health` → `agents: 1`
+- [x] **A real DeepSeek turn through it** — `POST /v1/agents/vela/messages` → 202, stored assistant
+      message `provisioned`
+- [x] Six refusals live: `provision_directory_refused`, `provision_unknown_answer`,
+      `provision_answer_invalid` (bad choice *and* non-string), `provision_answers_required`,
+      `cli_init_target_exists`
+- [x] A public bind refuses with a valid token: `provisioning_not_local`, and its
+      `GET /v1/provision` reports `available: true, local: false`
+- [x] Four guards revert-checked red, each edit compiling and typechecking
+
+**Two plan claims corrected.** The container was said to be covered by passing no provisioner — the
+CLI injects one unconditionally, so what refuses provisioning there is the **loopback gate** (its
+`CMD` binds `0.0.0.0`). Better mechanism, found by reading the Dockerfile. 16.3's `resolveAgent`
+carried the same false claim and the container really does have that lookup, correctly.
+
+**One defect, and a repeat.** `provisionAgent` called `agentsDir()` instead of the injected
+`defaults.agentDirBase` and wrote three agents into the author's real `~/.dispach`. The tests did
+not fail — the *second* run did, on a collision. The guard now asserts the returned directory is
+inside the base the caller handed in, and revert-checking *that* guard pollutes the real sandbox
+again, which is worth knowing before running it.
+
+
 ---
 
 ## Carried backlog

@@ -1984,6 +1984,23 @@ Never claim a performance property without a number in `evals/` and a script to 
   is already set **in `nextQuestion`**, not as a courtesy from `fromFlags`: a caller assembling `given`
   by hand — the wizard's own tests do — would otherwise be asked where to put an agent whose path is
   already decided.
+- **A path a test can redirect is a path the code must not compute itself.** `provisionAgent` called
+  `agentsDir()` rather than the injected `defaults.agentDirBase`, and wrote three agents into the
+  author's real `~/.dispach`. The tests did not fail — the *second* run did, on a collision, a day
+  later and in a different file. That is the whole reason `lib/sandbox.ts` takes an env override and
+  the reason `QuestionDefaults.agentDirBase` is required: the guard is an assertion that the result
+  is **inside the base that was handed in**, not that a directory was created somewhere.
+- **A capability injected by `serve` is injected in the container too, so "the image passes none" is
+  a claim to check rather than state.** It was written twice — for `resolveAgent` and again for
+  `provision` — and was false both times. What actually keeps provisioning out of the container is
+  the loopback gate, because its `CMD` binds `0.0.0.0`: a fact about what was bound rather than
+  about what somebody remembered to omit, which is the better mechanism anyway. Read the Dockerfile
+  before writing a containment sentence.
+- **A gate on "is this local" reads the bind, never the request.** `Host` is attacker-controlled and
+  a separate option could disagree with what was actually bound, so the provisioning gate reads the
+  origin policy's host — the bind `serve` performed. An **absent** policy reads as *not* local: a
+  handler mounted inside somebody else's router is exactly the case that must not get a filesystem
+  write for free.
 - **`launchctl list` omits a disabled job, so it cannot answer "what units exist".** Which is the
   worst possible gap, because a *disabled* unit is exactly the one worth retiring: its `disable` row
   persists across boots, no verb deletes it, and a future job with that label then installs cleanly

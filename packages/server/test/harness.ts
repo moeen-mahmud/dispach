@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Runtime } from "@dispach/core"
-import { createHandler } from "../src/handler.ts"
+import { createHandler, type Provisioner } from "../src/handler.ts"
 import type { ClaimTicket } from "../src/keys.ts"
 
 export const TOKEN = "test-token-abcdef"
@@ -176,6 +176,15 @@ export async function harness(
          * writing a row and reporting a success that hosts nothing.
          */
         resolveAgent?: (agentId: string) => string | undefined
+        /**
+         * The provisioner `POST /v1/agents` needs, injected the way the CLI injects the real one.
+         *
+         * Omitted by every other test, which is the state an embedder mounting this handler over
+         * its own agent store is in — so the route answers `501` and says why rather than accepting
+         * a request and writing nothing. The container is not that case: it has a provisioner and
+         * is refused by the loopback gate, because its `CMD` binds `0.0.0.0`.
+         */
+        provision?: Provisioner
     } = {},
 ) {
     const dir = workspace(options.manifest)
@@ -194,6 +203,7 @@ export async function harness(
         ...(options.claim === undefined ? {} : { claim: options.claim }),
         ...(options.origin === undefined ? {} : { origin: options.origin }),
         ...(options.resolveAgent === undefined ? {} : { resolveAgent: options.resolveAgent }),
+        ...(options.provision === undefined ? {} : { provision: options.provision }),
     })
 
     const call = (

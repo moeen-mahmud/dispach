@@ -43,7 +43,7 @@ import {
 } from "@dispach/core"
 import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
 import type { ClaimTicket } from "./keys.ts"
-import { type OriginPolicy, originProblem } from "./origin.ts"
+import { isLoopback, type OriginPolicy, originProblem } from "./origin.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
@@ -137,11 +137,74 @@ export interface HandlerOptions {
      *
      * Absent is a coherent state and answers `501` naming the reason: an embedder composing this
      * handler over its own agent store has no sandbox to search, and inventing a path convention
-     * for it would be a guess about somebody else's filesystem. The Docker image passes none, so
-     * the route structurally does not work there — the same containment-by-construction property
-     * 16.5 relies on.
+     * for it would be a guess about somebody else's filesystem.
+     *
+     * ⚠️ **Not the container**, despite what this comment said when it was written: the CLI's
+     * `serve` injects this unconditionally, so the image has it — and that is correct, because the
+     * container's sandbox is a real place an agent can live and `start <agent>` there should work.
+     * Found while writing 16.5, which repeated the same wrong claim about its own callback.
      */
     readonly resolveAgent?: (agentId: string) => string | undefined
+    /**
+     * How to create an agent, injected by whoever knows how.
+     *
+     * `POST /v1/agents` writes a directory of files from a wizard's own question set, and that
+     * wizard — its steps, its validation, its templates — lives in `packages/cli`. `packages/server`
+     * may not import the CLI, so the server owns the **route, the wire shape and the gate** and the
+     * CLI supplies the implementation. Three things follow, and the second is the one worth having:
+     *
+     * 1. No dependency edge, and no move of a large module that would need re-testing wholesale.
+     * 2. An embedder over its own agent store passes none, and the route then says `501` rather
+     *    than accepting a request and writing nothing.
+     *
+     *    ⚠️ **The container is *not* covered by this**, and the plan's claim that it would be was
+     *    wrong: the CLI's `serve` injects a provisioner unconditionally, so the image has one. What
+     *    actually refuses provisioning there is the **loopback gate** — the image's `CMD` binds
+     *    `0.0.0.0`, so `provisioningIsLocal()` is false and the route answers `403`. Checked by
+     *    reading the Dockerfile rather than assumed, and it is the better of the two mechanisms:
+     *    it is a fact about what was bound rather than about what somebody remembered to omit.
+     * 3. `steps` comes *from the callback*, so a browser renders the same question set the terminal
+     *    asks and the two cannot drift. A hard-coded list in the page would be the "two hand-kept
+     *    lists" shape that has already cost this repo several rounds.
+     *
+     * Absent answers `501`, which is honest: a server with no provisioner cannot create an agent
+     * and should say so rather than accept a request and write nothing.
+     */
+    readonly provision?: Provisioner
+}
+
+/** What the CLI injects for `POST /v1/agents`. See `HandlerOptions.provision`. */
+export interface Provisioner {
+    /** Every question, in asking order, with defaults and choices. Served as-is. */
+    steps(): readonly ProvisionStepWire[]
+    /**
+     * Create the agent and return where it landed.
+     *
+     * Throws a `HarnessError` for a bad answer, an unknown step, or a collision — the route maps
+     * those to `400` and passes the hint through, because the implementation knows why far better
+     * than the route does.
+     */
+    create(answers: Readonly<Record<string, string>>): {
+        readonly agentId: string
+        readonly manifestPath: string
+        readonly dir: string
+        readonly files: readonly string[]
+    }
+}
+
+/** One question as the wire carries it. Structural, so `packages/cli` needs no import from here. */
+export interface ProvisionStepWire {
+    readonly step: string
+    readonly prompt: string
+    readonly fallback: string
+    readonly optional: boolean
+    /** Mask it. A secret answer is written once at `0600` and never read back by any route. */
+    readonly secret: boolean
+    readonly choices?: readonly {
+        readonly value: string
+        readonly label: string
+        readonly hint?: string
+    }[]
 }
 
 type Handler = (context: RequestContext) => Promise<Response> | Response
@@ -201,6 +264,18 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * The origin guard, closed over the bind. `undefined` policy means the caller did not say what
      * it bound, and a claim about cross-origin safety cannot be made from nothing.
      */
+    /**
+     * Whether this handler was bound to loopback, for the provisioning gate.
+     *
+     * Read from the **origin policy's host**, which is the bind `serve` actually performed — not
+     * from the request's `Host` header, which an attacker controls, and not from a separate option
+     * a caller could set inconsistently with what it bound. `origin` being absent means the caller
+     * did not say what it bound, and the honest reading of that is *not local*: a handler mounted
+     * inside somebody else's router is the case that must not get a filesystem write for free.
+     */
+    const provisioningIsLocal = (): boolean =>
+        options.origin !== undefined && isLoopback(options.origin.host)
+
     const refuseOrigin = (request: Request): Response | undefined => {
         if (options.origin === undefined) return undefined
         const problem = originProblem(request, options.origin)
@@ -367,6 +442,150 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * state that already holds. Refused with `409` while a turn is running — `dispose` decides
      * that, and the refusal carries its hint rather than a second copy of the reasoning.
      */
+    /**
+     * What provisioning needs to ask, straight from the implementation that will answer it.
+     *
+     * Served even when there is no provisioner — an empty list plus `available: false` is more
+     * useful to a client than a `501`, because it can then say "this server cannot create agents"
+     * rather than having to interpret a status code. `local` is the other half of that answer: a
+     * client on a public bind gets `available: true, local: false` and knows the questions are real
+     * and the route will refuse it, which is what the container reports.
+     *
+     * `/v1/provision` rather than `/v1/agents/steps`: the router matches in registration order and
+     * `/v1/agents/:id` is registered above, so a literal under that prefix would be swallowed as an
+     * agent id and answered `404 agent_not_found` — a route that exists and cannot be reached.
+     */
+    router.add("GET", "/v1/provision", () =>
+        json({
+            available: options.provision !== undefined,
+            local: provisioningIsLocal(),
+            steps: options.provision?.steps() ?? [],
+        }),
+    )
+
+    /**
+     * Create an agent, and have this host adopt it before the response returns.
+     *
+     * **Provisioning ends in `Runtime.adopt`, not in a restart.** That is the whole point of it: the
+     * directory is written and the agent is live — served, channels started, schedules armed —
+     * without disturbing anything else this process is hosting. A restart would drop every other
+     * agent's in-flight turn to add one, which is why `POST /reload` answers 501 rather than doing
+     * it.
+     *
+     * **Loopback only, in this phase.** An unauthenticated loopback server is a legitimate
+     * configuration, so a route that writes files and starts an agent must not be reachable from
+     * the network on one — and the origin guard protects a *browser* caller, not a curl. 18.2's
+     * scoped keys are what open this to a remote operator holding an admin-capability key; until
+     * then the refusal names the two ways to do it instead, because "not supported" with no
+     * alternative is where somebody starts looking for a way round the gate.
+     */
+    router.add("POST", "/v1/agents", async (context) => {
+        const provision = options.provision
+        if (provision === undefined) {
+            return fail(
+                {
+                    code: "provisioning_not_supported",
+                    message: "This server cannot create agents.",
+                    hint: "Creating one writes a directory of files from a question set this process was not given — an embedder mounting this handler over its own agent store is the case that lands here. Run `init` where the sandbox is, or mount an agent directory.",
+                },
+                501,
+            )
+        }
+        if (!provisioningIsLocal()) {
+            return fail(
+                {
+                    code: "provisioning_not_local",
+                    message: "Creating an agent is only allowed on a loopback bind.",
+                    hint: "This route writes files and starts an agent, and a token-less loopback server is a supported configuration — so it is gated on the bind rather than on a credential. This is also what refuses provisioning inside the container, whose CMD binds 0.0.0.0: mount a written agent at /agent, or run `init` on the host. A scoped admin key will open this on a public bind.",
+                },
+                403,
+            )
+        }
+
+        const body = await readJson(context.request)
+        if (body.kind === "error") return fail(body.error, 400)
+        const input = (body.value ?? {}) as { answers?: unknown }
+        const answers = input.answers
+        if (answers === undefined || typeof answers !== "object" || Array.isArray(answers)) {
+            return fail(
+                {
+                    code: "provision_answers_required",
+                    message: "The request body has no `answers` object.",
+                    hint: 'Send { "answers": { "name": "milo", … } }. Every step you leave out takes its default, exactly as `init --yes` does with flags; GET /v1/provision lists them.',
+                    field: "answers",
+                },
+                400,
+            )
+        }
+        // Coerced per key rather than trusted: a number or a nested object here would reach
+        // `validateAnswer` as something it has no case for, and the answers arrive as text from
+        // both front doors anyway.
+        const text: Record<string, string> = {}
+        for (const [key, value] of Object.entries(answers as Record<string, unknown>)) {
+            if (typeof value !== "string") {
+                return fail(
+                    {
+                        code: "provision_answer_invalid",
+                        message: `answers.${key} is ${typeof value}, and every answer is text.`,
+                        hint: "Answers arrive as strings from the terminal and from here, and are validated per step. Send the value as a string — including a boolean-looking choice, whose values are named in GET /v1/provision.",
+                        field: `answers.${key}`,
+                    },
+                    400,
+                )
+            }
+            text[key] = value
+        }
+
+        let created: ReturnType<Provisioner["create"]>
+        try {
+            created = provision.create(text)
+        } catch (error) {
+            // The implementation knows why far better than this route does, so its hint passes
+            // through rather than being paraphrased.
+            if (error instanceof HarnessError) return fail(error.toDetail(), 400)
+            throw error
+        }
+
+        /**
+         * Adopted after the files exist, and a failure here is reported **with the directory**.
+         *
+         * The agent is on disk either way, so a failed adoption is not a failed creation: telling
+         * somebody their request failed when a complete agent is sitting in the sandbox would send
+         * them to create a second one. `201` with `adopted: false` and the reason is the honest
+         * answer — the thing they asked for exists, and it is not running yet.
+         */
+        try {
+            const admitted = await runtime.adopt(created.manifestPath)
+            return json(
+                {
+                    id: created.agentId,
+                    dir: created.dir,
+                    files: created.files,
+                    adopted: admitted.map((agent) => agent.id),
+                },
+                201,
+            )
+        } catch (error) {
+            return json(
+                {
+                    id: created.agentId,
+                    dir: created.dir,
+                    files: created.files,
+                    adopted: [],
+                    error:
+                        error instanceof HarnessError
+                            ? error.toDetail()
+                            : {
+                                  code: "provision_adopt_failed",
+                                  message: error instanceof Error ? error.message : String(error),
+                                  hint: "The agent was written and is not running. Fix what the message names and `start` it, or restart the host.",
+                              },
+                },
+                201,
+            )
+        }
+    })
+
     router.add("POST", "/v1/agents/:id/stop", async (context) => {
         const id = context.params.id ?? ""
         const hosted = runtime.list().some((agent) => agent.id === id)

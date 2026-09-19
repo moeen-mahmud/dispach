@@ -60,7 +60,14 @@ and WebSocket surfaces can return:
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
 | `reload_not_supported` | 409 | An agent's configuration is fixed for its process lifetime, deliberately. |
-| `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting. An embedder over its own agent store, or the container image, which passes none on purpose. |
+| `provisioning_not_supported` | 501 | This server was built with no provisioner — an embedder over its own agent store. The container has one and is refused by the bind instead. |
+| `provisioning_not_local` | 403 | `POST /v1/agents` on a non-loopback bind. A scoped admin key opens it later; until then the refusal names `init` and mounting. |
+| `provision_answers_required` | 400 | The body has no `answers` object. |
+| `provision_answer_invalid` | 400 | One answer failed its step's validation, or was not a string. Carries the field. |
+| `provision_unknown_answer` | 400 | A key that is not a question this runtime asks. |
+| `provision_directory_refused` | 400 | `dir` or `dirChoice` over the wire. The sandbox decides; see above. |
+| `provision_adopt_failed` | — | Returned *inside* a `201`: the agent was written and is not running. |
+| `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting — an embedder over its own agent store. The container has the lookup, and `start` works there. |
 | `agent_turn_in_flight` | 409 | `stop` was asked for an agent with a turn running. Tearing it down would close its store under a turn recorded as running. |
 | `agent_stopped` | 400 | Adoption was asked for an agent that is switched off. `start` is the way back, and it is the one caller that enables before adopting. |
 | `turn_not_running` | 409 | No cancel handle for that turn **on this API** — a channel- or schedule-started turn has none. |
@@ -118,7 +125,37 @@ GET /v1/agents/:id       → the above plus dialect, window, tool count, skills 
 POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disabledAt, reason? }
 POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }
 POST /v1/agents/:id/reload
+
+GET  /v1/provision       → { available, local, steps[] }
+POST /v1/agents            { answers: {step: value, …} }
+                         → 201 { id, dir, files[], adopted[] }
 ```
+
+**Provisioning is one POST, and it ends in an adopt rather than a restart.** The directory is
+written and the agent is **live before the response returns** — served, channels started, schedules
+armed — without disturbing anything else the process hosts. A restart would drop every other
+agent's in-flight turn to add one, which is the same reason `reload` answers 501.
+
+`answers` is a subset: every step left out takes its default, exactly as `init --yes` does with
+flags. `GET /v1/provision` lists each step with its prompt, default, choices and a `secret` flag,
+and it is generated from the same walk the terminal wizard performs — so a browser form cannot go
+stale against the questions. `dir` and `dirChoice` are **refused**: a provisioned agent lands in the
+host's sandbox, because where an agent lives on disk is the operator's decision rather than a
+caller's.
+
+**`201` with `adopted: []` and an `error` is a success, not a failure.** The agent is on disk either
+way, so a failed adoption is not a failed creation — reporting the request as failed would send
+somebody to create a second copy of an agent that already exists.
+
+Gated to a **loopback bind**, answering `403 provisioning_not_local` otherwise: the route writes
+files and starts an agent, a token-less loopback server is a supported configuration, and the origin
+guard protects a browser caller rather than a curl. `501 provisioning_not_supported` on a server
+built with no provisioner, which is an embedder mounting this handler over its own agent store.
+
+**The container is covered by the bind rather than by the 501.** Its `CMD` binds `0.0.0.0`, so
+provisioning there answers `403` — a fact about what was bound rather than about what somebody
+remembered to omit. `GET /v1/provision` reports `available: true, local: false` for exactly that
+case, so a client knows the questions are real and the route will refuse it.
 
 **`stop` and `start` are the durable switch, not a signal.** `stop` writes the agent off in the
 store *and* drops it from this host now; the row is what makes it survive a restart, and the drop is
@@ -127,7 +164,7 @@ process that holds a lease takes every other agent down with it. Both are idempo
 state that already holds is `200`, never `404`. `stop` answers `409 agent_turn_in_flight` while a
 turn is running, and `404` only when the id is neither hosted nor recorded. `start` answers
 `501 start_not_supported` on a server built without a manifest lookup — an embedder over its own
-agent store, or the Docker image, which passes none deliberately.
+agent store. The container has the lookup and `start` works there.
 
 **A stopped agent is listed and its resource is `404`**, and the asymmetry is deliberate: the
 listing answers "what exists" and the resource answers "what is running". The row is thin because a
