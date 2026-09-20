@@ -172,18 +172,33 @@ function Workspace(props: {
     const [error, setError] = useState<string>()
     const stopRef = useRef<(() => Promise<void>) | undefined>(undefined)
 
-    // Which agent, and its name for the title. `serve` takes one manifest, so the first is the one
-    // — but the list is read rather than assumed, because `runtime.list()` is what every route
-    // resolves through and a member of a team is deliberately absent from it.
+    /**
+     * Which agent, and its name for the title.
+     *
+     * `?agent=` first, then the first one running. The query parameter is what `web run <agent>`
+     * puts there, and reading it here is what stops that URL being a lie — a link naming an agent
+     * that the page then ignores is declared vocabulary nothing consumes, which this repo has paid
+     * for more than once (`kv`, `eviction: oldest`, `includeHistory`).
+     *
+     * **A path was the alternative and costs five things** a query parameter does not: a route, a
+     * `WEB_ASSETS` entry, a spec row, a `spec.test.ts` change, and either a catch-all — which would
+     * make `/v1/agentss` answer `200 text/html` — or a 404 on reload. The no-catch-all decision
+     * stands; this is how a deep link works without it.
+     *
+     * An id that names nothing **falls back** rather than erroring, and says nothing about it: the
+     * ordinary cause is a bookmark to an agent that has since been stopped or removed, and a blank
+     * screen with "no such agent" would be a worse answer than the one running agent there is.
+     */
     useEffect(() => {
+        const asked = new URL(window.location.href).searchParams.get("agent") ?? undefined
         clientRef.current
             .agents()
             .then((agents) => {
                 // **The first agent that is actually running.** The listing carries a thin row for
                 // a stopped one so a picker can offer to start it, and taking `agents[0]` blindly
                 // would open a chat against an agent with no runtime behind it — every send a 404.
-                // Still the first rather than a choice: the picker is 17.3's.
-                const first = agents.find((entry) => entry.status !== "disabled")
+                const running = agents.filter((entry) => entry.status !== "disabled")
+                const first = running.find((entry) => entry.id === asked) ?? running[0]
                 if (first === undefined) return
                 setAgentId(first.id)
                 setAgentName(first.name)

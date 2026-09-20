@@ -868,6 +868,49 @@ export const COMMANDS: readonly CommandSpec[] = [
         ],
     },
     {
+        name: "web",
+
+        // A pane runs a command as a child and shows its output, which is right here: the effect is
+        // a browser window, and one line saying where it went is all a session needs to report.
+        inSession: "output",
+        // `run` needs a host to point a browser at, and the first-run bootstrap is what makes
+        // "install, then open the page" one step. `open` and `url` are read-only and say so when
+        // nothing is running, rather than starting something on a machine that did not ask for it.
+        needsServer: true,
+        summary: "open the browser view of a running agent",
+        args: [
+            {
+                name: "action",
+                required: true,
+                help: "what to do",
+                choices: [
+                    { value: "run", help: "start a server if needed, then open the page" },
+                    { value: "open", help: "open the page of a server already running" },
+                    {
+                        value: "url",
+                        help: "print the address and open nothing — the form a pipe reads",
+                    },
+                ],
+            },
+            {
+                name: "agent",
+                // Optional: a bare `web open` points at the page, which lists what the host has.
+                // Naming an agent is what puts `?agent=` in the URL for the page to read.
+                required: false,
+                help: "path or sandbox agent name (omit to open the page itself)",
+            },
+        ],
+        flags: [
+            {
+                name: "no-open",
+                kind: "boolean",
+                help: "print the URL instead of opening it",
+            },
+            STORE,
+            JSON_FLAG,
+        ],
+    },
+    {
         // Second action-as-positional command after `soul` — and the reason `ArgSpec.choices`
         // exists, since seven verbs hidden inside a prose help string is a set nothing can check.
         name: "daemon",

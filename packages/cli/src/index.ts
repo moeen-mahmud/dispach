@@ -429,6 +429,24 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 json: flags.bool("json"),
             })
 
+        case "web": {
+            const { webCommand } = await import("#web")
+            return await webCommand({
+                // The action is positional 0 and the agent positional 1 — the `daemon install
+                // <agent>` shape, which `manifestIndex` already reads off this spec, so the parser
+                // and the help needed no change for a nested verb.
+                action: manifestPath as "run" | "open" | "url" | undefined,
+                ...(positionals[1] === undefined
+                    ? {}
+                    : { manifestPath: resolveAgentRef(positionals[1]) }),
+                noOpen: flags.bool("no-open"),
+                ...(flags.str("store") === undefined
+                    ? {}
+                    : { store: flags.str("store") as string }),
+                json: flags.bool("json"),
+            })
+        }
+
         case "daemon": {
             const lines = flags.num("lines")
             return await daemonCommand({

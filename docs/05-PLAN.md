@@ -4513,6 +4513,48 @@ writers, and slot 2 told the **model** as much through `declined`.
 
 **Not done here, deliberately.** `packages/web` still picks `agents[0]`; the browser is 17.3.
 
+### 17.2 — `dispach web run` — **built** (2026-09-19)
+
+The browser as a second view onto the same host. Small, because 17.1 did the hard part and
+`claimUrl` already existed.
+
+**What landed.**
+
+- A `web` command with three verbs — `run` (declares `needsServer`, so the bootstrap gets one),
+  `open` (assumes a host, refuses with a hint when there is none), `url` (prints only, the form a
+  pipe reads). The `daemon install <agent>` arg shape, so `lib/args.ts`, `lib/help.ts` and
+  `lib/palette.ts` needed no change.
+- `lib/browser.ts` through `lib/spawn.ts` — one command per platform, bounded, and **refusals as
+  outcomes**: `no-opener` (a container), `not-a-terminal`, `asked-not-to`, `opener-failed`. Every
+  branch prints the URL, success included.
+- `?agent=` in the URL and **`app.tsx` reads it** in the same commit, falling back to the first
+  running agent. The deep-link decision (query string, not paths) lands here rather than in 17.3.
+- `browsableHost` extracted in `packages/server/src/keys.ts`, where the same rewrite existed twice
+  inline. `agentIdFor` moved to `lib/lifecycle.ts`, one function for `run` and `web`.
+- `LANDING_LIST_ROWS` 21 → 22, which the constant's own docstring requires of a phase adding a
+  command.
+
+**Acceptance — run inside the container, per the standing rule.**
+
+- [x] `docker compose up -d --build --wait` → healthy; `HOME=/home/dispach`, glibc 2.41, and
+      **no `xdg-open`** — the case the opener is written for.
+- [x] `dispach web url primary` → `http://127.0.0.1:7420/?agent=minimal`, and that URL fetched
+      **from the host** answers `200 text/html` and serves the app.
+- [x] `dispach web open primary` with a TTY → *"no browser here — open this from a machine that has
+      one"* plus the URL. Without a TTY → the URL alone, which is what a pipe can use.
+- [x] The served `app.js` contains `searchParams.get("agent")`, so the link is not a lie.
+- [x] With no host (on the Mac, since the container always has one): refused, exit 1, naming
+      `serve` and `daemon install`.
+- [x] 3403 pass / 0 fail, node 1433 / 0, typecheck 0, lint clean, `bench:boot` ok, `check:deps` ok.
+      Both refusal branches revert-checked.
+
+**The defect the container found.** `web url` printed `http://0.0.0.0:7420/` on the first run
+inside the image — a bind, not an address, and a link nothing can click. A laptop cannot reproduce
+it: `serve` there binds `127.0.0.1` and the substitution never fires. Fixing it forced the rewrite
+out of its two inline copies in `keys.ts` into one `browsableHost`, which immediately exposed a
+second defect neither copy handled — `URL.hostname` returns IPv6 **bracketed**, so `[::]` never
+matched the bare `::` comparison. `claimUrl` had shipped with that since Phase 13.
+
 ---
 
 ## Carried backlog

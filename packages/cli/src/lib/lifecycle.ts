@@ -215,6 +215,20 @@ export async function liveHosts(store?: string): Promise<readonly LeaseRecord[]>
  * refusing to stop an agent over that would be absurd. A wrong or absent token is not silent: the
  * request comes back `401` and the caller says which variable to set.
  */
+/**
+ * The agent id a manifest declares, without loading it.
+ *
+ * `readManifestHeader` rather than `loadManifest` for the reason `lib/sandbox.ts` already records:
+ * loading checks that the key variables are set, so a *lookup* built on it fails exactly when the
+ * agent is misconfigured — which is when you most need to name it. Here that would mean `run` and
+ * `web` refusing to find a host for an agent whose `.env` is incomplete.
+ */
+export function agentIdFor(manifestPath: string | undefined): string {
+    return manifestPath === undefined || manifestPath === ""
+        ? ""
+        : (readManifestHeader(manifestPath).id ?? "")
+}
+
 export function hostToken(manifestPath: string): string | undefined {
     const fallback = process.env[`${BRAND.envPrefix}API_TOKEN`]
     try {

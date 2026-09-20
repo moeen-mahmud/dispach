@@ -29,7 +29,6 @@ import {
     HarnessError,
     processAlive,
     Runtime as RuntimeClass,
-    readManifestHeader,
     VERSION,
     windowReport,
 } from "@dispach/core"
@@ -54,7 +53,7 @@ import {
     restoreTerminal,
 } from "#lib/exit"
 import { negotiateKeyboard } from "#lib/keyboard"
-import { hostToken, liveHostOf } from "#lib/lifecycle"
+import { agentIdFor, hostToken, liveHostOf } from "#lib/lifecycle"
 import { ENABLE_MOUSE } from "#lib/mouse"
 import { resolveModeFromProcess } from "#lib/output"
 import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
@@ -723,11 +722,6 @@ function attachedBanner(
     // host's boot, which finished long before this process subscribed to anything.
     for (const warning of described.warnings) lines.push(`warning: ${warning.message}`)
     return lines
-}
-
-/** The agent id a manifest declares, without loading it — no credentials needed for a lookup. */
-function agentIdFor(manifestPath: string | undefined): string {
-    return manifestPath === undefined ? "" : (readManifestHeader(manifestPath).id ?? "")
 }
 
 /**

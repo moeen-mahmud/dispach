@@ -189,6 +189,16 @@ export interface TerminalHandles {
  * `process.exit` itself: that would discard buffered stdout on a pipe, and it makes a command
  * impossible to call from a test.
  */
+/** `web run | open | url` — point a browser at a running host, or print where it is. */
+export interface WebOptions {
+    readonly action?: "run" | "open" | "url" | undefined
+    /** The agent to open. Absent opens the page and lets it list what the host has. */
+    readonly manifestPath?: string
+    readonly noOpen?: boolean
+    readonly store?: string
+    readonly json?: boolean
+}
+
 export interface RunOptions {
     /** Absent = bare `run`: the sandbox decides (picker, auto-run, or the wizard). */
     readonly manifestPath?: string

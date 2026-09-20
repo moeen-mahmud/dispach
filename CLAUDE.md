@@ -2105,6 +2105,21 @@ Never claim a performance property without a number in `evals/` and a script to 
   into a `run`-mode runtime, opening a Telegram long-poll nobody asked for. That is the exact
   surprise `startChannels` exists to prevent, and the reason a one-shot `run --input` would then
   hang on exit.
+- **A bind is not an address, and a laptop cannot show you the difference.** `web url` printed
+  `http://0.0.0.0:7420/` from inside the container — every interface, and a link nothing can click.
+  `claimUrl` had made that substitution since Phase 13; the new builder took the lease's published
+  `base_url` verbatim. A `serve` on a laptop binds `127.0.0.1`, so the substitution never fires and
+  the defect is invisible in the one place it is not deployed. `browsableHost` is now the single
+  copy — and extracting it from the two inline ones in `keys.ts` immediately found a second defect
+  neither had: `URL.hostname` returns IPv6 **bracketed**, so a host read back out of a URL is `[::]`
+  while a manifest's bind is `::`, and comparing only the bare spelling let the v6 wildcard through.
+- **A browser is a convenience; the URL is the deliverable.** `lib/browser.ts` treats every refusal
+  as an outcome rather than a failure, because the most important one is structural: **a container
+  has no `xdg-open` and never will**, so that path says *"no browser here — open this from a machine
+  that has one"* instead of reporting a fault an operator would go looking for. No TTY means no
+  window, since a scripted run must not sprout one on somebody's screen. Every branch prints the
+  URL, success included — a browser that opened behind another window looks like nothing happened,
+  and a terminal reached over SSH is one where the link is the only usable half.
 - **`run` is a view, not an owner — it attaches to a live host and never builds a runtime beside
   one.** `components/App` takes an `AgentSource` (`lib/source.ts`), implemented twice; the lease
   decides which, and a published `base_url` is what makes attaching possible at all. **Nothing falls

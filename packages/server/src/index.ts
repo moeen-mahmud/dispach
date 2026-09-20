@@ -21,7 +21,13 @@ export {
     type Provisioner,
     type ProvisionStepWire,
 } from "./handler.ts"
-export { type ClaimTicket, claimCommand, claimUrl, createClaimTicket } from "./keys.ts"
+export {
+    browsableHost,
+    type ClaimTicket,
+    claimCommand,
+    claimUrl,
+    createClaimTicket,
+} from "./keys.ts"
 export { type Route, type RouteMatch, Router } from "./router.ts"
 export { isLoopback, type RunningServer, type ServeOptions, serve } from "./serve.ts"
 export {
