@@ -15,8 +15,19 @@ export {
     createApprovalRegistry,
     type PendingApproval,
 } from "./approvals.ts"
-export { createHandler, type HandlerOptions } from "./handler.ts"
-export { type ClaimTicket, claimCommand, claimUrl, createClaimTicket } from "./keys.ts"
+export {
+    createHandler,
+    type HandlerOptions,
+    type Provisioner,
+    type ProvisionStepWire,
+} from "./handler.ts"
+export {
+    browsableHost,
+    type ClaimTicket,
+    claimCommand,
+    claimUrl,
+    createClaimTicket,
+} from "./keys.ts"
 export { type Route, type RouteMatch, Router } from "./router.ts"
 export { isLoopback, type RunningServer, type ServeOptions, serve } from "./serve.ts"
 export {

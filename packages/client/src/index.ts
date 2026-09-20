@@ -24,6 +24,17 @@
  */
 
 import type { AnyEvent, EventDataMap, EventType, ScheduleRecord, TurnSender } from "@dispach/core"
+
+/**
+ * Re-exported, because a consumer of `schedules()` cannot name its own return type otherwise.
+ *
+ * The browser is the caller that made this a defect: it imports this package and **must not**
+ * import `@dispach/core`'s barrel, which is 1.18 MB of Zod and a YAML parser (decision 11.199).
+ * Telling it to reach past this package for a type is telling it to pay four hundred times the
+ * bundle for one interface.
+ */
+export type { ScheduleRecord } from "@dispach/core"
+
 import { DispachError, errorFromResponse, transportError, type WireError } from "./errors.ts"
 import {
     type EventStreamItem,
@@ -158,6 +169,31 @@ export interface AgentClient {
     tools(): Promise<readonly ToolSummary[]>
     skills(): Promise<SkillsReport>
     sessions(): Promise<readonly SessionSummary[]>
+    /**
+     * A page of one conversation, newest first.
+     *
+     * Needed by anything that *resumes* rather than watches: an attached terminal or a browser tab
+     * opening onto a conversation has to paint what is already there, and the event stream only
+     * carries what happens next. Without this a resumed session shows a blank screen above a live
+     * prompt, which is the failure `seedHistory` was written for on the embedded path.
+     */
+    messages(sessionKey: string, options?: MessagesOptions): Promise<MessagePageLike>
+    /**
+     * Clear a conversation's history. Memory files on disk are untouched, and the server says so.
+     *
+     * Deliberately not called `delete`: the session key keeps working and the next message starts
+     * it again, so this empties rather than removes. A name implying removal would invite a caller
+     * to treat a cleared key as unusable.
+     */
+    clearSession(sessionKey: string): Promise<{ readonly memoryFilesKept: boolean }>
+    /**
+     * Re-read the manifest by **replacing** the agent — a new instance, not a mutated one.
+     *
+     * `adopted` lists everything that came back, which is more than one agent when the target is a
+     * supervisor: a team loads from one manifest as one unit. Answers 409 while a turn is running
+     * rather than aborting it, so a caller applying a config change retries instead of assuming.
+     */
+    reload(): Promise<{ readonly id: string; readonly adopted: readonly string[] }>
     schedules(): Promise<readonly ScheduleRecord[]>
     context(options?: { readonly sessionKey?: string; readonly input?: string }): Promise<unknown>
     /**
@@ -178,11 +214,47 @@ export interface AgentClient {
      * reason.
      */
     approve(approvalId: string, granted: boolean): Promise<void>
+    /**
+     * Switch this agent off — durably, and out of the host now.
+     *
+     * Two effects in one call and both are needed: the store row survives a restart, and the host
+     * drops the agent immediately. It is not a signal — since one process hosts several agents,
+     * signalling the process would take the others with it.
+     *
+     * Throws `agent_turn_in_flight` (409) while a turn is running. The row is written first either
+     * way, so the agent is off at the next start even when the teardown is refused.
+     */
+    stop(reason?: string): Promise<AgentLifecycleState>
+    /**
+     * Switch it back on, and have the host adopt it now.
+     *
+     * Throws `start_not_supported` (501) on a server with no way to look up a manifest for an agent
+     * it is not hosting — an embedder over its own agent store, or the container image, which
+     * passes none on purpose.
+     */
+    start(): Promise<AgentLifecycleState>
+}
+
+/** What `stop` and `start` report back. */
+export interface AgentLifecycleState {
+    readonly id: string
+    readonly status: "loaded" | "disabled"
+    /**
+     * When it was last switched off, and why — **kept through a later start**, as the record of
+     * what happened. So a started agent legitimately carries both, and a reader has to look at
+     * `status` rather than at their presence.
+     */
+    readonly disabledAt?: string
+    readonly reason?: string
+    /** Which agents the host took on. A supervisor brings its team, so this can be several. */
+    readonly adopted?: readonly string[]
 }
 
 /** A question waiting on somebody. */
 export interface PendingApproval {
     readonly approvalId: string
+    /** Which agent is asking. Always the agent in the path — a listing never crosses agents. */
+    readonly agentId: string
     readonly slug: string
     readonly callId: string
     /** The command or path a rule would match — what the person actually needs to read. */
@@ -192,20 +264,54 @@ export interface PendingApproval {
     readonly requestedAt: string
 }
 
+/**
+ * An agent in the listing, or at the head of its own resource.
+ *
+ * **Most fields are optional because a stopped agent is listed too.** `GET /v1/agents` carries a
+ * thin `{ id, name, status: "disabled", reason? }` row for one — it is not loaded, so there is no
+ * manifest in memory to report a model or a window from, and loading one to fill the row in would
+ * make a listing depend on the agent's credentials being present, which is the defect
+ * `readManifestHeader` exists to avoid. Read `status` first: `"disabled"` means the rest is absent
+ * by design rather than missing by accident.
+ */
 export interface AgentDescriptionLike {
     readonly id: string
     readonly name: string
     readonly status: string
-    readonly model: string
-    readonly dialect: string
-    readonly window: number
-    readonly tools: number
-    readonly skills: number
-    readonly schedules: number
-    readonly entryPhase: string | null
+    readonly model?: string
+    readonly dialect?: string
+    readonly window?: number
+    readonly tools?: number
+    /** What the catalogue costs per turn. A tool *count* says nothing about the bill. */
+    readonly catalogueTokens?: number
+    readonly skills?: number
+    readonly schedules?: number
+    readonly entryPhase?: string | null
     readonly phases?: readonly string[]
-    readonly channels: readonly unknown[]
-    readonly warnings: readonly WireError[]
+    /**
+     * Each channel's last reported state. `unknown[]` until 16.6, which is why the web UI cast.
+     *
+     * `status` is deliberately a plain `string` and not `ChannelStatus`: the set can grow inside
+     * `v: 1`, and a closed union here would make a server one member ahead of this package a type
+     * error rather than a state a client renders generically. `input` is present only with
+     * `needs_input` and its `kind` is `string` for the same reason.
+     */
+    readonly channels?: readonly {
+        readonly id: string
+        readonly type: string
+        readonly status: string
+        readonly detail?: string
+        readonly input?: {
+            readonly kind: string
+            readonly payload: string
+            readonly issuedAt: string
+            readonly expiresAt?: string
+        }
+    }[]
+    readonly warnings?: readonly WireError[]
+    /** Set on a `disabled` row: when it was switched off, and why if anybody said. */
+    readonly disabledAt?: string
+    readonly reason?: string
 }
 
 export interface ToolSummary {
@@ -213,6 +319,8 @@ export interface ToolSummary {
     readonly summary: string
     readonly mutating: boolean
     readonly trust: string
+    /** Why a tool declares itself trusted when a provider tool defaults to untrusted. */
+    readonly trustReason?: string
     readonly provider: string
     readonly tags: readonly string[]
     /** Absent on an unphased agent — which is not the same as "visible in no phase". */
@@ -234,11 +342,57 @@ export interface SkillsReport {
     }[]
 }
 
+/**
+ * One stored message, as a page returns it.
+ *
+ * `origin` is what a resuming client filters on and the field most easily got wrong: it is set
+ * only when the *harness* wrote the row (`observation`, `call`, `repair`, `digest`), and absent for
+ * a person's message and the model's prose. So a transcript is built from an **allowlist of
+ * absent-or-prose**, never a blocklist — `lib/resume.ts` in the CLI owns that rule for the same
+ * reason `endNote` is shared: it has been written wrong twice.
+ */
+export interface StoredMessageLike {
+    /** Monotonic within a store, and the ordering key. Never sort by timestamp, which can tie. */
+    readonly id: number
+    readonly role: string
+    readonly content: string
+    readonly turnId?: string
+    readonly origin?: string
+    readonly createdAt?: string
+}
+
+export interface MessagePageLike {
+    readonly messages: readonly StoredMessageLike[]
+    /** Feed back as `before` for the previous page. Absent once the first message is included. */
+    readonly nextBefore?: number
+}
+
+/**
+ * One conversation, as `GET /v1/agents/:id/sessions` returns it.
+ *
+ * This declared four fields while the route sent the store's whole `SessionSummary` — `messages`
+ * and `phase` among them. Under-declaring is not harmless: a session picker cannot show how long a
+ * conversation is, and the field is *there*, so the only way to find out is to read the server. The
+ * same shape as `channels` being `readonly unknown[]` until 16.6.
+ */
 export interface SessionSummary {
     readonly sessionKey: string
     readonly channel: string
+    readonly peerId: string
     readonly turns: number
+    readonly messages: number
     readonly lastActivityAt: string
+    readonly createdAt: string
+    readonly updatedAt: string
+    readonly thread?: string
+    /** Phase-scoped tool visibility, persisted per session. Absent on an unphased agent. */
+    readonly phase?: string
+}
+
+export interface MessagesOptions {
+    /** The cursor from a previous page's `nextBefore`. Absent starts at the newest. */
+    readonly before?: number
+    readonly limit?: number
 }
 
 export interface EventStreamOptions {
@@ -454,7 +608,42 @@ export function createClient(options: ClientOptions): DispachClient {
             tools: () => json<readonly ToolSummary[]>("GET", at("/tools")),
             skills: () => json<SkillsReport>("GET", at("/skills")),
             sessions: () => json<readonly SessionSummary[]>("GET", at("/sessions")),
-            schedules: () => json<readonly ScheduleRecord[]>("GET", at("/schedules")),
+
+            messages: (sessionKey, options) => {
+                const query = new URLSearchParams()
+                if (options?.before !== undefined) query.set("before", String(options.before))
+                if (options?.limit !== undefined) query.set("limit", String(options.limit))
+                const suffix = query.size === 0 ? "" : `?${query.toString()}`
+                return json<MessagePageLike>(
+                    "GET",
+                    at(`/sessions/${encodeURIComponent(sessionKey)}/messages${suffix}`),
+                )
+            },
+
+            clearSession: (sessionKey) =>
+                json<{ memoryFilesKept: boolean }>(
+                    "DELETE",
+                    at(`/sessions/${encodeURIComponent(sessionKey)}`),
+                ),
+
+            reload: () =>
+                json<{ id: string; adopted: readonly string[] }>("POST", at("/reload"), {
+                    body: {},
+                }),
+
+            /**
+             * Unwrapped, because the route wraps it — and this was declared as a bare array and
+             * **never called** until 17.3's panel became the first consumer, at which point the
+             * page crashed on `schedules.map is not a function` and React took the whole tree down
+             * to a black screen.
+             *
+             * `approvals` directly above has always unwrapped correctly, which is what makes this
+             * the `includeHistory` shape rather than a typo: a declaration with no consumer is
+             * wrong for as long as nobody uses it, and its type says otherwise the whole time.
+             */
+            schedules: async () =>
+                (await json<{ schedules: readonly ScheduleRecord[] }>("GET", at("/schedules")))
+                    .schedules,
 
             approvals: async () =>
                 (await json<{ approvals: readonly PendingApproval[] }>("GET", at("/approvals")))
@@ -468,6 +657,13 @@ export function createClient(options: ClientOptions): DispachClient {
                     body: { granted },
                 })
             },
+
+            stop: (reason) =>
+                json<AgentLifecycleState>("POST", at("/stop"), {
+                    body: reason === undefined ? {} : { reason },
+                }),
+
+            start: () => json<AgentLifecycleState>("POST", at("/start"), { body: {} }),
 
             context: (opts) => {
                 const params = new URLSearchParams()

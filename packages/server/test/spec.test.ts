@@ -22,6 +22,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { readdirSync, readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { EVENT_TYPES } from "@dispach/core"
+import { phantomRoutes, undocumentedRoutes } from "../src/openapi.ts"
 import { WEB_PATHS } from "../src/web.ts"
 import { cleanupWorkspaces, harness } from "./harness.ts"
 
@@ -193,8 +194,11 @@ describe("the routes match the spec", () => {
             // path: a bare `\/\S*` would match a line of prose that happens to start with a verb
             // and a slash, and a guard that matches prose is one that goes green on a typo.
             [
+                // `docs` joins `v1`, `assets/` and the bare `/`: the reference page is a route
+                // this server registers, so a scanner that could not see it in the spec would
+                // report it as undocumented forever — which is what it did.
                 ...SPEC.matchAll(
-                    /^(GET|POST|PATCH|DELETE|PUT)\s+(\/(?:v1[^\s?→]*|assets\/[^\s?→]*|))(?=[\s?]|$)/gm,
+                    /^(GET|POST|PATCH|DELETE|PUT)\s+(\/(?:v1[^\s?→]*|assets\/[^\s?→]*|docs|))(?=[\s?]|$)/gm,
                 ),
             ].map((match) => `${match[1]} ${match[2]}`),
         )
@@ -209,6 +213,44 @@ describe("the routes match the spec", () => {
             (route) => !codeRoutes().has(route) && !upgrade.has(route),
         )
         expect(missing).toEqual([])
+    })
+
+    /**
+     * The OpenAPI summaries, guarded in **both** directions against the real router table.
+     *
+     * Here rather than in `openapi.test.ts`, because this file already extracts the routes from the
+     * source. The first version of this guard lived over there and read the generated *document*
+     * back, which is circular: a route with no summary is absent from the document, so a check
+     * driven by the document can never see the thing it exists to catch.
+     *
+     * Both directions matter. A route with no summary is a blank page in the reference; a summary
+     * for a route nothing registers is a reference describing an endpoint that answers 404, which
+     * is worse because it looks authoritative.
+     */
+    test("every route has an OpenAPI summary, and every summary has a route", () => {
+        const refs = [...codeRoutes()].map((route) => {
+            const [method, pattern] = route.split(" ")
+            return { method: method ?? "", pattern: pattern ?? "" }
+        })
+        expect(undocumentedRoutes(refs)).toEqual([])
+        expect(phantomRoutes(refs)).toEqual([])
+    })
+
+    test("no route validates its own request body by hand", () => {
+        /**
+         * The shape of a body is the schema's to decide, and one validator is the whole point.
+         *
+         * Nine routes each had their own `typeof input.x` check with its own code and hint, which
+         * is what made the surface undescribable from outside a route. The codes and hints moved
+         * into `wire-schemas.ts`; this is what stops a tenth being written inline. The pattern is
+         * narrow on purpose — `typeof input.` and `body.value as` are the two spellings that were
+         * actually there — because a broad one would fire on every legitimate `typeof` in the file.
+         */
+        const handler = readFileSync(join(SERVER_SRC, "handler.ts"), "utf8")
+        const inline = [
+            ...handler.matchAll(/typeof\s+input\.[A-Za-z]+|body\.value\s+as\s+\{/g),
+        ].map((match) => match[0])
+        expect(inline).toEqual([])
     })
 
     test("every registered route is documented", () => {
@@ -234,6 +276,16 @@ describe("the browser surface", () => {
                 (match) => match[1] ?? "",
             ),
         )
+        /**
+         * `/docs` is excluded **by name**, because it is a page rather than an asset.
+         *
+         * It has no entry in `WEB_ASSETS` and needs none — it is one inline string with two script
+         * tags, and giving it a table row would mean a build artefact for a page with no build.
+         * Excluded by name rather than by loosening the pattern: a prefix exemption would quietly
+         * swallow the next non-asset route somebody adds, which is the failure this guard exists
+         * for in the first place.
+         */
+        registered.delete("/docs")
         expect([...registered].sort()).toEqual([...WEB_PATHS].sort())
     })
 
@@ -327,10 +379,19 @@ describe("every reachable failure carries a hint", () => {
             code: "unknown_event_type",
         },
         {
-            name: "reload",
+            name: "reloading an agent this server does not host",
             method: "POST",
-            path: "/v1/agents/assistant/reload",
-            code: "reload_not_supported",
+            /**
+             * The reload route's remaining reachable failure from a bare call.
+             *
+             * It answered a blanket `reload_not_supported` 501 until 17.1 wired it to
+             * `Runtime.replace`; the refusals that survive are about *this* agent — unknown here,
+             * `agent_turn_in_flight` while a turn is running (asserted in `server.test.ts`, where
+             * a turn can be held open), and `agent_not_replaceable` for a team member, which is
+             * the runtime's own refusal and belongs where the team is — `core/test/adopt.test.ts`.
+             */
+            path: "/v1/agents/nope/reload",
+            code: "agent_not_found",
         },
         {
             name: "stopping a turn with no handle",

@@ -20,8 +20,10 @@
 import type {
     ChannelBinding,
     ChannelHost,
+    ChannelInput,
     ChannelStatus,
     ChannelTransport,
+    IssuedChannelInput,
     RawInbound,
     WebhookDelivery,
     WebhookOutcome,
@@ -64,12 +66,25 @@ export interface ChannelHubOptions {
     readonly pollIntervalMs?: number
 }
 
+/**
+ * A channel's last report, kept so a reader that arrives afterwards still gets it.
+ *
+ * `input` is stored rather than left on the event for one reason: a browser that opens *after* a
+ * QR was emitted would otherwise see `needs_input` with nothing to render and no way to ask for
+ * it. It carries `issuedAt` so a stale payload can be shown as stale instead of as broken.
+ */
+interface ChannelState {
+    readonly status: ChannelStatus
+    readonly detail?: string
+    readonly input?: IssuedChannelInput
+}
+
 interface Bound {
     readonly agent: Agent
     readonly bindings: readonly ChannelBinding[]
     readonly inboxes: ReadonlyMap<string, Inbox>
     readonly outbox: Outbox
-    readonly status: Map<string, ChannelStatus>
+    readonly status: Map<string, ChannelState>
 }
 
 export class ChannelHub {
@@ -145,14 +160,20 @@ export class ChannelHub {
         return this.#started
     }
 
-    /** Channel ids and their last reported state, for `GET /v1/agents/:id`. */
-    statusOf(agentId: string): readonly { id: string; type: string; status: ChannelStatus }[] {
+    /**
+     * Channel ids and their last reported state, for `GET /v1/agents/:id`.
+     *
+     * Returns `detail` and `input` as well as the status, because a field the runtime has stored
+     * and does not hand back is one a client can only learn by having been subscribed at the
+     * right moment — which for `needs_input` means a page that missed the QR can never render it.
+     */
+    statusOf(agentId: string): readonly ({ id: string; type: string } & ChannelState)[] {
         const bound = this.#agents.get(agentId)
         if (bound === undefined) return []
         return bound.bindings.map((binding) => ({
             id: binding.transport.id,
             type: binding.transport.type,
-            status: bound.status.get(binding.transport.id) ?? "starting",
+            ...(bound.status.get(binding.transport.id) ?? { status: "starting" as const }),
         }))
     }
 
@@ -167,32 +188,82 @@ export class ChannelHub {
         if (this.#started || this.#stopped) return
         this.#started = true
 
-        for (const [agentId, bound] of this.#agents) {
-            // Scoped to this agent, not to every row in the file. Two runtimes can share a store,
-            // and recovering the other one's in-flight chunk makes it re-send a message it has
-            // already delivered.
-            await bound.outbox.recover([agentId])
-            bound.outbox.start(agentId)
+        for (const agentId of this.#agents.keys()) await this.startAgent(agentId)
+    }
 
-            for (const binding of bound.bindings) {
-                const transport = binding.transport
-                const host = this.#hostFor(agentId, transport)
-                host.status("starting")
-                // Not awaited as a group: one transport failing to start must not prevent the
-                // others, and `start` is specified to return once running rather than connected.
-                try {
-                    await transport.start(host)
-                } catch (cause) {
-                    host.status("error", cause instanceof Error ? cause.message : String(cause))
-                    host.error({
-                        code: "channel_start_failed",
-                        message: `Channel "${transport.id}" (${transport.type}) failed to start: ${
-                            cause instanceof Error ? cause.message : String(cause)
-                        }`,
-                        hint: "The runtime is still serving — a channel that cannot start never blocks readiness. Check the channel's credentials and network access, then reload the agent.",
-                        field: `channels[${transport.id}]`,
-                    })
-                }
+    /**
+     * Start one agent's transports, whether or not the hub has been started before.
+     *
+     * Extracted from `start()` rather than duplicated, because this is the path an agent adopted
+     * into a **running** server takes and the two must not drift: a channel that connects on boot
+     * and not on adoption is the "provisioned and silently unreachable" failure the always-on model
+     * exists to remove. `start()` is a loop over this, so there is one place a transport starts.
+     *
+     * A no-op when the hub is stopped, and when the agent has no enabled channels — `register`
+     * stores nothing for an agent with none, so this is also how "adopt an agent with no channels"
+     * costs nothing rather than needing a caller-side check.
+     */
+    async startAgent(agentId: string): Promise<void> {
+        // **`#started` is a precondition, not just a flag `start()` sets.** Without this an agent
+        // adopted into a `run`-mode runtime opened a Telegram long-poll, because `adopt` calls this
+        // unconditionally — which is exactly the surprise `startChannels` exists to prevent, and
+        // the reason a one-shot `run --input` would then hang on exit. Found by the test asserting
+        // an adopted agent's channels stay registered-and-not-started.
+        if (!this.#started || this.#stopped) return
+        const bound = this.#agents.get(agentId)
+        if (bound === undefined) return
+        // Scoped to this agent, not to every row in the file. Two runtimes can share a store,
+        // and recovering the other one's in-flight chunk makes it re-send a message it has
+        // already delivered.
+        await bound.outbox.recover([agentId])
+        bound.outbox.start(agentId)
+
+        for (const binding of bound.bindings) {
+            const transport = binding.transport
+            const host = this.#hostFor(agentId, transport)
+            host.status("starting")
+            // Not awaited as a group: one transport failing to start must not prevent the
+            // others, and `start` is specified to return once running rather than connected.
+            try {
+                await transport.start(host)
+            } catch (cause) {
+                host.status("error", cause instanceof Error ? cause.message : String(cause))
+                host.error({
+                    code: "channel_start_failed",
+                    message: `Channel "${transport.id}" (${transport.type}) failed to start: ${
+                        cause instanceof Error ? cause.message : String(cause)
+                    }`,
+                    hint: "The runtime is still serving — a channel that cannot start never blocks readiness. Check the channel's credentials and network access, then reload the agent.",
+                    field: `channels[${transport.id}]`,
+                })
+            }
+        }
+    }
+
+    /**
+     * Stop and forget one agent's channels, for an agent being disposed or replaced.
+     *
+     * The transports go down and the **outbox poll loop stops**, which is the half easy to miss: it
+     * is a `setInterval` scoped to one agent, so a hub that forgot the bindings and left the loop
+     * running would keep draining rows for an agent this process no longer hosts — and after a
+     * `replace` there would be two loops on one agent's queue, which is the double-send the
+     * idempotency key exists to make survivable rather than routine.
+     *
+     * Unsent rows are left in the store on purpose. They are durable and keyed, so the replacement
+     * agent's outbox recovers them on `startAgent`; dropping them would lose a reply somebody is
+     * waiting for in order to make a teardown look tidy.
+     */
+    async unregister(agentId: string): Promise<void> {
+        const bound = this.#agents.get(agentId)
+        if (bound === undefined) return
+        this.#agents.delete(agentId)
+        bound.outbox.stop()
+        for (const binding of bound.bindings) {
+            try {
+                await binding.transport.stop()
+            } catch {
+                // Best-effort, exactly as in `stop()`: a transport that throws has already been
+                // told to stop, and the agent is going away either way.
             }
         }
     }
@@ -280,8 +351,38 @@ export class ChannelHub {
                 // execution, or one slow turn stops the runtime from seeing any further updates.
                 void this.#onInbound(agentId, transport, raw)
             },
-            status: (status, detail) => {
-                bound?.status.set(transport.id, status)
+            status: (status: ChannelStatus, detail?: string, input?: ChannelInput) => {
+                /**
+                 * A `needs_input` with nothing to act on keeps the previous state.
+                 *
+                 * The overloads on `ChannelHost.status` make this unreachable from TypeScript; a
+                 * plugin written in JavaScript arrives here. Recording it would replace a state a
+                 * client can render ("connected") with one it cannot, which is a channel that
+                 * looks broken rather than one that is waiting — so the refusal is reported and
+                 * the state is left alone rather than the other way round.
+                 */
+                if (status === "needs_input" && input === undefined) {
+                    this.#bus.emit(
+                        "agent.channel.error",
+                        {
+                            channelId: transport.id,
+                            code: "channel_input_missing",
+                            message: `Channel "${transport.id}" (${transport.type}) reported needs_input with no input to act on.`,
+                            hint: 'Pass the payload: host.status("needs_input", "scan to link", { kind: "qr", payload: "…" }). A status nobody can act on is indistinguishable from a hang.',
+                        },
+                        { agentId },
+                    )
+                    return
+                }
+                const issued: IssuedChannelInput | undefined =
+                    input === undefined
+                        ? undefined
+                        : { ...input, issuedAt: new Date().toISOString() }
+                bound?.status.set(transport.id, {
+                    status,
+                    ...(detail === undefined ? {} : { detail }),
+                    ...(issued === undefined ? {} : { input: issued }),
+                })
                 this.#bus.emit(
                     "agent.channel.status",
                     {
@@ -289,6 +390,7 @@ export class ChannelHub {
                         channelType: transport.type,
                         status,
                         ...(detail === undefined ? {} : { detail }),
+                        ...(issued === undefined ? {} : { input: issued }),
                     },
                     { agentId },
                 )

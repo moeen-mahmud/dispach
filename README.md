@@ -316,8 +316,11 @@ than left to be discovered:
 - **No `command:` override.** The image's CMD carries `--host 0.0.0.0`; a compose `command:`
   replaces CMD wholesale, so adding one drops the host flag and the process listens on loopback
   *inside* the container, which no published port can reach.
-- **A named volume at `/state`.** A named volume inherits uid 1000 from the image; a host path
-  keeps host ownership, and a non-root container cannot write its own store.
+- **A named volume at `/home/dispach`.** That is the agent's home, and the sandbox inside it is a
+  laptop's: `~/.dispach/store.db`, `~/.dispach/agents/`, `~/.dispach/logs/`. A named volume inherits
+  uid 1000 from the image; a host path keeps host ownership, and a non-root container cannot write
+  its own home. It also holds the `uv` cache and the cloned skills catalogues, which used to sit on
+  a tmpfs and be discarded on every restart.
 - **`/agent` is read-write.** The skills cache and `memory_write` both write beside the manifest.
 - **`stop_grace_period: 30s`.** The 10 s default can SIGKILL an outbox flush mid-write.
 
@@ -325,7 +328,9 @@ The model reaches the container through the *environment* rather than through a 
 manifest, which is the documented precedence: the ambient environment beats an agent's own file,
 so an operator can configure the agent their container runs.
 
-One agent per container: `serve` takes one manifest. A second agent is a second service with its
+One agent per container **by choice, not by limitation**: `serve` accepts several manifests and one
+process hosts N agents (decision 8.5), but a shared process means one agent's runaway `exec` starves
+the others, so the image runs one. A second agent is a second service with its
 own port, its own agent directory and **its own state volume** — a commented example in the
 compose file shows the shape, including why sharing a volume would have two boots deleting each
 other's schedules.
@@ -351,14 +356,20 @@ edit re-runs `bun run build` and nothing before it:
 docker compose up -d --build --wait     # after any source change
 docker compose logs -f                  # what it is saying
 docker compose exec agent sh            # a shell in the container, as uid 1000
-docker compose down                     # stop;  down -v also discards /state
+docker compose down                     # stop;  down -v also discards the home volume
 ```
 
 Verified: `exec` runs inside the container as **uid 1000**, cwd `/agent/workspace`, with output
-fenced as untrusted. What the agent's shell can reach is `sh`, `bash`, `git`, `python3`, `curl`,
-`wget` and `node` — `git` because the skills catalogue is fetched with it and its absence *deletes*
-that feature rather than degrading it, `python3` because a skill shipping scripts needs it. The
-CI `docker` job asserts all of them, and that the image still runs as uid 1000.
+fenced as untrusted. What the agent's shell can reach is `sh`, `bash`, `git`, `python3`, `uv`, `jq`
+and `curl` — `git` because the skills catalogue is fetched with it and its absence *deletes* that
+feature rather than degrading it, `python3` and `uv` because a skill shipping scripts needs them.
+
+What is **absent on purpose**, and asserted as such: no Bun and no Node, because the application is
+one compiled binary; no `wget`, so there is one obvious HTTP client rather than two; and no pager
+and no editor, because `exec` hands a child a file descriptor and never a TTY — anything that pages
+or prompts blocks until its deadline and reads as a hung agent. The CI `docker` job asserts both
+lists, that the image is glibc, that a C-extension wheel installs with no compiler present, that a
+named timezone resolves, and that it still runs as uid 1000 with `$HOME` set.
 
 ### What containment the compose file adds
 
@@ -372,8 +383,8 @@ nothing can inspect. So the deployment supplies the other half:
 | `no-new-privileges` | A setuid binary cannot raise privileges. There should be none; this makes that a property rather than an audit. |
 | `pids_limit: 512` | **A fork bomb is one `exec` call away.** `init: true` reaps children; only this bounds them. |
 | `mem_limit: 2g`, `cpus: 2.0` | An agent asked to process a large file can allocate until the host swaps. Here it is OOM-killed and restarts, which is legible. |
-| `read_only: true` | An immutable root filesystem. `/agent` and `/state` are mounts and stay writable — the skills cache and `memory_write` both need that. |
-| `tmpfs` on `/tmp` and `$HOME` | The two places something genuinely writes: `exec` hands children a file descriptor in `/tmp`, and `uv` caches under `$HOME`. **Wiped on restart**, so a Python skill rebuilds its venv after each boot. |
+| `read_only: true` | An immutable root filesystem. `/agent` and `/home/dispach` are mounts and stay writable — the skills cache and `memory_write` both need that. |
+| `tmpfs` on `/tmp` | Where `exec` hands children a file descriptor rather than buffering their output. There used to be a second entry for `$HOME`, which meant a Python skill rebuilt its venv on every boot; `$HOME` is a volume now, so that trade is gone rather than accepted. |
 
 `examples/shell-agent` is the agent to mount for this, and its README is blunt about the
 consequence: run it on a laptop and the policy is the only boundary there is.
@@ -386,7 +397,7 @@ docker run --rm -p 7420:7420 \
   --env-file examples/minimal/.env \
   -e DISPACH_API_TOKEN=pick-something \
   -v "$PWD/examples/minimal:/agent" \
-  -v dispach-state:/state \
+  -v dispach-home:/home/dispach \
   dispach
 ```
 
@@ -395,19 +406,33 @@ listening on loopback *inside* a container is unreachable through a published po
 that looks healthy, answers nothing, and gives no clue why. A non-loopback bind then requires a
 token by design, and `serve` refuses to start without one rather than binding the world open.
 
-A manifest goes at `/agent`; the store, logs and sandbox live on a volume at `/state`. Two stages,
-so the image carries `dist/`, production dependencies and no toolchain. Non-root as `bun` (uid 1000)
-— **a host directory bind-mounted at `/state` has to be writable by uid 1000**, or the container
-starts and fails at the first turn with a permission error, which is the worse moment to find out.
+A manifest goes at `/agent`, and the entrypoint links it into the sandbox as `primary` — so the
+mounted agent is reachable by bare ref (`dispach validate primary`) and appears in the same listing
+as anything `dispach init` creates inside the container. There is **one agents directory**, which
+there was not before: the image used to set `DISPACH_HOME=/state`, so `init` wrote to `/state/agents`
+while the CMD served `/agent`, and an agent created in the container was invisible to every listing.
+
+The image is `debian:trixie-slim` and the runtime stage contains **one file** — the compiled binary.
+No Bun, no Node, no `node_modules`. glibc rather than musl is deliberate and is about Python: PyPI's
+C-extension wheels are `manylinux`, so on alpine anything without a `musllinux` build compiles from
+source, and this image ships no compiler — a wheel would fail *inside a tool call*. Non-root as
+`dispach` (uid 1000) — **a host directory bind-mounted at `/home/dispach` has to be writable by
+uid 1000**, or the container starts and fails at the first turn with a permission error, which is
+the worse moment to find out.
 
 The healthcheck polls `/v1/ready`, which flips at `runtime.ready` — *before* channels connect,
 deliberately. A Telegram outage must not read as an unhealthy container and get it restarted into
 the same outage, so the probe answers "can it serve a turn" rather than "is everything connected".
 Channel state lives on the agent resource instead.
 
-Measured on an arm64 Docker Desktop, 2026-09-17: the image is **287 MB** against a 350 MB ceiling,
-`docker compose up -d --wait` reaches healthy in **5.8 s**, the healthcheck reports healthy, an
-unauthenticated write is refused with 401, `store.db` lands on the state volume owned by uid 1000,
+Measured on an arm64 Docker Desktop, 2026-09-17, after the base-image change: the image is
+**570 MB** against a 700 MB ceiling and `docker compose up -d --wait` reaches healthy in **5.7 s** —
+the same as before, because readiness is tens of milliseconds in-process and almost all of that is
+waiting for the first healthcheck probe. Where the size goes: 109 MB debian-slim, 180 MB of apt
+packages (of which `git` alone is **92 MB**, because Debian's git pulls perl), 47 MB of `uv`, and
+85 MB of compiled binary. `git` is the price of glibc and glibc is the price of Python wheels that
+install rather than compile. The healthcheck reports healthy, an
+unauthenticated write is refused with 401, `store.db` lands on the home volume owned by uid 1000,
 and a real streaming turn against DeepSeek reconstructs from 26 `model.chunk` frames. The CI
 `docker` job rebuilds and re-measures on every push, because a figure nobody re-checks is a figure
 about one afternoon.

@@ -29,42 +29,34 @@ import {
 } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import {
-    BRAND,
-    buildChannels,
-    HarnessError,
-    loadManifest,
-    processAlive,
-    readManifestHeader,
-    SqliteStore,
-} from "@dispach/core"
-import { ambientEnv } from "#lib/ambient"
+import { BRAND, HarnessError, processAlive, readManifestHeader, SqliteStore } from "@dispach/core"
 import { EXIT_FAILURE, EXIT_OK, LOG_POLL_MS } from "#lib/const"
 import {
     type Attention,
+    agentFindings,
     attentionFrom,
     type BinaryFacts,
     type Finding,
     isLoopbackHost,
-    type PreflightFacts,
-    preflightFindings,
     renderStatus,
     type ServiceFacts,
+    serverFindings,
     summariseStatus,
 } from "#lib/daemon-plan"
 import { onExit } from "#lib/exit"
 import {
-    labelFor,
     plistEnvAllowed,
     renderPlist,
     type ServicePlan,
+    serverLabel,
     THROTTLE_SECONDS,
 } from "#lib/launchd"
+import { liveHosts } from "#lib/lifecycle"
 import { type FollowIO, followLogs } from "#lib/log-follow"
-import { CHANNEL_IDS, CHANNELS, PROVIDER_IDS } from "#lib/providers"
 import { bytes, indent, keyValue, tildify } from "#lib/render"
-import { logPaths, storePath } from "#lib/sandbox"
+import { listAgents, logPaths, sandboxRoot, serverLogPaths, storePath } from "#lib/sandbox"
 import { type Exec, resolveServiceManager, unsupported } from "#lib/service"
+import { renderUnit } from "#lib/systemd"
 
 export const DAEMON_ACTIONS = [
     "install",
@@ -89,6 +81,10 @@ export interface DaemonOptions {
     /** Test seams. Nothing in `src/` outside this file passes them. */
     readonly exec?: Exec
     readonly platform?: string
+    /** For the sandbox root and `XDG_CONFIG_HOME`. Injectable so a test needs no real HOME. */
+    readonly env?: Readonly<Record<string, string | undefined>>
+    /** The database to read leases from. Defaults to the sandbox's. */
+    readonly store?: string
 }
 
 export async function daemonCommand(options: DaemonOptions): Promise<number> {
@@ -101,11 +97,23 @@ export async function daemonCommand(options: DaemonOptions): Promise<number> {
     }
     const action = options.action as DaemonAction
 
-    if (action !== "status" && options.manifestPath === undefined) {
+    /**
+     * **Naming an agent is retired for every verb that installs or moves a unit.**
+     *
+     * One service hosts every agent now, so a per-agent unit is not a smaller version of this — it
+     * is a second host claiming the same leases, which would leave the server reporting those
+     * agents as served elsewhere indefinitely with nothing looking wrong. Refused rather than
+     * silently reinterpreted, because a command that does something materially different from what
+     * it says is worse than one that stops.
+     *
+     * `status` and `logs` still take one: those are questions about an agent rather than
+     * instructions about a unit.
+     */
+    if (options.manifestPath !== undefined && action !== "status" && action !== "logs") {
         throw new HarnessError({
-            code: "cli_daemon_agent_required",
-            message: `daemon ${action} needs an agent.`,
-            hint: `Usage: ${BRAND.slug} daemon ${action} <agent>. Only \`status\` may be run bare, where it reports on every installed agent.`,
+            code: "daemon_per_agent_retired",
+            message: `daemon ${action} no longer takes an agent — one service hosts every agent.`,
+            hint: `\`${BRAND.slug} daemon ${action}\` acts on that one service. Per-agent on/off is \`${BRAND.slug} stop <agent>\` and \`${BRAND.slug} start <agent>\`, which persist in the store rather than as a unit — so an agent you switch off stays off across a restart without the host going down with it.`,
         })
     }
 
@@ -113,19 +121,20 @@ export async function daemonCommand(options: DaemonOptions): Promise<number> {
     const binary = binaryFacts()
 
     // The platform check runs *after* the paths are resolved, so the refusal can hand over the
-    // ExecStart line rather than only naming the gap. Not for `status`, which answers from the
-    // runtime lease alone and is useful everywhere.
-    if (platform !== "darwin" && action !== "status") {
+    // ExecStart line rather than only naming the gap. `darwin` and `linux` both have a manager now;
+    // anything else still refuses, and `status` answers from the lease alone everywhere.
+    if (platform !== "darwin" && platform !== "linux" && action !== "status") {
         throw unsupported(platform, execStartLine(binary, options.manifestPath ?? "<manifest>"))
     }
 
     const manager =
-        platform === "darwin"
+        platform === "darwin" || platform === "linux"
             ? resolveServiceManager(platform, {
                   home: homedir(),
                   uid: process.getuid?.() ?? 0,
                   envPrefix: BRAND.envPrefix,
                   ...(options.exec === undefined ? {} : { exec: options.exec }),
+                  ...(options.env === undefined ? {} : { env: options.env }),
               })
             : undefined
 
@@ -133,16 +142,133 @@ export async function daemonCommand(options: DaemonOptions): Promise<number> {
         case "status":
             return await statusAction(options, manager)
         case "install":
-            return await installAction(options, binary, manager)
+            return await serverInstallAction(options, binary, manager)
         case "uninstall":
             return uninstallAction(options, manager)
         case "start":
         case "stop":
         case "restart":
-            return lifecycleAction(action, options, manager)
+            return lifecycleAction(action, manager)
         case "logs":
             return await logsAction(options)
     }
+}
+
+/**
+ * Install **the** server unit: one process, hosting whatever the sandbox holds and has not stopped.
+ *
+ * No manifest anywhere in the plan, which is the change. `serve` with no argument reads the sandbox
+ * at every start, so an agent provisioned tomorrow is hosted without touching the unit — where a
+ * per-agent unit had to be installed per agent and could never host one that did not exist yet.
+ *
+ * Retirement happens **before** the install and is reported: a per-agent unit left beside this one
+ * claims the same leases. `bootout` + `enable` + `rm`, in that order, because `launchctl enable` is
+ * the only thing that clears an orphaned `disable` row and no verb deletes it — a label left
+ * disabled makes a future job with that name install cleanly and silently never start.
+ */
+async function serverInstallAction(
+    options: DaemonOptions,
+    binary: BinaryFacts,
+    manager: ReturnType<typeof resolveServiceManager> | undefined,
+): Promise<number> {
+    const label = serverLabel(BRAND.slug)
+    const logs = serverLogPaths(options.env)
+    const retiring = (manager?.labels(`${BRAND.slug}.agent.`) ?? []).filter(
+        (found) => found !== label,
+    )
+    const findings = [
+        ...serverFindings({
+            binary,
+            retiring,
+            servedElsewhere: (await liveHosts(options.store)).map((lease) => ({
+                agentId: lease.agentId,
+                pid: lease.pid,
+                mode: lease.mode,
+            })),
+        }),
+        /**
+         * Plus each agent's own, which is how "per-agent findings stay per-agent" survives the
+         * per-agent install being retired: they are still facts about one agent, reported by the
+         * one install that exists. Read from the **header**, never a full load — a listing must not
+         * depend on any agent's credentials being present, and this one runs over every agent in
+         * the sandbox, so a single missing key would otherwise break the install of the host that
+         * serves all the others.
+         */
+        ...listAgents(options.env).flatMap((agent) => {
+            // Read once. `exactOptionalPropertyTypes` cannot narrow a second call, and a doubled
+            // `statSync` per agent is a filesystem call for nothing.
+            const mode = envMode(agent.dir)
+            return agentFindings({
+                agentId: agent.id ?? agent.ref,
+                agentDir: agent.dir,
+                ...(agent.problem === undefined ? {} : { problem: agent.problem }),
+                ...(mode === undefined ? {} : { envFileMode: mode }),
+            })
+        }),
+    ]
+
+    const plan: ServicePlan = {
+        label,
+        // **No manifest.** The sandbox is the inventory, read at every start.
+        programArguments: [binary.execPath, binary.scriptPath, "serve", "--store", storePath()],
+        // The sandbox root rather than an agent's directory: there is no single agent here, and a
+        // cwd that *is* an agent directory makes that agent's `.env` a layer in every other
+        // agent's environment (decision 11.210).
+        workingDirectory: sandboxRoot(options.env),
+        stdoutPath: logs.out,
+        stderrPath: logs.err,
+        environment: serviceEnvironment(label),
+        provenance: [
+            `Generated by \`${BRAND.slug} daemon install\`. One service hosts every agent.`,
+            "Rewritten on every install — it names no agent, so there is nothing here to edit",
+            "when you add one. Switch an agent off with `stop <agent>`, which persists.",
+            "There are no secrets here and there never will be: a service manager echoes a",
+            "unit's environment in plaintext to anything running as this user. Each agent",
+            "reads its own credentials from the .env beside its manifest.",
+        ],
+    }
+
+    if (options.dryRun === true) {
+        process.stdout.write(
+            manager?.id === "systemd"
+                ? renderUnit(plan, BRAND.envPrefix)
+                : renderPlist(plan, BRAND.envPrefix),
+        )
+        if (findings.length > 0) process.stderr.write(renderFindings(findings))
+        return EXIT_OK
+    }
+
+    for (const old of retiring) manager?.uninstall(old)
+    if (findings.length > 0) process.stdout.write(renderFindings(findings))
+
+    mkdirSync(dirname(logs.out), { recursive: true })
+    manager?.install(plan)
+
+    const followUp = manager?.followUp(label) ?? []
+    process.stdout.write(
+        `${label} — ${followUp.length === 0 ? "service installed" : "unit written"}\n${keyValue([
+            { label: "runs", value: `${short(binary.execPath)} … serve` },
+            { label: "hosts", value: "every agent in the sandbox that is not stopped" },
+            { label: "logs", value: short(logs.err) },
+            { label: "restarts", value: `on crash only, at most one per ${THROTTLE_SECONDS}s` },
+        ])}\n`,
+    )
+    if (followUp.length > 0) {
+        // The honest half of a manager that writes a unit and does not start it. Numbered, because
+        // the order matters and because an unnumbered list of two commands reads as alternatives.
+        process.stdout.write(
+            `\nNot started yet — run these:\n${followUp
+                .map((command, index) => `  ${index + 1}. ${command}`)
+                .join("\n")}\n`,
+        )
+    }
+    const caution = manager?.caution()
+    if (caution !== undefined) process.stdout.write(`\n${caution}\n`)
+
+    process.stdout.write(
+        `\nA configuration error stops it once rather than looping — \`${BRAND.slug} daemon status\` says why.\n`,
+    )
+    return EXIT_OK
 }
 
 // ─── facts ──────────────────────────────────────────────────────────────────────────────
@@ -188,99 +314,6 @@ function execStartLine(binary: BinaryFacts, manifestPath: string): string {
 }
 
 // ─── install ────────────────────────────────────────────────────────────────────────────
-
-async function installAction(
-    options: DaemonOptions,
-    binary: BinaryFacts,
-    manager: ReturnType<typeof resolveServiceManager> | undefined,
-): Promise<number> {
-    const manifestPath = options.manifestPath as string
-    const env = ambientEnv([manifestPath])
-
-    // Exactly the pair `validate` uses, so a manifest the daemon accepts is one `serve` runs.
-    // `buildChannels` is where a missing bot token surfaces — the single check that would have
-    // prevented the crash loop this whole design is a reaction to. It opens no socket.
-    const loaded = loadManifest(manifestPath, {
-        knownProviders: PROVIDER_IDS,
-        knownChannels: CHANNEL_IDS,
-        env,
-    })
-    buildChannels(loaded, { channels: CHANNELS })
-
-    const agentId = loaded.manifest.id
-    const label = labelFor(BRAND.slug, agentId)
-    const logs = logPaths(agentId)
-    const mode = envMode(loaded.dir)
-    const facts: PreflightFacts = {
-        platform: options.platform ?? process.platform,
-        agentId,
-        manifestPath,
-        agentDir: loaded.dir,
-        binary,
-        ...(mode === undefined ? {} : { envFileMode: mode }),
-        enabledChannels: loaded.manifest.channels
-            .filter((channel) => channel.enabled)
-            .map((channel) => channel.id),
-        serverEnabled: loaded.manifest.server.enabled,
-        serverHost: loaded.manifest.server.host,
-        serverTokenPresent: (loaded.env[loaded.manifest.server.tokenEnv] ?? "") !== "",
-        ...(await servedBy(agentId)),
-        ...installedManifest(manager?.unitPath(label)),
-    }
-
-    const findings = preflightFindings(facts)
-    const blocking = findings.filter((finding) => finding.severity === "block")
-    if (blocking.length > 0) {
-        process.stderr.write(renderFindings(findings))
-        return EXIT_FAILURE
-    }
-
-    const plan: ServicePlan = {
-        label,
-        programArguments: [
-            binary.execPath,
-            binary.scriptPath,
-            "serve",
-            manifestPath,
-            "--store",
-            storePath(),
-        ],
-        workingDirectory: loaded.dir,
-        stdoutPath: logs.out,
-        stderrPath: logs.err,
-        environment: serviceEnvironment(label),
-        provenance: [
-            `Generated by \`${BRAND.slug} daemon install\` for agent "${agentId}".`,
-            "Rewritten on every install — change agent.yaml, not this file.",
-            "There are no secrets here and there never will be: `launchctl print` echoes",
-            "EnvironmentVariables in plaintext to anything running as this user. The agent",
-            "reads its own credentials from the .env beside its manifest.",
-        ],
-    }
-
-    if (options.dryRun === true) {
-        process.stdout.write(renderPlist(plan, BRAND.envPrefix))
-        if (findings.length > 0) process.stderr.write(renderFindings(findings))
-        return EXIT_OK
-    }
-
-    if (findings.length > 0) process.stdout.write(renderFindings(findings))
-    mkdirSync(dirname(logs.out), { recursive: true })
-    manager?.install(plan)
-
-    process.stdout.write(
-        `${agentId} — service installed\n${keyValue([
-            { label: "label", value: label },
-            { label: "runs", value: `${short(binary.execPath)} … serve ${short(manifestPath)}` },
-            { label: "logs", value: short(logs.err) },
-            { label: "restarts", value: `on crash only, at most one per ${THROTTLE_SECONDS}s` },
-        ])}\n`,
-    )
-    process.stdout.write(
-        `\nA configuration error stops it once rather than looping — \`${BRAND.slug} daemon status ${agentId}\` says why.\nAfter changing agent.yaml or .env: \`${BRAND.slug} daemon restart ${agentId}\`.\n`,
-    )
-    return EXIT_OK
-}
 
 /**
  * Four keys at most, and a throw in `renderPlist` if anything else appears.
@@ -331,28 +364,6 @@ function envMode(agentDir: string): number | undefined {
     }
 }
 
-async function servedBy(agentId: string): Promise<Partial<PreflightFacts>> {
-    try {
-        const store = await SqliteStore.open({ path: storePath() })
-        const lease = await store.leases.get(agentId)
-        await store.close()
-        if (lease === undefined) return {}
-        return {
-            servedBy: { pid: lease.pid, mode: lease.mode, startedAt: lease.startedAt },
-        }
-    } catch {
-        // No store yet is the normal case for a fresh agent, not an error.
-        return {}
-    }
-}
-
-function installedManifest(unitPath: string | undefined): Partial<PreflightFacts> {
-    if (unitPath === undefined || !existsSync(unitPath)) return {}
-    const body = readFileSync(unitPath, "utf8")
-    const match = /<string>([^<]*agent\.ya?ml)<\/string>/.exec(body)
-    return match?.[1] === undefined ? {} : { installedManifest: match[1] }
-}
-
 function renderFindings(findings: readonly Finding[]): string {
     return `${findings
         .map(
@@ -368,16 +379,24 @@ function uninstallAction(
     options: DaemonOptions,
     manager: ReturnType<typeof resolveServiceManager> | undefined,
 ): number {
-    const agentId = agentIdOf(options.manifestPath as string)
-    const label = labelFor(BRAND.slug, agentId)
+    const label = serverLabel(BRAND.slug)
+    const logs = serverLogPaths(options.env)
+    // Retired per-agent units go too. Somebody uninstalling the host is not leaving one of those
+    // behind on purpose, and a `disable` row it leaves is permanent.
+    for (const old of (manager?.labels(`${BRAND.slug}.agent.`) ?? []).filter((l) => l !== label)) {
+        manager?.uninstall(old)
+        process.stdout.write(`  also removed ${old}\n`)
+    }
     manager?.uninstall(label)
-    const logs = logPaths(agentId)
     process.stdout.write(
-        `${agentId} — service removed\n${keyValue([
-            { label: "label", value: label },
+        `${label} — service removed\n${keyValue([
             // Kept deliberately. Removing a service is not a reason to destroy the record of why it
             // was removed, which is very often the reason someone is removing it.
             { label: "logs kept", value: short(logs.err) },
+            // Said out loud: the agents are *not* stopped. Their `agent_state` rows are untouched,
+            // so reinstalling brings back exactly what was running — and an agent switched off with
+            // `stop` is still off. Removing a unit must not quietly become removing configuration.
+            { label: "agents", value: "unchanged — nothing was switched off" },
         ])}\n`,
     )
     return EXIT_OK
@@ -385,20 +404,19 @@ function uninstallAction(
 
 function lifecycleAction(
     action: "start" | "stop" | "restart",
-    options: DaemonOptions,
     manager: ReturnType<typeof resolveServiceManager> | undefined,
 ): number {
-    const agentId = agentIdOf(options.manifestPath as string)
-    const label = labelFor(BRAND.slug, agentId)
+    const label = serverLabel(BRAND.slug)
     if (manager === undefined) return EXIT_FAILURE
     if (action === "start") manager.start(label)
     if (action === "stop") manager.stop(label)
     if (action === "restart") manager.restart(label)
     const note =
         action === "stop"
-            ? " — it stays stopped across a restart or a login until you start it again"
+            ? " — the whole host. It stays stopped across a login until you start it again, and no" +
+              " agent was switched off"
             : ""
-    process.stdout.write(`${agentId} — ${action}${action === "stop" ? "ped" : "ed"}${note}\n`)
+    process.stdout.write(`${label} — ${action}${action === "stop" ? "ped" : "ed"}${note}\n`)
     return EXIT_OK
 }
 
@@ -406,21 +424,66 @@ async function statusAction(
     options: DaemonOptions,
     manager: ReturnType<typeof resolveServiceManager> | undefined,
 ): Promise<number> {
-    const ids =
-        options.manifestPath === undefined
-            ? await installedAgentIds(manager)
-            : [agentIdOf(options.manifestPath)]
+    /**
+     * Bare reports **the unit**; naming an agent reports that agent.
+     *
+     * Two different questions since one service hosts everything, and the bare form used to answer
+     * the wrong one: it listed per-agent labels, so after 16.4 it said "no agents are installed as
+     * a service" on a machine with a healthy server unit running — and pointed at the retired
+     * `daemon install <agent>` to fix it.
+     */
+    const label = serverLabel(BRAND.slug)
+    const hosts = await liveHosts(options.store)
 
-    if (ids.length === 0) {
-        process.stdout.write(
-            `no agents are installed as a service\n  hint: \`${BRAND.slug} daemon install <agent>\` keeps one running after you close the terminal.\n`,
-        )
-        return EXIT_FAILURE
+    if (options.manifestPath === undefined) {
+        const unitInstalled = manager?.state(label).installed === true
+        if (!unitInstalled && hosts.length === 0) {
+            process.stdout.write(
+                `no server is installed and nothing is running\n  hint: \`${BRAND.slug} daemon install\` keeps one running after you close the terminal. One service hosts every agent.\n`,
+            )
+            return EXIT_FAILURE
+        }
     }
 
-    const reports = await Promise.all(ids.map((id) => gatherStatus(id, manager)))
+    const ids = options.manifestPath === undefined ? [label] : [agentIdOf(options.manifestPath)]
+
+    const reports = await Promise.all(
+        ids.map((id) =>
+            gatherStatus(id, manager, {
+                // The unit has a label and the server's own log; an agent has neither, and its
+                // liveness is the lease's to report.
+                ...(id === label ? { label } : {}),
+                logs: id === label ? serverLogPaths(options.env) : logPaths(id),
+                ...(options.store === undefined ? {} : { store: options.store }),
+                // The unit holds one lease per agent it serves, so any of them is evidence that
+                // *this* process is up — and the first is as good as any for an uptime.
+                ...(id === label && hosts[0] !== undefined ? { leaseOf: hosts[0].agentId } : {}),
+            }),
+        ),
+    )
+
+    // What the unit is actually hosting, which no service manager can say. Printed before the
+    // switched-off list below, so "3 agents, 1 disabled" reads as one thought.
+    const hosted =
+        options.manifestPath === undefined && hosts.length > 0
+            ? hosts.map((lease) => lease.agentId).sort()
+            : []
+    /**
+     * Agents that are switched off, which no other source here can see.
+     *
+     * `installedAgentIds` reads service labels and lease rows, and a stopped agent has neither — so
+     * without this it is simply **absent** from the status of the thing it belongs to, which is the
+     * "I set this up and it is gone" failure the durable switch exists to make explicable. The same
+     * reason `listAgents` shows a broken directory rather than skipping it.
+     */
+    const switchedOff = (await disabledAgents()).filter(
+        (entry) => options.manifestPath === undefined || ids.includes(entry.agentId),
+    )
+
     if (options.json === true) {
-        process.stdout.write(`${JSON.stringify({ agents: reports }, null, 2)}\n`)
+        process.stdout.write(
+            `${JSON.stringify({ agents: reports, hosting: hosted, disabled: switchedOff }, null, 2)}\n`,
+        )
     } else {
         for (const report of reports) {
             process.stdout.write(`${renderStatus(report.report)}\n`)
@@ -442,48 +505,93 @@ async function statusAction(
             }
             process.stdout.write("\n")
         }
+
+        if (hosted.length > 0) {
+            process.stdout.write(
+                `  hosting ${hosted.length} ${hosted.length === 1 ? "agent" : "agents"}: ${hosted.join(", ")}\n`,
+            )
+        }
+
+        if (switchedOff.length > 0) {
+            const count = `${switchedOff.length} ${switchedOff.length === 1 ? "agent" : "agents"}`
+            process.stdout.write(`  ${count} switched off, so nothing is hosting them:\n`)
+            for (const entry of switchedOff) {
+                process.stdout.write(
+                    `    ${entry.agentId}${entry.reason === undefined ? "" : ` — ${entry.reason}`}` +
+                        `${entry.disabledAt === undefined ? "" : ` (since ${entry.disabledAt})`}\n`,
+                )
+            }
+            process.stdout.write(
+                `  \`${BRAND.slug} start <agent>\` switches one back on — a restart alone will not.\n\n`,
+            )
+        }
     }
+    // A switched-off agent is **not** unhealthy: it is in the state somebody asked for, and exiting
+    // non-zero over it would make a deliberate stop look like a fault to a monitor.
+    //
     // Non-zero when anything is unhealthy. Reporting a restart loop and exiting 0 is the shape hard
     // rule 8 forbids, and it is what makes this usable from a monitor without parsing text.
     return reports.every((report) => report.report.healthy) ? EXIT_OK : EXIT_FAILURE
 }
 
-async function installedAgentIds(
-    manager: ReturnType<typeof resolveServiceManager> | undefined,
-): Promise<readonly string[]> {
-    const prefix = `${BRAND.slug}.agent.`
-    const fromLaunchd = (manager?.labels(prefix) ?? []).map((label) => label.slice(prefix.length))
-    // Plus anything holding a lease, so a `serve` running in a terminal is reported rather than
-    // reading as "nothing is running" — the same lie slot 2 was fixed for.
-    const leased: string[] = []
+/** Every agent with a `disabled` row, for the status block above. */
+async function disabledAgents(): Promise<
+    readonly { agentId: string; reason?: string; disabledAt?: string }[]
+> {
     try {
         const store = await SqliteStore.open({ path: storePath() })
-        for (const lease of await store.leases.all()) leased.push(lease.agentId)
-        await store.close()
+        try {
+            return (await store.agentState.list())
+                .filter((state) => !state.enabled)
+                .map((state) => ({
+                    agentId: state.agentId,
+                    ...(state.reason === undefined ? {} : { reason: state.reason }),
+                    ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+                }))
+        } finally {
+            await store.close()
+        }
     } catch {
-        // No store is not an error here.
+        // No store is the ordinary first-run state, not an error for a status command.
+        return []
     }
-    return [...new Set([...fromLaunchd, ...leased])].sort()
 }
 
+/**
+ * One status report, for the server unit or for one agent.
+ *
+ * The label and the log paths are arguments rather than derived from `agentId`, which is what lets
+ * the *unit* and an *agent* share this: there is one unit and many agents, so a function that
+ * computed `labelFor(slug, agentId)` could only ever describe the retired per-agent shape.
+ *
+ * When `label` is absent there is no unit to ask about — that is an agent, whose liveness is the
+ * lease's to report, and `installed: false` is then the honest answer rather than a gap.
+ */
 async function gatherStatus(
     agentId: string,
     manager: ReturnType<typeof resolveServiceManager> | undefined,
+    options: {
+        readonly label?: string
+        readonly logs: { readonly out: string; readonly err: string }
+        readonly store?: string
+        /** The lease to read liveness from. The unit's own is whichever agent it happens to hold. */
+        readonly leaseOf?: string
+    },
 ): Promise<{
     agentId: string
     report: ReturnType<typeof summariseStatus>
     tail: string
     attention: readonly Attention[]
 }> {
-    const label = labelFor(BRAND.slug, agentId)
-    const unit = manager?.unitPath(label)
-    const state = manager?.state(label)
-    const logs = logPaths(agentId)
+    const label = options.label
+    const unit = label === undefined ? undefined : manager?.unitPath(label)
+    const state = label === undefined ? undefined : manager?.state(label)
+    const logs = options.logs
 
     let lease: Awaited<ReturnType<SqliteStore["leases"]["get"]>>
     try {
-        const store = await SqliteStore.open({ path: storePath() })
-        lease = await store.leases.get(agentId)
+        const store = await SqliteStore.open({ path: options.store ?? storePath() })
+        lease = await store.leases.get(options.leaseOf ?? agentId)
         await store.close()
     } catch {
         lease = undefined
@@ -530,9 +638,17 @@ async function gatherStatus(
     }
 }
 
+/**
+ * The host's log, or one agent's — and naming an agent is now the *unusual* form.
+ *
+ * One service means one log, so bare is the normal case. An agent is still accepted because the
+ * per-agent files exist on any machine that ran a per-agent unit before 16.4, and a command that
+ * refused to show a log somebody is looking for would be worse than one that shows an old file.
+ */
 async function logsAction(options: DaemonOptions): Promise<number> {
-    const agentId = agentIdOf(options.manifestPath as string)
-    const logs = logPaths(agentId)
+    const named = options.manifestPath === undefined ? undefined : agentIdOf(options.manifestPath)
+    const agentId = named ?? serverLabel(BRAND.slug)
+    const logs = named === undefined ? serverLogPaths(options.env) : logPaths(named)
     if (options.truncate === true) {
         // Truncate rather than delete: launchd holds the file descriptor, so removing the file
         // leaves output flowing into a deleted inode — disk consumed, `ls` showing nothing.

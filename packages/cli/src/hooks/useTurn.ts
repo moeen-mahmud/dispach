@@ -6,8 +6,9 @@
  * pure and tested — this hook only owns the subscription, the abort controller, and the promise.
  */
 
-import type { Agent, AnyEvent, EventBus } from "@dispach/core"
+import type { AnyEvent } from "@dispach/core"
 import { useCallback, useEffect, useReducer, useRef } from "react"
+import type { AgentSource } from "#lib/source"
 import type { TranscriptState } from "#lib/types"
 import { reduce, type TranscriptAction } from "#transcript"
 
@@ -30,19 +31,27 @@ export interface UseTurn {
 }
 
 export function useTurn(options: {
-    readonly agent: Agent
-    readonly bus: EventBus
+    /**
+     * Where the agent is, rather than which object it is.
+     *
+     * This took an `Agent` and an `EventBus` directly, which is what made the TUI a second *owner*
+     * of a runtime rather than a view of one. Nothing in this hook changes between the two: it
+     * subscribes, it sends, it aborts, and each of those is one call the source implements its own
+     * way — attached, an abort becomes a request naming the turn, because a turn belongs to the
+     * server and is never cancelled by a disconnect.
+     */
+    readonly source: AgentSource
     readonly sessionKey: string
     readonly initial: TranscriptState
 }): UseTurn {
-    const { agent, bus, sessionKey, initial } = options
+    const { source, sessionKey, initial } = options
     const [state, dispatch] = useReducer(reduce, initial)
     const controller = useRef<AbortController | undefined>(undefined)
 
     // A stream filter is stateful and the reducer is pure, so filtering happens here, on the way in.
     // Without it the live pane shows `ACTION:` and `END` and then commits them as the reply: with a
     // line-oriented dialect the invocation *is* text, and only the dialect knows which text.
-    const filter = useRef(agent.streamFilter())
+    const filter = useRef(source.streamFilter())
 
     useEffect(() => {
         // One wildcard subscription rather than six by name: the reducer already ignores what it
@@ -54,43 +63,39 @@ export function useTurn(options: {
         // per-token path by accident. This is the one wildcard in the tree that genuinely wants
         // tokens; drop the flag and the TUI silently stops streaming, which is the same shape of
         // failure the per-subscriber opt-in was introduced to remove.
-        return bus.on(
-            "*",
-            (event: AnyEvent) => {
-                // Other sessions share this bus — from Phase 4, a channel can be delivering a turn for
-                // a different peer while this prompt is open. An event with no session key is
-                // runtime-wide and belongs to everyone.
-                if (event.sessionKey !== undefined && event.sessionKey !== sessionKey) return
+        return source.subscribe((event: AnyEvent) => {
+            // Other sessions share this bus — from Phase 4, a channel can be delivering a turn for
+            // a different peer while this prompt is open. An event with no session key is
+            // runtime-wide and belongs to everyone.
+            if (event.sessionKey !== undefined && event.sessionKey !== sessionKey) return
 
-                // Reasoning is never parsed for tool calls, so it is never filtered for them either.
-                if (event.type === "model.chunk") {
-                    const { delta, kind } = event.data
-                    if (kind === "reasoning") {
-                        dispatch({ kind: "delta", of: "reasoning", text: delta })
-                        return
-                    }
-                    dispatch({ kind: "delta", of: "text", text: filter.current.push(delta) })
+            // Reasoning is never parsed for tool calls, so it is never filtered for them either.
+            if (event.type === "model.chunk") {
+                const { delta, kind } = event.data
+                if (kind === "reasoning") {
+                    dispatch({ kind: "delta", of: "reasoning", text: delta })
                     return
                 }
+                dispatch({ kind: "delta", of: "text", text: filter.current.push(delta) })
+                return
+            }
 
-                // The filter owns the paragraph break between one step's narration and the next's, which
-                // is why it is told where a step ends rather than being replaced at each one.
-                if (event.type === "model.result") {
-                    dispatch({ kind: "delta", of: "text", text: filter.current.endStep() })
-                    return
-                }
+            // The filter owns the paragraph break between one step's narration and the next's, which
+            // is why it is told where a step ends rather than being replaced at each one.
+            if (event.type === "model.result") {
+                dispatch({ kind: "delta", of: "text", text: filter.current.endStep() })
+                return
+            }
 
-                if (event.type === "turn.end") {
-                    // Flush before the reducer commits the reply, or the last line of it is lost.
-                    dispatch({ kind: "delta", of: "text", text: filter.current.end() })
-                    filter.current = agent.streamFilter()
-                }
+            if (event.type === "turn.end") {
+                // Flush before the reducer commits the reply, or the last line of it is lost.
+                dispatch({ kind: "delta", of: "text", text: filter.current.end() })
+                filter.current = source.streamFilter()
+            }
 
-                dispatch({ kind: "event", event })
-            },
-            { chunks: true },
-        )
-    }, [agent, bus, sessionKey])
+            dispatch({ kind: "event", event })
+        })
+    }, [source, sessionKey])
 
     const send = useCallback(
         (text: string) => {
@@ -100,8 +105,8 @@ export function useTurn(options: {
             // `send` resolves rather than rejects on abort, so cancellation is not an error path.
             // Anything that does reject got past the loop's own handling, and swallowing it would be
             // the silent failure hard rule 8 forbids — so it is reported and the prompt returns.
-            agent
-                .send(text, { sessionKey, signal: next.signal, source: "repl" })
+            source
+                .send(text, { sessionKey, signal: next.signal })
                 .catch((error: unknown) => {
                     dispatch({
                         kind: "event",
@@ -123,7 +128,7 @@ export function useTurn(options: {
                     if (controller.current === next) controller.current = undefined
                 })
         },
-        [agent, sessionKey],
+        [source, sessionKey],
     )
 
     const cancel = useCallback(() => {

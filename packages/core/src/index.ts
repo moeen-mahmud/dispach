@@ -25,10 +25,12 @@ export {
 export type {
     ChannelBinding,
     ChannelHost,
+    ChannelInput,
     ChannelLimits,
     ChannelStatus,
     ChannelTransport,
     InboundMessage,
+    IssuedChannelInput,
     OutboundMessage,
     RawInbound,
     SendResult,
@@ -310,6 +312,7 @@ export {
     type AgentSource,
     type BootReport,
     buildChannels,
+    type DisposeReason,
     defaultStorePath,
     Runtime,
     type RuntimeOptions,
@@ -405,6 +408,8 @@ export {
 export { openMemoryStore, SqliteStore, type SqliteStoreOptions } from "./store/sqlite/store.ts"
 export type {
     AgentFootprint,
+    AgentStateRecord,
+    AgentStateStore,
     DeliveryRecord,
     DeliveryStatus,
     EnqueueDelivery,
@@ -413,11 +418,17 @@ export type {
     HandoffRecord,
     HandoffStore,
     KVStore,
+    // Exported so the CLI can read a lease's address without re-declaring the row's shape —
+    // the `stop` path needs `baseUrl`, and a second definition of it is the drift this repo
+    // keeps paying for.
+    LeaseRecord,
+    LeaseStore,
     MessagePage,
     MessageStore,
     OperatorKeyRecord,
     OperatorKeyStore,
     OutboxStore,
+    RuntimeMode,
     ScheduleFired,
     ScheduleOrigin,
     ScheduleRecord,

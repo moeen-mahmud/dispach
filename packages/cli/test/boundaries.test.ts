@@ -15,6 +15,7 @@ import { DAEMON_ACTIONS } from "#daemon"
 import { COMMANDS } from "#lib/commands"
 import { helpText } from "#lib/help"
 import { SESSION_COMMANDS } from "#lib/session-commands"
+import { spawnCapture } from "#lib/spawn"
 import { SKILLS_ACTIONS } from "#skills"
 
 const SRC = resolve(import.meta.dirname, "..", "src")
@@ -492,6 +493,89 @@ describe("help lists everything a command accepts", () => {
         }
         expect(unread).toEqual([])
     })
+
+    /**
+     * Every command declares whether it wants a running host, and one place reads it.
+     *
+     * The first-run bootstrap is the most invasive thing this product does — it installs a
+     * background service — so which commands trigger it must be a decision taken per command
+     * rather than membership of a list somebody maintains. Required on the spec for the reason
+     * `inSession` is: a new command cannot be silently absent, and cannot be silently *included*
+     * either, which is the direction that matters here.
+     *
+     * The second half is the one that would actually rot: exactly one call site reads the field,
+     * so a command cannot opt itself in or out anywhere else.
+     */
+    test("needsServer is declared by every command and read in one place", () => {
+        for (const command of COMMANDS) {
+            expect(typeof command.needsServer).toBe("boolean")
+        }
+        // The three that would be absurd. `serve` *is* the server, `daemon` manages the unit, and
+        // a command whose job is stopping things must never start one.
+        for (const name of ["serve", "daemon", "stop"]) {
+            expect(COMMANDS.find((command) => command.name === name)?.needsServer).toBe(false)
+        }
+
+        const index = FILES.find((file) => file.path === "index.ts")?.text ?? ""
+        expect(index).toContain("needsServer: command.needsServer")
+        /**
+         * Two files may *read* it and no more.
+         *
+         * A read is `.needsServer`, not `needsServer:` — `commands.ts` writes the field on every
+         * spec and `schema.ts` declares it, and neither is a policy. `index.ts` passes it across
+         * and `bootstrap.ts` acts on it. A third reader would be a second answer to "when does
+         * this product install a service", which is the one question that must have one.
+         */
+        const readers = FILES.filter((file) => file.text.includes(".needsServer")).map(
+            (file) => file.path,
+        )
+        expect(readers.sort()).toEqual(["index.ts", "lib/bootstrap.ts"])
+    })
+})
+
+/**
+ * No test may leave a background service on the machine that ran it.
+ *
+ * This is here because it happened. `start` declares `needsServer`, so the first spawn in
+ * `lifecycle.test.ts` found no live host and installed a **real LaunchAgent** — pointing at a temp
+ * store that no longer existed, loaded into launchd, still there after the suite finished. Nothing
+ * failed; it was found by listing `~/Library/LaunchAgents` during an unrelated check.
+ *
+ * `CI` suppresses the bootstrap and is absent locally, which is exactly the wrong way round: the
+ * runner is disposable and a developer's machine is the one that keeps the wreckage. So the opt-out
+ * has to be explicit in every test that drives the real binary, and this is what makes forgetting
+ * it a failing test rather than a plist somebody finds months later.
+ */
+describe("no test spawns a binary that could install a service", () => {
+    test("every test that runs the CLI opts out of the first-run bootstrap", () => {
+        const dir = resolve(import.meta.dirname)
+        const offenders: string[] = []
+        for (const name of readdirSync(dir)) {
+            if (!name.endsWith(".test.ts")) continue
+            const text = readFileSync(join(dir, name), "utf8")
+            /**
+             * Both halves: a real spawn **and** a reference to our built entry point.
+             *
+             * Each alone over-matches in a different direction, and both were tried. Matching the
+             * path alone fires on *fixture data* — `daemon-plan.test.ts` hands a `scriptPath`
+             * string to a pure function that spawns nothing. Matching the spawn alone fires on
+             * `stop.test.ts`, which spawns a bare `node -e "setInterval(…)"` as something to
+             * signal, and which cannot bootstrap because it never runs this CLI.
+             */
+            const spawns = /\b(spawn|spawnSync|spawnCaptureAsync)\s*\(/.test(text)
+            const runsOurBinary = /"dist"[^\n]*"index\.js"|dist\/index\.js|\bBINARY\b/.test(text)
+            if (!spawns || !runsOurBinary) continue
+            /**
+             * `bundle.test.ts` is exempt **on purpose**, and it is the stronger guard of the two:
+             * it runs only `--version` and `--help`, and asserts `stderr` is empty. Those return
+             * before the bootstrap is reached, so its silence is what proves asking for help never
+             * installs anything — setting the opt-out there would throw that proof away.
+             */
+            if (name === "bundle.test.ts") continue
+            if (!text.includes("NO_BOOTSTRAP")) offenders.push(name)
+        }
+        expect(offenders).toEqual([])
+    })
 })
 
 describe("only the rich path moves a cursor", () => {
@@ -507,6 +591,37 @@ describe("only the rich path moves a cursor", () => {
 })
 
 describe("hard rule 3 — the brand lives in one file", () => {
+    test("no tracked path contains the brand, which is what makes the rename script correct", () => {
+        /**
+         * Hard rule 3's own words are *"no directory, type, interface, or variable contains"* the
+         * slug — and nothing enforced the **path** half until a stray file proved why it matters.
+         *
+         * A `packages/cli/bin/<oldslug>.js` survived the 2026-08-19 rename and sat in the tree for
+         * over a month: a dead launcher, unreferenced by `bin` and excluded from `files`, carrying
+         * the previous brand **in its filename**. `git grep` could not see it, because grep searches
+         * contents; and `scripts/rename-brand.ts` could not either, because it only ever rewrites
+         * file contents and never renames a path (`renameSync` appears in it zero times).
+         *
+         * That is not a defect in the script. It is only correct *given this invariant*: if no
+         * tracked path ever contains the brand, a rename has no path to rename. So the invariant is
+         * what gets asserted, and the decisions log's claim that "the tree was clean" after that
+         * rename was false by exactly one file — which is why this is a test rather than a note.
+         *
+         * A path carrying an **old** brand is not catchable here — nothing can enumerate names the
+         * project has not chosen yet. What this guarantees is that no *future* rename leaves one.
+         */
+        const tracked = spawnCapture({
+            command: "git",
+            args: ["ls-files"],
+            cwd: resolve(import.meta.dir, "..", "..", ".."),
+        })
+        expect(tracked.notFound).toBe(false)
+        const offenders = tracked.stdout
+            .split("\n")
+            .filter((path) => path !== "" && path.toLowerCase().includes(BRAND.slug.toLowerCase()))
+        expect(offenders).toEqual([])
+    })
+
     test("no source file spells the product name", () => {
         // `rename-brand.ts` rewrites `brand.ts` and package manifests. A literal anywhere else,
         // including in a comment, goes stale on the first rename.
@@ -569,27 +684,56 @@ describe("hard rule 3 — the brand lives in one file", () => {
 })
 
 describe("the image can build what the repo builds", () => {
-    test("the Dockerfile copies every workspace package's manifest", () => {
-        // A hand-kept list of workspace members, and it bit immediately: adding `@dispach/client`
-        // to the root `build` script broke the image, because `bun install` inside the builder
-        // never saw that package and `@dispach/core` then would not resolve from it. The failure
-        // is a `TS2307` in a container build — far from the edit that caused it, and invisible
-        // until somebody builds the image.
-        //
-        // Derived here instead. Both stages copy the same set, so both counts have to match: the
-        // builder needs the manifest to link the workspace, and the runtime stage installs
-        // production dependencies against the same root `workspaces` glob.
+    /** The Dockerfile split at its stage boundaries, so a claim can be made about one stage. */
+    function stages(): { readonly builder: string; readonly runtime: string } {
         const dockerfile = readFileSync(join(SRC, "..", "..", "..", "docker", "Dockerfile"), "utf8")
+        const parts = dockerfile.split(/^FROM /m)
+        const builder = parts.find((part) => part.includes("AS builder")) ?? ""
+        const runtime = parts.find((part) => part.includes("AS runtime")) ?? ""
+        expect(builder).not.toBe("")
+        expect(runtime).not.toBe("")
+        return { builder, runtime }
+    }
+
+    test("the builder copies every workspace package's manifest", () => {
+        // A hand-kept list of workspace members, and it bit immediately: adding a new workspace
+        // package to the root `build` script broke the image, because `bun install` inside the
+        // builder never saw that package and core then would not resolve from it. The failure is a
+        // `TS2307` in a container build — far from the edit that caused it, and invisible until
+        // somebody builds the image. Derived here instead.
+        //
+        // **Once, not twice.** This asserted two copies until 15.5, because both stages installed:
+        // the builder to link the workspace, the runtime to install production dependencies. The
+        // runtime stage has no install any more — the application is one compiled binary — so a
+        // second copy would be a stage doing work nothing needs.
+        const { builder } = stages()
         const packages = readdirSync(join(SRC, "..", ".."), { withFileTypes: true })
             .filter((entry) => entry.isDirectory())
             .map((entry) => entry.name)
             .sort()
         const missing = packages.filter(
             (name) =>
-                (dockerfile.match(new RegExp(`^COPY packages/${name}/package\\.json `, "gm")) ?? [])
-                    .length !== 2,
+                (builder.match(new RegExp(`^COPY packages/${name}/package\\.json `, "gm")) ?? [])
+                    .length !== 1,
         )
         expect(missing).toEqual([])
+    })
+
+    test("the runtime stage installs nothing and carries no source", () => {
+        // The property that makes one manifest copy correct, and it is worth locking rather than
+        // implying. A runtime `bun install --production` is how ~17 MB of `react-devtools-core`
+        // reached every shipped image: `ink` declares it a **peerDependency**, so `--production`
+        // does not skip it. Deleting the install is what makes that unrepresentable; reintroducing
+        // one would restore the cost silently, and the image would still work.
+        //
+        // No `COPY packages/` either: the whole application is the compiled binary, so a `dist/`
+        // arriving in the runtime stage means something is being resolved at boot that should have
+        // been bundled.
+        const { runtime } = stages()
+        expect(runtime).not.toContain("bun install")
+        expect(runtime.match(/^COPY packages\//m)).toBeNull()
+        // And the binary is there, which is the other half of "the application is one file".
+        expect(runtime).toContain("COPY --from=builder")
     })
 })
 
@@ -645,18 +789,27 @@ test("every command in the table is wired to an implementation", () => {
 })
 
 test("an event a person must see is handled on BOTH output paths", () => {
-    // The two paths subscribe differently, and that asymmetry is a real trap. The rich path uses
-    // `bus.on("*")`, so a new event type reaches the reducer for free — and falls into its
-    // `default` case, silently doing nothing. The plain path uses named subscriptions, so the same
-    // event is simply absent. Either way the failure is invisible, which is the worst shape for a
-    // blocked write. Pinned rather than left to vigilance.
+    /**
+     * The two paths reach the same events by different routes, and a gap in either is invisible.
+     *
+     * The rich path's reducer takes everything and falls into `default`, silently doing nothing for
+     * a type it does not name. The plain path used *named* subscriptions, where the same event was
+     * simply absent — and since 17.1 it takes one wildcard from the source and switches, which
+     * makes both paths the same shape and this check the same string on both. That is a small win
+     * on its own: the asymmetry this test was written to police is gone, and what is left is the
+     * ordinary risk that somebody adds an event and handles it in one place.
+     */
     const transcript = FILES.find((file) => file.path === "transcript.ts")?.text ?? ""
     const plain = FILES.find((file) => file.path === "run.ts")?.text ?? ""
 
     for (const type of ["tool.gated", "context.dropped"]) {
         expect(transcript).toContain(`case "${type}"`)
-        expect(plain).toContain(`runtime.bus.on("${type}"`)
+        expect(plain).toContain(`case "${type}"`)
     }
+
+    // And the plain path takes its stream from the source rather than a bus it happens to hold —
+    // without which an attached run would print no tokens at all and look like a hung model.
+    expect(plain).toContain("wired.source.subscribe(")
 })
 
 test("every way a turn can end has a sentence, on one shared formatter", () => {

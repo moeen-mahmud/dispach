@@ -14,6 +14,7 @@
 
 import {
     type Agent,
+    type AgentStateRecord,
     type AnyEvent,
     type ErrorDetail,
     EVENT_TYPES,
@@ -42,9 +43,20 @@ import {
 } from "@dispach/core"
 import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
 import type { ClaimTicket } from "./keys.ts"
+import { openapiDocument } from "./openapi.ts"
+import { isLoopback, type OriginPolicy, originProblem } from "./origin.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
+import {
+    ApprovalBody,
+    KeyBody,
+    MessageBody,
+    PhaseBody,
+    ProvisionBody,
+    parseBody,
+    StopBody,
+} from "./wire-schemas.ts"
 
 /** Bodies larger than this are refused before a channel plugin sees them. */
 const MAX_BODY_BYTES = 1_000_000
@@ -114,6 +126,95 @@ export interface HandlerOptions {
      * logs, which is the opposite of what a one-time ticket is for.
      */
     readonly claim?: ClaimTicket
+    /**
+     * What the bind is, so the origin guard can decide how strict to be.
+     *
+     * Optional because a great many tests build a handler with nothing but a runtime, and a guard
+     * that refused those would be a guard nobody could write a test around. Absent means **no
+     * origin checking at all**, which is the honest reading of "the caller did not say what it
+     * bound" — `serve` always passes it, so every real server is covered, and
+     * `spec.test.ts` asserts that it does.
+     */
+    readonly origin?: OriginPolicy
+    /**
+     * How to find the manifest for an agent this process is **not** hosting.
+     *
+     * `POST /v1/agents/:id/start` has to hand `Runtime.adopt` a source, and a stopped agent is by
+     * definition absent from the runtime — so the source has to come from wherever agents live,
+     * which is the sandbox layout in `cli/lib/sandbox.ts`. `packages/server` may not import the
+     * CLI, so the CLI injects the lookup. The same seam 16.5's provisioning route needs, built
+     * once for whichever stage lands first.
+     *
+     * Absent is a coherent state and answers `501` naming the reason: an embedder composing this
+     * handler over its own agent store has no sandbox to search, and inventing a path convention
+     * for it would be a guess about somebody else's filesystem.
+     *
+     * ⚠️ **Not the container**, despite what this comment said when it was written: the CLI's
+     * `serve` injects this unconditionally, so the image has it — and that is correct, because the
+     * container's sandbox is a real place an agent can live and `start <agent>` there should work.
+     * Found while writing 16.5, which repeated the same wrong claim about its own callback.
+     */
+    readonly resolveAgent?: (agentId: string) => string | undefined
+    /**
+     * How to create an agent, injected by whoever knows how.
+     *
+     * `POST /v1/agents` writes a directory of files from a wizard's own question set, and that
+     * wizard — its steps, its validation, its templates — lives in `packages/cli`. `packages/server`
+     * may not import the CLI, so the server owns the **route, the wire shape and the gate** and the
+     * CLI supplies the implementation. Three things follow, and the second is the one worth having:
+     *
+     * 1. No dependency edge, and no move of a large module that would need re-testing wholesale.
+     * 2. An embedder over its own agent store passes none, and the route then says `501` rather
+     *    than accepting a request and writing nothing.
+     *
+     *    ⚠️ **The container is *not* covered by this**, and the plan's claim that it would be was
+     *    wrong: the CLI's `serve` injects a provisioner unconditionally, so the image has one. What
+     *    actually refuses provisioning there is the **loopback gate** — the image's `CMD` binds
+     *    `0.0.0.0`, so `provisioningIsLocal()` is false and the route answers `403`. Checked by
+     *    reading the Dockerfile rather than assumed, and it is the better of the two mechanisms:
+     *    it is a fact about what was bound rather than about what somebody remembered to omit.
+     * 3. `steps` comes *from the callback*, so a browser renders the same question set the terminal
+     *    asks and the two cannot drift. A hard-coded list in the page would be the "two hand-kept
+     *    lists" shape that has already cost this repo several rounds.
+     *
+     * Absent answers `501`, which is honest: a server with no provisioner cannot create an agent
+     * and should say so rather than accept a request and write nothing.
+     */
+    readonly provision?: Provisioner
+}
+
+/** What the CLI injects for `POST /v1/agents`. See `HandlerOptions.provision`. */
+export interface Provisioner {
+    /** Every question, in asking order, with defaults and choices. Served as-is. */
+    steps(): readonly ProvisionStepWire[]
+    /**
+     * Create the agent and return where it landed.
+     *
+     * Throws a `HarnessError` for a bad answer, an unknown step, or a collision — the route maps
+     * those to `400` and passes the hint through, because the implementation knows why far better
+     * than the route does.
+     */
+    create(answers: Readonly<Record<string, string>>): {
+        readonly agentId: string
+        readonly manifestPath: string
+        readonly dir: string
+        readonly files: readonly string[]
+    }
+}
+
+/** One question as the wire carries it. Structural, so `packages/cli` needs no import from here. */
+export interface ProvisionStepWire {
+    readonly step: string
+    readonly prompt: string
+    readonly fallback: string
+    readonly optional: boolean
+    /** Mask it. A secret answer is written once at `0600` and never read back by any route. */
+    readonly secret: boolean
+    readonly choices?: readonly {
+        readonly value: string
+        readonly label: string
+        readonly hint?: string
+    }[]
 }
 
 type Handler = (context: RequestContext) => Promise<Response> | Response
@@ -123,6 +224,36 @@ interface RequestContext {
     readonly url: URL
     readonly params: Readonly<Record<string, string>>
 }
+
+/**
+ * The reference page. Two script tags and a `noscript`, and nothing else.
+ *
+ * Inline rather than an asset file because it is 1 KB and because `WEB_ASSETS` is a table the spec
+ * guard checks — adding an entry there for a page with no build step would be a route and a table
+ * row for one string. The `noscript` is load-bearing: with no network the page is blank, and a
+ * blank page with no explanation is indistinguishable from a broken server.
+ */
+const DOCS_PAGE = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispach API</title>
+</head>
+<body style="margin:0">
+<noscript style="display:block;font:14px/1.5 system-ui;padding:2rem;max-width:40rem">
+  <h1 style="font-size:1rem">This page needs JavaScript and a network</h1>
+  <p>It loads the reference viewer from a CDN. The document itself is served locally and needs
+  neither: <a href="/v1/openapi.json">/v1/openapi.json</a>.</p>
+</noscript>
+<div id="app"></div>
+<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+<script>
+  Scalar.createApiReference('#app', { url: '/v1/openapi.json', theme: 'default' })
+</script>
+</body>
+</html>
+`
 
 export function createHandler(options: HandlerOptions): (request: Request) => Promise<Response> {
     const { runtime } = options
@@ -169,6 +300,28 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * Only the genuinely open case asks each time, where the query is a count over an index on a
      * table with no rows in it.
      */
+    /**
+     * The origin guard, closed over the bind. `undefined` policy means the caller did not say what
+     * it bound, and a claim about cross-origin safety cannot be made from nothing.
+     */
+    /**
+     * Whether this handler was bound to loopback, for the provisioning gate.
+     *
+     * Read from the **origin policy's host**, which is the bind `serve` actually performed — not
+     * from the request's `Host` header, which an attacker controls, and not from a separate option
+     * a caller could set inconsistently with what it bound. `origin` being absent means the caller
+     * did not say what it bound, and the honest reading of that is *not local*: a handler mounted
+     * inside somebody else's router is the case that must not get a filesystem write for free.
+     */
+    const provisioningIsLocal = (): boolean =>
+        options.origin !== undefined && isLoopback(options.origin.host)
+
+    const refuseOrigin = (request: Request): Response | undefined => {
+        if (options.origin === undefined) return undefined
+        const problem = originProblem(request, options.origin)
+        return problem === undefined ? undefined : fail(problem, 403)
+    }
+
     let closed = false
     const authRequired = async (): Promise<boolean> => {
         if (token !== undefined || closed) return true
@@ -209,9 +362,38 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
 
     // ─── Agents ──────────────────────────────────────────────────────────────────────────
 
-    router.add("GET", "/v1/agents", () =>
-        json(runtime.list().map((agent) => summary(runtime, agent))),
-    )
+    /**
+     * Every agent this server knows about, hosted or not.
+     *
+     * **A stopped agent is listed, with `status: "disabled"`.** Hiding it would make the listing
+     * answer a different question from the one a client is asking — an agent picker showing two
+     * entries where the operator configured three has no way to offer "start it again", and the
+     * operator's only clue is that something they set up is missing. Same reasoning as `listAgents`
+     * showing a broken directory rather than skipping it.
+     *
+     * The rows are thin on purpose: a disabled agent is not loaded, so there is no manifest in
+     * memory to report a model or a channel list from, and loading one to fill the row in would
+     * make a listing depend on credentials being present — the defect `readManifestHeader` exists
+     * to avoid. The id and the reason are what a client can act on.
+     *
+     * `GET /v1/agents/:id` still answers **404** for one of these, and the asymmetry is the point:
+     * the listing answers "what exists", the resource answers "what is running". A 200 there would
+     * have to invent a body for an agent with no tools, no window and no sessions in memory.
+     */
+    router.add("GET", "/v1/agents", async () => {
+        const hosted = runtime.list().map((agent) => summary(runtime, agent))
+        const live = new Set(hosted.map((entry) => entry.id))
+        const stopped = (await runtime.store.agentState.list())
+            .filter((state) => !state.enabled && !live.has(state.agentId))
+            .map((state) => ({
+                id: state.agentId,
+                name: state.agentId,
+                status: "disabled" as const,
+                ...(state.reason === undefined ? {} : { reason: state.reason }),
+                ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+            }))
+        return json([...hosted, ...stopped])
+    })
 
     router.add("GET", "/v1/agents/:id", (context) =>
         withAgent(runtime, context, async (agent) => {
@@ -232,6 +414,10 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 dialect: agent.describe().dialect,
                 window: agent.window,
                 tools: agent.tools.size,
+                // What the catalogue costs every turn, beside how many tools there are. A count
+                // says nothing about the bill: eight system tools and eight Composio ones differ
+                // by an order of magnitude, and this is the figure a person trims against.
+                catalogueTokens: agent.describe().catalogueTokens,
                 skills: agent.skills?.skills.length ?? 0,
                 schedules: schedules.length,
                 /**
@@ -261,26 +447,336 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
     )
 
     /**
-     * Reload is refused, and the refusal is the honest answer.
+     * Re-read one agent's manifest by **replacing the agent**, never by mutating it.
      *
-     * The spec describes it as re-reading the manifest and rebuilding the tool index. That
-     * contradicts a decision this runtime is built on: the catalogue resolves once and slot 1
-     * renders once, so a session's cached prefix stays byte-stable and `config_set` cannot change
-     * behaviour underneath a conversation. `/restart` exists in the CLI for exactly this reason.
-     * Implementing a partial reload that silently did not apply would be worse than saying no.
+     * This answered 501 for four phases, and the refusal was right about the thing it was arguing
+     * against: an agent's configuration is fixed for the lifetime of its *instance* — the catalogue
+     * resolves once and slot 1 renders once, so a session's cached prefix stays byte-stable and
+     * `config_set` cannot change behaviour underneath a conversation. A *partial* reload that
+     * silently did not apply would be worse than saying no, and still would be.
+     *
+     * `Runtime.replace` is the version that keeps that decision intact: the agent is disposed and
+     * re-created from its source, so it gets a **new instance** with its own catalogue and its own
+     * frozen prefix. Nothing is mutated. What changes is only who can ask — the CLI's `/restart`
+     * rebuilt the whole runtime because it owned one, and an attached view owns nothing.
+     *
+     * It refuses while a turn is in flight rather than aborting one, which is `dispose`'s rule and
+     * not this route's: a reload that killed somebody's half-finished answer to pick up a setting
+     * would be a worse trade than waiting. `agent_turn_in_flight` names the count.
      */
     router.add("POST", "/v1/agents/:id/reload", (context) =>
-        withAgent(runtime, context, () =>
-            fail(
-                {
-                    code: "reload_not_supported",
-                    message: "An agent's configuration is fixed for the lifetime of its process.",
-                    hint: "Restart the runtime to pick up a manifest change. The tool catalogue resolves once and the cached prompt prefix depends on it staying fixed, so a live reload would change behaviour mid-conversation. This endpoint is specified in 04-SPEC-WIRE.md and deliberately not implemented.",
-                },
-                501,
-            ),
+        withAgent(runtime, context, async (agent) => {
+            try {
+                const admitted = await runtime.replace(agent.id)
+                return json({
+                    id: agent.id,
+                    status: "loaded",
+                    // Every agent that came back, because replacing a supervisor replaces its team:
+                    // they load from one manifest as one unit, so a caller holding a list needs to
+                    // know the members are new instances too.
+                    adopted: admitted.map((entry) => entry.id),
+                })
+            } catch (error) {
+                // The runtime's own refusals carry the field and the remedy — a team member has no
+                // manifest of its own, a busy agent names its in-flight count. Paraphrasing either
+                // here would replace a precise answer with a vague one.
+                if (error instanceof HarnessError) {
+                    return fail(
+                        {
+                            code: error.code,
+                            message: error.message,
+                            hint: error.hint,
+                            ...(error.field === undefined ? {} : { field: error.field }),
+                        },
+                        error.code === "agent_turn_in_flight" ? 409 : 400,
+                    )
+                }
+                throw error
+            }
+        }),
+    )
+
+    /**
+     * Switch an agent off, durably, and drop it from this host now.
+     *
+     * Two effects, and both are necessary. The row is what makes it survive a restart — the launchd
+     * lesson, where `bootout` unloads a job and only `disable` persists, so a thing stopped the
+     * first way comes back at the next login. The `dispose` is what makes the command mean
+     * something *today*: since one process hosts several agents, the old answer — kill the process
+     * holding the lease — takes every other agent down with it.
+     *
+     * **Order is state first, then teardown.** A dispose that succeeded before a write that failed
+     * would leave the agent down and marked running, which comes back at the next restart with
+     * nobody having asked for it. This way round, a failed dispose leaves it marked stopped and
+     * still hosted, which the next restart fixes and which `GET /v1/agents` reports honestly.
+     *
+     * Idempotent: stopping a stopped agent is `200`, not `404`, because the caller asked for a
+     * state that already holds. Refused with `409` while a turn is running — `dispose` decides
+     * that, and the refusal carries its hint rather than a second copy of the reasoning.
+     */
+    /**
+     * What provisioning needs to ask, straight from the implementation that will answer it.
+     *
+     * Served even when there is no provisioner — an empty list plus `available: false` is more
+     * useful to a client than a `501`, because it can then say "this server cannot create agents"
+     * rather than having to interpret a status code. `local` is the other half of that answer: a
+     * client on a public bind gets `available: true, local: false` and knows the questions are real
+     * and the route will refuse it, which is what the container reports.
+     *
+     * `/v1/provision` rather than `/v1/agents/steps`: the router matches in registration order and
+     * `/v1/agents/:id` is registered above, so a literal under that prefix would be swallowed as an
+     * agent id and answered `404 agent_not_found` — a route that exists and cannot be reached.
+     */
+    /**
+     * The generated document, and a browser reference over it.
+     *
+     * **Open, like `/v1/health`.** A description of which routes exist is not a secret — the spec is
+     * in the repository and the client package is published — and gating it would mean a developer
+     * cannot read the API of a server they have not yet obtained a credential for, which is the one
+     * moment the reference is most useful. It contains no agent ids, no session keys and no
+     * configuration: it is generated from the route *table*, not from what this process is hosting.
+     *
+     * `servers` names the URL this request arrived on, so the page's "try it" calls the server the
+     * document came from rather than a hardcoded localhost that is wrong in a container.
+     */
+    router.add("GET", "/v1/openapi.json", (context) =>
+        json(
+            openapiDocument({
+                routes: router.routes(),
+                serverUrl: `${context.url.protocol}//${context.url.host}`,
+            }),
         ),
     )
+
+    /**
+     * Scalar, from its CDN, over `/v1/openapi.json`.
+     *
+     * **The script is remote and that is a stated trade rather than an oversight.** This surface
+     * inlines its assets as *text* and ships no binary (11.200), and the browser payload has a
+     * measured budget after the 1.18 MB lesson. Scalar's bundle is **3.6 MB raw / 1.0 MB gzipped**,
+     * measured rather than guessed — sixteen times this project's entire UI, which is 220 KB. A
+     * `.ts` file holding that as a string is not a thing to inline, and vendoring it would need its
+     * own ceiling and its own argument. Offline, this page does not
+     * render and `/v1/openapi.json` still does, which is the failure mode worth having: the machine-
+     * readable half never depends on a network, and the pretty half says so in its own noscript.
+     */
+    router.add(
+        "GET",
+        "/docs",
+        () =>
+            new Response(DOCS_PAGE, {
+                status: 200,
+                headers: { "content-type": "text/html; charset=utf-8" },
+            }),
+    )
+
+    router.add("GET", "/v1/provision", () =>
+        json({
+            available: options.provision !== undefined,
+            local: provisioningIsLocal(),
+            steps: options.provision?.steps() ?? [],
+        }),
+    )
+
+    /**
+     * Create an agent, and have this host adopt it before the response returns.
+     *
+     * **Provisioning ends in `Runtime.adopt`, not in a restart.** That is the whole point of it: the
+     * directory is written and the agent is live — served, channels started, schedules armed —
+     * without disturbing anything else this process is hosting. A restart would drop every other
+     * agent's in-flight turn to add one, which is why `POST /reload` answers 501 rather than doing
+     * it.
+     *
+     * **Loopback only, in this phase.** An unauthenticated loopback server is a legitimate
+     * configuration, so a route that writes files and starts an agent must not be reachable from
+     * the network on one — and the origin guard protects a *browser* caller, not a curl. 18.2's
+     * scoped keys are what open this to a remote operator holding an admin-capability key; until
+     * then the refusal names the two ways to do it instead, because "not supported" with no
+     * alternative is where somebody starts looking for a way round the gate.
+     */
+    router.add("POST", "/v1/agents", async (context) => {
+        const provision = options.provision
+        if (provision === undefined) {
+            return fail(
+                {
+                    code: "provisioning_not_supported",
+                    message: "This server cannot create agents.",
+                    hint: "Creating one writes a directory of files from a question set this process was not given — an embedder mounting this handler over its own agent store is the case that lands here. Run `init` where the sandbox is, or mount an agent directory.",
+                },
+                501,
+            )
+        }
+        if (!provisioningIsLocal()) {
+            return fail(
+                {
+                    code: "provisioning_not_local",
+                    message: "Creating an agent is only allowed on a loopback bind.",
+                    hint: "This route writes files and starts an agent, and a token-less loopback server is a supported configuration — so it is gated on the bind rather than on a credential. This is also what refuses provisioning inside the container, whose CMD binds 0.0.0.0: mount a written agent at /agent, or run `init` on the host. A scoped admin key will open this on a public bind.",
+                },
+                403,
+            )
+        }
+
+        const body = await readJson(context.request)
+        if (body.kind === "error") return fail(body.error, 400)
+        /**
+         * `Record<string, string>`, checked by the schema — including the per-value type.
+         *
+         * Every answer is text on both front doors, and a number reaching `validateAnswer` would
+         * arrive as something it has no case for. The schema refuses it by path (`answers.server`),
+         * which is the field a caller has to fix; *which* steps exist is `GET /v1/provision`'s
+         * answer, not this schema's, because enumerating them here would be a second copy of
+         * `STEP_ORDER`.
+         */
+        const parsed = parseBody(ProvisionBody, body.value)
+        if (!parsed.ok) return fail(parsed.error, 400)
+        const text = parsed.value.answers
+
+        let created: ReturnType<Provisioner["create"]>
+        try {
+            created = provision.create(text)
+        } catch (error) {
+            // The implementation knows why far better than this route does, so its hint passes
+            // through rather than being paraphrased.
+            if (error instanceof HarnessError) return fail(error.toDetail(), 400)
+            throw error
+        }
+
+        /**
+         * Adopted after the files exist, and a failure here is reported **with the directory**.
+         *
+         * The agent is on disk either way, so a failed adoption is not a failed creation: telling
+         * somebody their request failed when a complete agent is sitting in the sandbox would send
+         * them to create a second one. `201` with `adopted: false` and the reason is the honest
+         * answer — the thing they asked for exists, and it is not running yet.
+         */
+        try {
+            const admitted = await runtime.adopt(created.manifestPath)
+            return json(
+                {
+                    id: created.agentId,
+                    dir: created.dir,
+                    files: created.files,
+                    adopted: admitted.map((agent) => agent.id),
+                },
+                201,
+            )
+        } catch (error) {
+            return json(
+                {
+                    id: created.agentId,
+                    dir: created.dir,
+                    files: created.files,
+                    adopted: [],
+                    error:
+                        error instanceof HarnessError
+                            ? error.toDetail()
+                            : {
+                                  code: "provision_adopt_failed",
+                                  message: error instanceof Error ? error.message : String(error),
+                                  hint: "The agent was written and is not running. Fix what the message names and `start` it, or restart the host.",
+                              },
+                },
+                201,
+            )
+        }
+    })
+
+    router.add("POST", "/v1/agents/:id/stop", async (context) => {
+        const id = context.params.id ?? ""
+        const hosted = runtime.list().some((agent) => agent.id === id)
+        const known = await runtime.store.agentState.get(id)
+        // Neither hosted nor ever recorded means there is nothing here by that name. A 200 would
+        // report having stopped something that does not exist, which is the shape of answer that
+        // lets a typo look like success.
+        if (!hosted && known === undefined) return notFound("agent", id)
+
+        const body = await readJson(context.request)
+        if (body.kind === "error") return fail(body.error, 400)
+        const parsed = parseBody(StopBody, body.value)
+        if (!parsed.ok) return fail(parsed.error, 400)
+        const reason = parsed.value.reason?.trim()
+        const state = await runtime.store.agentState.disable(
+            id,
+            new Date(options.now?.() ?? Date.now()).toISOString(),
+            // An empty or whitespace-only note is no note. Kept here rather than in the schema
+            // because "" is a legal string a client may genuinely send meaning "no reason".
+            reason === undefined || reason === "" ? undefined : reason,
+        )
+
+        if (hosted) {
+            try {
+                await runtime.dispose(id, "stopped")
+            } catch (error) {
+                if (error instanceof HarnessError && error.code === "agent_turn_in_flight") {
+                    return fail(error.toDetail(), 409)
+                }
+                throw error
+            }
+        }
+        return json({ id, status: "disabled", ...stateFields(state) })
+    })
+
+    /**
+     * Switch it back on, and adopt it into this host now.
+     *
+     * The mirror of `stop`, and the asymmetry between them is real: `stop` acts on an agent the
+     * runtime is holding, while `start` acts on one it has never seen — so it needs a manifest from
+     * outside, which is `resolveAgent`. Without that injection the route says `501` and names it
+     * rather than writing the row and reporting a success that hosts nothing.
+     *
+     * **Enabled first, then adopted**, because `adopt` refuses a stopped agent by design — that
+     * refusal is what stops every other caller reversing a stop by accident, and this is the one
+     * caller that means to.
+     */
+    router.add("POST", "/v1/agents/:id/start", async (context) => {
+        const id = context.params.id ?? ""
+        if (runtime.list().some((agent) => agent.id === id)) {
+            // Already running. Enabled anyway, because a hosted agent with a `disabled` row is a
+            // state a crash between the two writes above can leave behind, and this is the command
+            // that would otherwise have no way to clear it.
+            const state = await runtime.store.agentState.enable(id)
+            return json({ id, status: "loaded", ...stateFields(state) })
+        }
+
+        const resolve = options.resolveAgent
+        if (resolve === undefined) {
+            return fail(
+                {
+                    code: "start_not_supported",
+                    message:
+                        "This server cannot look up a manifest for an agent it is not hosting.",
+                    hint: "Starting a stopped agent needs its manifest, which lives wherever agents live — the sandbox for the CLI, a mounted path for a container. This process was built without that lookup, so pass the agent to `serve` and restart it instead.",
+                },
+                501,
+            )
+        }
+
+        const source = resolve(id)
+        if (source === undefined) return notFound("agent", id)
+
+        const state = await runtime.store.agentState.enable(id)
+        try {
+            const admitted = await runtime.adopt(source)
+            return json({
+                id,
+                status: "loaded",
+                ...stateFields(state),
+                adopted: admitted.map((agent) => agent.id),
+            })
+        } catch (error) {
+            // Put back, because the agent is not running and a row saying otherwise is the
+            // "looks live and is not" failure this table exists to prevent. Reported with the
+            // adoption's own error, which names the real fault — a missing key, a bad manifest.
+            await runtime.store.agentState.disable(
+                id,
+                new Date(options.now?.() ?? Date.now()).toISOString(),
+                "start failed",
+            )
+            if (error instanceof HarnessError) return fail(error.toDetail(), 400)
+            throw error
+        }
+    })
 
     // ─── Turns ───────────────────────────────────────────────────────────────────────────
 
@@ -289,34 +785,28 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             const body = await readJson(context.request)
             if (body.kind === "error") return fail(body.error, 400)
 
-            const input = body.value as {
-                text?: unknown
-                sessionKey?: unknown
-                deliver?: unknown
-                stream?: unknown
-                chunks?: unknown
-                from?: unknown
-            }
+            /**
+             * Shape from the schema; meaning from the two parsers below.
+             *
+             * `MessageBody` owns the types, the trim and the enum — including the trust-boundary
+             * refusal on `from.kind`, whose nearest-match suggestion moved into a custom Zod error
+             * rather than being lost. `parseDeliver` and `parseFrom` then only *build* their values.
+             * A schema that validated and a parser that re-validated would be two owners of one
+             * field, which is the drift this refactor exists to remove.
+             */
+            const parsed = parseBody(MessageBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const input = parsed.value
+
             // Per-token frames are opt-in, and the *reader* decides — so the query parameter on the
             // stream routes is the primary control and this is the writer's way to ask on the
             // inline-stream path, where there is no second request to carry one. Strict `=== true`,
-            // like `stream`: a client sending the string "false" must not be read as asking.
+            // like `stream`: the schema rejects the string "false", so this cannot be read as
+            // asking by a client that sent one.
             const wantsChunks = input.chunks === true
-            const text = typeof input.text === "string" ? input.text : ""
-            if (text.trim() === "") {
-                return fail(
-                    {
-                        code: "message_text_required",
-                        message: "The request body has no text.",
-                        hint: 'Send { "text": "..." }. An empty turn would be billed for a full prompt and produce nothing.',
-                        field: "text",
-                    },
-                    400,
-                )
-            }
+            const text = input.text
 
-            const sessionKey =
-                typeof input.sessionKey === "string" ? input.sessionKey : "api:default"
+            const sessionKey = input.sessionKey ?? "api:default"
             const deliver = parseDeliver(input.deliver)
             if (deliver.kind === "error") return fail(deliver.error, 400)
 
@@ -511,14 +1001,18 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * otherwise sees a turn that has visibly stopped with no way to discover why. Same argument as
      * turn reattach, which the spec calls core rather than a convenience.
      *
-     * Not scoped by agent even though the path names one. The registry is per *process* and a
-     * pending approval's turn belongs to whichever agent raised it; filtering here would need the
-     * registry to carry an agent id it has no use for otherwise, and `serve` hosts one agent. The
-     * path keeps the agent segment so the route reads like its neighbours and so scoping later is
-     * additive rather than a URL change.
+     * **Scoped by agent, and it was not.** This discarded `:id` and returned every pending question
+     * in the process — slug, matched command and reason included — which is one operator reading
+     * another agent's queue. Unreachable only because a served process hosted one agent, which is
+     * the same shape as the cross-agent disclosure Phase 13 found on `/v1/events`: single-tenancy
+     * hides multi-tenancy bugs rather than preventing them. The old comment reasoned that the
+     * registry "has no use for" an agent id otherwise; it does now, and `pending` takes it as a
+     * required argument so the disclosing call is the one that does not compile.
      */
     router.add("GET", "/v1/agents/:id/approvals", (context) =>
-        withAgent(runtime, context, async () => json({ approvals: approvals.pending() })),
+        withAgent(runtime, context, async (agent) =>
+            json({ approvals: approvals.pending(agent.id) }),
+        ),
     )
 
     /**
@@ -538,18 +1032,9 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
         withAgent(runtime, context, async () => {
             const body = await readJson(context.request)
             if (body.kind === "error") return fail(body.error, 400)
-            const input = body.value as { granted?: unknown }
-            if (typeof input.granted !== "boolean") {
-                return fail(
-                    {
-                        code: "approval_decision_required",
-                        message: "The request body has no boolean `granted`.",
-                        hint: 'Send { "granted": true } or { "granted": false }. There is no default: one direction would deny a call over a typo and the other would grant one, and neither is a decision anybody made.',
-                        field: "granted",
-                    },
-                    400,
-                )
-            }
+            const parsed = parseBody(ApprovalBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const input = parsed.value
 
             const approvalId = context.params.approvalId ?? ""
             if (!approvals.resolve(approvalId, input.granted)) {
@@ -631,18 +1116,11 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
 
         const body = await readJson(context.request)
         if (body.kind === "error") return fail(body.error, 400)
-        const input = body.value as { label?: unknown }
-        if (typeof input.label !== "string") {
-            return fail(
-                {
-                    code: "key_label_required",
-                    message: "The request body has no string `label`.",
-                    hint: 'Send { "label": "my browser" }. A label is required rather than defaulted because it is the only thing distinguishing two credentials in a listing, and "key 2" is a name nobody can act on when deciding which to revoke.',
-                    field: "label",
-                },
-                400,
-            )
-        }
+        // Shape here; the display rule stays in `keyLabelProblem`, which decides what a label may
+        // *contain* — a wire schema has no business knowing how wide a listing row is.
+        const parsed = parseBody(KeyBody, body.value)
+        if (!parsed.ok) return fail(parsed.error, 400)
+        const input = parsed.value
         const problem = keyLabelProblem(input.label)
         if (problem !== undefined) {
             return fail(
@@ -773,7 +1251,11 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
         withAgent(runtime, context, async (agent) => {
             const body = await readJson(context.request)
             if (body.kind === "error") return fail(body.error, 400)
-            const phase = (body.value as { phase?: unknown }).phase
+            const parsed = parseBody(PhaseBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            // Shape here; whether the agent *declares* this phase is checked below, where the
+            // manifest is — a wire schema cannot know one agent's phase names.
+            const phase = parsed.value.phase
             if (typeof phase !== "string" && phase !== null) {
                 return fail(
                     {
@@ -931,6 +1413,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                     summary: spec.summary,
                     mutating: spec.mutating,
                     trust: spec.trust,
+                    // Why a provider tool declares itself trusted when the default is untrusted.
+                    // It exists because the boot warning fired on every start of every
+                    // system-provider agent, and a warning always present for a correct
+                    // configuration is one nobody reads — so the reason belongs where a person is
+                    // already looking at the catalogue. Omitted here, an attached reader sees the
+                    // column silently blank, which is the same failure one layer out.
+                    ...(spec.trustReason === undefined ? {} : { trustReason: spec.trustReason }),
                     provider: spec.provider ?? "local",
                     tags: spec.tags,
                     ...(phased ? { phases: phasesFor(phases, spec) } : {}),
@@ -1189,6 +1678,9 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                     )
                 }
 
+                const crossOrigin = refuseOrigin(request)
+                if (crossOrigin !== undefined) return crossOrigin
+
                 if (!isOpenPath(url.pathname) && (await authRequired())) {
                     const unauthorized = await authorise({
                         request,
@@ -1234,6 +1726,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 404,
             )
         }
+
+        // **Before the open-path check, not after.** `POST /v1/channels/…` is open by prefix and
+        // changes state, so a guard sitting behind authentication would leave the one
+        // state-changing unauthenticated route unprotected — which is the half of the DNS-rebinding
+        // hole that a configured token does not close.
+        const crossOrigin = refuseOrigin(request)
+        if (crossOrigin !== undefined) return crossOrigin
 
         if (!isOpenPath(url.pathname) && (await authRequired())) {
             const unauthorized = await authorise({
@@ -1380,7 +1879,21 @@ function isOpenPath(pathname: string): boolean {
          * open any future path under it, and the set of things served from a directory is exactly
          * the kind of list that grows without anybody re-reading the auth rule.
          */
-        WEB_PATHS.includes(pathname)
+        WEB_PATHS.includes(pathname) ||
+        /**
+         * The reference, and the document behind it.
+         *
+         * Open for the same reason `/v1/health` is, and for one more: a description of which routes
+         * exist is not a secret — the spec is in the repository and the client package is
+         * published — and gating it means a developer cannot read the API of a server they have not
+         * yet obtained a credential for, which is the one moment a reference is most useful.
+         *
+         * It discloses nothing about *this* process: the document is generated from the route
+         * table, so it carries no agent id, no session key and no configuration. Named explicitly
+         * rather than matched by prefix, for the reason the asset list is.
+         */
+        pathname === "/docs" ||
+        pathname === "/v1/openapi.json"
     )
 }
 
@@ -1606,6 +2119,20 @@ function summary(runtime: Runtime, agent: Agent) {
         channels: runtime.channels.statusOf(agent.id),
         entryPhase: phased ? (entryPhase(phases) ?? null) : null,
         ...(phased ? { phases: Object.keys(phases) } : {}),
+    }
+}
+
+/**
+ * The state fields both lifecycle routes return, so the two cannot describe one row differently.
+ *
+ * `disabledAt` and `reason` survive an enable — they are the record of what happened — so a started
+ * agent legitimately carries both, and a client reading them has to look at `status` rather than at
+ * their presence.
+ */
+function stateFields(state: AgentStateRecord): Record<string, string> {
+    return {
+        ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+        ...(state.reason === undefined ? {} : { reason: state.reason }),
     }
 }
 

@@ -31,22 +31,13 @@ export interface BinaryFacts {
     readonly gitRoot?: string
 }
 
-export interface PreflightFacts {
-    readonly platform: string
+export interface AgentFindingFacts {
     readonly agentId: string
-    readonly manifestPath: string
     readonly agentDir: string
-    readonly binary: BinaryFacts
     /** `undefined` when there is no `.env` beside the manifest. */
     readonly envFileMode?: number
-    readonly enabledChannels: readonly string[]
-    readonly serverEnabled: boolean
-    readonly serverHost: string
-    readonly serverTokenPresent: boolean
-    /** A plist already at this label, and the manifest it names. */
-    readonly installedManifest?: string
-    /** A live runtime lease, if one is held. */
-    readonly servedBy?: { readonly pid: number; readonly mode: string; readonly startedAt: string }
+    /** Set when the manifest could not be loaded at all. Reported, never fatal. */
+    readonly problem?: string
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"])
@@ -56,83 +47,126 @@ export function isLoopbackHost(host: string): boolean {
 }
 
 /**
- * Everything that would stop, or should worry, an install — in one ordered list.
+ * What is worth saying about **one agent** when the host that will serve it is installed.
  *
- * Blocking findings are collected rather than thrown one at a time: a command line with two
- * mistakes should report both, because fixing them one round trip at a time is the experience this
- * whole phase is a reaction to.
+ * ## Four blockers were deleted rather than moved, and each for a reason
  *
- * Preflight is a **convenience**, not the safety mechanism. It runs once, at install, and cannot
- * know about the key that gets rotated three weeks later. What actually keeps a broken service from
- * looping is the exit-code contract plus `KeepAlive: {Crashed: true}` — see `launchd.ts`.
+ * This was `preflightFindings`, gating `daemon install <agent>`. That install is retired — one
+ * service hosts every agent — and with it three of its five blockers became *false* rather than
+ * merely unreachable, which is worth recording so nobody restores them:
+ *
+ * - **`daemon_nothing_to_serve`** refused an agent with no enabled channel and `server.enabled`
+ *   false, because "a background service would answer nothing". Since 16.3 the host serves every
+ *   agent over `/v1` whatever that agent's own `server` block says, so an agent with no channel is
+ *   reachable from a browser and from the API — and a server with *no* agents is the designed
+ *   first-run state. Refusing here would make "install and the API is up" false.
+ * - **`server_public_without_token`** duplicated `serve`'s own bind-time refusal one step earlier,
+ *   for a host whose address came from that agent's manifest. The unit names no manifest, so its
+ *   bind comes from the schema's loopback default and this cannot arise. `serve` still refuses it.
+ * - **`daemon_label_taken`** was about two agents sharing one per-agent label. There is no
+ *   per-agent label.
+ * - **`daemon_already_serving`** survives as `daemon_agents_held_elsewhere` on the server's own
+ *   list, as a **warning**: the host now starts and serves everything else rather than refusing,
+ *   which is 16.2a's partial-lease behaviour applied to an install.
+ *
+ * What is left is the one thing that is still true per agent and that nothing else says: the mode
+ * of the file its credentials live in.
  */
-export function preflightFindings(facts: PreflightFacts): readonly Finding[] {
+export function agentFindings(facts: AgentFindingFacts): readonly Finding[] {
     const out: Finding[] = []
 
-    if (facts.enabledChannels.length === 0 && !facts.serverEnabled) {
+    if (facts.problem !== undefined) {
         out.push({
-            code: "daemon_nothing_to_serve",
-            severity: "block",
-            message: `Agent "${facts.agentId}" has no enabled channel and its HTTP server is off, so a background service would answer nothing.`,
-            hint: "A service exists to keep something listening. Add a channel, or set server.enabled: true — the agent can write either itself with config_set, if it has that tool. Until then `run` is the way to talk to it.",
+            code: "daemon_agent_unreadable",
+            severity: "warn",
+            message: `Agent "${facts.agentId}" could not be read: ${facts.problem}`,
+            hint: "The host skips an agent whose manifest will not load and serves the rest, so this is a warning rather than a refusal — `validate` on that agent says exactly what is wrong with it.",
         })
     }
-
-    if (!isLoopbackHost(facts.serverHost) && facts.serverEnabled && !facts.serverTokenPresent) {
-        out.push({
-            code: "server_public_without_token",
-            severity: "block",
-            message: `The server is set to bind ${facts.serverHost}, which is not loopback, and no API token is set.`,
-            hint: "The same refusal `serve` makes at bind time, made here instead — a service that fails at every start is worse than a command that fails once. Set the token in the .env beside the manifest, or bind 127.0.0.1.",
-        })
-    }
-
-    if (facts.servedBy !== undefined) {
-        out.push({
-            code: "daemon_already_serving",
-            severity: "block",
-            message: `Agent "${facts.agentId}" is already being served by pid ${facts.servedBy.pid} (${facts.servedBy.mode}, since ${facts.servedBy.startedAt}).`,
-            hint: "Two processes serving one agent is a silent failure, not a loud one: a messaging channel allows a single listener per token, so a second one produces conflicts indistinguishable from the provider being down. Stop that one first.",
-        })
-    }
-
-    if (facts.installedManifest !== undefined && facts.installedManifest !== facts.manifestPath) {
-        out.push({
-            code: "daemon_label_taken",
-            severity: "block",
-            message: `A service for "${facts.agentId}" already exists and points at a different manifest: ${facts.installedManifest}`,
-            hint: `Two agents sharing an id would share this service, and one would silently replace the other. Uninstall the existing one first, or give this agent a different id. The manifest here is ${facts.manifestPath}.`,
-        })
-    }
-
-    // ── warnings ────────────────────────────────────────────────────────────────────────
 
     if (facts.envFileMode !== undefined && (facts.envFileMode & 0o077) !== 0) {
         out.push({
             code: "daemon_env_world_readable",
             severity: "warn",
-            message: `The .env beside the manifest is mode ${(facts.envFileMode & 0o777).toString(8)} and holds this agent's only secrets.`,
-            hint: `Under a service manager that file is the *only* path credentials arrive by — launchd hands a job almost no environment, and the service definition carries none on purpose. \`chmod 600 ${facts.agentDir}/.env\`.`,
+            message: `${facts.agentId}'s .env is mode ${(facts.envFileMode & 0o777).toString(8)} and holds its only secrets.`,
+            hint: `Under a service manager that file is the *only* path credentials arrive by — a unit carries none on purpose, because its manager echoes the environment in plaintext. \`chmod 600 ${facts.agentDir}/.env\`.`,
         })
     }
 
-    if (facts.binary.gitRoot !== undefined) {
+    return out
+}
+
+export function binaryWarnings(binary: BinaryFacts): readonly Finding[] {
+    const out: Finding[] = []
+
+    if (binary.gitRoot !== undefined) {
         out.push({
             code: "daemon_binary_in_checkout",
             severity: "warn",
-            message: `The binary resolves to ${facts.binary.scriptPath}, inside a git checkout at ${facts.binary.gitRoot}.`,
+            message: `The binary resolves to ${binary.scriptPath}, inside a git checkout at ${binary.gitRoot}.`,
             hint: "A rebuild, a branch switch or a `git clean` changes or breaks what the service runs, and the failure arrives with no obvious connection to the change. Fine for testing; install a released build for a service you intend to leave running.",
         })
     }
 
-    if (/[/.](nvm|fnm|volta|asdf)\//.test(facts.binary.execPath)) {
+    if (/[/.](nvm|fnm|volta|asdf)\//.test(binary.execPath)) {
         out.push({
             code: "daemon_versioned_runtime",
             severity: "warn",
-            message: `The interpreter is a version-managed install: ${facts.binary.execPath}`,
+            message: `The interpreter is a version-managed install: ${binary.execPath}`,
             hint: "The absolute path is baked into the service definition, so removing that runtime version later kills the service with a message only the log file sees. A system or Homebrew install is more durable.",
         })
     }
+
+    return out
+}
+
+export interface ServerPreflightFacts {
+    readonly binary: BinaryFacts
+    /** Retired per-agent labels found installed, which a bare install cleans up. */
+    readonly retiring: readonly string[]
+    /** Live leases held by other processes — agents the new unit would not be able to serve. */
+    readonly servedElsewhere: readonly {
+        readonly agentId: string
+        readonly pid: number
+        readonly mode: string
+    }[]
+}
+
+/**
+ * What to say before installing **the** server unit — a much shorter list, and deliberately so.
+ *
+ * Every blocker the per-agent list used to carry was a fact about one agent — its channel, its
+ * token, its label — and a host that starts with no agents has none of those. `agentFindings` above
+ * records which ones were deleted and why each one became false rather than merely unreachable.
+ *
+ * Nothing here blocks. The one thing that could — a conflicting label — is handled by *retiring* it
+ * instead, because that is the only way to leave a working system behind: a per-agent unit left
+ * beside the server unit contends for the same lease, so the server would report that agent as
+ * served elsewhere indefinitely with nothing looking wrong.
+ */
+export function serverFindings(facts: ServerPreflightFacts): readonly Finding[] {
+    const out: Finding[] = []
+
+    for (const label of facts.retiring) {
+        out.push({
+            code: "daemon_per_agent_retired",
+            severity: "warn",
+            message: `Retiring ${label} — one service hosts every agent now.`,
+            hint: "It is unloaded, re-enabled and its definition removed. The re-enable is not cosmetic: a `disable` row persists across boots and no verb deletes it, so a label left disabled makes any future job with that name install cleanly and silently never start. Per-agent on/off is `stop <agent>`, which persists in the store instead.",
+        })
+    }
+
+    if (facts.servedElsewhere.length > 0) {
+        const first = facts.servedElsewhere[0]
+        out.push({
+            code: "daemon_agents_held_elsewhere",
+            severity: "warn",
+            message: `${facts.servedElsewhere.length} agent(s) are held by other live processes — ${first?.agentId} by pid ${first?.pid} (${first?.mode}).`,
+            hint: "The service will start and serve everything else, and report those as served elsewhere rather than fighting for them — one listener per bot token is the whole reason the lease exists. `stop` with no agent ends the other processes.",
+        })
+    }
+
+    out.push(...binaryWarnings(facts.binary))
 
     return out
 }

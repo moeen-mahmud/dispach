@@ -89,10 +89,32 @@ export function createClaimTicket(): ClaimTicket {
  * URL naming that is one nobody can open. The wildcard forms are shown as loopback for display
  * only; the server really is on every interface.
  */
+/**
+ * The host as something a browser can be pointed at.
+ *
+ * `0.0.0.0` and `::` are **binds, not addresses** — they mean "every interface" and a browser
+ * handed either gets nothing. Loopback is the right substitute because that is what the operator
+ * reaching this machine actually uses: on a laptop it is the same machine, and from a container it
+ * is the published port on the host doing the opening.
+ *
+ * Exported because there are three callers and there were two copies of this before the third
+ * arrived. The third — `web url` in the CLI — printed `http://0.0.0.0:7420/` from inside the
+ * container, which is a link that cannot be clicked, and no amount of testing on a laptop would
+ * have shown it: a `serve` there binds `127.0.0.1` and the substitution never fires.
+ */
+export function browsableHost(host: string): string {
+    // Unwrapped before comparing, because a caller may hand this either spelling: `serve` has the
+    // bare bind from the manifest, while anything reading it back out of a URL gets `[::]` — and
+    // `URL.hostname` keeps the brackets. Comparing only the bare form let the IPv6 wildcard
+    // through, which is the same defect as `0.0.0.0` in the half of the world that runs on v6.
+    const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host
+    const shown = bare === "0.0.0.0" || bare === "::" || bare === "" ? "127.0.0.1" : bare
+    // IPv6 needs brackets in a URL authority, and only when it is actually IPv6.
+    return shown.includes(":") ? `[${shown}]` : shown
+}
+
 export function claimUrl(host: string, port: number, token: string): string {
-    const shown = host === "0.0.0.0" || host === "::" || host === "" ? "127.0.0.1" : host
-    const bracketed = shown.includes(":") && !shown.startsWith("[") ? `[${shown}]` : shown
-    return `http://${bracketed}:${port}/?claim=${token}`
+    return `http://${browsableHost(host)}:${port}/?claim=${token}`
 }
 
 /**
@@ -103,7 +125,6 @@ export function claimUrl(host: string, port: number, token: string): string {
  * something they cannot. `serve` prints the URL and mentions this.
  */
 export function claimCommand(host: string, port: number, token: string): string {
-    const shown = host === "0.0.0.0" || host === "::" || host === "" ? "127.0.0.1" : host
-    const bracketed = shown.includes(":") && !shown.startsWith("[") ? `[${shown}]` : shown
+    const bracketed = browsableHost(host)
     return `curl -sX POST http://${bracketed}:${port}/v1/keys -H 'Authorization: Bearer ${token}' -H 'content-type: application/json' -d '{"label":"my browser"}'`
 }

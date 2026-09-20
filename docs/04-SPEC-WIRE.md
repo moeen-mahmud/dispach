@@ -33,6 +33,8 @@ and WebSocket surfaces can return:
 | Code | Status | Means |
 | --- | --- | --- |
 | `unauthorized` | 401 | Missing or invalid token. Never distinguishes which, and never says the token was absent rather than wrong. |
+| `origin_not_allowed` | 403 | A browser sent an `Origin` this server does not answer to. Checked **before** authentication, because `POST /v1/channels/…` needs no credential and changes state. An absent `Origin` is allowed — a curl, a webhook and a healthcheck all send none. Port is not compared: a published port mapping and a dev proxy both change it legitimately. |
+| `host_not_allowed` | 403 | A request reached a **loopback** bind addressed to a name that is not a loopback name. That is what a DNS-rebinding attack cannot hide, since the browser sends the name it resolved — so this is the check that closes the hole. Widen it with `server.allowedHosts`; ignored on a public bind, where the legitimate names are the operator's to know. |
 | `not_found` | 404 | No route for this method and path. |
 | `agent_not_found` | 404 | No agent with that id in this runtime. |
 | `session_not_found` | 404 | No session with that key for this agent. |
@@ -57,7 +59,20 @@ and WebSocket surfaces can return:
 | `web_asset_missing` | 500 | The routes serving the browser surface and the table backing them diverged. A broken build, not a missing file. |
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
-| `reload_not_supported` | 409 | An agent's configuration is fixed for its process lifetime, deliberately. |
+| `agent_turn_in_flight` | 409 | A reload or stop was asked for while a turn is running. It names the count; retry when the turn ends, because aborting one to apply a setting is the worse trade. |
+| `agent_not_replaceable` | 400 | `reload` on a team member, which has no manifest of its own — replace its supervisor, which reloads the team as one unit. |
+| `provisioning_not_supported` | 501 | This server was built with no provisioner — an embedder over its own agent store. The container has one and is refused by the bind instead. |
+| `provisioning_not_local` | 403 | `POST /v1/agents` on a non-loopback bind. A scoped admin key opens it later; until then the refusal names `init` and mounting. |
+| `request_body_invalid` | 400 | A body failed its schema and the failing field declared no code of its own. Carries the field. |
+| `agent_stop_invalid` | 400 | `stop` was sent a `reason` that is not a string. |
+| `provision_answers_required` | 400 | The body has no `answers` object. |
+| `provision_answer_invalid` | 400 | One answer failed its step's validation, or was not a string. Carries the field. |
+| `provision_unknown_answer` | 400 | A key that is not a question this runtime asks. |
+| `provision_directory_refused` | 400 | `dir` or `dirChoice` over the wire. The sandbox decides; see above. |
+| `provision_adopt_failed` | — | Returned *inside* a `201`: the agent was written and is not running. |
+| `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting — an embedder over its own agent store. The container has the lookup, and `start` works there. |
+| `agent_turn_in_flight` | 409 | `stop` was asked for an agent with a turn running. Tearing it down would close its store under a turn recorded as running. |
+| `agent_stopped` | 400 | Adoption was asked for an agent that is switched off. `start` is the way back, and it is the one caller that enables before adopting. |
 | `turn_not_running` | 409 | No cancel handle for that turn **on this API** — a channel- or schedule-started turn has none. |
 | `internal_error` | 500 | An unexpected throw. The event stream carries what happened around it. |
 | `websocket_unavailable` | 501 | `/v1/ws` under Node, which has no upgrade path without a dependency. |
@@ -102,14 +117,78 @@ GET /v1/ready    → 200 when every agent has loaded; 503 { status: "starting" }
 visible on the agent resource. This distinction is deliberate: a channel that cannot
 connect must not make the process look dead to an orchestrator.
 
+Each entry of `channels[]` is `{ id, type, status, detail?, input? }`. `status` is one of
+`starting | connected | disconnected | error | needs_input`, and **a consumer must tolerate a
+sixth**: the set can grow inside `v: 1` while a field's type cannot.
+
+`needs_input` means the transport is running and cannot finish connecting until a *person* acts —
+WhatsApp's link-device QR is the first instance. It carries
+`input: { kind: "qr", payload, issuedAt, expiresAt? }`: `payload` is the bytes to render, `detail`
+the sentence explaining them, and `issuedAt` what makes staleness visible, because WhatsApp rotates
+its QR roughly every 20 seconds and a code nobody can tell is expired reads as a broken scanner.
+`kind` has one member today and a reader needs a default branch regardless. The payload is on the
+resource as well as on the event, so a page that opens *after* the QR was emitted renders it
+immediately instead of waiting for the next one.
+
 ### Agents
 
 ```
 GET /v1/agents           → [{ id, name, status, model, channels[], entryPhase, phases? }]
+                           plus a thin { id, name, status: "disabled", disabledAt?, reason? }
+                           row per stopped agent
 GET /v1/agents/:id       → the above plus dialect, window, tool count, skills indexed,
                            schedule count, warnings[], team? [{ id, task, artifact[] }]
+POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disabledAt, reason? }
+POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }
 POST /v1/agents/:id/reload
+
+GET  /v1/openapi.json    → the generated OpenAPI 3.1 document
+GET  /docs               → a browser reference over it
+
+GET  /v1/provision       → { available, local, steps[] }
+POST /v1/agents            { answers: {step: value, …} }
+                         → 201 { id, dir, files[], adopted[] }
 ```
+
+**Provisioning is one POST, and it ends in an adopt rather than a restart.** The directory is
+written and the agent is **live before the response returns** — served, channels started, schedules
+armed — without disturbing anything else the process hosts. A restart would drop every other
+agent's in-flight turn to add one, which is the same reason `reload` answers 501.
+
+`answers` is a subset: every step left out takes its default, exactly as `init --yes` does with
+flags. `GET /v1/provision` lists each step with its prompt, default, choices and a `secret` flag,
+and it is generated from the same walk the terminal wizard performs — so a browser form cannot go
+stale against the questions. `dir` and `dirChoice` are **refused**: a provisioned agent lands in the
+host's sandbox, because where an agent lives on disk is the operator's decision rather than a
+caller's.
+
+**`201` with `adopted: []` and an `error` is a success, not a failure.** The agent is on disk either
+way, so a failed adoption is not a failed creation — reporting the request as failed would send
+somebody to create a second copy of an agent that already exists.
+
+Gated to a **loopback bind**, answering `403 provisioning_not_local` otherwise: the route writes
+files and starts an agent, a token-less loopback server is a supported configuration, and the origin
+guard protects a browser caller rather than a curl. `501 provisioning_not_supported` on a server
+built with no provisioner, which is an embedder mounting this handler over its own agent store.
+
+**The container is covered by the bind rather than by the 501.** Its `CMD` binds `0.0.0.0`, so
+provisioning there answers `403` — a fact about what was bound rather than about what somebody
+remembered to omit. `GET /v1/provision` reports `available: true, local: false` for exactly that
+case, so a client knows the questions are real and the route will refuse it.
+
+**`stop` and `start` are the durable switch, not a signal.** `stop` writes the agent off in the
+store *and* drops it from this host now; the row is what makes it survive a restart, and the drop is
+what makes the request mean something today — one process hosts several agents, so killing the
+process that holds a lease takes every other agent down with it. Both are idempotent: asking for a
+state that already holds is `200`, never `404`. `stop` answers `409 agent_turn_in_flight` while a
+turn is running, and `404` only when the id is neither hosted nor recorded. `start` answers
+`501 start_not_supported` on a server built without a manifest lookup — an embedder over its own
+agent store. The container has the lookup and `start` works there.
+
+**A stopped agent is listed and its resource is `404`**, and the asymmetry is deliberate: the
+listing answers "what exists" and the resource answers "what is running". The row is thin because a
+stopped agent is not loaded — there is no manifest in memory to report a model or channels from, and
+loading one to fill the row in would make a listing depend on credentials being present.
 
 **Team members are not listed and not addressable.** `GET /v1/agents` returns only served agents,
 and every route above resolves through the same list — so a member has no URL. That is a boundary
@@ -118,15 +197,27 @@ wider, and an addressable one is a route around whatever policy the supervisor w
 nobody having asked the supervisor. `team?` on the supervisor's own resource is how they stay
 observable, and it is absent rather than `[]` for an agent with no team.
 
-`reload` re-reads the manifest and context files and rebuilds the tool and skill indexes.
-It does **not** restart channels unless their config changed, and it never drops in-flight
-turns. Returns a diff of what changed.
+`reload` **replaces the agent**: it is disposed and re-created from its source, so it comes back as
+a new instance with a freshly resolved catalogue and a freshly rendered slot 1. It answers
+`200 { id, status: "loaded", adopted[] }`, and `adopted` lists every agent that came back — a
+supervisor brings its team, because they load from one manifest as one unit.
 
-**This build answers `501 reload_not_supported`.** An agent's catalogue resolves once and slot 1
-renders once, so a session's cached prompt prefix depends on the configuration staying fixed for the
-lifetime of the process — which is also why the CLI has `/restart`. A partial reload that silently
-did not apply would be worse than a refusal, so the endpoint stays specified and declines, naming
-the reason. Decision 11.20.
+**It does not mutate a live agent, and the distinction is the whole design.** An agent's
+configuration is fixed for the lifetime of its *instance*: the catalogue resolves once and slot 1
+renders once, so a session's cached prompt prefix stays byte-stable and `config_set` cannot change
+behaviour underneath a conversation. Replacing the instance honours that where a partial in-place
+reload would quietly break it. It returns no diff — that was specified and never built, and a
+report of "what changed" between two instances is a different feature from restarting one.
+
+**Nothing in flight is discarded.** A reload while a turn is running answers
+`409 agent_turn_in_flight` naming the count, rather than aborting it: picking up a setting is not
+worth somebody's half-finished answer, and from a caller's side an aborted turn is
+indistinguishable from the runtime crashing. Retry once the turn ends.
+
+This answered `501 reload_not_supported` until 17.1, when `Runtime.replace` (16.2b) made the
+honest version possible. The old refusal's argument was correct about in-place mutation and is
+preserved above; what changed is that an **attached** view owns no runtime, so `/restart` in a CLI
+session hosted by a server has to reach it through here. Decisions 11.20 and 11.220.
 
 ### Turns
 
@@ -228,6 +319,12 @@ a POST resumes it. The runtime emits **`approval.resolved`** either way, and the
 `approvalId` is minted per question and is **not** `callId`: a dialect numbers calls within a step,
 so two steps of one turn both have a `c1`, and an id that decides which blocked call resumes cannot
 collide.
+
+Each entry carries `agentId`, and the listing is **scoped to the agent in the path**. It was not:
+the registry is per process and `:id` was discarded, so one operator read every agent's pending
+questions — slug, matched command and reason included. Harmless while a served process hosted one
+agent, which is precisely how it stayed unnoticed. `POST …/:approvalId` stays keyed by the approval
+id alone, because that id is minted per question and is already unique across agents.
 
 **The event comes from the runtime, not from whichever front end asks.** So the question is visible
 to the firehose, to a second observer of the same session, and to an audit log — not only to the
@@ -515,8 +612,9 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `plugin.loaded` | per plugin | `name`, `version`, `setupMs`, `permissions` |
 | `plugin.slow` | setup over budget | `name`, `setupMs` |
 | `agent.loaded` | per agent | `tools`, `skills`, `schedules` (the manifest's **declared** count — this fires before reconciliation), `model` |
+| `agent.disposed` | this process stopped hosting an agent, without exiting | `reason` (`requested` \| `replaced` \| `stopped`) |
 | `agent.warning` | a fact true for the whole session, said at load | `code`, `message`, `hint`, `field?` |
-| `agent.channel.status` | connect/disconnect | `channelId`, `channelType`, `status`, `detail?` |
+| `agent.channel.status` | connect/disconnect, or a channel now waiting on a person | `channelId`, `channelType`, `status` (`starting` \| `connected` \| `disconnected` \| `error` \| `needs_input`), `detail?`, `input?` (`{kind, payload, issuedAt, expiresAt?}`, present only with `needs_input`) |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |
 | `agent.channel.rejected` | inbound not turned into a turn | `channelId`, `reason` (`duplicate` \| `denied`), `sender`, `detail` |
 | `handoff.start` | a delegation began | `member`, `task`, `sessionKey` |

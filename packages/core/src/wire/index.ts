@@ -34,6 +34,16 @@
  * page to show for it.
  */
 
+/**
+ * The channel vocabulary, because a browser is what renders `needs_input`.
+ *
+ * Type-only, so it is erased and costs the bundle nothing — `channels/channel.ts` imports one type
+ * from `errors.ts` and this entry already carries that edge. Exported deliberately rather than
+ * left for a consumer to restate: `packages/client` typed the agent resource's `channels` as
+ * `readonly unknown[]`, which means every front end casts, and a hand-written cast is where the
+ * fifth `ChannelStatus` member goes unhandled with nothing reporting it.
+ */
+export type { ChannelInput, ChannelStatus, IssuedChannelInput } from "../channels/channel.ts"
 export type {
     AnyEvent,
     EventContext,

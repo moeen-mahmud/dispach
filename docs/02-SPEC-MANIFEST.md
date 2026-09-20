@@ -129,6 +129,8 @@ server:
   enabled: true
   port: 7420
   tokenEnv: DISPACH_API_TOKEN
+  allowedOrigins: []
+  allowedHosts: []
 ```
 
 ---
@@ -780,6 +782,22 @@ Load order is manifest order; middleware composes outermost-first. A plugin whos
 | `port` | 7420 | |
 | `host` | `127.0.0.1` | Binds loopback by default. Public binding is explicit. |
 | `tokenEnv` | `DISPACH_API_TOKEN` | Bearer token env var name. Server refuses to start on a non-loopback host without a token. |
+| `allowedOrigins` | `[]` | Origins a browser may call from, written in full (`https://app.example.com`). **No wildcard.** Only widens what is already allowed. |
+| `allowedHosts` | `[]` | Extra `Host` values a **loopback** bind will answer to. Ignored on a public bind. |
+
+Both allowlists only widen, and the defaults protect a server whose operator configured nothing —
+which is the one that needs it, since a loopback bind may carry no token at all.
+
+**Allowed with neither set:** any page this server served; anything on loopback whatever port it is
+on (a `-p 8080:7420` mapping and a `vite dev` proxy both change the port legitimately, and the
+hostname is the discriminator an attack cannot fake); and, on a public bind, a page on the same host
+the request was addressed to.
+
+**Refused:** a request to a *loopback* bind addressed to a name that is not a loopback name
+(`host_not_allowed`), and a browser `Origin` outside the above (`origin_not_allowed`). The first is
+the one that matters: it is a DNS-rebinding attack, which is how a web page reaches a local server
+it was never given access to, and the browser cannot hide the name it resolved. Both are checked
+**before** authentication, because `POST /v1/channels/…` needs no credential and changes state.
 
 ---
 

@@ -40,6 +40,8 @@ import type { ApprovalRequest } from "@dispach/core"
 /** A question waiting on somebody, as a reader of the listing sees it. */
 export interface PendingApproval {
     readonly approvalId: string
+    /** Which agent is asking. See `pending` for why this is not optional. */
+    readonly agentId: string
     readonly slug: string
     readonly callId: string
     readonly match: string | undefined
@@ -58,8 +60,17 @@ export interface ApprovalRegistry {
      * which is a runtime error in the one code path nobody exercises until somebody needs it.
      */
     readonly approver: (request: ApprovalRequest) => Promise<boolean>
-    /** Oldest first, which is the order a queue should be worked. */
-    pending(): readonly PendingApproval[]
+    /**
+     * Oldest first, which is the order a queue should be worked.
+     *
+     * **`agentId` is required, not an optional filter.** This registry is per *process* and a
+     * process can host several agents, so an unscoped listing is one agent's operator reading
+     * another's pending questions — with the slug, the matched command and the reason. It read that
+     * way for as long as it existed: `GET /v1/agents/:id/approvals` discarded `:id` entirely,
+     * unreachable only because a served process happened to host one agent. An optional argument
+     * would have left the disclosing call the easier one to write.
+     */
+    pending(agentId: string): readonly PendingApproval[]
     /**
      * Answer one. `false` when no such approval is waiting — already answered, abandoned with its
      * turn, or never existed. The caller turns that into the wire's `404`.
@@ -86,6 +97,7 @@ export function createApprovalRegistry(
             const entry: Entry = {
                 pending: {
                     approvalId: request.approvalId,
+                    agentId: request.agentId,
                     slug: request.slug,
                     callId: request.callId,
                     match: request.match,
@@ -116,9 +128,10 @@ export function createApprovalRegistry(
 
     return {
         approver,
-        pending: () =>
+        pending: (agentId) =>
             [...waiting.values()]
                 .map((entry) => entry.pending)
+                .filter((entry) => entry.agentId === agentId)
                 .sort((a, b) => a.requestedAt.localeCompare(b.requestedAt)),
         resolve: (approvalId, granted) => {
             const entry = waiting.get(approvalId)

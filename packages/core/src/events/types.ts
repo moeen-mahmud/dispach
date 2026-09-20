@@ -6,6 +6,7 @@
  * platform wants to know about an agent arrives here.
  */
 
+import type { ChannelStatus, IssuedChannelInput } from "../channels/channel.ts"
 import type { ErrorDetail } from "../errors.ts"
 import type { SenderKind } from "../loop/sender.ts"
 import type { OnMutate, Trust } from "../tools/trust.ts"
@@ -99,6 +100,20 @@ export interface EventDataMap {
     }
     "runtime.stopping": { reason: string }
     "agent.loaded": { tools: number; skills: number; schedules: number; model: string }
+    /**
+     * One agent stopped being hosted by this process, while the process kept running.
+     *
+     * The other half of `agent.loaded`, and it only became possible to emit when `Runtime.dispose`
+     * did: before that an agent left only by the process exiting, which `runtime.stopping` already
+     * reports. A client holding a list of agents needs both — an always-on server whose agent set
+     * changes under it, with nothing on the stream saying so, is a UI that shows a chat for an
+     * agent that has gone.
+     *
+     * `reason` rather than a boolean because the three cases read differently to whoever is
+     * watching: `requested` is an operator, `replaced` is the same agent coming back a moment
+     * later, `stopped` is 16.3's durable off switch.
+     */
+    "agent.disposed": { reason: "requested" | "replaced" | "stopped" }
     "agent.warning": ErrorDetail
     /**
      * One plugin registered, with what it cost and what it declared.
@@ -349,17 +364,28 @@ export interface EventDataMap {
         error?: string
     }
     /**
-     * A channel's connection state changed.
+     * A channel's state changed.
      *
      * Never blocks readiness. A channel that cannot connect says so here and keeps trying, because
      * a runtime that refused to boot during a Telegram outage would also be unable to serve its
-     * HTTP API during one.
+     * HTTP API during one. `needs_input` is the same rule applied to a person rather than a
+     * network: the transport is up and cannot finish without somebody acting.
+     *
+     * `status` is imported rather than restated. It was a second literal copy of `ChannelStatus`
+     * for four phases — right when written and silently wrong at the next member, which is the
+     * hand-kept-list shape this runtime has paid for repeatedly (`NO_MANIFEST`, `THRESHOLD_ORDER`,
+     * the wire doc's six phantom event rows).
+     *
+     * `input` accompanies `needs_input` and nothing else: the structured thing a person has to act
+     * on, where `detail` is the sentence explaining it. A consumer must tolerate an unknown
+     * `kind`, because that set can grow inside `v: 1` while this field's type cannot.
      */
     "agent.channel.status": {
         channelId: string
         channelType: string
-        status: "starting" | "connected" | "disconnected" | "error"
+        status: ChannelStatus
         detail?: string
+        input?: IssuedChannelInput
     }
     /** A channel failure that did not stop the channel. A bad token lands here, not on `error`. */
     "agent.channel.error": ErrorDetail & { channelId: string }
@@ -514,6 +540,7 @@ export const EVENT_TYPES = [
     "store.ready",
     "runtime.stopping",
     "agent.loaded",
+    "agent.disposed",
     "agent.warning",
     "plugin.loaded",
     "plugin.slow",

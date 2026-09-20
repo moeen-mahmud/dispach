@@ -23,6 +23,14 @@ export const GLOBAL_FLAGS: readonly FlagSpec[] = [
     },
     { name: "help", short: "h", kind: "boolean", help: "show this help and exit" },
     { name: "version", short: "v", kind: "boolean", help: "print the version and exit" },
+    {
+        // Global rather than per command, because the first-run bootstrap is checked before any
+        // `case` block runs — and because somebody who does not want it does not want it once.
+        // `<PREFIX>NO_BOOTSTRAP` is the same switch for a script that cannot add a flag.
+        name: "no-bootstrap",
+        kind: "boolean",
+        help: "never start a background server on this run",
+    },
 ]
 
 const MANIFEST: ArgSpec = {
@@ -60,6 +68,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "init",
 
         inSession: "hidden",
+        needsServer: true,
         summary: "create a new agent: manifest, workspace, and env files",
         // No positional. It used to be the target *directory*, which read as the agent's name and
         // was not — `init milo` silently wrote ./milo into whatever checkout you were standing in,
@@ -181,6 +190,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "run",
 
         inSession: "hidden",
+        needsServer: true,
         summary: "start an interactive session — bare `run` picks from the sandbox",
         args: [
             {
@@ -245,6 +255,7 @@ export const COMMANDS: readonly CommandSpec[] = [
 
         // A view: a list somebody reads and then acts on, like `sessions`.
         inSession: "view",
+        needsServer: true,
         summary: "list schedules, when they next fire, and how the last run went",
         args: [MANIFEST],
         flags: [
@@ -284,6 +295,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         // A view rather than an output pane: the list is a *choice*, and reading it read-only was the one
         // thing you could already do by exiting and passing `--session`. Enter switches.
         inSession: "view",
+        needsServer: false,
         summary: "list stored sessions, or inspect one",
         args: [MANIFEST],
         flags: [
@@ -318,6 +330,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         // A view: the result is a list somebody reads and then wants to act on. Read-only for now —
         // deleting a memory means editing the file, which is the point of files being canonical.
         inSession: "view",
+        needsServer: false,
         summary: "search what the agent remembers, or rebuild the index from the files",
         args: [
             {
@@ -376,6 +389,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "config",
 
         inSession: "view",
+        needsServer: false,
         summary: "read and change an agent's settings, and fill in its secrets",
         args: [
             {
@@ -438,6 +452,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "validate",
 
         inSession: "output",
+        needsServer: false,
         summary: "load and validate a manifest, then exit",
         args: [MANIFEST],
         flags: [JSON_FLAG],
@@ -449,6 +464,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "workspace",
 
         inSession: "output",
+        needsServer: false,
         summary: "check the workspace files against the authoring rules",
         args: [MANIFEST],
         flags: [
@@ -467,6 +483,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "soul",
 
         inSession: "output",
+        needsServer: false,
         summary: "scaffold a hand-edited compact identity from a long-form document",
         args: [
             {
@@ -495,6 +512,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "skills",
 
         inSession: "view",
+        needsServer: false,
         summary: "browse the catalogue and install — or list, scaffold, check one agent's skills",
         args: [
             {
@@ -548,6 +566,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "sources",
 
         inSession: "view",
+        needsServer: false,
         summary: "the repositories skills come from: list, add, search",
         args: [
             {
@@ -594,6 +613,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "plugins",
 
         inSession: "output",
+        needsServer: false,
         summary: "list the plugins this agent loaded, and what each one registered",
         args: [MANIFEST],
         flags: [JSON_FLAG],
@@ -602,6 +622,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "agents",
 
         inSession: "output",
+        needsServer: true,
         summary: "list the agents one or more manifests produce",
         args: [{ ...MANIFEST, variadic: true, help: "one or more paths to an agent.yaml" }],
         flags: [JSON_FLAG],
@@ -614,6 +635,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "tools",
 
         inSession: "output",
+        needsServer: false,
         summary:
             "show the resolved tool catalogue, or fetch a remote provider's schemas into the cache",
         args: [MANIFEST],
@@ -633,8 +655,25 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "serve",
 
         inSession: "hidden",
-        summary: "run the HTTP API and connect the agent's channels",
-        args: [MANIFEST],
+        needsServer: false,
+        summary: "run the HTTP API and connect the agents' channels",
+        // Variadic since 16.2a. One process hosts N agents — decision 8.5 has said so since the
+        // beginning, and only this line pinned the product to one. The bind is process-level, so a
+        // second manifest declaring a *different* `server.port`, `host` or `tokenEnv` is refused
+        // rather than silently ignored.
+        //
+        // **Optional since 16.3**, which is what makes the product always-on: naming nothing hosts
+        // the sandbox's enabled agents, so a host does not have to be told which agents to serve —
+        // and one that did could never serve an agent provisioned after it started. Naming
+        // manifests is the container's shape, where the agent arrives on a mount.
+        args: [
+            {
+                ...MANIFEST,
+                required: false,
+                variadic: true,
+                help: "paths to an agent.yaml, or sandbox agent names (omit for every enabled agent)",
+            },
+        ],
         flags: [
             {
                 name: "port",
@@ -670,6 +709,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         // answered first and could not be until now.
         name: "keys",
         inSession: "hidden",
+        needsServer: false,
         summary: "press a chord and see the bytes, Ink's reading of them, and the intent",
         args: [],
         flags: [
@@ -686,6 +726,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "terminal-setup",
 
         inSession: "hidden",
+        needsServer: false,
         summary: "teach this terminal to send shift+enter as a new line",
         args: [],
         flags: [
@@ -704,6 +745,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "remove",
 
         inSession: "hidden",
+        needsServer: false,
         summary: "delete a sandbox agent: its directory, sessions, memory, logs and service",
         args: [
             {
@@ -742,12 +784,13 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "stop",
 
         inSession: "hidden",
-        summary: "stop everything — background services and any session serving an agent",
+        needsServer: false,
+        summary: "stop one agent for good, or everything — named, it stays stopped across restarts",
         args: [
             {
                 name: "agent",
                 required: false,
-                help: "path or sandbox agent name (omit to stop every agent)",
+                help: "path or sandbox agent name (omit to stop the whole host)",
             },
         ],
         flags: [
@@ -756,8 +799,25 @@ export const COMMANDS: readonly CommandSpec[] = [
                 kind: "boolean",
                 help: "list what would be stopped; stop nothing",
             },
+            {
+                name: "reason",
+                kind: "string",
+                help: "why — recorded, and shown wherever the agent is reported as off",
+            },
+            STORE,
             JSON_FLAG,
         ],
+    },
+    {
+        // The other half of `stop <agent>`. Not `daemon start`, which starts a *process*: this
+        // decides what a running process holds, which since 16.2a is a different question.
+        name: "start",
+
+        inSession: "hidden",
+        needsServer: true,
+        summary: "switch an agent back on, and have a running host adopt it now",
+        args: [MANIFEST],
+        flags: [STORE, JSON_FLAG],
     },
     {
         // `serve` stays up only as long as its terminal, which makes an agent configured for a
@@ -766,6 +826,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "model",
 
         inSession: "output",
+        needsServer: false,
         summary: "ask the endpoint what it can actually do — window, output cap, prompt caching",
         args: [
             {
@@ -807,11 +868,55 @@ export const COMMANDS: readonly CommandSpec[] = [
         ],
     },
     {
+        name: "web",
+
+        // A pane runs a command as a child and shows its output, which is right here: the effect is
+        // a browser window, and one line saying where it went is all a session needs to report.
+        inSession: "output",
+        // `run` needs a host to point a browser at, and the first-run bootstrap is what makes
+        // "install, then open the page" one step. `open` and `url` are read-only and say so when
+        // nothing is running, rather than starting something on a machine that did not ask for it.
+        needsServer: true,
+        summary: "open the browser view of a running agent",
+        args: [
+            {
+                name: "action",
+                required: true,
+                help: "what to do",
+                choices: [
+                    { value: "run", help: "start a server if needed, then open the page" },
+                    { value: "open", help: "open the page of a server already running" },
+                    {
+                        value: "url",
+                        help: "print the address and open nothing — the form a pipe reads",
+                    },
+                ],
+            },
+            {
+                name: "agent",
+                // Optional: a bare `web open` points at the page, which lists what the host has.
+                // Naming an agent is what puts `?agent=` in the URL for the page to read.
+                required: false,
+                help: "path or sandbox agent name (omit to open the page itself)",
+            },
+        ],
+        flags: [
+            {
+                name: "no-open",
+                kind: "boolean",
+                help: "print the URL instead of opening it",
+            },
+            STORE,
+            JSON_FLAG,
+        ],
+    },
+    {
         // Second action-as-positional command after `soul` — and the reason `ArgSpec.choices`
         // exists, since seven verbs hidden inside a prose help string is a set nothing can check.
         name: "daemon",
 
         inSession: "output",
+        needsServer: false,
         summary: "keep an agent serving in the background — starts at login, restarts on crash",
         args: [
             {
@@ -867,6 +972,9 @@ export const COMMANDS: readonly CommandSpec[] = [
                 kind: "boolean",
                 help: "print the service definition and the checks; write nothing",
             },
+            // The server preflight reads the lease table to report agents another process holds,
+            // so this command has a store to point at like the others do.
+            STORE,
             JSON_FLAG,
         ],
     },

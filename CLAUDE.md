@@ -1476,8 +1476,8 @@ Never claim a performance property without a number in `evals/` and a script to 
   (`@<oldslug>/cli`) that no longer names any package — so the old command runs and the new one does
   not exist, which reads as the rename having failed. And `~/.<oldslug>/` is orphaned rather than
   migrated, taking the sandbox, the store and the skills cache with it. Corollary: **rename with the
-  script, never by hand.** The hand edit lowercased `CASTELLAN_API_TOKEN` to `dispach_API_TOKEN` and
-  the display name to `dispach`, both of which the script's `/CASTELLAN/g` and title-case
+  script, never by hand.** The hand edit lowercased `DISPACH_API_TOKEN` to `dispach_API_TOKEN` and
+  the display name to `dispach`, both of which the script's `/DISPACH/g` and title-case
   substitutions get right — and it left the etymology epigraph reading "a dispach holds and governs a
   keep", which no substitution can fix because it was a sentence about the *old* word's meaning.
 - **A block whose slot is missing from `assembleContext`'s ordering list is built, charged for, and
@@ -1984,6 +1984,224 @@ Never claim a performance property without a number in `evals/` and a script to 
   is already set **in `nextQuestion`**, not as a courtesy from `fromFlags`: a caller assembling `given`
   by hand — the wizard's own tests do — would otherwise be asked where to put an agent whose path is
   already decided.
+- **A refusal's code and hint belong on the schema, not in the route.** Nine routes each validated
+  their body with `typeof` checks carrying their own code and a well-argued hint, and that is
+  precisely what made the wire surface undescribable from outside a route — a generated reference
+  would have had to restate all nine. Zod 4's `.meta()` carries them, `parseBody` reads the failing
+  field's metadata to rebuild the same `ErrorDetail`, and `z.toJSONSchema` puts them in the document,
+  so the reference names the error code a bad value produces. Two traps inside that. A field with
+  nothing specific to say must get **no code**, never a neighbour's — `sessionKey` carrying
+  `message_text_required` reports a text error for a session key, which is a lie about which field
+  is wrong. And the metadata lookup has to walk the **whole** path, including into a record's value
+  type: reading `shape[path[0]]` reported `provision_answers_required` for an answer that was
+  present and the wrong type, and "required" for a value somebody sent is the same lie.
+- **A generated reference is safe where a hand-written one is not, and the distinction is what to
+  check.** `09-API-GUIDE.md` refuses "a third description of a surface that already has two"; that
+  argument is about a description nothing checks. Derive paths from `Router.routes()` — whose
+  docstring already says a hand-kept copy "is right when it is written and wrong at the next
+  addition" — derive bodies from the schemas, and guard the one hand-written part (a summary per
+  route) in **both** directions. A summary for a route nothing registers is worse than a missing
+  one, because a reference describing an endpoint that answers 404 looks authoritative.
+- **Measure a dependency's payload before writing a sentence about it.** I wrote "several hundred
+  kilobytes" about Scalar's bundle twice; it is **3.6 MB raw, 1.0 MB gzipped** — sixteen times this
+  project's entire UI at 220 KB. The number is what decides CDN versus vendoring, so guessing it
+  decides the argument by accident.
+- **A path a test can redirect is a path the code must not compute itself.** `provisionAgent` called
+  `agentsDir()` rather than the injected `defaults.agentDirBase`, and wrote three agents into the
+  author's real `~/.dispach`. The tests did not fail — the *second* run did, on a collision, a day
+  later and in a different file. That is the whole reason `lib/sandbox.ts` takes an env override and
+  the reason `QuestionDefaults.agentDirBase` is required: the guard is an assertion that the result
+  is **inside the base that was handed in**, not that a directory was created somewhere.
+- **A capability injected by `serve` is injected in the container too, so "the image passes none" is
+  a claim to check rather than state.** It was written twice — for `resolveAgent` and again for
+  `provision` — and was false both times. What actually keeps provisioning out of the container is
+  the loopback gate, because its `CMD` binds `0.0.0.0`: a fact about what was bound rather than
+  about what somebody remembered to omit, which is the better mechanism anyway. Read the Dockerfile
+  before writing a containment sentence.
+- **A gate on "is this local" reads the bind, never the request.** `Host` is attacker-controlled and
+  a separate option could disagree with what was actually bound, so the provisioning gate reads the
+  origin policy's host — the bind `serve` performed. An **absent** policy reads as *not* local: a
+  handler mounted inside somebody else's router is exactly the case that must not get a filesystem
+  write for free.
+- **`launchctl list` omits a disabled job, so it cannot answer "what units exist".** Which is the
+  worst possible gap, because a *disabled* unit is exactly the one worth retiring: its `disable` row
+  persists across boots, no verb deletes it, and a future job with that label then installs cleanly
+  and silently never starts. Read the plist directory too — the filesystem is authoritative for "a
+  definition exists" and the list for "it is loaded", and retirement needs the union. Found by
+  running the real install against a real `~/Library/LaunchAgents`; the daemon tests drive a fake
+  `Exec` and could not have seen it.
+- **`launchctl bootout` returns before the job is gone, so a `bootstrap` straight after races it.**
+  Both return 0 and nothing is loaded — the command reports "service installed" while
+  `launchctl print` cannot find the service at all. A first install has nothing to wait for, so the
+  bug needs an existing *running* job and never appears in a test. Wait for the unload, and then
+  **verify**: "installed" is a claim about a running job, and this project's whole objection to the
+  service it replaces is that nobody was ever told.
+- **A test that spawns the real binary can install a background service on the machine running it.**
+  It did: `start` declares `needsServer`, the first spawn found no live host, and a LaunchAgent
+  pointing at a temp store was left loaded after the suite. `CI` suppresses the bootstrap and is
+  absent locally, which is exactly backwards — the runner is disposable and a developer's machine
+  keeps the wreckage. Every such test sets `<PREFIX>NO_BOOTSTRAP`, and a boundaries test fails when
+  one forgets. The detector needs a real spawn **and** a reference to the built entry: matching the
+  path alone fires on fixture strings, and matching the spawn alone fires on a test that spawns
+  `node -e` as something to signal.
+- **A lease says who is serving an agent now; it cannot say whether anybody should.** Conflating
+  the two is why `stop <agent>` killed a process: right while a process served one agent, and since
+  16.2a it takes every other agent in that process down. The durable answer is a row (`agent_state`),
+  and the live one is an HTTP request naming the agent — a signal cannot name one. Three things that
+  are easy to get wrong around it. The address `stop` posts to comes off the **lease**, published
+  after the bind, because `--port 0` means the port does not exist until the socket does and a
+  manifest's `server.port` is only what the file asked for; and a takeover must **clear** the
+  inherited address, or `stop` posts at a dead process or at whatever now owns that port. `start`
+  cannot look for "the host holding this agent" — the stop released that lease — so it asks any live
+  host. And the switch is read where the *host* is, never inside `Runtime.create`: a read-only
+  command builds a runtime too, so filtering there would refuse to inspect the agent somebody just
+  switched off in order to go and look at it.
+- **An absent row means enabled, and that direction is the safe one.** The alternative is a
+  provisioning path that has to remember to write an "on" row, where a forgotten write is an agent
+  that is silently unhosted — and `init` would have to know about a table it has no other reason to
+  touch. The cost is that "has anybody touched this" and "is this on" are the same question, which
+  is why `disabled_at` and `reason` survive an enable: they are the record of what happened, so a row
+  that forgot it was ever off cannot answer "why was this down last Tuesday".
+- **A durable switch is only defensible where the thing it switches off says so.** launchd's
+  `disable` persists across boots and no verb deletes the row, which is how a job installs cleanly,
+  reports success and silently never starts. So every surface that could be asked "why is this not
+  running" answers it: the `serve` banner names each stopped agent and the command that reverses it,
+  `daemon status` prints them even though they have neither a service label nor a lease, and
+  `GET /v1/agents` carries a thin `disabled` row rather than omitting one — the same reason
+  `listAgents` shows a broken directory. Its resource still answers 404, and the asymmetry is the
+  point: the listing says what exists, the resource says what is running.
+- **A backtick inside a SQL comment in a template literal terminates the string.** The error points
+  at the line *after* it, so the five minutes go on the wrong statement. Write SQL comments in plain
+  prose and keep the code spans in the TypeScript docblock above.
+- **Anything held flattened can only be torn down all at once, and `stop()` is the only caller that
+  wants that.** The runtime kept `#providers` as one array, so disposing a single agent either left
+  its backgrounded `exec` children unreaped — the failure that took a machine to load average 351 —
+  or reaped every other agent's with it. The map was already built per agent inside `create`; only
+  the copy kept on the class threw the keys away. Same shape one layer over: `ChannelHub.unregister`
+  has to stop the **outbox poll loop** as well as the transports, because that loop is a
+  `setInterval` scoped to one agent, so after a `replace` there would be two of them draining one
+  queue — turning the double-send the idempotency key exists to *survive* into routine. And
+  `bus.on` returns an unsubscribe that nothing was holding: harmless while an agent only ever left
+  by the process exiting, a leak with a behavioural symptom the moment one can be removed, since a
+  replaced agent's old plugin watcher goes on observing the new one's turns. The guard for the whole
+  class is one test: adopt and dispose in a loop, then assert nothing is bigger than it started.
+- **A closure that reads the array a constructor was handed reads the set that existed at boot.**
+  Both of the `Scheduler`'s agent lookups did, so an adopted agent's schedules were never in the due
+  query and a disposed agent's still were — a throw arriving on a timer with nobody watching. Read
+  the *runtime's own map* (`runtime.all()`), lazily, which is the same trick the team `handoff`
+  getter already uses and needs the same explicit type annotation to break the inference cycle.
+  Reconciling a row is also not enough to make it fire: `#arm` sleeps until the soonest due time it
+  knew about when it last looked, up to the 24-day clamp, so anything that writes a schedule calls
+  `scheduler.changed()`.
+- **A guard that queries the store cannot fail when the thing that was supposed to query the store
+  is broken.** The first test for the above asserted `store.schedules.nextDue(...)` and **stayed
+  green with both defects reverted**, because it read the source of truth directly rather than
+  anything the scheduler believes. The version that works waits for the turn to actually happen.
+  This is the "passes with the fix reverted" hazard in a new costume, and the tell is the same:
+  revert, watch it go red, and if it does not, ask which layer the assertion is really reading.
+- **`#started` is a precondition, not just a flag `start()` sets.** `ChannelHub.startAgent` was
+  extracted from `start()`'s loop so an agent adopted into a running server takes the same path a
+  booted one does — and without re-checking the flag it also started channels for an agent adopted
+  into a `run`-mode runtime, opening a Telegram long-poll nobody asked for. That is the exact
+  surprise `startChannels` exists to prevent, and the reason a one-shot `run --input` would then
+  hang on exit.
+- **`git grep` cannot see a brand in a *filename*, and neither can the rename script.** A dead
+  `packages/cli/bin/<oldslug>.js` survived the 2026-08-19 rename and sat tracked in the tree for a
+  month — unreferenced by `bin`, excluded from `files`, invisible to grep because grep searches
+  contents, and invisible to `scripts/rename-brand.ts` because that only ever rewrites contents
+  (`renameSync` appears in it zero times). The decisions log claimed "the tree was clean" the whole
+  time. The script is **not** wrong: it is correct *given* that no tracked path contains the brand,
+  which hard rule 3 already says in words and nothing enforced. `boundaries.test.ts` asserts it now,
+  over `git ls-files`. A path carrying an *old* brand stays uncatchable — nothing can enumerate names
+  the project has not chosen — so what this buys is that no future rename leaves one behind.
+  Corollary for any "is it all renamed?" question: check `git ls-files | grep -i <name>` as well as
+  `git grep -i <name>`, and check the things outside the tree too (the GitHub description, the npm
+  scope, `~/.<oldslug>/`).
+- **A tree that does not paint is invisible to everything except a screenshot.** `schedules()` in
+  `packages/client` was declared `Promise<readonly ScheduleRecord[]>` while the route answers
+  `{schedules: [...]}`, and nothing noticed for three phases because **nothing called it** — the
+  `includeHistory` shape, where a declaration with no consumer is wrong for as long as it has none
+  and its type asserts otherwise throughout. `tsc` was satisfied. The first real caller threw
+  `schedules.map is not a function` during render, React unmounted the tree, and the page went
+  **entirely black** — while the accessibility snapshot taken a second earlier showed a complete,
+  correct-looking DOM. That gap is the case for a real-browser pass that a DOM test cannot make.
+  The guard asserts `Array.isArray` on every list read against a real handler, because what went
+  wrong was the *kind* of value and every assertion about its contents passed right up to `.map`.
+- **A 404 is a selection that has expired, not a poll to retry.** A page open on an agent that was
+  then stopped answered 404 on `/approvals` every five seconds forever, plus the panels and the
+  session list, **with nothing on screen** — licensed by the poller's own comment, *"a failed poll
+  is not worth a banner; the next one will say so"*, which is true of a transient failure and false
+  of a 404. All three call sites route it to one handler that clears the selection, says so, and
+  re-reads the listing, so the agent reappears as a stopped row with the `start` that fixes it. The
+  guard counts the call sites rather than mocking a timer: what was missing was the single owner,
+  and a fourth fetch has to join them.
+- **The browser may start an agent and may not stop one.** Listing a stopped agent with its reason
+  is the honest half — somebody who switched one off otherwise gets a blank page and no way to find
+  out — but `stop` from a browser is one click from making an agent unreachable for everybody,
+  durably and across restarts, with nothing like the typed confirmation `remove` demands. And a
+  panel takes its data as **props**: that is what makes `renderToStaticMarkup` a real render test
+  with no DOM and no new dependency, and why `now` is passed into the channel panel rather than read
+  inside it — a component reading the clock is one whose test depends on the time of day.
+- **A bind is not an address, and a laptop cannot show you the difference.** `web url` printed
+  `http://0.0.0.0:7420/` from inside the container — every interface, and a link nothing can click.
+  `claimUrl` had made that substitution since Phase 13; the new builder took the lease's published
+  `base_url` verbatim. A `serve` on a laptop binds `127.0.0.1`, so the substitution never fires and
+  the defect is invisible in the one place it is not deployed. `browsableHost` is now the single
+  copy — and extracting it from the two inline ones in `keys.ts` immediately found a second defect
+  neither had: `URL.hostname` returns IPv6 **bracketed**, so a host read back out of a URL is `[::]`
+  while a manifest's bind is `::`, and comparing only the bare spelling let the v6 wildcard through.
+- **A browser is a convenience; the URL is the deliverable.** `lib/browser.ts` treats every refusal
+  as an outcome rather than a failure, because the most important one is structural: **a container
+  has no `xdg-open` and never will**, so that path says *"no browser here — open this from a machine
+  that has one"* instead of reporting a fault an operator would go looking for. No TTY means no
+  window, since a scripted run must not sprout one on somebody's screen. Every branch prints the
+  URL, success included — a browser that opened behind another window looks like nothing happened,
+  and a terminal reached over SSH is one where the link is the only usable half.
+- **`run` is a view, not an owner — it attaches to a live host and never builds a runtime beside
+  one.** `components/App` takes an `AgentSource` (`lib/source.ts`), implemented twice; the lease
+  decides which, and a published `base_url` is what makes attaching possible at all. **Nothing falls
+  back from attached to embedded**: a host that holds the lease and cannot be reached is a fault to
+  report, because quietly starting a second runtime is the state this removes and it would look like
+  success. Four things around it are easy to get wrong. `send` resolves with a `TurnOutcome` rather
+  than `void`, because the plain path prints `endNote` and decides its exit status from it —
+  attached, every field comes off `turn.end` and the `error` event. **Cancellation is a request**,
+  since turns are detached from the client connection, and an abort in the window *before* the send
+  has returned a turn id is remembered and applied when it arrives, or the cancel key visibly does
+  nothing. **One SSE stream serves every subscriber**, or every token crosses the wire twice. And an
+  attached view **opens no database** — a stale `--store` would show a different conversation than
+  the one being appended to, with both looking correct. `/status` has a *second implementation*
+  rather than blanked fields: "connected in this session" and "NOT bound here" are both lies about an
+  agent hosted elsewhere, which is decision 5.17 one process boundary out.
+- **A command handled on one output path and not the other is invisible, and `/restart` proved it
+  again.** The rich path reloaded the host; the plain path still returned `"restart"`, re-bannered,
+  and printed *"the configuration on disk is now the one in force"* — a sentence about a rebuild that
+  never happened, which is worse than doing nothing because somebody would believe it. Found by
+  running it, not by reading it. `boundaries.test.ts` polices this for *events*; commands have no
+  such guard, so the rule is to change both paths in the same edit.
+- **A state a client cannot act on must not displace one it can.** `ChannelStatus` gained
+  `needs_input` before anything produces it, because `status` is a **string on the wire** and adding
+  a member is additive inside `v: 1` while changing the field to an object is not — so the
+  structured half rides beside it as `input?: {kind, payload, issuedAt, expiresAt?}` rather than
+  turning four payload-free states into wrappers. The cost of that shape is that `needs_input` with
+  no `input` is *expressible*: `ChannelHost.status` is overloaded so TypeScript refuses it, and the
+  hub refuses it again for a JavaScript plugin — **keeping the previous state**, because recording it
+  would turn a channel that is waiting into one that looks broken, which is worse than the plugin's
+  own bug. Three things that are easy to get wrong around it. The payload is **stored** and returned
+  by `statusOf`, or a page that opens after the QR was issued holds a state it cannot act on with
+  the bytes gone — and a field the runtime has and does not hand back is one a client can only learn
+  by having been subscribed at the right moment. `issuedAt` is the runtime's and is **required**,
+  since WhatsApp rotates its QR about every 20 seconds and a code nobody can tell is expired reads
+  as a broken scanner rather than an old picture. And `kind` has one member, because a second with no
+  producer is dead vocabulary while a reader needs an unknown-kind branch regardless.
+- **`PluginContext.defineChannel` does not work through the CLI, and both first-party channels hide
+  it.** `Runtime.create` reads the manifest header for `plugins`, loads them, then validates
+  `channels[].type` against the host's registrations *plus* the plugin's. Every CLI surface
+  pre-loads with `knownChannels: CHANNEL_IDS` first, so a manifest naming a plugin-supplied channel
+  is refused with `channel_type_unknown` before the plugin that would satisfy it is imported — the
+  *"a check that only one surface performs is a check the two disagree on"* hazard with the polarity
+  reversed, refusing a correct manifest rather than admitting a broken one. Invisible because
+  `telegram` arrives as `channels: { telegram }` from the CLI's own table and never through the
+  plugin path, so documented public API has no in-tree consumer. Carried in `docs/05-PLAN.md`.
 - **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
   under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
   builds running beside it — which is a shared 2-core runner every time. Its own comment says the

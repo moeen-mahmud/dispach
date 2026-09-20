@@ -58,7 +58,9 @@ describe("the plist carries no secrets", () => {
         } catch (error) {
             expect(error).toBeInstanceOf(PlistSecretError)
             const secret = error as PlistSecretError
-            expect(secret.code).toBe("daemon_secret_in_plist")
+            // `_service`, not `_plist`: one error for two renderers, because `systemctl show`
+            // echoes `Environment=` exactly as `launchctl print` echoes `EnvironmentVariables`.
+            expect(secret.code).toBe("daemon_secret_in_service")
             expect(secret.message).toContain("MODEL_API_KEY")
             expect(secret.hint).toContain("HOME")
         }

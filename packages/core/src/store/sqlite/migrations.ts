@@ -737,6 +737,77 @@ CREATE TABLE operator_keys (
 CREATE INDEX operator_keys_by_age ON operator_keys (created_at);
 `,
     },
+    {
+        version: 15,
+        name: "agent_state",
+        /**
+         * Whether an agent is *supposed* to be running — the durable half of `dispach stop`.
+         *
+         * A lease says who is serving an agent **now**; this says whether anybody should. The two
+         * are different questions and conflating them is the failure this table exists to prevent:
+         * stopping an agent by killing the process that holds its lease worked while a process
+         * served one agent, and since 16.2a takes down every other agent in that process.
+         *
+         * **This is the launchd lesson written into the schema.** `bootout` unloads a job and
+         * `disable` persists across boots, and the trap is that only the second survives: a thing
+         * stopped with the first *quietly comes back at the next login*, which is how "I stopped it
+         * and it was running again after lunch" happens. So an agent switched off is switched off
+         * in a row, and the host reads the row at every start.
+         *
+         * **Not `kv`, and for a stated reason rather than a preference.** `kv` is the one table
+         * with no `agent_id` and no consumer anywhere, documented as dead vocabulary precisely
+         * because `purgeAgent` could never clean up after it — there would be no column to match
+         * on. This has the column, `purgeAgent` deletes it, and the first consumer exists in the
+         * same commit.
+         *
+         * **A row's absence means enabled.** Every agent that has never been stopped therefore
+         * costs nothing, and `dispach init` writes no state — which matters because the alternative
+         * is a provisioning path that has to remember to write an "on" row, and an agent that is
+         * silently unhosted when it forgets. `enabled` is stored rather than implied by the row
+         * existing so that `start` after a `stop` leaves the audit trail (`disabled_at`, `reason`)
+         * rather than deleting it.
+         *
+         * `reason` is free text from whoever switched it off — an operator's note, or a sentence
+         * from whatever automated thing did it. Read back in the banner and in `GET /v1/agents`, so
+         * "why is this not running" is answerable without anybody's memory.
+         */
+        sql: `
+CREATE TABLE agent_state (
+    agent_id    TEXT PRIMARY KEY,
+    -- 1 or 0. An absent row is enabled, so this is only ever read for agents somebody has touched.
+    enabled     INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    -- When it was switched off, kept through a later enable as the audit trail.
+    disabled_at TEXT,
+    reason      TEXT
+);
+`,
+    },
+    {
+        version: 16,
+        name: "lease_base_url",
+        /**
+         * Where the process holding this lease can actually be reached.
+         *
+         * `dispach stop milo` has to reach *into* a running host rather than signal it, because one
+         * process hosts several agents and a signal cannot name one. That means an address, and the
+         * address has to be a fact rather than a guess: a manifest's `server.port` is what the file
+         * asks for, `--port` overrides it, `--port 0` picks one at random, and `-p 8080:7420` moves
+         * it again — so guessing 7420 is how a second host on 7421 becomes invisible to the one
+         * command that must never miss it.
+         *
+         * Nullable, and the null case is load-bearing rather than a gap: a `run` REPL and an
+         * embedded runtime hold leases and serve no HTTP at all, so there is nothing to write. A
+         * caller reading `undefined` here knows to fall back to the process-level stop, which is
+         * what `stop` did for every lease before this column existed.
+         *
+         * Written **after** the bind, not at claim time, because the port is not known until the
+         * socket exists — `--port 0` is the case that proves it. `LeaseStore.publish` is that
+         * second write, and the heartbeat carries the value forward so a row never loses it.
+         */
+        sql: `
+ALTER TABLE runtime_leases ADD COLUMN base_url TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

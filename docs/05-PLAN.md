@@ -3912,12 +3912,713 @@ consistent with the 84/92 ms recorded in 11.202.
 - [ ] npm publishing — **out of scope here.** Open item O.2 (registering the `@dispach` scope) has to
       land first, and a pipeline that cannot be run is not a pipeline
 
+### 15.5 — The container the agent lives in — **built** (2026-09-17)
+
+The image was a **process wrapper**: `oven/bun:1-alpine`, a `bun install --production` of nine
+manifests, seven copied `dist/` directories, `DISPACH_HOME=/state`, and `/home/bun` as a 128 MB
+tmpfs wiped on every restart. Right when the deliverable was "run `serve` in a container"; wrong for
+what this is. **The agent has a shell, and containment is the deployment's job** — so the container
+is the small Linux machine the agent works on, with a home that persists, one place an agent can
+live, and the tooling its own documented features require.
+
+**Deliverables**
+
+- `debian:trixie-slim` runtime on glibc; builder moved from `oven/bun:1-alpine` to `oven/bun:1`, so
+  both stages are Debian 13 / glibc 2.41 and no cross-compilation happens
+- the runtime stage is **one file** — no Bun, no Node, no `node_modules`, no `bun install`
+- a real `/home/dispach` with `ENV HOME`, one volume, and **`DISPACH_HOME` dropped from the image**
+- `docker/entrypoint.sh`, which links the mounted manifest into the sandbox as `primary`
+- `apt` set with a reason each: `git bash python3 python3-venv curl ca-certificates jq tzdata`, plus
+  `uv` 0.12.15 copied from its own image; no pager, no editor, no `wget`
+- compose: one `dispach-home` volume, one tmpfs, `read_only` intact
+- `lib/config-env.ts` grows `sourceOf`/`describeOrigin`/`envProvenance`; `validate` prints the
+  winning source when it is surprising
+- CI: glibc asserted, a C-extension wheel installed with no compiler, a named timezone resolved,
+  Bun and Node asserted **absent**, `$HOME` checked, and a one-agents-directory listing guard
+
+**Measured, arm64**
+
+| layer | |
+| --- | --- |
+| `debian:trixie-slim` | 109 MB |
+| apt packages | 180 MB — of which **`git` alone is 92** |
+| `uv` + `uvx` | 47 MB |
+| the compiled binary | 85 MB |
+| **total** | **570 MB** |
+
+`git` at 92 MB is the price of glibc: Debian's git pulls perl and git-man. It buys wheels that
+install rather than compile. Start-to-ready is **5.7 s**, unchanged from 13.5's 5.8 s — almost all
+of it waiting for the first healthcheck probe rather than for the runtime.
+
+**Five things found by building it**
+
+- **Two agents directories, and only one was ever served.** `DISPACH_HOME=/state` put `init`'s output
+  in `/state/agents` while the CMD served `/agent`, so an agent created inside the container was
+  invisible to every listing and nothing would serve it. Found by *using* the container (Moeen), not
+  by reading it — and an earlier draft of the plan wrote it up as a supported feature ("two ways an
+  agent exists, and both stay supported"). The fix needs no code change: `listAgents` calls
+  `statSync(...).isDirectory()` and **`stat` follows symlinks**, so a link at
+  `~/.dispach/agents/primary` makes the mounted agent an ordinary sandbox agent, and `CMD` became
+  `serve primary` through the one `resolveAgentRef` path a laptop uses.
+- **The link has to be made at start, not at build.** A volume mounted at `$HOME` replaces whatever
+  the image put there. A *named* volume is seeded from the image on first use, so a build-time link
+  survives that one case — and is absent for a bind mount, and absent for a named volume made by an
+  older image. Three shapes, one of which works. `entrypoint.sh` makes it idempotently and `exec`s,
+  so `/proc/7/cmdline` still reads `dispach serve primary --host 0.0.0.0`.
+- **`USER` does not set `$HOME` in Docker.** It is inherited from the build environment, so without
+  the explicit `ENV HOME` the sandbox resolves against `/root` — writable while building, refused
+  under `USER dispach`, and the failure arrives on the first turn. Asserted in CI.
+- **`process.title` is a no-op under Bun**, which means a recorded property has been false in the
+  primary runtime the whole time and is now false everywhere it ships. Measured three ways on the
+  same manifest: `node packages/cli/dist/index.js serve …` shows **`dispach minimal`**, while
+  `bun packages/cli/src/index.ts serve …` and the compiled binary both show raw argv. So "a
+  long-running process names itself in Activity Monitor" holds only on the soft-compat runtime. Not
+  fixable from here — Bun ignores the setter — so the claim is narrowed rather than kept.
+- **Deleting the runtime install is what removes `react-devtools-core`.** ~17 MB reached every
+  shipped image because `ink` declares it a **peerDependency**, which `--production` does not skip.
+  It cannot arrive now, and `boundaries.test.ts` asserts the runtime stage runs no `bun install` —
+  the guard that makes copying each workspace manifest *once* correct rather than accidental.
+
+**Acceptance**
+
+- [x] glibc in both stages; a C-extension wheel installs and imports with **no compiler present**
+- [x] A named timezone resolves (`TZ=Asia/Dhaka date` → `+0600`), so schedules do not silently run
+      in UTC
+- [x] `$HOME` is `/home/dispach`; `~/.dispach` holds `store.db` and `agents/`
+- [x] `dispach validate primary` resolves the mounted manifest **by bare ref**
+- [x] `dispach init` inside the container writes to `~/.dispach/agents/probe`, and a fresh container
+      on the same volume lists **both** `primary` and `probe`
+- [x] `docker compose up -d --wait` healthy in 5.7 s; `/`, `/assets/app.js` and `/v1/ready` answer,
+      `/v1/agents` is 401 without a token and 200 with one
+- [x] Bun, Node, `wget`, `less`, `nano` and `vi` are all absent, asserted
+- [x] Both new Dockerfile guards revert-checked red: a reintroduced runtime `bun install`, and a
+      removed manifest copy
+- [x] `sourceOf` revert-checked — disabling the ambiguity branch fails exactly one test
+- [ ] amd64 is unbuilt here. Every figure above is arm64, and the release workflow's buildx leg is
+      the first thing that will produce the other architecture
+
+## Phase 16 — the always-on server
+
+**Goal.** The server is not something a command starts; it exists and the front ends are views onto
+it. `dispach run` and `dispach web run` attach, provisioning reaches a running process, and
+`dispach stop <agent>` is the only thing that makes an agent unreachable.
+
+Stages: **16.1** origin hardening · **16.2a** N agents in one process · **16.2b** adopt/replace ·
+**16.3** per-agent lifecycle · 16.4 one service unit, first-run bootstrap, systemd ·
+16.5 `POST /v1/agents` · 16.6 the human-input seam on channel status.
+
+16.2 was **split** (Moeen, 2026-09-18) for the reason 11.202 gives about 15.3/15.4: a stage that
+bundles a CLI surface, a latent disclosure, per-agent teardown of six subsystems and two new
+lifecycle methods cannot be reviewed. 16.2a is the half that delivers multi-agent hosting; 16.2b is
+where the quiet-failure risk lives.
+
+### 16.1 — Origin and Host hardening — **built** (2026-09-17)
+
+First in the phase because it is the one item whose cost *rises* with everything else in it. Today a
+server has to be started deliberately, so the exposure is one developer. An always-on server makes
+it every user, always.
+
+**The hole.** Nothing read an `Origin` or a `Host` header anywhere, and a loopback bind is permitted
+to carry no token (`serve` only refuses a token-less *non-loopback* bind). So any page an operator
+visited could **DNS-rebind** to `127.0.0.1:7420` and drive an agent with a shell — no credential
+stolen, none needed. With a token configured it still reached `POST /v1/channels/…`, which
+`isOpenPath` matches by **prefix** and which changes state. MCP made `Origin` validation mandatory
+after CVE-2026-11624 in the same shape.
+
+**Deliverables**
+
+- `packages/server/src/origin.ts` — `originProblem`, `hostOf`, and `isLoopback` moved here
+- wired at **both** handler dispatch sites, *before* the open-path check
+- wired again in `serve.ts`'s `/v1/ws` branch, which never reaches `handler`
+- `server.allowedOrigins` and `server.allowedHosts` in the schema, the reference manifest, and
+  `docs/02-SPEC-MANIFEST.md`; two error codes in `docs/04-SPEC-WIRE.md`
+- `origin.test.ts` — 21 tests over Origin (absent / allowed / hostile) × bind (loopback / public) ×
+  route (open / authenticated / HEAD / no-policy)
+- a CI step asserting seven cases against a **real** loopback bind, including the ws handshake
+
+**The rules, and why they differ by bind**
+
+| | loopback bind | public bind |
+| --- | --- | --- |
+| may be token-less | yes — the dangerous case | no, `serve` refuses |
+| `Host` | must be a loopback name, or in `allowedHosts` | not checked; the operator's name is not ours to guess |
+| `Origin` | loopback (any port), or `allowedOrigins` | same host as `Host`, loopback, or `allowedOrigins` |
+| absent `Origin` | allowed | allowed |
+
+**Four decisions inside it**
+
+- **Absent `Origin` is allowed.** A curl, a channel provider, a scheduled job and the healthcheck
+  all send none; refusing them to guard against a browser breaks every non-browser caller. A browser
+  always sends one on the requests worth refusing.
+- **Port is not compared.** `-p 8080:7420` means the browser sends `Origin: http://localhost:8080`
+  at a server bound to 7420, and `vite dev` proxies from 5173 — both legitimate, and an exact-match
+  rule breaks the web UI in the two most common deployments. The discriminator a rebinding attack
+  cannot fake is the *hostname*. Stated cost: another local program on another loopback port can
+  still call this one, which is a different concern from the one Origin checking is for.
+- **`Host` is checked first, and an absent one is refused.** A rebinding request has both headers
+  agreeing on the attacker's name, so reporting `origin_not_allowed` would point at the wrong
+  setting. HTTP/1.1 requires a `Host`, so absent is malformed rather than permissive.
+- **`isLoopback` moved out of `serve.ts`.** `handler.ts` needs it and `serve.ts` imports
+  `handler.ts`, so leaving it there made the dependency a cycle. Re-exported, so no caller changed.
+
+**Acceptance**
+
+- [x] 21 unit tests, revert-checked three ways: Host check disabled → 5 red; Origin check disabled →
+      6 red; and **the guard moved *after* the open-path check → 2 red**, which is the one that
+      proves its position rather than its logic
+- [x] Verified against a real loopback bind with real headers: no Origin 200, dev-proxy origin 200,
+      web UI's own origin 200, hostile Origin 403, `Host: evil.example` 403, and **403 on the open
+      webhook POST** where a token would not have helped
+- [x] The `/v1/ws` handshake refuses a hostile `Origin` and a hostile `Host` with 403, and answers
+      401 for a bad token on loopback — so origin is checked before the credential there too
+- [x] A handler built with no bind does no checking, which is what keeps 3,200 constructed-`Request`
+      tests working: `new Request(url)` carries no `Host`
+- [ ] CORS response headers are **not** here. 18.4 adds them, consuming the same allowlist — one
+      list, two consumers, never two lists
+
+### 16.2a — N agents in one process — **built** (2026-09-18)
+
+Decision **8.5** has read *"one process hosts N agents… forcing 1:1 would make the embedded use case
+impossible"* since the beginning, and core was built that way: `RuntimeOptions.agents` is an array,
+`#agents` is a Map, `GET /v1/agents` maps over `runtime.list()`, `runtime_leases` is keyed
+`agent_id`, and `ChannelHub` keys its bindings per agent. Three things pinned the product to one.
+
+**Deliverables**
+
+- `serve` takes a **variadic** manifest list; `agents: [...options.manifestPaths]`
+- **`ApprovalRequest.agentId`** in core, `PendingApproval.agentId` in the server and the client, and
+  `pending(agentId)` as a **required** argument
+- `claimLeases` refuses only when it has nothing left to serve; `Runtime` gains a `declined` getter
+  and drops declined agents from the hosted set under `exclusive`
+- `serve_bind_conflict` — manifests disagreeing about `server.port`/`host`/`tokenEnv` are refused
+  before anything binds, unless a flag has already settled the value
+- `process.title` reports a count rather than a truncated second id
+
+**Four things found by building it**
+
+- **`GET /v1/agents/:id/approvals` discarded `:id` and returned every agent's queue** — slug, matched
+  command and reason included. One operator reading another's pending questions, unreachable only
+  because a served process hosted one agent. The same shape as the cross-agent disclosure Phase 13
+  found on `/v1/events`: single-tenancy hides multi-tenancy bugs rather than preventing them. The old
+  comment reasoned the registry "has no use for" an agent id; `pending` now takes one as a
+  **required** argument, so the disclosing call is the one that does not compile.
+- **`ApprovalRequest` omitted the agent id *deliberately*, and the reason expired.** `execute.ts`
+  said the event carries the context "which an `ApprovalRequest` deliberately does not" — true and
+  tidy for one agent, unsafe for several, because `RuntimeOptions.approve` is a single process-wide
+  callback and a question that cannot say who asked cannot be listed per agent. The comment is
+  rewritten rather than worked around; the session and turn stay off the request, because an approver
+  answers a question about a *call*.
+- **`claimLeases` threw on the first conflict**, so five agents with one held elsewhere refused all
+  five — one row taking four healthy agents down. It now refuses only when `owned` is empty, which
+  leaves the single-agent behaviour identical **by construction** rather than by a second code path.
+  A declined agent is then dropped from the hosted set, filtered at exactly the point after the claim
+  and before anything downstream, because providers, agents and channel bindings are parallel arrays
+  zipped by index.
+- **A flag settles a disagreement, so it settles the refusal.** `--port` overrides every manifest, so
+  refusing because two of them disagree about a value nothing will read is a refusal the operator has
+  already answered. Found by writing the test: the harness passed `--port 0` unconditionally, which
+  would have made the conflict test unable to fail.
+
+**Acceptance**
+
+- [x] Two agents in one process: both on the banner, both in `GET /v1/agents`, `/v1/health` reports
+      `agents: 2`, and each `…/approvals` answers 200 while an unknown agent is 404
+- [x] A **partial conflict**, verified live across two processes: the second server prints
+      `alpha — NOT served here: pid 71098 (terminal) already has it`, hosts only `gamma`, answers
+      **404** for `alpha` while the holder answers 200, and reports `agents: 1`
+- [x] Disagreeing manifests refuse with `serve_bind_conflict` naming both files and the field; the
+      same pair with `--port` comes up
+- [x] A single agent held elsewhere still refuses, unchanged — the pre-existing test passes untouched
+- [x] Revert-checked: the lease change, the declined banner line, the conflict loop, and the approvals
+      filter each turn exactly the right test red
+- [x] 16.2b owns `adopt`/`replace` — **built** (2026-09-18), below
+
+**Method note, because it nearly went unrecorded.** Two of my revert-checks for the conflict loop
+produced meaningless results before one produced a real one: the first mangled the file (a `perl`
+`s|…|…|` whose *pattern* contained `||`), and the second made the build fail on unreachable code, so
+`&&` short-circuited and the test never ran — printing nothing, which reads like a pass. **A
+revert-check that does not compile is not a revert-check**, and the tell is an empty result rather
+than a red one. The edit that worked leaves the code valid: `manifests.slice(1, 1)`, a loop that
+never runs.
+
+
+### 16.2b — adopt, replace and per-agent teardown — **built** (2026-09-18)
+
+The half where the quiet-failure risk lives, and it lived exactly where the plan said: six
+subsystems that had only ever been unwound at process exit.
+
+**What landed.**
+
+- `Runtime.adopt(source)` — hosts an agent that was not part of boot. Leased, served, channels
+  started, schedules reconciled *and re-armed*, providers warmed, `agent.loaded` emitted, all
+  before the call returns. Returns the agents it admitted, because a `team:` manifest is several.
+- `Runtime.replace(agentId)` — dispose then adopt, so a changed manifest is a **new instance** and
+  the frozen-configuration decision is untouched.
+- `Runtime.dispose(agentId, reason?)` — the per-agent teardown: channel bindings and the outbox poll
+  loop, that agent's tool providers, its plugin `onEvent` subscription, its lease, its entry in
+  `#agents`/`#members`/`#teams`/`#sources`. Schedule *rows* are deliberately kept — a dispose is not
+  a removal, and `purgeAgent` is the thing that removes.
+- `agent.disposed { reason: requested | replaced | stopped }`, the other half of `agent.loaded`.
+  `stopped` has no caller yet and is declared now because the event is append-only within `v: 1`.
+- `Agent.inFlight`, a count, and `dispose` refuses while it is non-zero.
+- `ChannelHub.startAgent(agentId)` / `unregister(agentId)`; `start()` is now a loop over the first.
+
+**One shared pipeline, not two.** `create` and `adopt` both go through `prepareAgents` (plugins,
+manifest, teams), `buildRegistry`, `instantiateAgent`, `#admit`, `#reconcile` and
+`refreshProviders` — extracted from `create` rather than reimplemented, because the alternative is
+"it worked from the API and the container will not start". Boot's phase names and their order are
+unchanged; `adopt` passes pass-through stopwatches and contributes to no report.
+
+**Deferred with a reason.** No new `TurnEndReason` and therefore no store migration: the plan
+offered *refuse* or *abort and record why*, and refusing is the rung that needs neither. It also
+removes the approval-abandonment step entirely rather than implementing it — an approval that is
+waiting **is** a suspended turn, so a disposable agent cannot have a question outstanding. Nothing
+in the server calls `replace` yet; `POST /reload` still answers 501 and 16.5 is what opens the door.
+
+**Acceptance**
+
+- [x] `bun test` 3275 / 0 · `test:node` 1419 / 0 · typecheck 9/9 · lint clean · `bench:boot` ok ·
+      `check:deps` ok
+- [x] Adopt: the agent is listed, leased to this runtime, and `agent.loaded` fires — with the other
+      agent untouched
+- [x] Adopt into a started hub starts that agent's transports; into a `run`-mode runtime starts
+      **nothing**, which is the distinction `startChannels` draws at boot
+- [x] A schedule adopted into a running scheduler **fires**, asserted by waiting for the turn
+- [x] Dispose releases the lease, reaps only that agent's providers, and leaves the other agent's
+      lease and providers alone
+- [x] Dispose refuses mid-turn with `agent_turn_in_flight` and tears nothing down on the way out
+- [x] A team is one unit: a member refuses, a supervisor takes its members, and a replaced
+      supervisor's members come back addressable with `handoff` still in the catalogue
+- [x] Adopt/dispose three times over: agents, leases, providers and transport start/stop counts all
+      back where they started
+- [x] **Eleven guards revert-checked red**, each edit still compiling and typechecking
+
+**Two defects the revert-checks found, and one bad test.** Both of the `Scheduler`'s agent lookups
+closed over the array `create` built — fixed at boot — so an adopted agent was never in the due
+query and a disposed one still was; and `adopt` has to call `scheduler.changed()`, because `#arm`
+sleeps until the soonest due time it knew about when it last looked. Neither was visible from the
+first version of that test, which asserted the store's own `nextDue` and **stayed green with both
+reverted** — it read the source of truth directly rather than anything the scheduler believes. New
+shape of a recorded hazard: *a guard that queries the store cannot fail when the thing that was
+supposed to query the store is broken.* Separately, `ChannelHub.startAgent` needed `#started` as a
+**precondition** and not merely as a flag `start()` sets — without it, adopting into a `run`-mode
+runtime opened a Telegram long-poll, which is the surprise `startChannels` exists to prevent and the
+reason a one-shot `run --input` would then hang on exit.
+
+
+
+### 16.3 — Per-agent lifecycle: "unless stopped" made durable — **built** (2026-09-18)
+
+**What landed.**
+
+- **`agent_state`** (migration 15) — `agent_id` primary key, `enabled`, `disabled_at`, `reason`. An
+  absent row means enabled. `purgeAgent` deletes it, which is the whole argument for it not being
+  `kv`.
+- **`runtime_leases.base_url`** (migration 16) — published after the bind, cleared on takeover.
+  17.1's flagged migration, pulled forward because `stop` needs an address today.
+- **`POST /v1/agents/:id/stop`** and **`/start`** — the row *and* the live drop or adopt. Idempotent,
+  `409` while a turn runs, `404` for an id neither hosted nor recorded, `501` for a `start` on a
+  server with no manifest lookup.
+- **`serve` with no manifest** hosts the sandbox's enabled agents — the service unit's form — and
+  **zero hosted agents is a running server**, not a refusal.
+- **`start <agent>`**, a new command; `stop <agent>` reworked; `stop` bare unchanged.
+- `HandlerOptions.resolveAgent?`, the injected sandbox lookup — the seam 16.5 needs, built here.
+- `packages/client` gained `agent.stop()` / `agent.start()`; `AgentDescriptionLike` went optional
+  past `status`, because the listing now carries a thin `disabled` row.
+
+**Three decisions taken with Moeen before writing any of it** (2026-09-18): the live drop goes
+through an address on the lease rather than a boot-time-only flag or a heartbeat poll; the bare
+`serve` lands here rather than in 16.4; and `stop` with no agent keeps meaning "the whole host",
+because `daemon start` should bring back exactly what was running.
+
+**Acceptance**
+
+- [x] `bun test` 3303 / 0 · `test:node` 1428 / 0 · typecheck 9/9 · lint clean · `bench:boot` ok ·
+      `check:deps` ok
+- [x] `stop <agent>` on a live host **drops one agent and keeps serving the rest**, verified across
+      processes — the host is asked, never signalled
+- [x] `start <agent>` is adopted by the same pid, live, with no restart
+- [x] The row survives: a stopped agent is named on the next `serve` banner with the way back, and
+      is not hosted
+- [x] Zero hosted agents still binds and serves
+- [x] An explicitly named manifest is subject to the switch too
+- [x] `GET /v1/agents` carries the stopped agent; `GET /v1/agents/:id` is 404
+- [x] `stop` with nothing running still writes the switch; `stop` bare writes no per-agent state
+- [x] A failed `start` rolls the row back rather than leaving an agent marked on with nothing
+      hosting it
+- [x] **Ten guards revert-checked red**, each edit still compiling and typechecking
+
+**Two defects found by running the pair in order.** `start` cannot look for the host holding this
+agent's lease — the stop released it — so it asks *any* live host; found because `start` reported
+"nothing is serving yet" with a host sitting right there. And the lifecycle helpers opened the
+sandbox store while `serve` honours `--store`, so a host would have read its on/off switch from a
+different database than the one it serves out of: invisible in normal use, wrong in exactly the
+configuration the tests use. Also worth recording as a five-minute trap rather than a defect: a
+backtick inside a SQL comment in a template literal **terminates the string**, and the resulting
+error points at the next line.
+
+**Not done here, deliberately.** `POST /v1/agents/:id/reload` still answers `501`. `Runtime.replace`
+is what that request was reaching for, and wiring it is Phase 19's doc reconciliation — the 501's
+argument is about a session's cached prefix changing underneath a conversation, which is a decision
+to revisit rather than a wire to connect. The per-agent launchd label is still there; 16.4 retires
+it with the orphaned-`disable`-row migration note.
+
+
+
+### 16.4 — One service unit, first-run bootstrap, and Linux — **built** (2026-09-18)
+
+**What landed.**
+
+- **`<slug>.server`, one unit**, running `serve` with no manifest. `daemon install <agent>` is
+  refused; a bare install retires any per-agent unit it finds with `bootout` + **`enable`** + `rm`.
+- **First-run bootstrap.** `CommandSpec.needsServer` is required on every spec and read in one
+  place; `--no-bootstrap` and `<PREFIX>NO_BOOTSTRAP` are the escapes; a container, CI and the
+  service itself are skipped; a failure is announced and never thrown.
+- **A systemd user unit**, written and not driven. Lifecycle verbs refuse with the exact command,
+  `ServiceState.liveness` says the manager cannot report running, and `loginctl enable-linger` is
+  printed with its reason.
+- **`service-env.ts`** — one secret allowlist and one error for both renderers, since `systemctl
+  show` exposes `Environment=` exactly as `launchctl print` exposes `EnvironmentVariables`.
+- **The preflight split**, with three blockers deleted as false rather than moved.
+- `daemon status` bare reports the unit plus what it hosts plus what is switched off; `logs` bare
+  reads the server's log; `uninstall` says the agents were *not* switched off.
+- The brew formula's **`service do`** block, parked in 15.4 waiting for a bare `serve`.
+
+**Acceptance**
+
+- [x] `bun test` 3341 / 0 · `test:node` 1428 / 0 · typecheck 0 errors · lint clean ·
+      `bench:boot` ok · `check:deps` ok
+- [x] `daemon install milo` refused, naming the bare form and `stop`/`start`
+- [x] **Two real per-agent units retired live** — plists removed and their permanent `disable` rows
+      flipped back to `enabled`, which is the only way to clear them
+- [x] The installed unit runs and serves: `launchctl list` shows it, `/v1/ready` answers
+      `{"status":"ready","agents":1}`, and it connected a real Telegram bot
+- [x] `daemon status` reports `dispach.server — running · pid … up 1m 7s` and `hosting 1 agent: m1l0`
+- [x] `daemon uninstall` removes it and says the agents were left alone
+- [x] The bootstrap is skipped for `validate` and honours `--no-bootstrap`
+- [x] Eight guards revert-checked red, each edit compiling and typechecking
+
+**Four defects, all found by running the real install against a real machine.**
+
+1. **`labels()` read `launchctl list` alone, and a disabled job is absent from it** — the exact unit
+   whose retirement matters, since its `disable` row is the permanent part. The install found
+   nothing to retire and reported success. It reads the plist directory too now.
+2. **`bootout` returns before the job is gone.** An immediate `bootstrap` raced it, both returned 0,
+   and nothing was loaded — while the command printed "service installed". `install` waits for the
+   unload and then **verifies** the job is there.
+3. `daemon status` bare still listed per-agent labels, so it reported "no agents are installed as a
+   service" on a machine running a healthy server unit, and pointed at the retired form to fix it.
+4. **The test suite installed a real LaunchAgent on the machine running it.** `start` declares
+   `needsServer` and `CI` is absent locally, so the wreckage lands on a developer's machine rather
+   than a disposable runner. Every test that spawns the binary opts out; a boundaries test fails
+   when one forgets, and `bundle.test.ts` is exempt on purpose because its empty-`stderr` assertion
+   is what proves `--help` never bootstraps.
+
+Two of the eight revert-checks were **meaningless before they were real**: one edit did not apply at
+all (11 pass, no red), and two produced unused-variable type errors rather than a failing test. And
+one guard did not exist — the post-install verification had no test until the revert-check found it
+silent, which is the third instance of a revert-check earning its keep by failing to fail.
+
+
+
+### 16.5 — Provisioning: `POST /v1/agents` — **built** (2026-09-18)
+
+**What landed.**
+
+- **`POST /v1/agents`** — one call: validate, write, adopt. Live before the response returns.
+- **`GET /v1/provision`** — `{available, local, steps[]}`, the walk `nextQuestion` performs, with a
+  `secret` flag per step and each choice's `hint` kept separate from its label. `/v1/provision`
+  rather than `/v1/agents/steps`, because the router matches in registration order and
+  `/v1/agents/:id` would swallow the literal.
+- **`HandlerOptions.provision`** — the injected `Provisioner`. The server owns the route and the
+  gate; the CLI owns the implementation.
+- **`lib/provision.ts`** — one writer, shared with `init`: `complete`, `fillDefaults`,
+  `writeAgentFiles`, `provisionSteps`, `toProvisionStep`, `provisionAgent`.
+- The gate: loopback only (`403 provisioning_not_local`), `501` with no provisioner, and an absent
+  origin policy reads as **not** local.
+
+**Acceptance — run here, not handed over**
+
+- [x] `bun test` 3363 / 0 (twice) · `test:node` 1428 / 0 · typecheck 0 · lint clean ·
+      `bench:boot` ok · `check:deps` ok
+- [x] `GET /v1/provision` on a live server: 13 steps, `apiKey` flagged secret and optional, `preset`
+      carrying 5 choices
+- [x] **An agent provisioned into a server that had zero agents**: `{"id":"vela","adopted":["vela"]}`,
+      13 files, `.env` at `0600`, `/v1/health` → `agents: 1`
+- [x] **A real DeepSeek turn through it** — `POST /v1/agents/vela/messages` → 202, stored assistant
+      message `provisioned`
+- [x] Six refusals live: `provision_directory_refused`, `provision_unknown_answer`,
+      `provision_answer_invalid` (bad choice *and* non-string), `provision_answers_required`,
+      `cli_init_target_exists`
+- [x] A public bind refuses with a valid token: `provisioning_not_local`, and its
+      `GET /v1/provision` reports `available: true, local: false`
+- [x] Four guards revert-checked red, each edit compiling and typechecking
+
+**Two plan claims corrected.** The container was said to be covered by passing no provisioner — the
+CLI injects one unconditionally, so what refuses provisioning there is the **loopback gate** (its
+`CMD` binds `0.0.0.0`). Better mechanism, found by reading the Dockerfile. 16.3's `resolveAgent`
+carried the same false claim and the container really does have that lookup, correctly.
+
+**One defect, and a repeat.** `provisionAgent` called `agentsDir()` instead of the injected
+`defaults.agentDirBase` and wrote three agents into the author's real `~/.dispach`. The tests did
+not fail — the *second* run did, on a collision. The guard now asserts the returned directory is
+inside the base the caller handed in, and revert-checking *that* guard pollutes the real sandbox
+again, which is worth knowing before running it.
+
+
+
+### 16.7 — A generated OpenAPI document, and one request validator — **built** (2026-09-19)
+
+Not in the original plan. Moeen asked whether there were API docs and suggested Scalar; the answer
+had to get past `09-API-GUIDE.md`'s standing refusal of a generated reference, which turns out to
+be an argument against a *hand-written* one.
+
+**What landed.**
+
+- `packages/server/src/wire-schemas.ts` — six body schemas, with each field's **code and hint as
+  metadata**, plus `parseBody`, the one validator.
+- `packages/server/src/openapi.ts` — the document, generated from `Router.routes()` plus those
+  schemas. One hand-written summary per route, in a table guarded both ways.
+- `GET /v1/openapi.json` and `GET /docs`, both open.
+- Six routes stopped validating their own bodies. A guard fails on a seventh that tries.
+
+**Acceptance — run here**
+
+- [x] `bun test` 3377 / 0 · `test:node` 1428 / 0 · typecheck 0 · lint clean
+- [x] Served live: `{"openapi":"3.1.0","version":"0.1.0","paths":30}`, 36 operations, **zero**
+      without a summary, 6 with a request body
+- [x] `GET /v1/openapi.json` with no credential → **200**, and **0** mentions of the agent the
+      process was hosting
+- [x] `text`'s schema carries `code: message_text_required` and its hint verbatim
+- [x] One route's parameters come out as `[(id, path), (key, path), (limit, query), (before, query)]`
+- [x] `/docs` → 200 `text/html`, with the `noscript`, the local document URL and the CDN script
+- [x] The CDN bundle exists, defines `window.Scalar` and exposes `createApiReference` — the API the
+      page calls, checked against the shipped bundle rather than against docs
+
+**Not verified by me: the page rendering in a browser.** The Chrome extension would not create a
+tab across three attempts, so what I checked instead is everything that decides whether it renders —
+the bundle is reachable, the global and the function are the ones the page calls, and the document
+it fetches parses as OpenAPI 3.1 with 36 operations. The visual check is still worth somebody
+doing once, and it is the same outstanding item 15.3 left.
+
+
+### 16.6 — The human-input seam on channel status — **built** (2026-09-19)
+
+The last stage of Phase 16, and the last thing between here and the front ends.
+
+`ChannelStatus` gains `needs_input`. Nothing produces it — Telegram never will, and WhatsApp is 9C
+— which is the point: `status` is a **string on the wire**, so a client that has learned to read
+four states must not discover a fifth after the field's type has already been frozen by use.
+Adding a member is additive inside `v: 1`; changing a field from string to object is not.
+
+**What landed.**
+
+- `ChannelStatus` is `starting | connected | disconnected | error | needs_input`, and
+  `ChannelInput { kind: "qr", payload, expiresAt? }` travels **beside** it rather than inside it.
+  `IssuedChannelInput` is the same stamped with `issuedAt`, which the runtime supplies.
+- `ChannelHost.status` is **overloaded**, so `status("needs_input")` with no payload is a compile
+  error. The hub refuses it again at runtime — a plugin written in JavaScript reaches that path —
+  keeping the previous state and emitting `channel_input_missing`.
+- The hub **stores** `detail` and `input`, and `statusOf` returns them, so `GET /v1/agents/:id`
+  carries the payload. A page that opens after the QR was issued renders it immediately.
+- `agent.channel.status` gained `input?`, and its `status` field now **imports** `ChannelStatus`
+  instead of restating the union — it had been a second literal copy for four phases.
+- `@dispach/core/wire` exports the three channel types (type-only, so the bundle is unchanged) and
+  `packages/client` types `channels[]`, which was `readonly unknown[]`. Both so 17.3 renders this
+  without a hand-written cast, which is where the fifth member would go unhandled.
+- The `serve` log names where the payload is and never prints it: a QR's bytes are unreadable in a
+  log and would bury the sentence, while a bare `needs_input` line is the 57 MB-log failure in
+  miniature — true, with no route to acting on it.
+
+**Acceptance — all run, against a real plugin and a real server.**
+
+- [x] A real agent whose channel reports `connected` then `needs_input`: the resource carries
+      `kind`, `payload`, a forwarded `expiresAt` and a runtime-stamped `issuedAt`.
+- [x] Read ~30 s **after** the emission, with no subscription: the payload is still there. This is
+      the property the storage decision exists for.
+- [x] A payload-less `needs_input` from the same transport: the previous state survives and
+      `channel_input_missing` reaches stderr with its hint.
+- [x] `/v1/ready` answers **200** with a channel waiting on a person — `start()` returns once
+      running, never once connected.
+- [x] `now` past `expiresAt` is visible to a client, which is what makes a stale QR greyable
+      rather than a scanner that appears broken.
+- [x] 3382 pass / 0 fail, node 1433 / 0, typecheck 0, lint clean, `bench:boot` ok, `check:deps` ok.
+- [x] Every guard revert-checked in both directions: dropping the stored fields from `statusOf`
+      fails 3, disabling the refusal fails 1, flattening `issuedAt` fails 1, re-inlining the event
+      union fails 1 — each with the code still compiling, since a revert that does not typecheck
+      is not a revert-check.
+
+**Found while testing, and deliberately not fixed here.** `serve` loads the manifest with
+`knownChannels: CHANNEL_IDS` — the first-party list — *before* `Runtime.create` loads the agent's
+plugins, so a manifest naming a channel a plugin supplies is refused at load with
+`channel_type_unknown`, while a bare `Runtime.create` on the same manifest boots it correctly. That
+makes `PluginContext.defineChannel` unreachable through the CLI. It is the recorded "a check that
+only one surface performs is a check the two disagree on" hazard, inverted: here the *preflight* is
+the stricter one. Recorded below rather than fixed, because the honest fix is a two-pass load and
+that is a decision rather than an edit.
+
+## Phase 17 — the front ends
+
+### 17.1 — The runtime seam — **built** (2026-09-19)
+
+The headline of the always-on plan, and the stage everything before it was for.
+
+**The problem, stated as a sequence.** `run` declares `needsServer`, so since 16.4 it installs and
+starts a server — and then built a *second* `Runtime` for the agent that server was already
+holding. Two processes on one SQLite file are not two views of one conversation; they are two
+writers, and slot 2 told the **model** as much through `declined`.
+
+**What landed.**
+
+- `packages/cli/src/lib/source.ts` — `AgentSource`, plus `embeddedSource` (today's behaviour) and
+  `remoteSource` (the same shape over `/v1`). `components/App` and `useTurn` take a source; neither
+  knows which it has.
+- `run` probes `liveHostOf(agentId)` and attaches when a host has published a `base_url`, embedding
+  otherwise. `--ephemeral` always embeds; `--input` attaches, deviating from this plan's wording
+  for the reason in decision 11.220.
+- `runAttached` — a loop that owns no runtime, no store and no lease. `/restart` asks the host to
+  `replace`; `/exit` detaches.
+- `POST /v1/agents/:id/reload` wired to `Runtime.replace`, answering 200 with `adopted[]` and
+  **409 `agent_turn_in_flight`** rather than aborting a turn. It had been a blanket 501, and the
+  409-vs-501 contradiction across `04-SPEC-WIRE.md` and `06-VELAOPS-INTEGRATION.md` is resolved
+  rather than carried to Phase 19.
+- `@dispach/client` gains `messages`, `clearSession` and `reload`; `SessionSummary` and
+  `ToolSummary` were **under-declared** against what the routes already sent and now match.
+- The tools route carries `trustReason` and the agent resource carries `catalogueTokens` — both
+  present on the embedded path and silently absent when attached.
+- `runPlain` takes one wildcard subscription and switches, instead of seven named ones. The
+  both-paths boundaries guard now checks the same string on both, because the asymmetry it policed
+  is gone.
+
+**Acceptance — all run against a real server holding a real agent.**
+
+- [x] `dispach run vela --input "…"` with a host live: attached, streamed over SSE, stats from
+      `turn.end`. The banner and `/status` both name the host's address and pid.
+- [x] `/status` attached reports what it is attached to and reads the host's conversations — a
+      second implementation, not the embedded one with its interesting halves blanked.
+- [x] `/restart` attached on **both** paths: `reloaded vela — this conversation continues`, one
+      banner, the server's pid unchanged. The plain path took the embedded route on the first
+      attempt and printed *"the configuration on disk is now the one in force"* about a rebuild
+      that never happened — found by running it, fixed, re-run.
+- [x] Every view exited: `/v1/ready` still 200 and a `POST /messages` still answered. That is what
+      "a view" has to mean.
+- [x] Host killed: `run` embeds, banner reports the store and `ready in 72 ms`, `/status` says
+      *"this session is serving this agent"*.
+- [x] The credential needs no new mechanism — verified by accident and then on purpose:
+      `hostToken` read the same layered env `serve` read it from.
+- [x] 3394 pass / 0 fail, node 1433 / 0, typecheck 0, lint clean, `bench:boot` ok, `check:deps` ok.
+- [x] The extraction was landed **green before any remote code existed**, so a failure could only
+      be one or the other. Three attached behaviours revert-checked: resolving on any `turn.end`
+      fails 1, dropping the abort-before-id window fails 1, a stream per subscriber fails 1.
+
+**Not done here, deliberately.** `packages/web` still picks `agents[0]`; the browser is 17.3.
+
+### 17.2 — `dispach web run` — **built** (2026-09-19)
+
+The browser as a second view onto the same host. Small, because 17.1 did the hard part and
+`claimUrl` already existed.
+
+**What landed.**
+
+- A `web` command with three verbs — `run` (declares `needsServer`, so the bootstrap gets one),
+  `open` (assumes a host, refuses with a hint when there is none), `url` (prints only, the form a
+  pipe reads). The `daemon install <agent>` arg shape, so `lib/args.ts`, `lib/help.ts` and
+  `lib/palette.ts` needed no change.
+- `lib/browser.ts` through `lib/spawn.ts` — one command per platform, bounded, and **refusals as
+  outcomes**: `no-opener` (a container), `not-a-terminal`, `asked-not-to`, `opener-failed`. Every
+  branch prints the URL, success included.
+- `?agent=` in the URL and **`app.tsx` reads it** in the same commit, falling back to the first
+  running agent. The deep-link decision (query string, not paths) lands here rather than in 17.3.
+- `browsableHost` extracted in `packages/server/src/keys.ts`, where the same rewrite existed twice
+  inline. `agentIdFor` moved to `lib/lifecycle.ts`, one function for `run` and `web`.
+- `LANDING_LIST_ROWS` 21 → 22, which the constant's own docstring requires of a phase adding a
+  command.
+
+**Acceptance — run inside the container, per the standing rule.**
+
+- [x] `docker compose up -d --build --wait` → healthy; `HOME=/home/dispach`, glibc 2.41, and
+      **no `xdg-open`** — the case the opener is written for.
+- [x] `dispach web url primary` → `http://127.0.0.1:7420/?agent=minimal`, and that URL fetched
+      **from the host** answers `200 text/html` and serves the app.
+- [x] `dispach web open primary` with a TTY → *"no browser here — open this from a machine that has
+      one"* plus the URL. Without a TTY → the URL alone, which is what a pipe can use.
+- [x] The served `app.js` contains `searchParams.get("agent")`, so the link is not a lie.
+- [x] With no host (on the Mac, since the container always has one): refused, exit 1, naming
+      `serve` and `daemon install`.
+- [x] 3403 pass / 0 fail, node 1433 / 0, typecheck 0, lint clean, `bench:boot` ok, `check:deps` ok.
+      Both refusal branches revert-checked.
+
+**The defect the container found.** `web url` printed `http://0.0.0.0:7420/` on the first run
+inside the image — a bind, not an address, and a link nothing can click. A laptop cannot reproduce
+it: `serve` there binds `127.0.0.1` and the substitution never fires. Fixing it forced the rewrite
+out of its two inline copies in `keys.ts` into one `browsableHost`, which immediately exposed a
+second defect neither copy handled — `URL.hostname` returns IPv6 **bracketed**, so `[::]` never
+matched the bare `::` comparison. `claimUrl` had shipped with that since Phase 13.
+
+### 17.3 — The web UI grows up — **built** (2026-09-20)
+
+Scoped deliberately: the picker, deep links and the **read-only** panels. Provisioning is 17.4,
+because creating an agent from a browser is a different kind of work — a multi-step form, masked
+secrets, and a write that adopts a live agent — and keeping them apart means the browser
+verification here creates nothing.
+
+**What landed.**
+
+- `AgentList` replaces `agents[0]`. It appears only when it has something to say; a stopped agent
+  is listed with its reason and a `start`; `stop` is deliberately absent (decision 11.223).
+- `lib/deep-link.ts` — `?agent=&panel=`, pure. `chat` writes no parameter; an unknown panel falls
+  back to the chat; an unrelated parameter survives a navigation, including never re-adding a
+  stripped `claim`.
+- `panels.tsx` — `ToolsPanel`, `SchedulesPanel`, `ChannelsPanel`. All props, no fetching, so
+  `renderToStaticMarkup` tests them with **no DOM and no new dependency**. The channel panel is
+  16.6's payoff: it renders `needs_input`, marks a lapsed payload without hiding it, and shows an
+  unknown `kind` as text.
+- `SERVER_PANELS` generates the sidebar, so a sixth panel needs nothing remembered.
+- The 404 loop fixed and guarded (11.224), and `@dispach/client`'s `schedules()` unwrapped (11.225).
+
+**Acceptance — in the container, in a real browser.** *This closes 15.3's outstanding item.*
+
+- [x] `docker compose up -d --build --wait` → healthy; the page served at `/`, `app.js` 230,969 B
+      and `app.css` 6,468 B, both under the measured ceiling.
+- [x] The credential gate paints; a pasted key is exchanged, stored, and **stripped from the address
+      bar** while `?panel=schedules` beside it survives.
+- [x] Clicking `tools` put `?agent=minimal&panel=tools` in the address bar, marked the row
+      `[active]`, and titled the bar `Tools`.
+- [x] A **cold load** of `?agent=minimal&panel=channels` landed on that panel with the right title
+      and the right row active.
+- [x] Stopped the agent by API: the **Agents** group appeared with `minimal · stopped`, `[disabled]`,
+      the reason, and a `start`. Clicking `start` brought it back and the group correctly vanished.
+- [x] The stopped row survived a full `--build` rebuild — 16.3's durable switch, incidentally.
+- [x] A screenshot of the schedules panel, read back: sidebar, accent-highlighted row, title, empty
+      state, footer. It paints.
+- [x] 3424 pass / 0 fail, node 1433 / 0, typecheck 0, lint clean, `bench:boot` ok, `check:deps` ok.
+      Both new guards revert-checked.
+
+**Three defects, all found in the browser and none reachable from the host suite.**
+
+1. **A 404 loop with nothing on screen.** A page open on an agent that was then stopped polled
+   `/approvals`, `/sessions` and the panels forever. Fixed, guarded, and the error count verified
+   flat across three further poll intervals.
+2. **`schedules()` returned the wrong shape** and had never been called. It threw during render, so
+   React unmounted the tree and the page was **entirely black** — while the accessibility snapshot
+   taken a second earlier showed a complete, correct-looking DOM. Nothing but a screenshot sees
+   that.
+3. **Literal backticks in my own empty state**, where the tools panel used `<code>`. Cosmetic, and
+   exactly what a visual pass is for.
+
+**Not verified in a browser:** a live `needs_input` channel. Producing one needs a transport that
+emits it, and the carried `defineChannel` defect means a plugin channel cannot load through the
+CLI's `serve` at all. The markup is covered by render tests against the real payload shape.
+
+**Playwright's MCP server disconnected** after the last rebuild, so the final cosmetic fix was
+verified in the **served bundle** (`<code>` present, no literal backtick) rather than on screen.
+
 ---
 
 ## Carried backlog
 
-Two findings that belong to no phase, recorded here so a session with no context still finds them.
-Both were reproduced rather than reasoned about.
+Three findings that belong to no phase, recorded here so a session with no context still finds
+them. All were reproduced rather than reasoned about.
 
 ### The NLT heredoc leak — **fixed 2026-09-13**, decisions 4.96–4.98
 
@@ -3979,3 +4680,41 @@ probed, so the registry had been publishing 37.5% of the real window.
 Low urgency, and the reason is worth keeping: **a floor is the safe direction.** An under-reported
 window over-compacts and wastes tokens; it never overflows an endpoint. A cost bug, not a correctness
 one.
+
+### `defineChannel` is unreachable through the CLI — **medium urgency** *(found 2026-09-19, in 16.6)*
+
+A manifest declaring a channel type supplied by one of its own plugins is refused at load:
+
+```
+$ dispach serve wa
+manifest_validation_failed: channels[0] declares type "qrstub", which is not registered here.
+  Available: telegram.
+  field: channels[0].type
+  hint: Check the spelling against the available types.
+```
+
+The same manifest boots correctly through `Runtime.create`, which reads the manifest **header** for
+`plugins`, loads them, and only then validates `channels[].type` against the host's registrations
+*plus* the plugin's (`runtime.ts:1357` and `:1454`). Every CLI surface instead pre-loads with
+`knownChannels: CHANNEL_IDS`, the static first-party list — `serve.ts:106`, and the same line in
+`validate`, `tools`, `workspace`, `model` and `init` — so the refusal happens before the plugin that
+would have satisfied it is ever imported.
+
+Reproduced with a two-line plugin calling `context.defineChannel("qrstub", …)`. It is the recorded
+*"a check that only `run` performs is a check `validate` disagrees with"* hazard with the polarity
+reversed: here the preflight is stricter than the runtime, so the disagreement refuses a correct
+manifest rather than admitting a broken one.
+
+**Why it has stayed invisible.** Both first-party channels arrive as `channels: { telegram }` from
+the CLI's own table, never through `defineChannel`, so the plugin path has no in-tree consumer —
+the dead-vocabulary shape again, except here the vocabulary is *documented public API*
+(`03-SPEC-PLUGIN-API.md`, `PluginContext.defineChannel`) that a third-party author would find
+simply does not work.
+
+**Not fixed in 16.6, because the fix is a decision.** The CLI's pre-load exists to get `loaded.env`
+(the server token) before `Runtime.create`, so it genuinely needs a manifest in hand first. Making
+it agree with the runtime means either a two-pass load in the CLI — read header, load plugins,
+validate — or moving the channel-type check out of the pre-load and letting `Runtime.create` be the
+only place that decides it. The second is smaller and matches the existing rule that one function
+owns a load-bearing check, but it moves *when* the error is reported, which is worth choosing
+deliberately rather than as a side effect of a phase about channel status.

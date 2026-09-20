@@ -64,7 +64,14 @@ async function serveThen(signal: NodeJS.Signals): Promise<Served> {
     const child = spawn(
         process.execPath,
         [BINARY, "serve", join(dir, "agent.yaml"), "--port", "0", "--store", store],
-        { env: { ...process.env, MODEL_API_KEY: "test-key" }, stdio: ["ignore", "pipe", "pipe"] },
+        {
+            env: {
+                ...process.env,
+                MODEL_API_KEY: "test-key",
+                [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+        },
     )
 
     let stdout = ""
@@ -91,6 +98,213 @@ async function serveThen(signal: NodeJS.Signals): Promise<Served> {
     const { code, signal: sig } = await exited
     return { dir, store, stdout, code, signal: sig }
 }
+
+/** A workspace with a chosen agent id, and optionally a port the manifest insists on. */
+function agentDir(id: string, port?: number): string {
+    const dir = mkdtempSync(join(tmpdir(), `serve-${id}-`))
+    writeFileSync(
+        join(dir, "agent.yaml"),
+        `apiVersion: ${BRAND.apiVersion}
+id: ${id}
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: MODEL_API_KEY
+server:
+  enabled: true
+${port === undefined ? "" : `  port: ${port}\n`}`,
+        "utf8",
+    )
+    return dir
+}
+
+/**
+ * Run `serve` with these manifests and return what it printed, whether it stayed up or refused.
+ *
+ * Resolves on the serving banner *or* on exit, because both are outcomes these tests assert —
+ * waiting only for "serving on" would turn an expected refusal into a 20-second timeout with a
+ * misleading message.
+ */
+async function serveAll(
+    manifests: readonly string[],
+    options: { readonly port?: "auto" | "none" } = {},
+): Promise<{ readonly out: string; readonly exited: boolean }> {
+    const store = join(mkdtempSync(join(tmpdir(), "serve-store-")), "store.db")
+    // `--port 0` by default, so a developer already running an agent on 7420 does not fail these
+    // and two can run at once. **`"none"` is not a detail**: the flag *settles* a bind
+    // disagreement, so a test of the refusal that passed one could never fail. Safe here because
+    // the refusal happens before anything binds, so the manifest's real port is never reached.
+    const portArgs = options.port === "none" ? [] : ["--port", "0"]
+    const child = spawn(
+        process.execPath,
+        [BINARY, "serve", ...manifests, ...portArgs, "--store", store],
+        {
+            env: {
+                ...process.env,
+                MODEL_API_KEY: "test-key",
+                [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+        },
+    )
+    let out = ""
+    /**
+     * Resolve when the output goes **quiet**, not on the first matching chunk.
+     *
+     * `serving on` is the banner's *first* line and the agent rows follow it, so resolving on the
+     * match left every assertion reading a one-line transcript — which failed in a way that looked
+     * like the feature was broken rather than the harness. Quiescence also covers the refusal path
+     * without a second code path: an error is written and the process exits.
+     */
+    const settled = await new Promise<boolean>((resolve, reject) => {
+        const overall = setTimeout(() => reject(new Error(`no outcome:\n${out}`)), 25_000)
+        let quiet: ReturnType<typeof setTimeout> | undefined
+        const done = (exited: boolean) => {
+            clearTimeout(overall)
+            if (quiet !== undefined) clearTimeout(quiet)
+            resolve(exited)
+        }
+        const collect = (chunk: Buffer) => {
+            out += chunk.toString()
+            if (!out.includes("serving on")) return
+            if (quiet !== undefined) clearTimeout(quiet)
+            quiet = setTimeout(() => done(false), 400)
+        }
+        child.stdout.on("data", collect)
+        child.stderr.on("data", collect)
+        child.on("exit", () => done(true))
+    })
+    if (!settled) child.kill("SIGTERM")
+    return { out, exited: settled }
+}
+
+/**
+ * Several agents in one process, which decision 8.5 has described since the beginning and which
+ * one line in the CLI prevented: `agents: [options.manifestPath]`.
+ */
+describe("one process, several agents", () => {
+    test("every manifest's agent is served and named", async () => {
+        const { out } = await serveAll([
+            join(agentDir("alpha"), "agent.yaml"),
+            join(agentDir("beta"), "agent.yaml"),
+        ])
+        expect(out).toContain("alpha —")
+        expect(out).toContain("beta —")
+    }, 30_000)
+
+    test("**a partial conflict serves what it can and names what it cannot**", async () => {
+        // The behaviour this stage exists for. `claimLeases` threw on the *first* conflict, so a
+        // host asked for two agents with one held elsewhere refused both — one stale-looking row
+        // taking a healthy agent down with it. The store is shared here, which is what makes the
+        // lease contended: the first process keeps `held`, the second must serve `free` anyway.
+        const held = join(agentDir("held"), "agent.yaml")
+        const free = join(agentDir("free"), "agent.yaml")
+        const store = join(mkdtempSync(join(tmpdir(), "serve-shared-")), "store.db")
+
+        const first = spawn(
+            process.execPath,
+            [BINARY, "serve", held, "--port", "0", "--store", store],
+            {
+                env: {
+                    ...process.env,
+                    MODEL_API_KEY: "test-key",
+                    [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+                },
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        )
+        let firstOut = ""
+        await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(
+                () => reject(new Error(`first never served:\n${firstOut}`)),
+                20_000,
+            )
+            first.stdout.on("data", (chunk: Buffer) => {
+                firstOut += chunk.toString()
+                if (firstOut.includes("serving on")) {
+                    clearTimeout(timer)
+                    resolve()
+                }
+            })
+        })
+
+        try {
+            const second = spawn(
+                process.execPath,
+                [BINARY, "serve", held, free, "--port", "0", "--store", store],
+                {
+                    env: {
+                        ...process.env,
+                        MODEL_API_KEY: "test-key",
+                        [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+                    },
+                    stdio: ["ignore", "pipe", "pipe"],
+                },
+            )
+            let out = ""
+            // Same quiescence rule as `serveAll`, and for the same reason: the line this test is
+            // about is printed *after* the one that says the server is up.
+            const up = await new Promise<boolean>((resolve, reject) => {
+                const overall = setTimeout(() => reject(new Error(`no outcome:\n${out}`)), 25_000)
+                let quiet: ReturnType<typeof setTimeout> | undefined
+                const done = (served: boolean) => {
+                    clearTimeout(overall)
+                    if (quiet !== undefined) clearTimeout(quiet)
+                    resolve(served)
+                }
+                const collect = (chunk: Buffer) => {
+                    out += chunk.toString()
+                    if (!out.includes("serving on")) return
+                    if (quiet !== undefined) clearTimeout(quiet)
+                    quiet = setTimeout(() => done(true), 400)
+                }
+                second.stdout.on("data", collect)
+                second.stderr.on("data", collect)
+                second.on("exit", () => done(false))
+            })
+            expect(up).toBe(true)
+            second.kill("SIGTERM")
+
+            // Serves the one it could claim…
+            expect(out).toContain("free —")
+            // …and says out loud that it is not serving the other, with the pid to act on. Without
+            // this line the process looks entirely healthy while hosting half of what was asked for.
+            expect(out).toContain("held — NOT served here")
+            expect(out).toMatch(/pid \d+/)
+        } finally {
+            first.kill("SIGTERM")
+        }
+    }, 60_000)
+
+    test("manifests that disagree about the bind are refused before anything binds", async () => {
+        // One process, one socket, one token. Taking the first manifest's port silently would make
+        // a file that carefully declares 7500 a file whose setting does nothing — and the symptom
+        // would be a port somebody else is already using.
+        const { out, exited } = await serveAll(
+            [join(agentDir("one", 7420), "agent.yaml"), join(agentDir("two", 7500), "agent.yaml")],
+            { port: "none" },
+        )
+        expect(exited).toBe(true)
+        expect(out).toContain("serve_bind_conflict")
+        expect(out).toContain("server.port")
+    }, 30_000)
+
+    test("a flag settles the disagreement, because it settles the value", async () => {
+        // The same disagreeing pair comes **up** when `--port` is given: the flag overrides every
+        // manifest, so refusing over a value nothing will read would be a refusal the operator has
+        // already answered. This pairs with the test above — one asserts the refusal, one asserts
+        // it is not overzealous, and neither is meaningful without the other.
+        const { out, exited } = await serveAll([
+            join(agentDir("three", 7420), "agent.yaml"),
+            join(agentDir("four", 7500), "agent.yaml"),
+        ])
+        expect(exited).toBe(false)
+        expect(out).not.toContain("serve_bind_conflict")
+        expect(out).toContain("three —")
+        expect(out).toContain("four —")
+    }, 30_000)
+})
 
 describe("serve shuts down gracefully", () => {
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
@@ -119,7 +333,11 @@ describe("serve shuts down gracefully", () => {
         const dir = workspace()
         const store = join(dir, "store.db")
         const args = [BINARY, "serve", join(dir, "agent.yaml"), "--port", "0", "--store", store]
-        const env = { ...process.env, MODEL_API_KEY: "test-key" }
+        const env = {
+            ...process.env,
+            MODEL_API_KEY: "test-key",
+            [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+        }
 
         const first = spawn(process.execPath, args, { env, stdio: ["ignore", "pipe", "pipe"] })
         try {

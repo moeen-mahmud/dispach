@@ -20,13 +20,14 @@
  * without a command, reporting failure for the one thing that had worked.
  */
 
-import { HarnessError, VERSION } from "@dispach/core"
+import { BRAND, HarnessError, VERSION } from "@dispach/core"
 import { agentsCommand } from "#agents"
 import { browseCommand } from "#browse"
 import { daemonCommand } from "#daemon"
 import { initCommand } from "#init"
 import { keysCommand } from "#keys"
 import { parse } from "#lib/args"
+import { announce, type BootstrapResult, ensureServer } from "#lib/bootstrap"
 import { askExactly, askYesNo } from "#lib/confirm"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { readEnv } from "#lib/env"
@@ -45,6 +46,7 @@ import { sessionsCommand } from "#sessions"
 import { skillsCommand } from "#skills"
 import { soulCommand } from "#soul"
 import { sourcesCommand } from "#sources"
+import { startCommand } from "#start"
 import { stopCommand } from "#stop"
 import { terminalSetupCommand } from "#terminal-setup"
 import { toolsCommand } from "#tools"
@@ -63,6 +65,36 @@ function report(error: unknown): number {
         process.stderr.write(`${String(error)}\n`)
     }
     return EXIT_FAILURE
+}
+
+/**
+ * Install and start the server unit, as the bootstrap does it.
+ *
+ * Reuses `daemonCommand` rather than reaching into the service layer, so a bootstrapped unit and
+ * one installed by hand are byte-identical — a second plan builder is how the two come to differ in
+ * a way nobody notices until one of them will not start. Its output is swallowed: the bootstrap's
+ * whole contract is *one line*, and `daemon install`'s four-row report in front of `agents` would
+ * be the opposite.
+ */
+async function installServerUnit(): Promise<BootstrapResult> {
+    const write = process.stdout.write.bind(process.stdout)
+    // Replaced rather than piped, because `daemon install` writes with `process.stdout.write`
+    // directly and there is nothing to intercept further down. Restored in a `finally`, or every
+    // subsequent line of this process would vanish.
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    try {
+        const code = await daemonCommand({ action: "install" })
+        if (code !== EXIT_OK) {
+            return {
+                kind: "failed",
+                message: `daemon install exited ${code}`,
+                hint: `Run \`${BRAND.slug} daemon install\` to see what it said.`,
+            }
+        }
+        return { kind: "started", label: `${BRAND.slug}.server` }
+    } finally {
+        process.stdout.write = write
+    }
 }
 
 async function dispatch(argv: readonly string[]): Promise<number> {
@@ -95,6 +127,36 @@ async function dispatch(argv: readonly string[]): Promise<number> {
     // here at the dispatch layer, so `sessions milo` works the moment `run milo` does. The
     // resolution throws with the candidate list and a nearest-match hint.
     const resolved = (): string => resolveAgentRef(manifestPath)
+
+    /**
+     * First run: if this command wants a host and none is up, put one up and say so in one line.
+     *
+     * Here rather than in each command, because "does this want a host" is declared on the spec
+     * (`CommandSpec.needsServer`, required) and this is the one place that reads it — a hand-kept
+     * list of command names would be the drift `session-commands.ts` was written to end, with a new
+     * command silently absent from it or silently included in it.
+     *
+     * **Before the switch and after the parse**, which matters in both directions: `--help`,
+     * `--version` and a usage error have already returned above, so asking for help never installs
+     * anything; and an unparseable command line never gets this far either.
+     *
+     * The announcement goes to **stderr** so it cannot land in the middle of `--json` output
+     * somebody is piping into `jq`. It never throws — see `ensureServer`.
+     */
+    // `--store` only when this command declares it. `flags.str` throws for an undeclared flag —
+    // deliberately, since reading one is a CLI bug — and the bootstrap is global, so it cannot
+    // assume a per-command flag exists. Asking the spec is the honest version of that question.
+    const storeFlag = command.flags.some((flag) => flag.name === "store")
+        ? flags.str("store")
+        : undefined
+    const bootstrap = await ensureServer({
+        needsServer: command.needsServer,
+        disabled: flags.bool("no-bootstrap"),
+        install: () => installServerUnit(),
+        ...(storeFlag === undefined ? {} : { store: storeFlag }),
+    })
+    const note = announce(bootstrap)
+    if (note !== undefined) process.stderr.write(note)
 
     switch (command.name) {
         case "init": {
@@ -306,7 +368,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
             const host = flags.str("host")
             const store = flags.str("store")
             return await serveCommand({
-                manifestPath: resolved(),
+                manifestPaths: positionals.map((ref) => resolveAgentRef(ref)),
                 ...(port === undefined ? {} : { port }),
                 ...(host === undefined ? {} : { host }),
                 ...(store === undefined ? {} : { store }),
@@ -343,13 +405,47 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 confirm: askExactly,
             })
 
-        case "stop":
+        case "stop": {
+            const reason = flags.str("reason")
             return await stopCommand({
-                // Optional on purpose: bare `stop` is the point of the command.
+                // Optional on purpose: bare `stop` is the whole host, and naming an agent is a
+                // different command rather than the same one with a filter — see stop.ts.
                 ...(manifestPath === undefined ? {} : { manifestPath: resolved() }),
                 dryRun: flags.bool("dry-run"),
+                ...(reason === undefined ? {} : { reason }),
+                ...(flags.str("store") === undefined
+                    ? {}
+                    : { store: flags.str("store") as string }),
                 json: flags.bool("json"),
             })
+        }
+
+        case "start":
+            return await startCommand({
+                manifestPath: resolved(),
+                ...(flags.str("store") === undefined
+                    ? {}
+                    : { store: flags.str("store") as string }),
+                json: flags.bool("json"),
+            })
+
+        case "web": {
+            const { webCommand } = await import("#web")
+            return await webCommand({
+                // The action is positional 0 and the agent positional 1 — the `daemon install
+                // <agent>` shape, which `manifestIndex` already reads off this spec, so the parser
+                // and the help needed no change for a nested verb.
+                action: manifestPath as "run" | "open" | "url" | undefined,
+                ...(positionals[1] === undefined
+                    ? {}
+                    : { manifestPath: resolveAgentRef(positionals[1]) }),
+                noOpen: flags.bool("no-open"),
+                ...(flags.str("store") === undefined
+                    ? {}
+                    : { store: flags.str("store") as string }),
+                json: flags.bool("json"),
+            })
+        }
 
         case "daemon": {
             const lines = flags.num("lines")
@@ -365,6 +461,9 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 follow: flags.bool("follow"),
                 truncate: flags.bool("truncate"),
                 dryRun: flags.bool("dry-run"),
+                ...(flags.str("store") === undefined
+                    ? {}
+                    : { store: flags.str("store") as string }),
                 json: flags.bool("json"),
             })
         }

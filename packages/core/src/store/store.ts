@@ -417,6 +417,18 @@ export interface LeaseRecord {
     readonly mode: RuntimeMode
     readonly startedAt: string
     readonly heartbeatAt: string
+    /**
+     * Where this holder serves HTTP, once it is bound. `undefined` for a holder that serves none.
+     *
+     * The reason it exists: `stop <agent>` has to reach *into* a running host rather than signal
+     * it, because one process hosts several agents and a signal cannot name one. The reason it is
+     * optional: a `run` REPL and an embedded runtime hold leases and bind no socket, so the absent
+     * case is a real state and a caller reading it falls back to stopping the process.
+     *
+     * Not derivable from a manifest — `--port` overrides it, `--port 0` picks one at random, and a
+     * container's published port moves it again — which is why it is recorded rather than computed.
+     */
+    readonly baseUrl?: string
 }
 
 /**
@@ -456,6 +468,18 @@ export interface LeaseStore {
     }): Promise<LeaseClaim>
     /** Refresh `heartbeat_at`. A no-op when this runtime no longer holds the lease. */
     beat(agentId: string, runtimeId: string, now: string): Promise<boolean>
+    /**
+     * Record where this runtime serves HTTP, on every lease it holds.
+     *
+     * A second write rather than an argument to `claim`, because the port is not known when the
+     * lease is taken: leases are claimed inside `Runtime.create` and the socket is bound after it
+     * returns, and `--port 0` is the case that makes that ordering unavoidable rather than merely
+     * convenient.
+     *
+     * Scoped to `runtimeId`, so a host cannot publish an address onto somebody else's lease — the
+     * same scoping `beat` and `release` use, for the same reason.
+     */
+    publish(runtimeId: string, baseUrl: string): Promise<void>
     release(agentId: string, runtimeId: string): Promise<void>
     get(agentId: string): Promise<LeaseRecord | undefined>
     all(): Promise<readonly LeaseRecord[]>
@@ -473,6 +497,58 @@ export interface LeaseStore {
      * and no lease) and cannot see an agent whose directory was deleted while it was idle.
      */
     orphans(): Promise<readonly string[]>
+}
+
+/**
+ * Whether an agent is supposed to be running, and why not.
+ *
+ * `enabled: false` means **not hosted at all** — no `/v1`, no channels, no schedules — and it
+ * survives a restart, which is the whole point. A lease answers "who is serving this now"; this
+ * answers "should anybody", and the two were one question only while a process served one agent.
+ */
+export interface AgentStateRecord {
+    readonly agentId: string
+    readonly enabled: boolean
+    /** When it was last switched off. Kept through a later enable, as the audit trail. */
+    readonly disabledAt: string | undefined
+    readonly reason: string | undefined
+}
+
+/**
+ * The durable on/off switch, per agent.
+ *
+ * **An absent row is enabled**, so an agent nobody has ever stopped costs nothing and `init` writes
+ * no state. The alternative — a provisioning path that has to remember to write an "on" row — makes
+ * a forgotten write into an agent that is silently unhosted, which is the exact shape this table
+ * exists to prevent at the other end.
+ *
+ * `disable` and `enable` are both idempotent and neither is an error on an agent that is already in
+ * the requested state: the caller asked for a state that already holds, and a 404 there makes a
+ * retried request look like a mistake. `disable` twice keeps the **first** stamp, for the reason
+ * `OperatorKeyStore.revoke` does — the interesting timestamp is when it stopped, not when somebody
+ * last asked again.
+ */
+export interface AgentStateStore {
+    /** `undefined` when nothing has ever been recorded, which means enabled. */
+    get(agentId: string): Promise<AgentStateRecord | undefined>
+    /** Every recorded state, enabled and disabled. Nothing is hidden; a caller filters. */
+    list(): Promise<readonly AgentStateRecord[]>
+    /**
+     * Switch an agent off durably. Returns the row as it now stands.
+     *
+     * Keeps the original `disabled_at` when it was already off, so asking twice does not rewrite
+     * the history of when it stopped.
+     */
+    disable(agentId: string, at: string, reason?: string): Promise<AgentStateRecord>
+    /** Switch it back on, keeping `disabled_at` and `reason` as the record of what happened. */
+    enable(agentId: string): Promise<AgentStateRecord>
+    /**
+     * The subset of `agentIds` that is switched off.
+     *
+     * One query rather than a `get` per agent, because the caller asking this is a host deciding
+     * what to load and it asks once for everything. Ids with no row are enabled and absent here.
+     */
+    disabledAmong(agentIds: readonly string[]): Promise<readonly string[]>
 }
 
 /**
@@ -1014,6 +1090,14 @@ export interface Store {
     readonly turns: TurnStore
     readonly outbox: OutboxStore
     readonly leases: LeaseStore
+    /**
+     * The durable per-agent on/off switch. Read by every host at every start.
+     *
+     * Beside `leases` rather than inside it deliberately: a lease is about *this* process and is
+     * released when it exits, and this outlives every process. Putting the flag on the lease row
+     * would have made "stopped" a fact that disappeared the moment the host did.
+     */
+    readonly agentState: AgentStateStore
     readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore

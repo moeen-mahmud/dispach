@@ -625,3 +625,36 @@ describe("the frame mapper", () => {
         expect(items[0]?.kind).toBe("event")
     })
 })
+
+describe("every read is unwrapped the way its route wraps it", () => {
+    /**
+     * `schedules()` was declared `Promise<readonly ScheduleRecord[]>` and returned
+     * `{ schedules: [...] }`, because the route wraps it and this one did not unwrap.
+     *
+     * It shipped that way and nothing noticed, for the only reason such a thing can: **nothing
+     * called it.** `approvals()` twenty lines above has always unwrapped correctly, so this is the
+     * `includeHistory` shape rather than a typo — a declaration with no consumer is wrong for as
+     * long as it has none, and its type asserts otherwise the whole time. The first real caller was
+     * 17.3's schedules panel, where it crashed on `schedules.map is not a function` and React took
+     * the entire page down to a black screen.
+     *
+     * So this walks every list-shaped read against a real handler and asserts it is an **array**.
+     * Not a type assertion — `tsc` was satisfied throughout — but the value that actually arrives.
+     */
+    test("each list read returns an array against a real handler", async () => {
+        const { client, runtime } = await harness()
+        const agent = client.agent("assistant")
+        for (const [name, read] of [
+            ["tools", () => agent.tools()],
+            ["sessions", () => agent.sessions()],
+            ["schedules", () => agent.schedules()],
+            ["approvals", () => agent.approvals()],
+        ] as const) {
+            const value = await read()
+            // `Array.isArray` rather than a length or a property: what went wrong was the *kind* of
+            // thing returned, and every assertion about its contents passed right up to `.map`.
+            expect({ name, isArray: Array.isArray(value) }).toEqual({ name, isArray: true })
+        }
+        await runtime.stop()
+    })
+})

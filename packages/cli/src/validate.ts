@@ -25,6 +25,7 @@ import {
     windowReport,
 } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
+import { describeOrigin, envProvenance } from "#lib/config-env"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { BUILT_IN_PLUGINS, CHANNELS, TOOL_PROVIDERS } from "#lib/providers"
 import type { ValidateOptions } from "#lib/schema"
@@ -182,10 +183,28 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
         // already on the line above, and repeating it says a second model was checked.
         const perRole = windows.filter((entry) => entry.role === entry.configuredAs)
 
+        // Where each env-backed value came from, and **only when that is surprising**: the agent's
+        // own `.env` winning is what an author expects, so `describeOrigin` says nothing about it. A
+        // note on every line is a note nobody reads; a note on the line that would otherwise have
+        // to be guessed at is the whole point. The container case is the one this exists for —
+        // compose passes `MODEL_ID` as process environment, which beats the `.env` `init` wrote, and
+        // until now nothing said so.
+        const provenance = envProvenance({
+            manifestPath: options.manifestPath,
+            rawModelId: header.modelId,
+            apiKeyEnv: manifest.model.main.apiKeyEnv,
+        })
+            .flatMap((row) => {
+                const note = describeOrigin(row.origin)
+                return note === undefined ? [] : [`  env          ${row.variable} — ${note}\n`]
+            })
+            .join("")
+
         process.stdout.write(
             `ok  ${loaded.path}\n` +
                 `  id           ${manifest.id}${manifest.name === undefined ? "" : ` (${manifest.name})`}\n` +
                 `  models       ${roles}\n` +
+                provenance +
                 `  window       ${loaded.window} ${describeWindowSource(windows[0]?.window)} (reserveOutput ${manifest.context.reserveOutput}, maxOutput ${capabilities.maxOutput})\n` +
                 (perRole.length < 2
                     ? ""

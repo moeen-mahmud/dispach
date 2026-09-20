@@ -17,6 +17,8 @@ import type { ChatMessage, ToolCallRequest } from "../../model/provider.ts"
 import { parseSessionKey } from "../session-key.ts"
 import type {
     AgentFootprint,
+    AgentStateRecord,
+    AgentStateStore,
     ArtifactRecord,
     ArtifactStore,
     DeliveryRecord,
@@ -572,6 +574,7 @@ interface LeaseRow {
     mode: string
     started_at: string
     heartbeat_at: string
+    base_url: string | null
 }
 
 function toLease(row: LeaseRow): LeaseRecord {
@@ -582,6 +585,26 @@ function toLease(row: LeaseRow): LeaseRecord {
         mode: row.mode as RuntimeMode,
         startedAt: row.started_at,
         heartbeatAt: row.heartbeat_at,
+        // Conditional, because `exactOptionalPropertyTypes` distinguishes absent from `undefined`
+        // and a caller testing `"baseUrl" in lease` would otherwise read a REPL's lease as having
+        // an address.
+        ...(row.base_url === null ? {} : { baseUrl: row.base_url }),
+    }
+}
+
+interface AgentStateRow {
+    agent_id: string
+    enabled: number
+    disabled_at: string | null
+    reason: string | null
+}
+
+function toAgentState(row: AgentStateRow): AgentStateRecord {
+    return {
+        agentId: row.agent_id,
+        enabled: row.enabled === 1,
+        disabledAt: row.disabled_at ?? undefined,
+        reason: row.reason ?? undefined,
     }
 }
 
@@ -593,6 +616,7 @@ export class SqliteStore implements Store {
     readonly turns: TurnStore
     readonly outbox: OutboxStore
     readonly leases: LeaseStore
+    readonly agentState: AgentStateStore
     readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
@@ -811,7 +835,12 @@ export class SqliteStore implements Store {
                  VALUES (?, ?, ?, ?, ?, ?)
                  ON CONFLICT (agent_id) DO UPDATE SET
                      runtime_id = excluded.runtime_id, pid = excluded.pid, mode = excluded.mode,
-                     started_at = excluded.started_at, heartbeat_at = excluded.heartbeat_at`,
+                     started_at = excluded.started_at, heartbeat_at = excluded.heartbeat_at,
+                     -- Cleared, not carried: a takeover inherits the row, so leaving the old
+                     -- holder's address on it would leave stop posting at a dead process, or at
+                     -- whatever has since been given that port, which is worse than failing.
+                     -- LeaseStore.publish writes the new one once this holder has actually bound.
+                     base_url = NULL`,
             ),
             leaseBeat: db.prepare(
                 "UPDATE runtime_leases SET heartbeat_at = ? WHERE agent_id = ? AND runtime_id = ?",
@@ -819,6 +848,34 @@ export class SqliteStore implements Store {
             leaseRelease: db.prepare(
                 "DELETE FROM runtime_leases WHERE agent_id = ? AND runtime_id = ?",
             ),
+            // Every lease this runtime holds, in one statement: a host binds one socket, so the
+            // address is a fact about the process rather than about each agent.
+            leasePublish: db.prepare("UPDATE runtime_leases SET base_url = ? WHERE runtime_id = ?"),
+
+            agentStateGet: db.prepare("SELECT * FROM agent_state WHERE agent_id = ?"),
+            agentStateList: db.prepare("SELECT * FROM agent_state ORDER BY agent_id"),
+            // `disabled_at` is only set when the row is being *created* or when it was enabled, so
+            // asking twice keeps the first stamp — the interesting moment is when it stopped.
+            agentStateDisable: db.prepare(
+                `INSERT INTO agent_state (agent_id, enabled, disabled_at, reason)
+                 VALUES (?, 0, ?, ?)
+                 ON CONFLICT (agent_id) DO UPDATE SET
+                     enabled = 0,
+                     disabled_at = CASE WHEN agent_state.enabled = 1
+                                        THEN excluded.disabled_at ELSE agent_state.disabled_at END,
+                     reason = excluded.reason`,
+            ),
+            // `disabled_at` and `reason` survive an enable deliberately: they are the record of
+            // what happened, and a row that forgets it was ever off cannot answer "why was this
+            // down last Tuesday".
+            agentStateEnable: db.prepare(
+                `INSERT INTO agent_state (agent_id, enabled) VALUES (?, 1)
+                 ON CONFLICT (agent_id) DO UPDATE SET enabled = 1`,
+            ),
+            agentStateDisabled: db.prepare(
+                "SELECT agent_id FROM agent_state WHERE enabled = 0 ORDER BY agent_id",
+            ),
+            agentStateDeleteAll: db.prepare("DELETE FROM agent_state WHERE agent_id = ?"),
 
             outboxInsert: db.prepare(
                 `INSERT INTO outbox
@@ -1401,6 +1458,9 @@ export class SqliteStore implements Store {
                 }),
             beat: async (agentId, runtimeId, now) =>
                 q.leaseBeat.run(now, agentId, runtimeId).changes > 0,
+            publish: async (runtimeId, baseUrl) => {
+                q.leasePublish.run(baseUrl, runtimeId)
+            },
             release: async (agentId, runtimeId) => {
                 q.leaseRelease.run(agentId, runtimeId)
             },
@@ -1807,6 +1867,46 @@ export class SqliteStore implements Store {
             lease: q.leaseGet.get(agentId) !== undefined,
         })
 
+        this.agentState = {
+            get: async (agentId) => {
+                const row = q.agentStateGet.get<AgentStateRow>(agentId)
+                return row === undefined ? undefined : toAgentState(row)
+            },
+            list: async () => q.agentStateList.all<AgentStateRow>().map(toAgentState),
+            disable: async (agentId, at, reason) => {
+                q.agentStateDisable.run(agentId, at, reason ?? null)
+                const row = q.agentStateGet.get<AgentStateRow>(agentId)
+                if (row === undefined) {
+                    // Unreachable: the insert above either created the row or updated it. Thrown
+                    // rather than defaulted, because a silent "enabled" here would report an agent
+                    // as running after a stop that did nothing.
+                    throw new Error(`agent_state row for "${agentId}" vanished after a write`)
+                }
+                return toAgentState(row)
+            },
+            enable: async (agentId) => {
+                q.agentStateEnable.run(agentId)
+                const row = q.agentStateGet.get<AgentStateRow>(agentId)
+                if (row === undefined) {
+                    throw new Error(`agent_state row for "${agentId}" vanished after a write`)
+                }
+                return toAgentState(row)
+            },
+            disabledAmong: async (agentIds) => {
+                if (agentIds.length === 0) return []
+                // Filtered in memory against one indexed scan rather than built as an `IN (?, ?, …)`
+                // with a variable parameter count: the disabled set is the small one by design —
+                // most agents have no row at all — and a prepared statement cannot be reused across
+                // differing parameter counts, which is the whole reason every other query here is
+                // prepared once.
+                const wanted = new Set(agentIds)
+                return q.agentStateDisabled
+                    .all<{ agent_id: string }>()
+                    .map((row) => row.agent_id)
+                    .filter((agentId) => wanted.has(agentId))
+            },
+        }
+
         this.agentFootprint = async (agentId) => footprint(agentId)
 
         this.purgeAgent = async (agentId) =>
@@ -1829,6 +1929,11 @@ export class SqliteStore implements Store {
                 // are already counted. Deleted for the reason inbound keys are — rows keyed to an
                 // agent that no longer exists.
                 q.handoffDeleteAll.run(agentId)
+                // Also not in the footprint, and deleted for the reason migration 15 gives: this
+                // is the table `kv` should have been, so the delete that `kv` could never have is
+                // the whole argument for the column. A state row surviving its agent would make a
+                // re-provisioned agent of the same name silently arrive switched off.
+                q.agentStateDeleteAll.run(agentId)
                 scheduleQ.deleteAll.run(agentId)
                 return went
             })

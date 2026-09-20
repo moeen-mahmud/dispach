@@ -6,7 +6,15 @@ This is the *guide*. [`04-SPEC-WIRE.md`](04-SPEC-WIRE.md) is the **contract** �
 event, every error code, checked against the code by `packages/server/test/spec.test.ts`. When the
 two disagree, the spec is right and this file is stale.
 
-> **Why there is no generated reference.** Phase 11 listed "API docs generated from types" as a
+> **There is a generated reference now, at `/docs`.** The paragraph below still holds and is why:
+> it argues against a *hand-written* description, and against a generator that produces a third
+> account of a surface nobody checks. `openapi.json` is neither — its paths come from the router
+> table and its bodies from the request schemas, and `spec.test.ts` fails when a registered route
+> has no summary or a summary has no route. What has **not** changed is that response shapes are
+> `@dispach/client`'s job: the document carries statuses and the error shape, and the types carry
+> the rest. See decision 11.218.
+>
+> **Why there is no *typedoc* reference.** Phase 11 listed "API docs generated from types" as a
 > deliverable, and this answers it deliberately without a generator. A typedoc build is a
 > dependency with its own release cadence producing a third description of a surface that already
 > has two — the spec, which is now machine-checked, and `@dispach/client`, whose types *are* the
@@ -343,7 +351,7 @@ Worth knowing before you design around it, because each of these is a decision r
 | **No outbound peer calls.** | `from` is the *inbound* half. Your agent reaching another one is a tool, not a route — and `allowFrom` is inbound-only, which is a separate recorded trap. |
 | **No per-sender authorisation.** | `from` says who sent a message and confers nothing. A recipient acts under its **own** owner's grants, whoever asked. A sender cannot widen what your agent may do by declaring itself. |
 | **No OpenAI-compatible surface.** | `/v1` is its own protocol. Nothing here answers `/v1/chat/completions`. |
-| **One agent per container.** | `serve` takes one manifest. A second agent is a second service. |
+| **One agent per container, by choice.** | `serve` accepts several manifests and one process hosts N agents — that is decision 8.5 and always was. The *image* runs one, because a shared process means one agent's runaway `exec` starves the others. A second agent is a second service. |
 | **No approval history.** | A pending approval lives in the serving process's memory, because the thing it resolves is a suspended turn *in that process*. A row surviving a restart would describe a question nobody is still waiting on. |
 | **No live reload.** | An agent's configuration is fixed for its process lifetime — the tool catalogue resolves once and the cached prompt prefix depends on it staying fixed. `POST /reload` answers `409` and says so. |
 | **No CORS.** | The web UI is same-origin. A default `*` would be catastrophic on a loopback bind, where the spec permits omitting the token entirely. |

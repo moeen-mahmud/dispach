@@ -1476,8 +1476,8 @@ Never claim a performance property without a number in `evals/` and a script to 
   (`@<oldslug>/cli`) that no longer names any package — so the old command runs and the new one does
   not exist, which reads as the rename having failed. And `~/.<oldslug>/` is orphaned rather than
   migrated, taking the sandbox, the store and the skills cache with it. Corollary: **rename with the
-  script, never by hand.** The hand edit lowercased `CASTELLAN_API_TOKEN` to `dispach_API_TOKEN` and
-  the display name to `dispach`, both of which the script's `/CASTELLAN/g` and title-case
+  script, never by hand.** The hand edit lowercased `DISPACH_API_TOKEN` to `dispach_API_TOKEN` and
+  the display name to `dispach`, both of which the script's `/DISPACH/g` and title-case
   substitutions get right — and it left the etymology epigraph reading "a dispach holds and governs a
   keep", which no substitution can fix because it was a sentence about the *old* word's meaning.
 - **A block whose slot is missing from `assembleContext`'s ordering list is built, charged for, and

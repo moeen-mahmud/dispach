@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Runtime } from "@dispach/core"
-import { createHandler } from "../src/handler.ts"
+import { createHandler, type Provisioner } from "../src/handler.ts"
 import type { ClaimTicket } from "../src/keys.ts"
 
 export const TOKEN = "test-token-abcdef"
@@ -156,6 +156,35 @@ export async function harness(
         manifest?: string
         /** The one-time bootstrap ticket, for the claim path. */
         claim?: ClaimTicket
+        /**
+         * The bind, for the origin guard.
+         *
+         * Omitted by every other test on purpose: a handler built without it does no origin
+         * checking, which is what lets a constructed `Request` with no `Host` header reach a route
+         * at all. A real server always has one; `new Request(url)` does not.
+         */
+        origin?: {
+            host: string
+            allowedOrigins?: readonly string[]
+            allowedHosts?: readonly string[]
+        }
+        /**
+         * How `POST /v1/agents/:id/start` finds a manifest for an agent this host is not holding.
+         *
+         * Omitted by every other test, which is the state an embedder is in and the state the
+         * container image is in deliberately — so the route answers `501` and says why rather than
+         * writing a row and reporting a success that hosts nothing.
+         */
+        resolveAgent?: (agentId: string) => string | undefined
+        /**
+         * The provisioner `POST /v1/agents` needs, injected the way the CLI injects the real one.
+         *
+         * Omitted by every other test, which is the state an embedder mounting this handler over
+         * its own agent store is in — so the route answers `501` and says why rather than accepting
+         * a request and writing nothing. The container is not that case: it has a provisioner and
+         * is refused by the loopback gate, because its `CMD` binds `0.0.0.0`.
+         */
+        provision?: Provisioner
     } = {},
 ) {
     const dir = workspace(options.manifest)
@@ -172,6 +201,9 @@ export async function harness(
             : { token: options.token }),
         ...(options.running === undefined ? {} : { running: options.running }),
         ...(options.claim === undefined ? {} : { claim: options.claim }),
+        ...(options.origin === undefined ? {} : { origin: options.origin }),
+        ...(options.resolveAgent === undefined ? {} : { resolveAgent: options.resolveAgent }),
+        ...(options.provision === undefined ? {} : { provision: options.provision }),
     })
 
     const call = (
