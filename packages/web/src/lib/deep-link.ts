@@ -12,8 +12,14 @@
  * been stopped since the link was made, and neither is worth mounting a page to check.
  */
 
-/** The panels the shell can show. `chat` is the one you land on. */
-export const PANELS = ["chat", "tools", "schedules", "channels", "keys"] as const
+/**
+ * The panels the shell can show. `chat` is the one you land on.
+ *
+ * `new` is the odd one: it is the only panel that *writes*, and the only one the page may land on
+ * without being asked to — a server hosting no agents has nothing else to show, and
+ * `dispach web run` with no agent points here.
+ */
+export const PANELS = ["chat", "new", "tools", "schedules", "channels", "keys"] as const
 
 export type PanelName = (typeof PANELS)[number]
 

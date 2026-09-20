@@ -74,6 +74,7 @@ export {
     ConfigError,
     type ErrorDetail,
     HarnessError,
+    isHarnessError,
     ModelError,
     ToolError,
 } from "./errors.ts"

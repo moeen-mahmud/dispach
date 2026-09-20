@@ -20,6 +20,7 @@ import {
     EVENT_TYPES,
     entryPhase,
     HarnessError,
+    isHarnessError,
     isPhased,
     keyFingerprint,
     keyLabelProblem,
@@ -206,10 +207,32 @@ export interface Provisioner {
 export interface ProvisionStepWire {
     readonly step: string
     readonly prompt: string
+    /**
+     * The default, as a value a client may send back — never a menu index.
+     *
+     * A client renders `choices` as a control and needs a default that is one of them. The
+     * implementation resolves it through the same validator the route applies to the answer, so a
+     * served default cannot be a value `POST /v1/agents` would reject.
+     */
     readonly fallback: string
     readonly optional: boolean
     /** Mask it. A secret answer is written once at `0600` and never read back by any route. */
     readonly secret: boolean
+    /**
+     * What opens this step, absent when it is always asked.
+     *
+     * The wizard's walk skips a question whose opening answer was not given, and that is a
+     * condition a form cannot see. Declaring it lets a client render the whole question set and
+     * reveal a field when the choice that opens it is picked, instead of re-implementing the walk —
+     * which is the second-hand-kept-list shape this route exists to prevent.
+     *
+     * **Transitive:** a step is askable when its requirement is met *and* the step it names is
+     * itself askable. Only the nearest opening choice is recorded.
+     */
+    readonly requires?: {
+        readonly step: string
+        readonly value: string
+    }
     readonly choices?: readonly {
         readonly value: string
         readonly label: string
@@ -480,7 +503,7 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 // The runtime's own refusals carry the field and the remedy — a team member has no
                 // manifest of its own, a busy agent names its in-flight count. Paraphrasing either
                 // here would replace a precise answer with a vague one.
-                if (error instanceof HarnessError) {
+                if (isHarnessError(error)) {
                     return fail(
                         {
                             code: error.code,
@@ -638,7 +661,7 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
         } catch (error) {
             // The implementation knows why far better than this route does, so its hint passes
             // through rather than being paraphrased.
-            if (error instanceof HarnessError) return fail(error.toDetail(), 400)
+            if (isHarnessError(error)) return fail(error.toDetail(), 400)
             throw error
         }
 
@@ -668,14 +691,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                     dir: created.dir,
                     files: created.files,
                     adopted: [],
-                    error:
-                        error instanceof HarnessError
-                            ? error.toDetail()
-                            : {
-                                  code: "provision_adopt_failed",
-                                  message: error instanceof Error ? error.message : String(error),
-                                  hint: "The agent was written and is not running. Fix what the message names and `start` it, or restart the host.",
-                              },
+                    error: isHarnessError(error)
+                        ? error.toDetail()
+                        : {
+                              code: "provision_adopt_failed",
+                              message: error instanceof Error ? error.message : String(error),
+                              hint: "The agent was written and is not running. Fix what the message names and `start` it, or restart the host.",
+                          },
                 },
                 201,
             )
@@ -708,7 +730,7 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
             try {
                 await runtime.dispose(id, "stopped")
             } catch (error) {
-                if (error instanceof HarnessError && error.code === "agent_turn_in_flight") {
+                if (isHarnessError(error) && error.code === "agent_turn_in_flight") {
                     return fail(error.toDetail(), 409)
                 }
                 throw error
@@ -773,7 +795,7 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 new Date(options.now?.() ?? Date.now()).toISOString(),
                 "start failed",
             )
-            if (error instanceof HarnessError) return fail(error.toDetail(), 400)
+            if (isHarnessError(error)) return fail(error.toDetail(), 400)
             throw error
         }
     })
@@ -1794,14 +1816,13 @@ async function writeSchedule(
         runtime.scheduler.changed()
         return json(saved, existing === undefined ? 201 : 200)
     } catch (error) {
-        const detail =
-            error instanceof HarnessError
-                ? error.toDetail()
-                : {
-                      code: "schedule_invalid",
-                      message: error instanceof Error ? error.message : String(error),
-                      hint: "See docs/02-SPEC-MANIFEST.md for the schedule fields.",
-                  }
+        const detail = isHarnessError(error)
+            ? error.toDetail()
+            : {
+                  code: "schedule_invalid",
+                  message: error instanceof Error ? error.message : String(error),
+                  hint: "See docs/02-SPEC-MANIFEST.md for the schedule fields.",
+              }
         return fail(detail, 400)
     }
 }
@@ -1908,7 +1929,7 @@ async function runHandler(handler: Handler, context: RequestContext): Promise<Re
     try {
         return await handler(context)
     } catch (error) {
-        if (error instanceof HarnessError) return fail(error.toDetail(), 400)
+        if (isHarnessError(error)) return fail(error.toDetail(), 400)
         return fail(
             {
                 code: "internal_error",

@@ -551,3 +551,95 @@ td.revoked {
     font-size: 12px;
     margin: 0 0 6px;
 }
+
+/* ─── provisioning ──────────────────────────────────────────────────────────
+ *
+ * `select` inherits `input`'s box rather than getting its own, so a choice and a text answer are
+ * the same height in a column of mixed fields — a form where the selects are two pixels shorter
+ * reads as two forms.
+ *
+ * `max-width: 60ch` matches `.empty`: a text field that runs the width of a 27-inch display is
+ * harder to read than one that stops, and every field here holds a short answer.
+ */
+select {
+    font: inherit;
+    color: inherit;
+    background: var(--ground);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    width: 100%;
+}
+select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.provision {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 60ch;
+}
+.provision > button[type="submit"] {
+    align-self: flex-start;
+}
+
+.field label {
+    display: block;
+    font-size: 12px;
+    color: var(--dim);
+    margin-bottom: 5px;
+}
+/*
+ * The border, not a colour on the text: the marker has to be findable in a column of eighteen
+ * fields, and a red word under one of them is not. `.error` still carries the sentence.
+ */
+.field.invalid input,
+.field.invalid select {
+    border-color: var(--bad);
+}
+
+.sub {
+    color: var(--dim);
+    font-size: 11px;
+}
+.error {
+    color: var(--bad);
+    font-size: 13px;
+    max-width: 60ch;
+}
+.ok {
+    color: var(--ok);
+    font-size: 13px;
+}
+
+.created {
+    max-width: 66ch;
+    font-size: 13px;
+}
+.created h3 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 10px;
+}
+.created p {
+    margin: 0 0 10px;
+}
+/*
+ * Framed in `--warn` rather than `--bad`, and that distinction is the message: the agent was
+ * created and is running. A blank secret is the one thing left, and `.env` is a protected path so
+ * no route can finish it — which makes this the only place anybody is told.
+ */
+.blank-secrets {
+    border: 1px solid var(--warn);
+    border-radius: 6px;
+    padding: 11px 13px;
+    margin: 14px 0;
+}
+.blank-secrets p {
+    margin: 0 0 6px;
+}
+.blank-secrets p:last-child {
+    margin: 0;
+}

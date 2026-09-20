@@ -69,6 +69,8 @@ and WebSocket surfaces can return:
 | `provision_answer_invalid` | 400 | One answer failed its step's validation, or was not a string. Carries the field. |
 | `provision_unknown_answer` | 400 | A key that is not a question this runtime asks. |
 | `provision_directory_refused` | 400 | `dir` or `dirChoice` over the wire. The sandbox decides; see above. |
+| `provision_daemon_refused` | 400 | `daemon` over the wire. The host answering the request is already the daemon. |
+| `provision_skills_search_refused` | 400 | `skills: "find"`, which needs an interactive picker. Points at `skills install`. |
 | `provision_adopt_failed` | — | Returned *inside* a `201`: the agent was written and is not running. |
 | `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting — an embedder over its own agent store. The container has the lookup, and `start` works there. |
 | `agent_turn_in_flight` | 409 | `stop` was asked for an agent with a turn running. Tearing it down would close its store under a turn recorded as running. |
@@ -156,11 +158,31 @@ armed — without disturbing anything else the process hosts. A restart would dr
 agent's in-flight turn to add one, which is the same reason `reload` answers 501.
 
 `answers` is a subset: every step left out takes its default, exactly as `init --yes` does with
-flags. `GET /v1/provision` lists each step with its prompt, default, choices and a `secret` flag,
-and it is generated from the same walk the terminal wizard performs — so a browser form cannot go
-stale against the questions. `dir` and `dirChoice` are **refused**: a provisioned agent lands in the
-host's sandbox, because where an agent lives on disk is the operator's decision rather than a
-caller's.
+flags. `GET /v1/provision` lists each step with its prompt, default, choices, a `secret` flag and a
+`requires`, and it is generated from the same walk the terminal wizard performs — so a browser form
+cannot go stale against the questions.
+
+```
+{ step, prompt, fallback, optional, secret, requires?: {step, value}, choices?: [{value, label, hint?}] }
+```
+
+**`fallback` is always a value you may send back.** For a step with `choices` it is one of their
+`value`s, never a menu index — the wizard's own internal default for a menu is a 1-based number, and
+it is resolved through the same validator this route applies to an answer before being served.
+
+**`requires` says what opens a step, and is evaluated transitively.** The walk skips a question whose
+opening answer was not given, which is a condition a form cannot see; declaring it lets a client
+render the whole set and reveal a field when the choice that opens it is picked. Only the **nearest**
+opening choice is recorded, so a step is askable when its requirement is met *and* the step it names
+is itself askable. A `requires` naming a step absent from the list means the field must be hidden.
+
+Three things are **refused** rather than accepted. `dir` and `dirChoice`, because a provisioned agent
+lands in the host's sandbox and where an agent lives on disk is the operator's decision. `daemon`,
+because this host is already hosting what you are creating — `adopted` in the response *is* that
+answer — and a route that wrote a service unit would be a web page installing a background process.
+And `skills: "find"`, which is an interactive catalogue picker rather than an answer: over the wire it
+would install nothing and report success. None of the three appears in the served list, because a
+field that cannot be submitted is worse than a missing one.
 
 **`201` with `adopted: []` and an `error` is a success, not a failure.** The agent is on disk either
 way, so a failed adoption is not a failed creation — reporting the request as failed would send

@@ -112,6 +112,97 @@ describe("the step list a client renders", () => {
     })
 })
 
+describe("the branches a single walk cannot reach", () => {
+    const steps = provisionSteps(defaults())
+    const named = (name: string) => steps.find((step) => step.step === name)
+
+    test("a conditional step is served, and declares what opens it", () => {
+        /**
+         * Following the default path alone lists thirteen steps and **omits every credential but
+         * the model key** — `nextQuestion` skips a question whose opening answer was not given, so
+         * `telegramToken` is never reached from `telegram: none`. A browser built on that could ask
+         * for a Telegram agent and not for its token, and would write an agent whose `.env` has to
+         * be filled at a terminal before it can start.
+         */
+        expect(named("telegramToken")?.requires).toEqual({
+            step: "telegram",
+            value: "connected",
+        })
+        expect(named("telegramAllow")?.requires).toEqual({
+            step: "telegram",
+            value: "connected",
+        })
+        expect(named("composioKey")?.requires).toEqual({
+            step: "composio",
+            value: "connected",
+        })
+        // `webBackend` and `webKey` are both opened by the same answer, and neither by the other:
+        // a chain that attributed the key to the backend would hide it behind a second choice.
+        expect(named("webBackend")?.requires).toEqual({ step: "web", value: "search" })
+        expect(named("webKey")?.requires).toEqual({ step: "web", value: "search" })
+    })
+
+    test("a step on the default path declares no requirement", () => {
+        // Or a client would hide the whole form waiting for a condition nothing can satisfy.
+        for (const name of ["user", "name", "preset", "model", "apiKey", "system", "skills"]) {
+            expect(named(name)?.requires).toBeUndefined()
+        }
+    })
+
+    test("every secret the wizard can ask for is reachable", () => {
+        /**
+         * The real assertion of the stage. Three of the four secrets are conditional, so the
+         * single-path walk served exactly one of them — and the one thing that stops a provisioned
+         * agent working is an empty credential.
+         */
+        const reachable = new Set(steps.map((step) => step.step))
+        for (const secret of SECRET_STEPS) {
+            expect(reachable.has(secret)).toBe(true)
+        }
+        expect(steps.filter((step) => step.secret).length).toBe(SECRET_STEPS.size)
+    })
+
+    test("asking order survives being discovered out of order", () => {
+        // A branch's finds are discovered after the default path has run past them, and "in asking
+        // order" is what the wire promises. Restored from `STEP_ORDER`, which is the authority.
+        const names = steps.map((step) => step.step)
+        expect(names.indexOf("telegramToken")).toBeGreaterThan(names.indexOf("telegram"))
+        expect(names.indexOf("telegramToken")).toBeLessThan(names.indexOf("server"))
+        expect(names.indexOf("webBackend")).toBeGreaterThan(names.indexOf("web"))
+        expect(names.indexOf("webKey")).toBeLessThan(names.indexOf("composio"))
+    })
+
+    test("the default a client is given is a value it may send back", () => {
+        /**
+         * **Found by building the form.** A `Question` for a menu carries `"1"` — a 1-based index
+         * that `validateAnswer` accepts from a terminal and that matches no `choices[].value` at
+         * all, so a `<select>` built from the served choices had no selectable default.
+         *
+         * The deeper half: the walk fed that index back to *itself*, `presetById("1")` answered
+         * `undefined`, and `model` and `baseUrl` were therefore served with **empty** defaults
+         * where the terminal offers a real model id and endpoint.
+         */
+        for (const step of steps) {
+            if (step.choices === undefined) continue
+            expect(step.choices.map((choice) => choice.value)).toContain(step.fallback)
+        }
+        expect(named("model")?.fallback).not.toBe("")
+        expect(named("baseUrl")?.fallback).toMatch(/^https:\/\//)
+    })
+
+    test("what the API cannot do is not offered", () => {
+        const names = steps.map((step) => step.step)
+        // `daemon` was in `FLAG_FOR`, so it validated and landed in `answers` — and only `init.ts`
+        // ever reads it, so the route answered 201 and installed nothing.
+        expect(names).not.toContain("daemon")
+        expect(names).not.toContain("dir")
+        expect(names).not.toContain("dirChoice")
+        // `skills: find` is a screen, not an answer: over the wire it wrote `skills/.keep`,
+        // byte-identical to `none`, while its own label promises a catalogue search.
+        expect(named("skills")?.choices?.map((choice) => choice.value)).toEqual(["starter", "none"])
+    })
+})
+
 describe("creating an agent from a partial answer set", () => {
     test("defaults fill the rest, and the files land in the sandbox", () => {
         const base = defaults()
@@ -179,6 +270,62 @@ describe("what an API caller may not decide", () => {
             // asked is the class of surprise this repo writes decisions about, and honouring it
             // would write wherever it was pointed.
             expect((error as HarnessError).code).toBe("provision_directory_refused")
+        }
+    })
+
+    test("a step nothing acts on is refused rather than reported as done", () => {
+        /**
+         * `daemon` validated, landed in `answers`, and was read by **nobody** —
+         * `POST /v1/agents {"answers":{"daemon":"service"}}` answered `201` and installed no
+         * service. Hard rule 8's shape from inside a route: a caller that asked for a background
+         * process was told it had one.
+         *
+         * It is also the question a running host has already answered. The response's `adopted`
+         * field *is* "yes, it is running in the background".
+         */
+        let error: unknown
+        try {
+            provisionAgent({
+                answers: { user: "Ada", name: "svc", telegram: "connected", daemon: "service" },
+                defaults: defaults(),
+            })
+        } catch (caught) {
+            error = caught
+        }
+        expect((error as HarnessError).code).toBe("provision_daemon_refused")
+        expect((error as HarnessError).field).toBe("daemon")
+        expect((error as HarnessError).hint).toContain("adopted")
+    })
+
+    test("a choice only a terminal can honour is refused, and says which", () => {
+        /**
+         * `skills: find` mounts a catalogue picker and writes the chosen refs into `skillsPick`.
+         * Over the wire it produced `skills/.keep` — indistinguishable from `none` — and reported
+         * success, while the choice's own label promises a search of 440+ skills.
+         *
+         * Refused **before** `validateAnswer`, which accepts it: it is a real answer to a real
+         * question, and reporting it as an invalid value would be a lie about why.
+         */
+        let error: unknown
+        try {
+            provisionAgent({
+                answers: { user: "Ada", name: "finder", skills: "find" },
+                defaults: defaults(),
+            })
+        } catch (caught) {
+            error = caught
+        }
+        expect((error as HarnessError).code).toBe("provision_skills_search_refused")
+        expect((error as HarnessError).field).toBe("skills")
+        // And the two answers it *can* honour still work, or the refusal above is a regression
+        // rather than a fix.
+        for (const skills of ["starter", "none"]) {
+            expect(
+                provisionAgent({
+                    answers: { user: "Ada", name: `ok-${skills}`, skills },
+                    defaults: defaults(),
+                }).agentId,
+            ).toBe(`ok-${skills}`)
         }
     })
 

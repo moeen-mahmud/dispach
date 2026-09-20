@@ -20,6 +20,8 @@ import type {
     AgentClient,
     DispachClient,
     PendingApproval,
+    ProvisionedAgentLike,
+    ProvisionOfferLike,
     ScheduleRecord,
     SessionSummary,
     ToolSummary,
@@ -37,7 +39,9 @@ import {
     resolveCredential,
 } from "./lib/auth.ts"
 import { hrefFor, type PanelName, placeFrom } from "./lib/deep-link.ts"
+import { initialAnswers, missingAnswers, payloadFor } from "./lib/provision-form.ts"
 import { EMPTY, emptyFor, reduce, type Transcript, withUser } from "./lib/transcript.ts"
+import { Onboarding } from "./onboarding.tsx"
 import {
     AgentList,
     type AgentRow,
@@ -195,6 +199,7 @@ type Panel = PanelName
 
 /** What the bar says for a panel that is not the chat. Keyed, so a new panel needs a title. */
 const TITLES: Readonly<Record<Exclude<Panel, "chat">, string>> = {
+    new: "New agent",
     tools: "Tools",
     schedules: "Schedules",
     channels: "Channels",
@@ -281,7 +286,26 @@ function Workspace(props: {
                 setAgents(agents)
                 const running = agents.filter((entry) => entry.status !== "disabled")
                 const first = running.find((entry) => entry.id === asked) ?? running[0]
-                if (first === undefined) return
+                if (first === undefined) {
+                    /**
+                     * Nothing to show, so show the thing that fixes it.
+                     *
+                     * This is the shape the whole phase is for: install, open the page, create an
+                     * agent, talk to it. Without this an empty server paints a chat against no
+                     * agent — a composer whose every send is a 404 and a sidebar with one greyed
+                     * group, which reads as broken rather than as new.
+                     *
+                     * **An explicit `?panel=` wins**, because a link somebody followed says where
+                     * they meant to go and `placeFrom` cannot tell "no parameter" from
+                     * "`panel=chat`". The address bar is deliberately not rewritten: this is a
+                     * consequence of the listing being empty, not a place that was navigated to,
+                     * and a reload re-derives it.
+                     */
+                    if (new URL(window.location.href).searchParams.get("panel") === null) {
+                        setPanel("new")
+                    }
+                    return
+                }
                 setAgentId(first.id)
                 setAgentName(first.name)
                 // The dialect decides whether the token stream needs filtering, and it is known
@@ -471,6 +495,78 @@ function Workspace(props: {
     }, [agent, panel, agentGone])
 
     /**
+     * What this server will ask to create an agent, and whether it will at all.
+     *
+     * Fetched when the panel is opened, like the report panels and for the same reason — nobody is
+     * billed for a surface they do not look at. Kept once opened rather than re-fetched: the step
+     * list is generated from a walk over a fixed order, so unlike a tool catalogue or a schedule's
+     * next run it cannot change while somebody is filling the form in.
+     *
+     * **Fetched even when provisioning is refused.** `GET /v1/provision` answers with `available`
+     * and `local` precisely so a page can say *which* reason applies; a `501` or a `403` from
+     * `POST /v1/agents` would only say that it did not work, after somebody had typed a form.
+     */
+    const [offer, setOffer] = useState<ProvisionOfferLike>()
+    const [answers, setAnswers] = useState<Readonly<Record<string, string>>>({})
+    const [touched, setTouched] = useState(false)
+    const [creating, setCreating] = useState(false)
+    const [created, setCreated] = useState<ProvisionedAgentLike>()
+
+    useEffect(() => {
+        if (panel !== "new" || offer !== undefined) return
+        let cancelled = false
+        void (async () => {
+            try {
+                const next = await clientRef.current.provision()
+                if (cancelled) return
+                setOffer(next)
+                // Seeded from the server's own defaults, so the form opens on the same agent
+                // `init --yes` would write. A default resolved here would be a second answer to a
+                // question the wire already answers.
+                setAnswers(initialAnswers(next.steps))
+            } catch (caught) {
+                if (!cancelled) setError(describe(caught))
+            }
+        })()
+        return () => {
+            cancelled = true
+        }
+    }, [panel, offer])
+
+    /**
+     * Create the agent, and let the response decide what is said next.
+     *
+     * The gate is checked here as well as in the form because the form's marker is advisory: the
+     * route answers one field at a time, and three round trips to learn about three empty fields is
+     * a form that feels broken. `touched` is set first either way, so the markers appear on the
+     * attempt rather than on load.
+     *
+     * A `400` carries a `field` naming the step to fix, and it is shown as the route worded it —
+     * the implementation knows why far better than this page does, which is the same reasoning
+     * `POST /v1/agents` uses for passing `HarnessError`'s hint through untouched.
+     *
+     * **The listing is re-read on success**, not patched: `adopted` can be empty for a reason this
+     * page cannot know, and the listing is the source of truth about what is running — the same
+     * choice `startAgent` makes one function up.
+     */
+    const createAgent = useCallback(async () => {
+        if (offer === undefined) return
+        setTouched(true)
+        if (missingAnswers(offer.steps, answers).length > 0) return
+        setCreating(true)
+        setError(undefined)
+        try {
+            const result = await clientRef.current.createAgent(payloadFor(offer.steps, answers))
+            setCreated(result)
+            setAgents(await clientRef.current.agents())
+        } catch (caught) {
+            setError(describe(caught))
+        } finally {
+            setCreating(false)
+        }
+    }, [offer, answers])
+
+    /**
      * Move, and put it in the address bar.
      *
      * `replaceState` rather than `pushState`: the browser's back button would otherwise walk the
@@ -576,6 +672,21 @@ function Workspace(props: {
                     ))}
                     <div className="group">Server</div>
                     {/*
+                     * `new agent` is not in `SERVER_PANELS` and that is deliberate: those are the
+                     * read-only report panels, and this is the only surface on the page that
+                     * *writes*. It is offered whenever the panel has been opened or a link named
+                     * it, and while the offer is unknown — because hiding it until a fetch that
+                     * only happens on open has happened would mean it could never be opened.
+                     */}
+                    <button
+                        type="button"
+                        className="row-button"
+                        aria-current={panel === "new"}
+                        onClick={() => goTo({ panel: "new" })}
+                    >
+                        + new agent
+                    </button>
+                    {/*
                      * Generated from `SERVER_PANELS`, so a panel added to the union appears here
                      * with nothing to remember. A hand-kept copy of this list is the shape this
                      * repo has paid for repeatedly — `NO_MANIFEST` omitting `soul`, the wire doc's
@@ -633,6 +744,40 @@ function Workspace(props: {
                     <div className="scroll">
                         <div className="pad">
                             {error === undefined ? null : <p className="row note bad">{error}</p>}
+                            {panel === "new" ? (
+                                offer === undefined ? (
+                                    <p className="empty">reading this server's questions…</p>
+                                ) : (
+                                    <Onboarding
+                                        offer={offer}
+                                        answers={answers}
+                                        busy={creating}
+                                        touched={touched}
+                                        {...(error === undefined ? {} : { error })}
+                                        {...(created === undefined ? {} : { result: created })}
+                                        onAnswer={(step, value) =>
+                                            setAnswers((previous) => ({
+                                                ...previous,
+                                                [step]: value,
+                                            }))
+                                        }
+                                        onSubmit={() => void createAgent()}
+                                        /*
+                                         * Straight into the new agent's chat, and the listing was
+                                         * already re-read — so the picker has it and `goTo` can
+                                         * find its name. Offered only when it was adopted: an
+                                         * agent that is on disk and not running would answer 404
+                                         * on every send, which is the loop 11.224 removed.
+                                         */
+                                        onOpen={(id) => {
+                                            setCreated(undefined)
+                                            setOffer(undefined)
+                                            setTouched(false)
+                                            goTo({ agentId: id, panel: "chat" })
+                                        }}
+                                    />
+                                )
+                            ) : null}
                             {panel === "keys" ? (
                                 <Keys
                                     client={clientRef.current}

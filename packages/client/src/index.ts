@@ -409,6 +409,60 @@ export interface EventStreamOptions {
     readonly signal?: AbortSignal
 }
 
+/**
+ * One provisioning question, as `GET /v1/provision` serves it.
+ *
+ * Structural rather than imported from `@dispach/server`: the client talks to a wire, and a type
+ * dependency on the server package would make a browser bundle pull Zod in for a form.
+ */
+export interface ProvisionStepLike {
+    readonly step: string
+    readonly prompt: string
+    /** The default, already a value that may be sent back — never a menu index. */
+    readonly fallback: string
+    readonly optional: boolean
+    /** Mask it. Written once into the agent's `.env` at `0600`; no route reads it back. */
+    readonly secret: boolean
+    /**
+     * What opens this step, absent when it is always asked.
+     *
+     * Evaluate **transitively**: askable when the requirement is met *and* the step it names is
+     * itself askable. `lib/provision-form.ts` in `@dispach/web` is the reference implementation.
+     */
+    readonly requires?: { readonly step: string; readonly value: string }
+    readonly choices?: readonly {
+        readonly value: string
+        readonly label: string
+        readonly hint?: string
+    }[]
+}
+
+/** What this server will ask, and whether it can create an agent at all. */
+export interface ProvisionOfferLike {
+    /** A provisioner was injected. `false` means `POST /v1/agents` answers `501`. */
+    readonly available: boolean
+    /** This handler is on a loopback bind. `false` means the route answers `403`. */
+    readonly local: boolean
+    readonly steps: readonly ProvisionStepLike[]
+}
+
+/**
+ * What `POST /v1/agents` answers, `201` either way.
+ *
+ * `adopted` is the part worth reading: the agent is on disk whichever way this went, so a failed
+ * adoption is not a failed creation — telling somebody their request failed while a complete agent
+ * sits in the sandbox would send them to create a second one. An empty `adopted` with an `error` is
+ * "it exists and is not running", which is a different sentence and needs a different one shown.
+ */
+export interface ProvisionedAgentLike {
+    readonly id: string
+    readonly dir: string
+    /** Relative paths written, so a caller can report what it made without re-reading the disk. */
+    readonly files: readonly string[]
+    readonly adopted: readonly string[]
+    readonly error?: WireError
+}
+
 export interface DispachClient {
     agent(id: string): AgentClient
     /** Every agent this runtime hosts. */
@@ -418,6 +472,21 @@ export interface DispachClient {
     ready(): Promise<boolean>
     /** The firehose. Every event, optionally narrowed. */
     events(options?: EventStreamOptions): AsyncGenerator<EventStreamItem>
+    /**
+     * What this server will ask to create an agent.
+     *
+     * Answers even when provisioning is unavailable or remote — an empty list beside
+     * `available: false` says *why* a form cannot be offered, where a `501` would only say that one
+     * cannot.
+     */
+    provision(): Promise<ProvisionOfferLike>
+    /**
+     * Create an agent and adopt it into this host.
+     *
+     * Send a subset: anything left out takes its default, exactly as `init --yes` does with flags.
+     * A bad answer comes back as a `400` whose `field` names the step to fix.
+     */
+    createAgent(answers: Readonly<Record<string, string>>): Promise<ProvisionedAgentLike>
 }
 
 /** Narrow an event by type, so a `switch` over a stream keeps its `data` typed. */
@@ -695,6 +764,10 @@ export function createClient(options: ClientOptions): DispachClient {
                 throw error
             }
         },
+
+        provision: () => json<ProvisionOfferLike>("GET", "/v1/provision"),
+        createAgent: (answers) =>
+            json<ProvisionedAgentLike>("POST", "/v1/agents", { body: { answers } }),
 
         async *events(opts) {
             const params = new URLSearchParams()
