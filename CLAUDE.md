@@ -1476,8 +1476,8 @@ Never claim a performance property without a number in `evals/` and a script to 
   (`@<oldslug>/cli`) that no longer names any package — so the old command runs and the new one does
   not exist, which reads as the rename having failed. And `~/.<oldslug>/` is orphaned rather than
   migrated, taking the sandbox, the store and the skills cache with it. Corollary: **rename with the
-  script, never by hand.** The hand edit lowercased `CASTELLAN_API_TOKEN` to `dispach_API_TOKEN` and
-  the display name to `dispach`, both of which the script's `/CASTELLAN/g` and title-case
+  script, never by hand.** The hand edit lowercased `DISPACH_API_TOKEN` to `dispach_API_TOKEN` and
+  the display name to `dispach`, both of which the script's `/DISPACH/g` and title-case
   substitutions get right — and it left the etymology epigraph reading "a dispach holds and governs a
   keep", which no substitution can fix because it was a sentence about the *old* word's meaning.
 - **A block whose slot is missing from `assembleContext`'s ordering list is built, charged for, and
@@ -2105,6 +2105,18 @@ Never claim a performance property without a number in `evals/` and a script to 
   into a `run`-mode runtime, opening a Telegram long-poll nobody asked for. That is the exact
   surprise `startChannels` exists to prevent, and the reason a one-shot `run --input` would then
   hang on exit.
+- **`git grep` cannot see a brand in a *filename*, and neither can the rename script.** A dead
+  `packages/cli/bin/<oldslug>.js` survived the 2026-08-19 rename and sat tracked in the tree for a
+  month — unreferenced by `bin`, excluded from `files`, invisible to grep because grep searches
+  contents, and invisible to `scripts/rename-brand.ts` because that only ever rewrites contents
+  (`renameSync` appears in it zero times). The decisions log claimed "the tree was clean" the whole
+  time. The script is **not** wrong: it is correct *given* that no tracked path contains the brand,
+  which hard rule 3 already says in words and nothing enforced. `boundaries.test.ts` asserts it now,
+  over `git ls-files`. A path carrying an *old* brand stays uncatchable — nothing can enumerate names
+  the project has not chosen — so what this buys is that no future rename leaves one behind.
+  Corollary for any "is it all renamed?" question: check `git ls-files | grep -i <name>` as well as
+  `git grep -i <name>`, and check the things outside the tree too (the GitHub description, the npm
+  scope, `~/.<oldslug>/`).
 - **A tree that does not paint is invisible to everything except a screenshot.** `schedules()` in
   `packages/client` was declared `Promise<readonly ScheduleRecord[]>` while the route answers
   `{schedules: [...]}`, and nothing noticed for three phases because **nothing called it** — the

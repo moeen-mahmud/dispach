@@ -15,6 +15,7 @@ import { DAEMON_ACTIONS } from "#daemon"
 import { COMMANDS } from "#lib/commands"
 import { helpText } from "#lib/help"
 import { SESSION_COMMANDS } from "#lib/session-commands"
+import { spawnCapture } from "#lib/spawn"
 import { SKILLS_ACTIONS } from "#skills"
 
 const SRC = resolve(import.meta.dirname, "..", "src")
@@ -590,6 +591,37 @@ describe("only the rich path moves a cursor", () => {
 })
 
 describe("hard rule 3 — the brand lives in one file", () => {
+    test("no tracked path contains the brand, which is what makes the rename script correct", () => {
+        /**
+         * Hard rule 3's own words are *"no directory, type, interface, or variable contains"* the
+         * slug — and nothing enforced the **path** half until a stray file proved why it matters.
+         *
+         * A `packages/cli/bin/<oldslug>.js` survived the 2026-08-19 rename and sat in the tree for
+         * over a month: a dead launcher, unreferenced by `bin` and excluded from `files`, carrying
+         * the previous brand **in its filename**. `git grep` could not see it, because grep searches
+         * contents; and `scripts/rename-brand.ts` could not either, because it only ever rewrites
+         * file contents and never renames a path (`renameSync` appears in it zero times).
+         *
+         * That is not a defect in the script. It is only correct *given this invariant*: if no
+         * tracked path ever contains the brand, a rename has no path to rename. So the invariant is
+         * what gets asserted, and the decisions log's claim that "the tree was clean" after that
+         * rename was false by exactly one file — which is why this is a test rather than a note.
+         *
+         * A path carrying an **old** brand is not catchable here — nothing can enumerate names the
+         * project has not chosen yet. What this guarantees is that no *future* rename leaves one.
+         */
+        const tracked = spawnCapture({
+            command: "git",
+            args: ["ls-files"],
+            cwd: resolve(import.meta.dir, "..", "..", ".."),
+        })
+        expect(tracked.notFound).toBe(false)
+        const offenders = tracked.stdout
+            .split("\n")
+            .filter((path) => path !== "" && path.toLowerCase().includes(BRAND.slug.toLowerCase()))
+        expect(offenders).toEqual([])
+    })
+
     test("no source file spells the product name", () => {
         // `rename-brand.ts` rewrites `brand.ts` and package manifests. A literal anywhere else,
         // including in a comment, goes stale on the first rename.
