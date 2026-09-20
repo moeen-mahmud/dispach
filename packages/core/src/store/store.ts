@@ -345,6 +345,58 @@ export const DEFAULT_KEY_TOUCH_MS = 60_000
  * would be a record that could not be produced. That absence is the whole security property, which
  * is why it is a fact about the type rather than a rule about the queries.
  */
+/**
+ * What a scoped key is trusted with, split by *what the holder is being given* rather than by HTTP
+ * method.
+ *
+ * `chat` is separate from `write` because "talk to my agent" is the credential a platform hands an
+ * end-user, and it must not also let them rewrite that agent's schedules. `read` is every GET
+ * because a caller that can read a session can already read its messages; splitting those would be
+ * a vocabulary with no consumer. `admin` is the one that can mint further credentials, which is why
+ * it is a member rather than an implicit property of an unscoped key.
+ *
+ * The names go on the wire (`GET /v1/keys`, `POST /v1/keys`), so they are append-only in practice.
+ */
+export type Capability = "read" | "chat" | "write" | "admin"
+
+/** Every capability, for validation and for a listing that cannot go stale against the union. */
+export const CAPABILITIES: readonly Capability[] = ["read", "chat", "write", "admin"]
+
+/**
+ * How far one key reaches. **Every field absent is byte-identical to an unscoped key**, which is
+ * what makes this opt-in narrowing rather than a new authorisation model.
+ *
+ * That default is the whole reason decision 11.197 survives: a key still authenticates a *caller to
+ * a server*, `operator_keys` still has no `agent_id`, and `purgeAgent` still leaves the table alone.
+ * A scope narrows what an already-authenticated caller may reach; it does not make the credential
+ * belong to an agent.
+ *
+ * **This is not an identity system and must not be described as one.** There are no users, teams,
+ * orgs or roles here and there will not be — `docs/06-VELAOPS-INTEGRATION.md` refuses them in four
+ * places, and Better Auth stays authoritative for the consumer that needs them. A scope supplies
+ * *isolation*; `from` on `POST /messages` supplies attribution. That pair is the contribution.
+ */
+export interface KeyScope {
+    /**
+     * Agent ids this key may reach. Absent means every agent this server holds.
+     *
+     * An id naming an agent that no longer exists is **reported**, never silently matched against
+     * nothing: a credential that authenticates and reaches zero agents is the "looks live and is
+     * not" failure this repo keeps finding, and it is indistinguishable from a working key until
+     * somebody tries to use it.
+     */
+    readonly agents?: readonly string[]
+    /**
+     * A session-key prefix, with an optional trailing `*`. Absent means every session.
+     *
+     * A prefix rather than a list because a platform mints one key per end-user and their sessions
+     * are created later — an enumerated list would have to be rewritten on every new conversation.
+     */
+    readonly sessions?: string
+    /** Absent means all four. See `Capability`. */
+    readonly can?: readonly Capability[]
+}
+
 export interface OperatorKeyRecord {
     readonly keyId: string
     /** What distinguishes this credential from the others in a listing. */
@@ -357,6 +409,17 @@ export interface OperatorKeyRecord {
     readonly lastUsedAt?: string
     /** Set rather than deleted. Present means the key is dead and can never be revived. */
     readonly revokedAt?: string
+    /** Absent means unscoped — every agent, every session, all four capabilities. */
+    readonly scope?: KeyScope
+    /**
+     * When this key stops authenticating. Absent means never.
+     *
+     * A **column** rather than a field inside `scope`, because `findLive` filters on it and a
+     * caller must not be able to forget: an expired key and a revoked one are one code path and
+     * answer identically, for the same reason `findLive` hides a revoked one — "forgot to check the
+     * expiry" is an expiry that silently does nothing.
+     */
+    readonly expiresAt?: string
 }
 
 /**
@@ -377,6 +440,9 @@ export interface OperatorKeyStore {
         readonly label: string
         readonly fingerprint: string
         readonly createdAt: string
+        /** Omitted for an unscoped key, which is what every caller before 18.2 minted. */
+        readonly scope?: KeyScope
+        readonly expiresAt?: string
     }): Promise<OperatorKeyRecord>
     /**
      * The live key with this fingerprint, if any. One indexed read.
@@ -384,7 +450,7 @@ export interface OperatorKeyStore {
      * A revoked key answers `undefined` — the caller must not have to remember to check, because
      * "forgot to filter on `revoked_at`" is a revocation that silently does nothing.
      */
-    findLive(fingerprint: string): Promise<OperatorKeyRecord | undefined>
+    findLive(fingerprint: string, at: string): Promise<OperatorKeyRecord | undefined>
     /**
      * Note that a key was just used, if the stored stamp is older than `coarseMs`.
      *

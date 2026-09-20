@@ -1,11 +1,18 @@
 /**
- * Operator keys: mint, list, revoke.
+ * Operator keys: mint, list, revoke — and what each one reaches.
  *
- * The one panel that has to *say* something rather than only show it. Keys are authentication and
- * not authorisation — every key reaches every route for every agent this server holds — and the
- * plan's rule for that was "said in the UI, not discovered". `GET /v1/keys` returns the sentence in
- * its own `scope` field precisely so this page does not compose its own version, which is how one
- * client comes to describe a security property differently from another.
+ * The one panel that has to *say* something rather than only show it, and the sentence it says
+ * changed in 18.2. It used to be that every key reached every route for every agent; now an
+ * unscoped one does and a scoped one does not. `GET /v1/keys` returns that sentence in its own
+ * `scope` field precisely so this page does not compose its own version — which is how one client
+ * comes to describe a security property differently from another, and how a page comes to be
+ * confidently wrong about a credential after the server's behaviour moved underneath it.
+ *
+ * **This panel shows a scope and mints without one.** A scope builder is a form over an agent list,
+ * a session prefix, four checkboxes and an expiry, with its own render tests and its own decisions
+ * about what a blank field means — its own piece of work rather than a field appended here. What
+ * matters now is that a key minted at a terminal or by a platform is *legible* here, because a
+ * credential whose reach a person cannot see is one nobody can audit.
  */
 
 import type { DispachClient } from "@dispach/client"
@@ -18,6 +25,32 @@ interface KeyRow {
     readonly createdAt: string
     readonly lastUsedAt?: string
     readonly revokedAt?: string
+    readonly scope?: {
+        readonly agents?: readonly string[]
+        readonly sessions?: string
+        readonly can?: readonly string[]
+    }
+    readonly expiresAt?: string
+}
+
+/**
+ * What a key reaches, in one line.
+ *
+ * Absent fields say "everything" **in words** rather than by being blank: a blank cell in a column
+ * headed "reaches" reads as unknown, and the difference between "unknown" and "everything" is the
+ * whole point of the column. An expiry in the past is marked rather than hidden, for the same
+ * reason a revoked key is listed — the row is the record.
+ */
+export function reachSummary(row: KeyRow, now: number): string {
+    const parts = [
+        row.scope?.agents === undefined ? "every agent" : row.scope.agents.join(", "),
+        ...(row.scope?.sessions === undefined ? [] : [`sessions ${row.scope.sessions}`]),
+        row.scope?.can === undefined ? "all capabilities" : row.scope.can.join("+"),
+    ]
+    if (row.expiresAt !== undefined) {
+        parts.push(Date.parse(row.expiresAt) <= now ? "expired" : `until ${day(row.expiresAt)}`)
+    }
+    return parts.join(" · ")
 }
 
 export function Keys(props: {
@@ -177,6 +210,7 @@ export function Keys(props: {
                         <tr>
                             <th>Label</th>
                             <th>Created</th>
+                            <th>Reaches</th>
                             <th>Last used</th>
                             <th />
                         </tr>
@@ -188,6 +222,7 @@ export function Keys(props: {
                                     {row.label}
                                 </td>
                                 <td>{day(row.createdAt)}</td>
+                                <td className="sub">{reachSummary(row, Date.now())}</td>
                                 <td>
                                     {row.revokedAt !== undefined
                                         ? `revoked ${day(row.revokedAt)}`

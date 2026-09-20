@@ -17,6 +17,7 @@ import { join } from "node:path"
 import { Runtime } from "@dispach/core"
 import { createHandler, type Provisioner } from "../src/handler.ts"
 import type { ClaimTicket } from "../src/keys.ts"
+import type { Principal } from "../src/principal.ts"
 
 export const TOKEN = "test-token-abcdef"
 export const ENV = { MODEL_API_KEY: "sk-test" }
@@ -306,13 +307,16 @@ export async function readUntil(
  * Module-scoped because two describe blocks need it: the bridge's own frames, and the shared
  * cancel registry, which is about two surfaces agreeing and therefore cannot live inside either.
  */
-export function fakeSocket(agentId?: string, chunks = false) {
+export function fakeSocket(agentId?: string, chunks = false, principal?: Principal) {
     const sent: string[] = []
     return {
         sent,
         frames: () => sent.map((raw) => JSON.parse(raw) as { type: string; [k: string]: unknown }),
         ws: {
-            data: { agentId, chunks },
+            // `open` by default: the overwhelming majority of these tests are about framing and
+            // filtering, not about scope, and making each one state a principal would bury the two
+            // that are. The scoped ones pass one explicitly.
+            data: { agentId, chunks, principal: principal ?? { kind: "open" as const } },
             send: (message: string) => sent.push(message),
             close: () => {},
         },

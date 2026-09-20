@@ -165,11 +165,51 @@ export const ApprovalBody = z.object({
 })
 
 /** `POST /v1/keys` */
+/**
+ * How far a minted key reaches. Every field optional; **all of them absent is an unscoped key**,
+ * which is byte-identical to what `POST /v1/keys` has always produced.
+ *
+ * `expiresIn` is **relative going in and absolute coming back**. A client sending an absolute
+ * instant would be asserting agreement with this server's clock, which is exactly the thing two
+ * machines are worst at; seconds-from-now needs no agreement at all, and the response reports the
+ * `expiresAt` this server computed so the caller can see what it decided.
+ */
+export const KeyScopeBody = z.object({
+    agents: z.array(z.string().min(1)).optional().meta({
+        code: "key_scope_agents_invalid",
+        hint: 'Send { "agents": ["milo"] } — a list of agent ids. Omit it for a key that reaches every agent. An id naming no agent on this server is reported rather than silently matching nothing.',
+        description: "Agent ids this key may reach. Absent means all of them.",
+    }),
+    sessions: z.string().min(1).optional().meta({
+        code: "key_scope_sessions_invalid",
+        hint: 'Send { "sessions": "team_42:" } — a session-key prefix, with an optional trailing "*". A prefix rather than a list, because the conversations this key will cover do not exist yet when it is minted.',
+        description: "Session-key prefix. Absent means every session.",
+    }),
+    can: z
+        .array(z.enum(["read", "chat", "write", "admin"]))
+        .optional()
+        .meta({
+            code: "key_scope_can_invalid",
+            hint: 'Send { "can": ["chat", "read"] }. The four are read (every GET), chat (send a message, answer an approval, stop a turn), write (schedules, phase, clearing a session) and admin (keys, provisioning, start/stop/reload). Absent means all four; an empty array means none, and is honoured as written.',
+            description: "Capabilities this key may exercise. Absent means all four.",
+        }),
+    expiresIn: z.number().int().positive().optional().meta({
+        code: "key_scope_expires_invalid",
+        hint: 'Send { "expiresIn": 3600 } — whole seconds from now, as a number. Relative rather than an absolute instant, because that would need the caller and this server to agree about the clock; the response reports the absolute expiresAt this server computed.',
+        description: "Seconds until this key stops authenticating. Absent means never.",
+    }),
+})
+
 export const KeyBody = z.object({
     label: refuse(z.string(), {
         code: "key_label_required",
         hint: 'Send { "label": "my browser" }. A label is required rather than defaulted because it is the only thing distinguishing two credentials in a listing, and "key 2" is a name nobody can act on when deciding which to revoke.',
         description: "How this credential is shown in a listing. Required; see `keyLabelProblem`.",
+    }),
+    scope: KeyScopeBody.optional().meta({
+        code: "key_scope_invalid",
+        hint: 'Send { "scope": { "agents": ["milo"], "can": ["chat"] } }, or omit it entirely for a key that reaches everything — which is what every key minted before scopes existed does.',
+        description: "Opt-in narrowing. Absent is an unscoped key.",
     }),
 })
 

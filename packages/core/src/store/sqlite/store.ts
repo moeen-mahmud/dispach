@@ -26,6 +26,7 @@ import type {
     HandoffRecord,
     HandoffStore,
     InboundKeyClaim,
+    KeyScope,
     KVStore,
     LeaseClaim,
     LeaseRecord,
@@ -201,6 +202,9 @@ interface OperatorKeyRow {
     created_at: string
     last_used_at: string | null
     revoked_at: string | null
+    /** JSON, or null for an unscoped key. See migration 17. */
+    scope: string | null
+    expires_at: string | null
 }
 
 interface HandoffRow {
@@ -437,13 +441,43 @@ function toHandoff(row: HandoffRow): HandoffRecord {
     }
 }
 
+/**
+ * A stored scope, or `undefined` for an unscoped key **and for a row we cannot read**.
+ *
+ * Failing open looks like the wrong direction and is the right one here, narrowly: this column is
+ * written only by `issue`, from a value the route already validated, so unreadable JSON means the
+ * database was edited by hand or corrupted. The alternative — treating it as a scope that reaches
+ * nothing — turns that into a credential which authenticates and then 404s every route, which is the
+ * "looks live and is not" failure this file keeps arguing against; and treating it as a *narrow*
+ * scope invents a restriction nobody wrote. An unscoped key is at least a state somebody can see and
+ * revoke.
+ */
+function toKeyScope(raw: string | null): KeyScope | undefined {
+    if (raw === null || raw === "") return undefined
+    try {
+        const parsed: unknown = JSON.parse(raw)
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined
+        const scope = parsed as KeyScope
+        // Every field optional, so an empty object is a legitimate "scoped to nothing in
+        // particular" — which is an unscoped key by another name and is reported as one.
+        return scope.agents === undefined && scope.sessions === undefined && scope.can === undefined
+            ? undefined
+            : scope
+    } catch {
+        return undefined
+    }
+}
+
 function toOperatorKey(row: OperatorKeyRow): OperatorKeyRecord {
+    const scope = toKeyScope(row.scope)
     return {
         keyId: row.key_id,
         label: row.label,
         createdAt: row.created_at,
         ...(row.last_used_at === null ? {} : { lastUsedAt: row.last_used_at }),
         ...(row.revoked_at === null ? {} : { revokedAt: row.revoked_at }),
+        ...(scope === undefined ? {} : { scope }),
+        ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
     }
 }
 
@@ -1022,14 +1056,20 @@ export class SqliteStore implements Store {
             ),
             handoffDeleteAll: db.prepare("DELETE FROM handoffs WHERE agent_id = ?"),
             keyInsert: db.prepare(
-                `INSERT INTO operator_keys (key_id, label, fingerprint, created_at)
-                 VALUES (?, ?, ?, ?)`,
+                `INSERT INTO operator_keys (key_id, label, fingerprint, created_at, scope, expires_at)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
             ),
             // `revoked_at IS NULL` is in the statement rather than in a caller's filter: a
             // revocation that depends on every reader remembering to check is a revocation that
             // silently does nothing the first time somebody forgets.
+            // The expiry rides the same statement as the revocation, and for the same reason: a
+            // filter a caller has to remember is one that silently does nothing the first time
+            // somebody forgets. The two are therefore indistinguishable to a caller, which is also
+            // the right answer on the wire — neither tells an attacker anything about the other.
             keyByFingerprint: db.prepare(
-                "SELECT * FROM operator_keys WHERE fingerprint = ? AND revoked_at IS NULL",
+                `SELECT * FROM operator_keys
+                  WHERE fingerprint = ? AND revoked_at IS NULL
+                    AND (expires_at IS NULL OR expires_at > ?)`,
             ),
             keyGet: db.prepare("SELECT * FROM operator_keys WHERE key_id = ?"),
             // The coarse write, expressed as a predicate rather than a read-then-write: two
@@ -1708,15 +1748,27 @@ export class SqliteStore implements Store {
 
         this.operatorKeys = {
             issue: async (record) => {
-                q.keyInsert.run(record.keyId, record.label, record.fingerprint, record.createdAt)
+                q.keyInsert.run(
+                    record.keyId,
+                    record.label,
+                    record.fingerprint,
+                    record.createdAt,
+                    record.scope === undefined ? null : JSON.stringify(record.scope),
+                    record.expiresAt ?? null,
+                )
                 return {
                     keyId: record.keyId,
                     label: record.label,
                     createdAt: record.createdAt,
+                    ...(record.scope === undefined ? {} : { scope: record.scope }),
+                    ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
                 }
             },
-            findLive: async (fingerprint) => {
-                const row = q.keyByFingerprint.get<OperatorKeyRow>(fingerprint)
+            // `at` from the caller, never `Date.now()` here — the recorded rule for every timestamp
+            // this store compares against, learned from an outbox whose tests passed or failed
+            // depending on the time of day.
+            findLive: async (fingerprint, at) => {
+                const row = q.keyByFingerprint.get<OperatorKeyRow>(fingerprint, at)
                 return row === undefined ? undefined : toOperatorKey(row)
             },
             touch: async (keyId, at, coarseMs = DEFAULT_KEY_TOUCH_MS) => {

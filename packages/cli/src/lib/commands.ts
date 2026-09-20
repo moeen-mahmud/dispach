@@ -704,6 +704,82 @@ export const COMMANDS: readonly CommandSpec[] = [
         ],
     },
     {
+        /**
+         * Operator credentials, from a terminal.
+         *
+         * **Not `keys`**, which is taken by the keyboard diagnostic below — two unrelated meanings
+         * under one verb costs somebody a confused minute every time they reach for either. `token`
+         * loses to `server.tokenEnv`, a different credential this command can neither mint nor
+         * revoke. `credential` is the word the spec and the store already use.
+         *
+         * `needsServer` is **true**: a credential belongs to a server rather than to a file, and
+         * this is an HTTP client. Writing the store directly would bypass the label rule, the scope
+         * validation and the refusal of a scope naming an agent that does not exist — the two
+         * surfaces would then disagree about what a valid credential is.
+         */
+        name: "credential",
+        // Minting a credential from inside a chat would print a secret into a transcript that is
+        // then stored, indexed and retrievable. The one place it must not appear.
+        inSession: "hidden",
+        needsServer: true,
+        summary: "mint, list and revoke operator credentials, optionally scoped",
+        args: [
+            {
+                name: "action",
+                required: true,
+                help: "what to do",
+                choices: [
+                    { value: "create", help: "mint one and print the secret, once" },
+                    { value: "list", help: "every credential, live and revoked, with its scope" },
+                    { value: "revoke", help: "kill one permanently" },
+                ],
+            },
+            {
+                name: "keyId",
+                required: false,
+                help: "which credential, for revoke (`credential list` prints the ids)",
+            },
+        ],
+        flags: [
+            {
+                name: "label",
+                kind: "string",
+                placeholder: "text",
+                help: "how it is shown in a listing — required for create",
+            },
+            {
+                name: "agents",
+                kind: "string",
+                placeholder: "a,b",
+                help: "narrow it to these agents",
+                defaultHelp: "every agent",
+            },
+            {
+                name: "sessions",
+                kind: "string",
+                placeholder: "prefix",
+                help: "narrow it to session keys starting with this",
+                defaultHelp: "every session",
+            },
+            {
+                name: "can",
+                kind: "string",
+                placeholder: "list",
+                help: "narrow it to these capabilities: read | chat | write | admin",
+                defaultHelp: "all four",
+            },
+            {
+                name: "expires",
+                kind: "string",
+                placeholder: "dur",
+                help: "how long it lives: 30s, 15m, 2h, 7d, or seconds",
+                defaultHelp: "never",
+            },
+            STORE,
+            JSON_FLAG,
+        ],
+    },
+    {
         // The instrument, not a setting. `terminal-setup` below changes a terminal's configuration; this
         // one only reports what the current terminal already does, which is the question that has to be
         // answered first and could not be until now.

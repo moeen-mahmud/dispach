@@ -42,6 +42,101 @@ function sources(dir: string): readonly string[] {
     return out
 }
 
+/**
+ * Every route declares what a scoped credential must be allowed to do, and the declaration is
+ * checked against the spec in **both** directions.
+ *
+ * The capability is a required field on `router.add` for the reason `CommandSpec.inSession` is
+ * required in the CLI — a table kept beside the router would be a second list of routes, which is
+ * the shape that has cost this repo `NO_MANIFEST`, `DOCUMENTED_CTRL_LETTERS` and `THRESHOLD_ORDER`.
+ * TypeScript already enforces that the field is *present*. What it cannot check is whether the
+ * value is the right one, and the first pass over 39 routes got **three** wrong in ways that
+ * compile perfectly: `POST /v1/agents/:id/messages` required `admin`, so no chat-scoped key could
+ * send a message; `GET /v1/agents/:id` and `GET /v1/agents/:id/turns/:turnId` required nothing at
+ * all. Every one of those is invisible to a type and obvious in a table.
+ */
+describe("what each route requires", () => {
+    const handler = readFileSync(join(SRC, "handler.ts"), "utf8")
+    const SPEC = resolve(SRC, "..", "..", "..", "docs", "04-SPEC-WIRE.md")
+
+    /**
+     * Each registration paired with the capability declared inside it.
+     *
+     * Bounded by the *next* registration rather than by matching parentheses: a balanced scan has to
+     * understand template literals and escapes to know which `)` closes the call, and the version
+     * that did not found 18 of 39 routes and silently reported the rest as fine. The next
+     * `router.add(` is an unambiguous terminator that needs no lexer.
+     */
+    function declared(): ReadonlyMap<string, string> {
+        const starts = [...handler.matchAll(/router\.add\(\s*"([A-Z]+)",\s*"([^"]+)"/g)]
+        const out = new Map<string, string>()
+        for (const [index, match] of starts.entries()) {
+            const from = match.index
+            const to = starts[index + 1]?.index ?? handler.length
+            const capability = /\{\s*capability:\s*"([a-z]+)"/.exec(handler.slice(from, to))
+            out.set(`${match[1]} ${match[2]}`, capability?.[1] ?? "MISSING")
+        }
+        return out
+    }
+
+    function documented(): ReadonlyMap<string, string> {
+        const spec = readFileSync(SPEC, "utf8")
+        const out = new Map<string, string>()
+        for (const row of spec.matchAll(
+            /^\| `([A-Z]+) (\/\S*)` \| `(open|read|chat|write|admin)` \|$/gm,
+        )) {
+            out.set(`${row[1]} ${row[2]}`, row[3] ?? "")
+        }
+        return out
+    }
+
+    test("every route declares one, and it is a real capability", () => {
+        const missing = [...declared()]
+            .filter(([, cap]) => cap === "MISSING")
+            .map(([route]) => route)
+        expect(missing).toEqual([])
+        expect(declared().size).toBeGreaterThan(30)
+    })
+
+    test("the code and the spec agree, in both directions", () => {
+        const code = declared()
+        const spec = documented()
+        // A route the spec describes and the server does not register is worse than a missing row:
+        // a reference naming an endpoint that answers 404 looks authoritative. Same argument the
+        // OpenAPI summaries are guarded with.
+        expect([...spec.keys()].filter((route) => !code.has(route))).toEqual([])
+        expect([...code.keys()].filter((route) => !spec.has(route))).toEqual([])
+        const disagreements = [...code]
+            .filter(([route, cap]) => spec.get(route) !== cap)
+            .map(([route, cap]) => `${route}: code=${cap} spec=${spec.get(route)}`)
+        expect(disagreements).toEqual([])
+    })
+
+    test("the capabilities that write are not reachable by a read-only key", () => {
+        /**
+         * A shape check over the table rather than a restatement of it: anything that changes state
+         * must be at least `chat`, and the probes and the browser assets must be `open`. This is
+         * what would have caught `POST /messages` at `admin` only indirectly — but it catches the
+         * far worse direction, a mutating route declared `read` or `open`, which no other assertion
+         * here would see.
+         */
+        for (const [route, cap] of declared()) {
+            const method = route.split(" ")[0] ?? ""
+            if (method === "GET") continue
+            // The webhook is the one deliberate exception: its caller is Telegram, which holds no
+            // credential of ours and never will.
+            if (route.includes("/webhook/")) {
+                expect(cap).toBe("open")
+                continue
+            }
+            expect({ route, open: cap === "open" || cap === "read" }).toEqual({
+                route,
+                open: false,
+            })
+        }
+    })
+})
+
 describe("errors thrown in another package", () => {
     test("nothing here narrows one with `instanceof`", () => {
         const offenders = sources(SRC)

@@ -35,6 +35,15 @@ afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
+/**
+ * The instant every `findLive` in this file asks about.
+ *
+ * Fixed rather than `new Date()`, because `findLive` now filters on `expires_at` — a wall-clock
+ * read would make these tests depend on when the suite ran, which is the outbox lesson this repo
+ * already paid for once.
+ */
+const AT = "2026-09-20T12:00:00.000Z"
+
 describe("key secrets", () => {
     test("carry the brand prefix, so a leaked one is identifiable", () => {
         expect(newKeySecret().startsWith(OPERATOR_KEY_PREFIX)).toBe(true)
@@ -155,8 +164,8 @@ describe("the key store", () => {
             fingerprint,
             createdAt: "2026-09-17T10:00:00.000Z",
         })
-        expect((await store.operatorKeys.findLive(fingerprint))?.keyId).toBe(issued.keyId)
-        expect(await store.operatorKeys.findLive(secret)).toBeUndefined()
+        expect((await store.operatorKeys.findLive(fingerprint, AT))?.keyId).toBe(issued.keyId)
+        expect(await store.operatorKeys.findLive(secret, AT)).toBeUndefined()
         await store.close()
     })
 
@@ -173,7 +182,7 @@ describe("the key store", () => {
         // The filter is in the statement, not in the caller. A revocation that depends on every
         // reader remembering `revoked_at IS NULL` is one that silently does nothing the first time
         // somebody forgets.
-        expect(await store.operatorKeys.findLive(fingerprint)).toBeUndefined()
+        expect(await store.operatorKeys.findLive(fingerprint, AT)).toBeUndefined()
         await store.close()
     })
 
@@ -277,7 +286,7 @@ describe("the key store", () => {
             createdAt: "2026-09-17T10:00:00.000Z",
         })
         await store.operatorKeys.touch(issued.keyId, "2026-09-17T10:00:00.000Z")
-        expect((await store.operatorKeys.findLive(fingerprint))?.lastUsedAt).toBe(
+        expect((await store.operatorKeys.findLive(fingerprint, AT))?.lastUsedAt).toBe(
             "2026-09-17T10:00:00.000Z",
         )
         // Thirty seconds later, inside the 60 s window: the write is skipped, so the column does
@@ -285,12 +294,12 @@ describe("the key store", () => {
         // decision about how often to write is how one route keeps a column fresh and another
         // leaves it null.
         await store.operatorKeys.touch(issued.keyId, "2026-09-17T10:00:30.000Z")
-        expect((await store.operatorKeys.findLive(fingerprint))?.lastUsedAt).toBe(
+        expect((await store.operatorKeys.findLive(fingerprint, AT))?.lastUsedAt).toBe(
             "2026-09-17T10:00:00.000Z",
         )
         // Past it: written.
         await store.operatorKeys.touch(issued.keyId, "2026-09-17T10:02:00.000Z")
-        expect((await store.operatorKeys.findLive(fingerprint))?.lastUsedAt).toBe(
+        expect((await store.operatorKeys.findLive(fingerprint, AT))?.lastUsedAt).toBe(
             "2026-09-17T10:02:00.000Z",
         )
         await store.close()

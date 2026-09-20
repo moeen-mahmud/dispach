@@ -688,6 +688,58 @@ describe("every read is unwrapped the way its route wraps it", () => {
         await runtime.stop()
     })
 
+    test("every route this client declares is reachable against a real handler", async () => {
+        /**
+         * The 18.5 gap, closed and then guarded: this package covered 17 of 33 routes, so the web
+         * UI hand-rolled the credential calls with its own `fetch`, its own headers and its own
+         * error handling — which is how one endpoint comes to throw a raw `TypeError` while its
+         * neighbours throw `DispachError`, and a caller cannot write one `catch` against that.
+         *
+         * Walked rather than one test per method, because what is being asserted is *coverage*: a
+         * method that compiles and 404s is the shape `schedules()` had for three phases.
+         */
+        const { client, runtime } = await harness()
+        const agent = client.agent("assistant")
+
+        const created = await agent.createSchedule({
+            id: "nightly",
+            kind: "every",
+            expr: "15m",
+            task: "check the thing",
+            deliver: "none",
+        })
+        expect(created.id).toBe("nightly")
+        expect((await agent.updateSchedule("nightly", { enabled: false })).enabled).toBe(false)
+        expect((await agent.schedules()).map((row) => row.id)).toEqual(["nightly"])
+        await agent.deleteSchedule("nightly")
+        expect(await agent.schedules()).toEqual([])
+
+        await runtime.stop()
+    })
+
+    test("the credential routes, which the web UI used to hand-roll", async () => {
+        /**
+         * A **token'd** harness, and the reason is the behaviour itself: `authRequired` latches on
+         * the first live key, so minting one against a server with no token configured flips it
+         * from open to closed and locks out the very client that just minted it. Documented, and
+         * exactly what a naive test walks into — the first version of this one did.
+         */
+        const { client, runtime } = await harness({ token: "t_operator" })
+
+        const listed = await client.keys()
+        expect(Array.isArray(listed.keys)).toBe(true)
+        // The sentence about scope travels with the listing, so a client never re-derives it.
+        expect(listed.scope).toContain("not an identity")
+
+        const minted = await client.createKey({ label: "probe", scope: { can: ["read"] } })
+        // The secret comes back **once**, and this is the only moment it exists outside the caller.
+        expect(minted.secret.length).toBeGreaterThan(20)
+        expect(minted.scope).toEqual({ can: ["read"] })
+        expect((await client.revokeKey(minted.keyId)).revokedAt).toBeDefined()
+
+        await runtime.stop()
+    })
+
     test("the step list is an array even when this server cannot provision", async () => {
         /**
          * The same class as `schedules()` above and the reason this is asserted rather than typed:

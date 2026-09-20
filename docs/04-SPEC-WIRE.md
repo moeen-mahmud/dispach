@@ -71,6 +71,13 @@ and WebSocket surfaces can return:
 | `provision_directory_refused` | 400 | `dir` or `dirChoice` over the wire. The sandbox decides; see above. |
 | `provision_daemon_refused` | 400 | `daemon` over the wire. The host answering the request is already the daemon. |
 | `provision_skills_search_refused` | 400 | `skills: "find"`, which needs an interactive picker. Points at `skills install`. |
+| `capability_required` | 403 | The key is real and its `scope.can` does not include what this route needs. **403, where out-of-scope is 404** — see below. |
+| `key_scope_invalid` | 400 | `scope` is not an object. |
+| `key_scope_agents_invalid` | 400 | `scope.agents` is not a list of ids. |
+| `key_scope_sessions_invalid` | 400 | `scope.sessions` is not a string prefix. |
+| `key_scope_can_invalid` | 400 | `scope.can` names something that is not one of the four capabilities. |
+| `key_scope_expires_invalid` | 400 | `scope.expiresIn` is not a positive whole number of seconds. |
+| `key_scope_agent_unknown` | 400 | `scope.agents` names an agent this server does not hold. Refused at mint rather than producing a key that reaches nothing. |
 | `provision_adopt_failed` | — | Returned *inside* a `201`: the agent was written and is not running. |
 | `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting — an embedder over its own agent store. The container has the lookup, and `start` works there. |
 | `agent_turn_in_flight` | 409 | `stop` was asked for an agent with a turn running. Tearing it down would close its store under a turn recorded as running. |
@@ -436,9 +443,98 @@ A key is a **labelled bearer credential with no identity attached** — no usern
 role, no signup. It exists so a browser session has a credential that can be revoked without
 restarting the process, which the container's `server.tokenEnv` value cannot be.
 
-**Keys are authentication, not authorisation.** Every key reaches every route for every agent this
-server holds. `GET /v1/keys` says so in its own `scope` field rather than leaving each client to
-rediscover it.
+`GET /v1/keys` carries that statement in its own `scope` field rather than leaving each client to
+rediscover it, and the field is asserted against this document — changing the behaviour without
+changing the sentence is a failing build.
+
+### Scope: what one key may reach
+
+A key with **no scope reaches everything**, which is what every key minted before this existed does.
+A scope is opt-in narrowing, so its absence is byte-identical to the old behaviour — and a key still
+authenticates a *caller to a server*, never to an agent: `operator_keys` has no `agent_id` and
+`purgeAgent` leaves the table alone.
+
+```
+POST /v1/keys  { "label": "web · user_8812",
+                 "scope": { "agents":   ["milo"],
+                            "sessions": "team_42:*",
+                            "can":      ["chat", "read"],
+                            "expiresIn": 3600 } }
+```
+
+| Field | Absent means | Notes |
+| --- | --- | --- |
+| `agents` | every agent | An id naming no agent is **reported at mint**, never silently matched against nothing. |
+| `sessions` | every session | A prefix; a trailing `*` is accepted and ignored. Not a namespace — `team_4` also matches `team_42:x`. |
+| `can` | all four | An **empty array** is honoured as written: a key that may do nothing is a coherent thing to mint. |
+| `expiresIn` | never expires | Seconds. Reported back as an absolute `expiresAt`. Enforced in the same query that hides a revoked key, so the two are indistinguishable. |
+
+**This is not an identity system.** No users, teams, orgs or roles — `06-VELAOPS-INTEGRATION.md`
+refuses them in four places and Better Auth stays authoritative for the consumer that needs them. A
+scope supplies *isolation*; `from` on `POST /messages` supplies *attribution*. That pair is the whole
+contribution, and it is enough to build a collaborative app on.
+
+**Out of scope answers `404`, never `403`.** A refusal that confirms existence turns a narrow
+credential into a directory of other tenants' agents and sessions, so a caller outside its scope sees
+exactly what a caller asking for something imaginary sees. The one exception is a **capability**
+refusal, which is `403 capability_required`: that discloses nothing about what exists, only about
+what this credential may do — and a `404` there would tell somebody holding a read-only key that the
+agent they are plainly reading has vanished.
+
+Listings **filter** rather than refuse — `GET /v1/agents`, `GET /v1/agents/:id/sessions` and the
+`/v1/events` firehose — because a listing is how a client discovers what it can reach. The firehose
+is the one that matters most: without a scope check there, a key narrowed to one agent could open
+`/v1/events` with **no parameter at all** and read every other agent's turns, prompts and tool calls.
+
+### The capability each route requires
+
+Derived from the route table and checked against it in both directions by `spec.test.ts` — a route
+here that the server does not register, or a registered route missing from here, is a failing build.
+`open` means no credential is needed at all.
+
+| Route | Requires |
+| --- | --- |
+| `GET /` | `open` |
+| `GET /assets/app.css` | `open` |
+| `GET /assets/app.js` | `open` |
+| `GET /docs` | `open` |
+| `POST /v1/channels/:channelId/webhook/:agentId` | `open` |
+| `GET /v1/health` | `open` |
+| `GET /v1/openapi.json` | `open` |
+| `GET /v1/ready` | `open` |
+| `GET /v1/agents` | `read` |
+| `GET /v1/agents/:id` | `read` |
+| `GET /v1/agents/:id/approvals` | `read` |
+| `GET /v1/agents/:id/context` | `read` |
+| `GET /v1/agents/:id/schedules` | `read` |
+| `GET /v1/agents/:id/schedules/:sid` | `read` |
+| `GET /v1/agents/:id/sessions` | `read` |
+| `GET /v1/agents/:id/sessions/:key` | `read` |
+| `GET /v1/agents/:id/sessions/:key/messages` | `read` |
+| `GET /v1/agents/:id/skills` | `read` |
+| `GET /v1/agents/:id/tools` | `read` |
+| `GET /v1/agents/:id/turns/:turnId` | `read` |
+| `GET /v1/agents/:id/turns/:turnId/stream` | `read` |
+| `GET /v1/events` | `read` |
+| `GET /v1/provision` | `read` |
+| `POST /v1/agents/:id/approvals/:approvalId` | `chat` |
+| `POST /v1/agents/:id/messages` | `chat` |
+| `POST /v1/agents/:id/turns/:turnId/stop` | `chat` |
+| `POST /v1/agents/:id/schedules` | `write` |
+| `DELETE /v1/agents/:id/schedules/:sid` | `write` |
+| `PATCH /v1/agents/:id/schedules/:sid` | `write` |
+| `POST /v1/agents/:id/schedules/:sid/run` | `write` |
+| `DELETE /v1/agents/:id/sessions/:key` | `write` |
+| `POST /v1/agents/:id/sessions/:key/phase` | `write` |
+| `POST /v1/agents` | `admin` |
+| `POST /v1/agents/:id/reload` | `admin` |
+| `POST /v1/agents/:id/start` | `admin` |
+| `POST /v1/agents/:id/stop` | `admin` |
+| `GET /v1/keys` | `admin` |
+| `POST /v1/keys` | `admin` |
+| `DELETE /v1/keys/:keyId` | `admin` |
+
+
 
 Three credentials authenticate a request, tried in this order:
 

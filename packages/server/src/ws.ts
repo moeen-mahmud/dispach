@@ -17,10 +17,21 @@
 
 import type { AnyEvent, Runtime } from "@dispach/core"
 import { newTurnId } from "@dispach/core"
+import { bearerFromProtocols, PROTOCOL, withBearerHeader } from "./auth.ts"
+import { type Principal, reachesAgent, reachesSession } from "./principal.ts"
 
 /** Per-connection state, handed to the socket by `Bun.serve`'s upgrade. */
 export interface WsSession {
     readonly agentId: string | undefined
+    /**
+     * Who opened this socket.
+     *
+     * Carried on the session rather than re-resolved per frame: the handshake is the only moment a
+     * credential is presented, and a scope read once there is a scope every frame answers to. It is
+     * also what stops this endpoint being the hole in the boundary — a key narrowed to one agent
+     * must not receive another's events over a transport that skipped the check.
+     */
+    readonly principal: Principal
     /**
      * Whether this socket receives `model.chunk`.
      *
@@ -38,10 +49,21 @@ interface Socket {
 }
 
 export interface WebSocketBridge {
-    /** Decide whether to upgrade. A rejection is an ordinary HTTP response. */
+    /**
+     * Decide whether to upgrade. A rejection is an ordinary HTTP response.
+     *
+     * Takes the **request**, not just its URL, because the credential is a header now — and `async`
+     * because resolving an operator key is one indexed read. Both are what it costs to authenticate
+     * this endpoint the same way every other one is authenticated, instead of with its own
+     * comparison against the configured token, which is what made a browser holding a key unable to
+     * use WebSocket at all.
+     */
     accept(
-        url: URL,
-    ): { kind: "accept"; session: WsSession } | { kind: "reject"; response: Response }
+        request: Request,
+    ): Promise<
+        | { kind: "accept"; session: WsSession; protocol?: string }
+        | { kind: "reject"; response: Response }
+    >
     readonly handlers: {
         open(ws: Socket): void
         message(ws: Socket, raw: string | Uint8Array): void
@@ -59,7 +81,15 @@ export interface WebSocketBridge {
  */
 export function attachWebSocket(
     runtime: Runtime,
-    token: string | undefined,
+    /**
+     * How to authenticate a handshake — the *same* function the HTTP dispatcher uses.
+     *
+     * It was `token: string | undefined` and a private `timingSafeEqual` against it, so an operator
+     * key authenticated every route except this one. Undocumented, and not a decision: the recorded
+     * *"a check only one surface performs is a check the two disagree about"* shape, on the one
+     * surface where disagreeing means a credential works everywhere except the socket.
+     */
+    authenticate: (request: Request) => Promise<Principal | Response>,
     /**
      * In-flight turns, shared with the HTTP handler.
      *
@@ -93,6 +123,23 @@ export function attachWebSocket(
             // A socket subscribed to one agent does not receive another's traffic. A runtime hosting
             // several agents would otherwise leak one conversation into another client's stream.
             if (ws.data.agentId !== undefined && event.agentId !== ws.data.agentId) continue
+            /**
+             * **The scope, on the socket** — the same boundary `/v1/events` applies, and the one
+             * this endpoint had none of.
+             *
+             * A socket opened with **no** `?agentId=` receives the whole firehose, so without this
+             * a key narrowed to one agent could read every other agent's turns, prompts and tool
+             * calls by simply omitting a parameter. An event with no `agentId` is runtime-wide and
+             * belongs to everyone; a session-scoped one is checked too, because a key narrowed to a
+             * session prefix is narrowed for reading as much as for writing.
+             */
+            if (event.agentId !== undefined && !reachesAgent(ws.data.principal, event.agentId))
+                continue
+            if (
+                event.sessionKey !== undefined &&
+                !reachesSession(ws.data.principal, event.sessionKey)
+            )
+                continue
             // The per-socket half. One client asking for tokens is what puts them on the bus; this
             // is what stops them reaching the clients that did not ask.
             if (chunk && !ws.data.chunks) continue
@@ -121,34 +168,67 @@ export function attachWebSocket(
     }
 
     return {
-        accept(url) {
-            if (token !== undefined) {
-                const presented = url.searchParams.get("token") ?? ""
-                if (!timingSafeEqual(presented, token)) {
-                    return {
-                        kind: "reject",
-                        response: new Response(
-                            JSON.stringify({
-                                error: {
-                                    code: "unauthorized",
-                                    message: "Missing or invalid token.",
-                                    hint: "A browser WebSocket cannot set headers, so this endpoint takes ?token=. It is the same token every other route requires.",
-                                },
-                            }),
-                            { status: 401, headers: { "content-type": "application/json" } },
-                        ),
-                    }
+        async accept(request) {
+            const url = new URL(request.url)
+            /**
+             * The credential, from a **header** — with the old query parameter still honoured.
+             *
+             * A browser cannot set headers on a WebSocket handshake, which is why `?token=` existed.
+             * But a credential in a URL is what this project's standing rule forbids: it lands in
+             * an access log, in a `Referer`, and in anything that proxies. The subprotocol list is a
+             * header the browser *will* send on the caller's behalf —
+             * `new WebSocket(url, ["dispach.bearer", key])` — so the credential travels the same
+             * way it does everywhere else.
+             *
+             * `?token=` is accepted for now and documented as deprecated. Removing it in the same
+             * change that introduces the replacement would break every client using the form this
+             * spec has advertised since Phase 13, for no security gain that a deprecation window
+             * does not also get.
+             */
+            const fromProtocol = bearerFromProtocols(request)
+            const fromQuery = url.searchParams.get("token")
+            const bearer = fromProtocol ?? fromQuery ?? ""
+
+            const who = await authenticate(withBearerHeader(request, bearer))
+            if (who instanceof Response) return { kind: "reject" as const, response: who }
+
+            const agentId = url.searchParams.get("agentId")
+            /**
+             * A named agent outside the scope is a **404**, exactly as it is over HTTP.
+             *
+             * Not a 401: the credential is fine. Not a 403: that would confirm the agent exists,
+             * which is the disclosure the whole 404-not-403 rule exists to prevent — and a socket
+             * is no less able to enumerate than a GET is.
+             */
+            if (agentId !== null && !reachesAgent(who, agentId)) {
+                return {
+                    kind: "reject" as const,
+                    response: new Response(
+                        JSON.stringify({
+                            error: {
+                                code: "agent_not_found",
+                                message: `No agent "${agentId}".`,
+                                hint: "Check the id — it is case-sensitive. A key scoped away from an agent sees exactly what a caller asking for one that does not exist sees.",
+                            },
+                        }),
+                        { status: 404, headers: { "content-type": "application/json" } },
+                    ),
                 }
             }
-            const agentId = url.searchParams.get("agentId")
+
             // `?chunks=true` on the handshake, the same spelling and the same default-off as the
             // SSE routes. A `subscribe` frame can change it later without reconnecting.
             return {
-                kind: "accept",
+                kind: "accept" as const,
                 session: {
                     agentId: agentId ?? undefined,
                     chunks: url.searchParams.get("chunks") === "true",
+                    principal: who,
                 },
+                // **Echoed, or the browser closes the socket immediately.** A server that accepts a
+                // handshake offering subprotocols and names none of them is, to a browser, a server
+                // that agreed to nothing — and it hangs up without a readable reason.
+                ...(fromProtocol === undefined ? {} : { protocol: PROTOCOL }),
             }
         },
 
@@ -225,9 +305,31 @@ export function attachWebSocket(
                         typeof frame.chunks === "boolean" ? frame.chunks : ws.data.chunks
                     if (wantsChunks && !ws.data.chunks) takeChunkInterest()
                     else if (!wantsChunks && ws.data.chunks) releaseChunkInterest()
+                    /**
+                     * A `subscribe` frame may re-point the agent, and the **scope is re-checked**.
+                     *
+                     * The handshake is not the only moment an agent id enters: a socket opened with
+                     * no `?agentId=` can name one later, and honouring that without a check would
+                     * make the frame a way round the boundary the handshake just applied.
+                     */
+                    const nextAgent = frame.agentId ?? ws.data.agentId
+                    if (nextAgent !== undefined && !reachesAgent(ws.data.principal, nextAgent)) {
+                        ws.send(
+                            JSON.stringify({
+                                type: "ws.error",
+                                error: {
+                                    code: "agent_not_found",
+                                    message: `No agent "${nextAgent}".`,
+                                    hint: "Check the id — it is case-sensitive. A key scoped away from an agent sees exactly what a caller asking for one that does not exist sees.",
+                                },
+                            }),
+                        )
+                        return
+                    }
                     ws.data = {
-                        agentId: frame.agentId ?? ws.data.agentId,
+                        agentId: nextAgent,
                         chunks: wantsChunks,
+                        principal: ws.data.principal,
                     }
                     ws.send(
                         JSON.stringify({
@@ -317,11 +419,4 @@ export function attachWebSocket(
             chunkSockets = 0
         },
     }
-}
-
-function timingSafeEqual(a: string, b: string): boolean {
-    if (a.length !== b.length) return false
-    let diff = 0
-    for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
-    return diff === 0
 }

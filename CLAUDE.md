@@ -2251,6 +2251,52 @@ Never claim a performance property without a number in `evals/` and a script to 
   result screen names the blank ones beside the directory, by each step's own `prompt` rather than by
   an environment variable, since a step-to-variable map would be a second copy of the one the generated
   `.env` already writes as comments.
+- **A scope is a boundary only where a caller cannot decline it, and the omission is the attack.**
+  `?agentId=` on `/v1/events` is a filter a caller *chooses*; the scope is not. The widest hole in the
+  surface was reached by **leaving a parameter out** — `/v1/events` and `/v1/ws` with no agent named
+  are the firehose, so a key narrowed to one agent read every other agent's turns, prompts and tool
+  calls without asking for anything. `POST /messages` is the mirror: the session key arrives in the
+  **body**, so a caller names a conversation they may never have seen. Anywhere a scope is enforced,
+  ask what the request looks like when the field is simply absent.
+- **Out of scope answers `404`, never `403` — and a capability refusal is the one exception.** A
+  refusal that confirms existence turns a key narrowed to one tenant into a directory of the others,
+  so an out-of-scope agent answers byte-identically to an imaginary one, **code included**. A
+  capability refusal is `403` because it discloses nothing about what exists, only about what this
+  credential may do: a `404` there would tell somebody holding a read-only key that the agent they
+  are plainly reading had vanished. Listings **filter** rather than refuse, because a listing is how
+  a client discovers what it can reach — and the half that is easy to miss is that
+  `GET /v1/agents`' stopped rows come from `agentState` rather than `runtime.list()`, so filtering
+  only the hosted ones leaks every disabled agent's id.
+- **A required field on the route is the mechanism; a table beside the router is the bug.**
+  `router.add` takes a required `capability`, the same shape as `CommandSpec.inSession` — a new route
+  cannot be registered without deciding. TypeScript enforces presence and **cannot check the value**,
+  and the first pass over 39 routes got three wrong in ways that compile perfectly: `POST /messages`
+  required `admin` (so no chat-scoped key could send anything) and two GETs required nothing at all.
+  The assignment is therefore documented in `04-SPEC-WIRE.md` and checked both ways, plus a shape
+  assertion that nothing mutating is `read` or `open`. Related, from the audit itself: **bound a
+  source scan by the *next* match, not by matching parentheses** — a balanced scan has to understand
+  template literals to know which `)` closes a call, and the version that did not found 18 of 39
+  routes and reported the rest as fine.
+- **`instanceof`'s sibling for credentials: one authenticator, or the two surfaces disagree.**
+  `/v1/ws` compared `?token=` against the configured token alone, so an operator key authenticated
+  every route *except the socket* — undocumented, and not a decision. `createHandler` returns the
+  dispatcher with its authenticator attached precisely so `serve.ts` composes no second copy of the
+  rule, which is how the divergence happened. The credential travels in `Sec-WebSocket-Protocol`
+  (`new WebSocket(url, ["dispach.bearer", key])`) because a browser cannot set headers on a handshake
+  and a credential in a URL lands in an access log, a `Referer` and anything that proxies — and the
+  server must **echo** the chosen subprotocol or the browser closes the socket with no readable
+  reason. One trap found by running the suite: a **claim** must skip the capability check, because
+  `authorise` has already restricted it to `POST /v1/keys` and nothing else; layering `admin` on top
+  broke the entire bootstrap, which is the one flow that has to work on a server with no credentials.
+- **Absence of a scope must be byte-identical to the behaviour before scopes existed, and an empty
+  set must not be.** All fields absent means an unscoped key — which is what keeps a key a credential
+  for a *server* rather than for an agent, so `operator_keys` still has no `agent_id` and
+  `purgeAgent` still leaves it alone. An **empty** `can` is honoured as written: a key that may do
+  nothing is coherent, and promoting it to everything would be the worst available reading. Expiry
+  rides the same query that hides a revoked key, so expired, revoked and wrong all answer the same —
+  "expired" would date a leaked credential and "revoked" would confirm it had once been real. A scope
+  naming an agent this server does not hold is **refused at mint**, because a credential that
+  authenticates and reaches nothing is indistinguishable from a working one until it is used.
 - **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
   under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
   builds running beside it — which is a shared 2-core runner every time. Its own comment says the

@@ -4673,6 +4673,76 @@ back to for the same reason, and it is **not** the same claim: 11.225 is the rec
 a perfect accessibility snapshot and was entirely black. A loopback server plus relay is left running
 at `http://localhost:7451/` for a one-click look.
 
+# Phase 18 — credentials a platform can hand out — **built** (2026-09-20)
+
+All five stages. A key still authenticates a *caller to a server*; what is new is that it can be
+**narrowed**, and that the narrowing is a boundary rather than a filter.
+
+### 18.1 — a principal on every request
+
+`authorise` answered *whether*, never *who*, so nothing else in this phase was expressible. It
+returns a `Principal` now (`open | token | key | claim`), threaded onto `RequestContext` as a
+**required** field, and it moved into `auth.ts` because `/v1/ws` has to resolve the same one —
+`createHandler` returns the dispatcher with its authenticator attached, so `serve.ts` composes no
+second copy of the rule (11.231).
+
+### 18.2 — scoped keys
+
+`scope` (JSON) and `expires_at` (a column, so `findLive` filters on it) on `operator_keys`,
+migration 17. Every field absent is byte-identical to an unscoped key, which is what keeps 11.197
+intact. `expiresIn` in, `expiresAt` out. A scope naming an agent this server does not hold is
+**refused at mint** (11.234).
+
+### 18.3 — scope as a boundary
+
+`capability` is a **required** field on `router.add` — a table beside the router would be a second
+list of routes — with the assignment documented in `04-SPEC-WIRE.md` and checked both ways. Out of
+scope is `404`, byte-identical to an imaginary id; a capability refusal is `403`. Listings filter
+(11.232, 11.233).
+
+### 18.4 — cross-origin
+
+16.1 built the allowlist and the refusal; this is the response side. The origin is echoed exactly,
+never `*`, never reflected unchecked; the preflight names `Authorization` or the browser strips the
+credential; no `Allow-Credentials`, because the credential is a header rather than a cookie (11.235).
+
+### 18.5 — the asymmetries that were simply bugs
+
+`/v1/ws` rejected operator keys outright. It now authenticates through the same function as every
+other route, with the credential in `Sec-WebSocket-Protocol` rather than a URL. `@dispach/client`
+gained the credential routes, the schedule writes and the session writes — the gap that had the web
+UI hand-rolling `fetch` calls with its own error handling (11.235, 11.236).
+
+**Three capabilities were assigned wrong on the first pass, in ways that compile perfectly**:
+`POST /messages` required `admin`, and `GET /v1/agents/:id` and `GET /turns/:turnId` required
+nothing. That is the argument for the table guard, and it is why the audit is a test.
+
+**Acceptance — in the container, against the shipped binary.**
+
+- [x] A scoped key minted through the API: `{agents:["minimal"], sessions:"team_42:*",
+      can:["chat","read"]}` with `expiresAt` computed server-side from `expiresIn: 3600`.
+- [x] `key_scope_agent_unknown` on a typo'd agent id, `field: scope.agents`.
+- [x] The boundary, every row: in-scope `200`; an imaginary agent and an out-of-scope one both
+      `404 agent_not_found`; `POST /schedules` and `GET /v1/keys` both `403 capability_required`;
+      writing into `team_7:` with a `team_42:` key `404 session_not_found`.
+- [x] CORS: a hostile origin `403` with **no** `Access-Control-*`; an allowed one echoed exactly
+      with `Vary: Origin`; the preflight carrying methods, `Authorization` and a max-age where it
+      previously carried none.
+- [x] **An operator key opens a WebSocket** — `open · negotiated protocol: dispach.bearer` — and was
+      `refused` before this phase. `?token=` still works; a wrong credential is refused.
+- [x] Expiry live: `200`, then `401 unauthorized` three seconds later — the same answer a revoked
+      key and a wrong one give.
+- [x] `dispach credential list` and `create --agents … --can … --expires 2h`, with the secret on
+      stdout alone (41 bytes captured through a pipe) and the reach printed to stderr.
+- [x] 3502 pass / 0 fail, node 1437 / 0, typecheck 0, lint at the 6 pre-existing warnings.
+      Every new guard revert-checked — `withAgent`, the firehose, the session body, the capability
+      gate, the socket broadcast, the socket credential.
+
+**Not done, deliberately.** `POST /v1/agents` is still gated to a loopback bind rather than opened
+to an admin-scoped key: provisioning writes files and starts a process, and opening that to a bearer
+token on a public bind deserves its own stage with its own threat model. The `admin` capability
+exists and gates credentials, start/stop and reload.
+
 ---
 
 ## Carried backlog

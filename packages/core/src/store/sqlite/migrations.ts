@@ -808,6 +808,40 @@ CREATE TABLE agent_state (
 ALTER TABLE runtime_leases ADD COLUMN base_url TEXT;
 `,
     },
+    {
+        version: 17,
+        name: "operator_key_scope",
+        /**
+         * How far one key reaches, and when it stops reaching at all.
+         *
+         * **Both nullable, and null is today's behaviour.** An unscoped key authenticates every
+         * route for every agent, exactly as every key minted before this migration does — which is
+         * what keeps decision 11.197 intact: a key still authenticates a *caller to a server*, this
+         * table still has no `agent_id`, and `purgeAgent` still leaves it alone. A scope narrows an
+         * already-authenticated caller; it does not make the credential belong to an agent.
+         *
+         * `scope` is **JSON in one column** rather than three. The alternative was `scope_agents`,
+         * `scope_sessions` and `scope_can`, each holding a joined string that something would have
+         * to split — which is a list encoded in a scalar with no parser, and a migration per field
+         * the first time the shape grows. The tradeoff is stated rather than hidden: nothing can
+         * query *into* a scope in SQL, and nothing needs to — a scope is read once per request
+         * alongside the row it belongs to, never searched across rows.
+         *
+         * `expires_at` is a **column**, because `findLive` filters on it. An expired key and a
+         * revoked one answer identically and by the same route out of that function, for the reason
+         * `revoked_at` is already handled there: "the caller must not have to remember to check",
+         * because forgetting is an expiry that silently does nothing. It is deliberately *not*
+         * inside the JSON, where a filter would have to parse every row to find out.
+         *
+         * No index on `expires_at`. The only query that reads it is the one already riding the
+         * UNIQUE index on `fingerprint`, which returns at most one row — an index here would be
+         * written on every issue and read by nothing.
+         */
+        sql: `
+ALTER TABLE operator_keys ADD COLUMN scope TEXT;
+ALTER TABLE operator_keys ADD COLUMN expires_at TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {
