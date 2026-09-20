@@ -13,8 +13,13 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { EVENT_TYPES, Runtime } from "@dispach/core"
-import { type ApprovalRegistry, createApprovalRegistry, createHandler } from "@dispach/server"
+import { EVENT_TYPES, HarnessError, Runtime } from "@dispach/core"
+import {
+    type ApprovalRegistry,
+    createApprovalRegistry,
+    createHandler,
+    type Provisioner,
+} from "@dispach/server"
 import { createClient, DispachError, isEvent } from "../src/index.ts"
 import { turnStreamItems } from "../src/stream.ts"
 
@@ -90,6 +95,14 @@ async function harness(
         manifest?: string
         /** Attach a real approval registry, so a blocked turn has somewhere to wait. */
         approvals?: ApprovalRegistry
+        /**
+         * A provisioner and a loopback bind, for the two provisioning reads.
+         *
+         * Both are needed together and neither is default: without a bind the handler cannot claim
+         * a request is local, and `POST /v1/agents` answers `403` — which is the right answer to
+         * "you did not say what you bound" and the wrong thing for this test to assert against.
+         */
+        provision?: Provisioner
     } = {},
 ) {
     const dir = mkdtempSync(join(tmpdir(), "client-test-"))
@@ -110,14 +123,32 @@ async function harness(
             ? { allowUnauthenticated: true }
             : { token: options.token }),
         ...(options.approvals === undefined ? {} : { approvals: options.approvals }),
+        ...(options.provision === undefined
+            ? {}
+            : { provision: options.provision, origin: { host: "127.0.0.1" } }),
     })
+
+    /**
+     * The client's transport *is* the server's handler — with the one header a real one adds.
+     *
+     * `new Request(url)` populates no `Host`, and a browser or `curl` always sends it. Without it
+     * the origin guard cannot tell a rebinding attempt from an ordinary call and refuses, which
+     * showed up as `host_not_allowed` on the first test to build the handler with a bind. Faked
+     * here rather than relaxed in the guard: the header is a fact about HTTP, not about this test.
+     */
+    const transport = () =>
+        ((url: string | URL | Request, init?: RequestInit) =>
+            handler(
+                new Request(url as string, {
+                    ...init,
+                    headers: { host: new URL(url as string).host, ...init?.headers },
+                }),
+            )) as typeof fetch
 
     const client = createClient({
         baseUrl: "http://127.0.0.1:7420",
         ...(options.token === undefined ? {} : { token: options.token }),
-        // The whole point: the client's transport *is* the server's handler.
-        fetch: ((url: string | URL | Request, init?: RequestInit) =>
-            handler(new Request(url as string, init))) as typeof fetch,
+        fetch: transport(),
     })
 
     /** A second client against the same server, so an auth test is a real one. */
@@ -125,11 +156,10 @@ async function harness(
         createClient({
             baseUrl: "http://127.0.0.1:7420",
             ...(token === undefined ? {} : { token }),
-            fetch: ((url: string | URL | Request, init?: RequestInit) =>
-                handler(new Request(url as string, init))) as typeof fetch,
+            fetch: transport(),
         })
 
-    return { client, clientWith, runtime }
+    return { client, clientWith, runtime, dir }
 }
 
 describe("a turn, end to end", () => {
@@ -655,6 +685,189 @@ describe("every read is unwrapped the way its route wraps it", () => {
             // thing returned, and every assertion about its contents passed right up to `.map`.
             expect({ name, isArray: Array.isArray(value) }).toEqual({ name, isArray: true })
         }
+        await runtime.stop()
+    })
+
+    test("every route this client declares is reachable against a real handler", async () => {
+        /**
+         * The 18.5 gap, closed and then guarded: this package covered 17 of 33 routes, so the web
+         * UI hand-rolled the credential calls with its own `fetch`, its own headers and its own
+         * error handling — which is how one endpoint comes to throw a raw `TypeError` while its
+         * neighbours throw `DispachError`, and a caller cannot write one `catch` against that.
+         *
+         * Walked rather than one test per method, because what is being asserted is *coverage*: a
+         * method that compiles and 404s is the shape `schedules()` had for three phases.
+         */
+        const { client, runtime } = await harness()
+        const agent = client.agent("assistant")
+
+        const created = await agent.createSchedule({
+            id: "nightly",
+            kind: "every",
+            expr: "15m",
+            task: "check the thing",
+            deliver: "none",
+        })
+        expect(created.id).toBe("nightly")
+        expect((await agent.updateSchedule("nightly", { enabled: false })).enabled).toBe(false)
+        expect((await agent.schedules()).map((row) => row.id)).toEqual(["nightly"])
+        await agent.deleteSchedule("nightly")
+        expect(await agent.schedules()).toEqual([])
+
+        await runtime.stop()
+    })
+
+    test("the credential routes, which the web UI used to hand-roll", async () => {
+        /**
+         * A **token'd** harness, and the reason is the behaviour itself: `authRequired` latches on
+         * the first live key, so minting one against a server with no token configured flips it
+         * from open to closed and locks out the very client that just minted it. Documented, and
+         * exactly what a naive test walks into — the first version of this one did.
+         */
+        const { client, runtime } = await harness({ token: "t_operator" })
+
+        const listed = await client.keys()
+        expect(Array.isArray(listed.keys)).toBe(true)
+        // The sentence about scope travels with the listing, so a client never re-derives it.
+        expect(listed.scope).toContain("not an identity")
+
+        const minted = await client.createKey({ label: "probe", scope: { can: ["read"] } })
+        // The secret comes back **once**, and this is the only moment it exists outside the caller.
+        expect(minted.secret.length).toBeGreaterThan(20)
+        expect(minted.scope).toEqual({ can: ["read"] })
+        expect((await client.revokeKey(minted.keyId)).revokedAt).toBeDefined()
+
+        await runtime.stop()
+    })
+
+    test("the step list is an array even when this server cannot provision", async () => {
+        /**
+         * The same class as `schedules()` above and the reason this is asserted rather than typed:
+         * `steps` is declared `readonly ProvisionStepLike[]`, and a handler with no provisioner
+         * still has to send `[]` rather than omit the field — a page that mapped over `undefined`
+         * would take the tree down exactly as the schedules panel did.
+         */
+        const { client, runtime } = await harness()
+        const offer = await client.provision()
+        expect(Array.isArray(offer.steps)).toBe(true)
+        // And it says *which* refusal applies, which is the whole reason this route answers at all
+        // rather than leaving a page to discover it from a 501 after somebody filled a form in.
+        expect(offer.available).toBe(false)
+        expect(offer.steps).toEqual([])
+        await runtime.stop()
+    })
+})
+
+describe("creating an agent", () => {
+    /** A provisioner that writes a real manifest, so `Runtime.adopt` has something to adopt. */
+    function provisioner(dir: () => string): Provisioner {
+        return {
+            steps: () => [
+                {
+                    step: "name",
+                    prompt: "The agent's name",
+                    fallback: "",
+                    optional: false,
+                    secret: false,
+                },
+                {
+                    step: "telegram",
+                    prompt: "Telegram?",
+                    fallback: "none",
+                    optional: false,
+                    secret: false,
+                    choices: [
+                        { value: "none", label: "no" },
+                        { value: "connected", label: "yes" },
+                    ],
+                },
+                {
+                    step: "telegramToken",
+                    prompt: "Telegram bot token",
+                    fallback: "",
+                    optional: true,
+                    secret: true,
+                    requires: { step: "telegram", value: "connected" },
+                },
+            ],
+            create: (answers) => {
+                const id = answers.name ?? "nameless"
+                const target = join(dir(), id)
+                mkdirSync(target, { recursive: true })
+                writeFileSync(join(target, "agent.yaml"), MANIFEST.replace("assistant", id))
+                return {
+                    agentId: id,
+                    manifestPath: join(target, "agent.yaml"),
+                    dir: target,
+                    files: ["agent.yaml"],
+                }
+            },
+        }
+    }
+
+    test("the answers reach the provisioner and the agent is adopted, not restarted", async () => {
+        /**
+         * The property the whole always-on shape rests on: `POST /v1/agents` ends in
+         * `Runtime.adopt`, so the agent is served before the response returns. A client that had to
+         * poll for it would be the "provisioned and silently unreachable" state this replaces.
+         */
+        let dir = ""
+        const { client, runtime } = await harness({ provision: provisioner(() => dir) })
+        dir = mkdtempSync(join(tmpdir(), "client-provision-"))
+        dirs.push(dir)
+
+        const created = await client.createAgent({ name: "vela" })
+        expect(created.id).toBe("vela")
+        expect(Array.isArray(created.files)).toBe(true)
+        expect(created.adopted).toEqual(["vela"])
+        // Live on the same host, in the same process, with no second command.
+        expect((await client.agents()).map((entry) => entry.id)).toContain("vela")
+        await runtime.stop()
+    })
+
+    test("a conditional step arrives with what opens it", async () => {
+        // Forwarded verbatim, so a browser can reveal a token field from data the server sent
+        // instead of re-implementing the wizard's walk.
+        const { client, runtime } = await harness({ provision: provisioner(() => tmpdir()) })
+        const offer = await client.provision()
+        expect(offer.available).toBe(true)
+        expect(offer.local).toBe(true)
+        expect(offer.steps.find((step) => step.step === "telegramToken")?.requires).toEqual({
+            step: "telegram",
+            value: "connected",
+        })
+        // And the secret flag survives the wire, because it is what a client masks on.
+        expect(offer.steps.find((step) => step.step === "telegramToken")?.secret).toBe(true)
+        await runtime.stop()
+    })
+
+    test("a refused answer names the field to fix", async () => {
+        /**
+         * The route passes `HarnessError`'s own detail through rather than paraphrasing it, and
+         * `field` is what turns a 400 into a marker beside one input instead of a banner.
+         */
+        const refusing: Provisioner = {
+            steps: () => [],
+            create: () => {
+                throw new HarnessError({
+                    code: "provision_answer_invalid",
+                    message: 'name is "" which cannot be empty.',
+                    hint: "GET /v1/provision lists every step with its default.",
+                    field: "name",
+                })
+            },
+        }
+        const { client, runtime } = await harness({ provision: refusing })
+        let caught: unknown
+        try {
+            await client.createAgent({ name: "" })
+        } catch (error) {
+            caught = error
+        }
+        expect(caught).toBeInstanceOf(DispachError)
+        expect((caught as DispachError).code).toBe("provision_answer_invalid")
+        expect((caught as DispachError).field).toBe("name")
+        expect((caught as DispachError).status).toBe(400)
         await runtime.stop()
     })
 })

@@ -2202,6 +2202,101 @@ Never claim a performance property without a number in `evals/` and a script to 
   reversed, refusing a correct manifest rather than admitting a broken one. Invisible because
   `telegram` arrives as `channels: { telegram }` from the CLI's own table and never through the
   plugin path, so documented public API has no in-tree consumer. Carried in `docs/05-PLAN.md`.
+- **`instanceof` asks which *copy* of a class built something, and a `--compile` binary can hold two.**
+  In the shipped image every provisioning refusal came back `500 internal_error`, losing the code, the
+  hint and the `field` a form marks — `provision_unknown_answer` had been that way since 16.5. The
+  image builds with a newer bun than this repo pins, and that bun resolves `@dispach/core` to core's
+  **`src/index.ts`** for `packages/cli`'s bundled source while the prebuilt `@dispach/server` it
+  bundles carries core's **`dist/index.js`**: two `HarnessError` classes, so the route's `instanceof`
+  was false for everything the CLI-injected provisioner threw. **Nothing in the suite could see it** —
+  `bun test` imports source, so there is one copy of everything, and a test that ran the built binary
+  would pass on the pinned bun, which resolves both sides to `dist` and agrees with itself. So the
+  rule is not "add a binary test": it is **`instanceof` only where the throw and the catch are in one
+  package**, `isHarnessError` (a `Symbol.for` mark, identical across copies by construction)
+  everywhere else, and a boundaries test in `packages/server` refusing `instanceof HarnessError`
+  outright because every `catch` there is catching a foreign error. The mark is set in the constructor
+  rather than declared as a field: a symbol-keyed field reaches the `.d.ts` and makes the class
+  *nominal*, at which point `tsc` reports the same duplication — a real finding, and the wrong place
+  to spend it. The guard that works without a bundler imports the built `dist` beside the source, which
+  puts a genuinely foreign class in one process and fails for exactly the reason the image did.
+- **A walk down the defaults lists only the questions the defaults reach.** `GET /v1/provision` was
+  generated from `nextQuestion` — which is what made it drift-proof — and served thirteen of eighteen
+  steps, omitting **every credential but the model key**, because `nextQuestion` skips a question whose
+  opening answer was never given. A browser could ask for `telegram: connected` and not for its token,
+  and write an agent whose `.env` needs a terminal visit before it starts. Explore the branches
+  breadth-first, attribute each new step to the branch that opened it (`requires: {step, value}`),
+  restore order from `STEP_ORDER`, and seed each branch with the **whole path** taken to reach it —
+  seeded with `webBackend` alone, `nextQuestion` skips it, because it is a question only for somebody
+  who already said `web: search`.
+- **A value shaped for a renderer is not a value shaped for a caller, and serving one as the other is
+  invisible until something consumes it.** A menu `Question` carries `fallback: "1"` — a 1-based index
+  `validateAnswer` accepts from a terminal and that matches no `choices[].value`, so a `<select>` built
+  from the served choices had no selectable default. The deeper half: the walk fed that index back to
+  **itself**, `presetById("1")` answered `undefined`, and `model` and `baseUrl` were therefore served
+  with *empty* defaults where the terminal offers a real model id and endpoint. Resolve through the
+  same validator the route applies to the answer, so a served default cannot be a value the route would
+  reject — one fix repairs the control, the defaults, and every branch test comparing against an index.
+- **An answer accepted by a route and read by nobody is worse than a missing field.**
+  `POST /v1/agents {"answers":{"daemon":"service"}}` answered **201 and installed no service** — it is
+  in `FLAG_FOR`, so it validated and landed in `answers`, and only `init.ts` ever reads it.
+  `skills: "find"` is the same with a louder promise: the terminal mounts a catalogue picker, while
+  over the wire it wrote `skills/.keep` — byte-identical to `none` — under a label offering to search
+  440+ skills. Both refused by name now, from **one map each that the step list also reads**, so a
+  question the route rejects is never offered. Hard rule 8 from inside a route that reports success.
+- **A secret typed into a browser lives in component state and nowhere else** — not the URL, not
+  `localStorage`, not `sessionStorage`. It is sent once, written into the agent's `.env` at `0600`, and
+  read back by **no route**, so a browser that remembered it would hold the only recoverable copy
+  anywhere; `type="password"` plus `autoComplete="new-password"` is what declines that. And because
+  `.env` is a **protected path**, a secret left blank is the one thing no later route can fix — so the
+  result screen names the blank ones beside the directory, by each step's own `prompt` rather than by
+  an environment variable, since a step-to-variable map would be a second copy of the one the generated
+  `.env` already writes as comments.
+- **A scope is a boundary only where a caller cannot decline it, and the omission is the attack.**
+  `?agentId=` on `/v1/events` is a filter a caller *chooses*; the scope is not. The widest hole in the
+  surface was reached by **leaving a parameter out** — `/v1/events` and `/v1/ws` with no agent named
+  are the firehose, so a key narrowed to one agent read every other agent's turns, prompts and tool
+  calls without asking for anything. `POST /messages` is the mirror: the session key arrives in the
+  **body**, so a caller names a conversation they may never have seen. Anywhere a scope is enforced,
+  ask what the request looks like when the field is simply absent.
+- **Out of scope answers `404`, never `403` — and a capability refusal is the one exception.** A
+  refusal that confirms existence turns a key narrowed to one tenant into a directory of the others,
+  so an out-of-scope agent answers byte-identically to an imaginary one, **code included**. A
+  capability refusal is `403` because it discloses nothing about what exists, only about what this
+  credential may do: a `404` there would tell somebody holding a read-only key that the agent they
+  are plainly reading had vanished. Listings **filter** rather than refuse, because a listing is how
+  a client discovers what it can reach — and the half that is easy to miss is that
+  `GET /v1/agents`' stopped rows come from `agentState` rather than `runtime.list()`, so filtering
+  only the hosted ones leaks every disabled agent's id.
+- **A required field on the route is the mechanism; a table beside the router is the bug.**
+  `router.add` takes a required `capability`, the same shape as `CommandSpec.inSession` — a new route
+  cannot be registered without deciding. TypeScript enforces presence and **cannot check the value**,
+  and the first pass over 39 routes got three wrong in ways that compile perfectly: `POST /messages`
+  required `admin` (so no chat-scoped key could send anything) and two GETs required nothing at all.
+  The assignment is therefore documented in `04-SPEC-WIRE.md` and checked both ways, plus a shape
+  assertion that nothing mutating is `read` or `open`. Related, from the audit itself: **bound a
+  source scan by the *next* match, not by matching parentheses** — a balanced scan has to understand
+  template literals to know which `)` closes a call, and the version that did not found 18 of 39
+  routes and reported the rest as fine.
+- **`instanceof`'s sibling for credentials: one authenticator, or the two surfaces disagree.**
+  `/v1/ws` compared `?token=` against the configured token alone, so an operator key authenticated
+  every route *except the socket* — undocumented, and not a decision. `createHandler` returns the
+  dispatcher with its authenticator attached precisely so `serve.ts` composes no second copy of the
+  rule, which is how the divergence happened. The credential travels in `Sec-WebSocket-Protocol`
+  (`new WebSocket(url, ["dispach.bearer", key])`) because a browser cannot set headers on a handshake
+  and a credential in a URL lands in an access log, a `Referer` and anything that proxies — and the
+  server must **echo** the chosen subprotocol or the browser closes the socket with no readable
+  reason. One trap found by running the suite: a **claim** must skip the capability check, because
+  `authorise` has already restricted it to `POST /v1/keys` and nothing else; layering `admin` on top
+  broke the entire bootstrap, which is the one flow that has to work on a server with no credentials.
+- **Absence of a scope must be byte-identical to the behaviour before scopes existed, and an empty
+  set must not be.** All fields absent means an unscoped key — which is what keeps a key a credential
+  for a *server* rather than for an agent, so `operator_keys` still has no `agent_id` and
+  `purgeAgent` still leaves it alone. An **empty** `can` is honoured as written: a key that may do
+  nothing is coherent, and promoting it to everything would be the worst available reading. Expiry
+  rides the same query that hides a revoked key, so expired, revoked and wrong all answer the same —
+  "expired" would date a leaked credential and "revoked" would confirm it had once been real. A scope
+  naming an agent this server does not hold is **refused at mint**, because a credential that
+  authenticates and reaches nothing is indistinguishable from a working one until it is used.
 - **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
   under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
   builds running beside it — which is a shared 2-core runner every time. Its own comment says the

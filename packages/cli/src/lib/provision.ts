@@ -41,6 +41,7 @@ import {
     type Question,
     type QuestionDefaults,
     SECRET_STEPS,
+    STEP_ORDER,
     validateAnswer,
 } from "#lib/init-flow"
 
@@ -289,16 +290,47 @@ export function writeAgentFiles(targetDir: string, files: readonly GeneratedFile
 
 // ─── the HTTP-facing half ───────────────────────────────────────────────────────────────
 
+/**
+ * What opens a step that is not always asked.
+ *
+ * `telegramToken` is a question only for somebody who said `telegram: connected`, and
+ * `nextQuestion` expresses that as a `continue` a client cannot see. This is the same fact,
+ * declared — so a browser can render the whole question set and reveal a field when the choice
+ * that opens it is made, without re-implementing the walk. A hard-coded condition in the page
+ * would be the two-hand-kept-lists shape that `GET /v1/provision` exists to prevent.
+ *
+ * **Evaluate it transitively.** A step is askable when its requirement is met *and* the step named
+ * in that requirement is itself askable. `webKey` requires `web: search`; `web` requires nothing,
+ * so the recursion terminates at the default path. Only the nearest opening choice is recorded,
+ * because attributing a step to every ancestor would be a second encoding of `STEP_ORDER`'s shape.
+ */
+export interface StepRequirement {
+    readonly step: InitStep
+    /** The canonical answer — the choice's `value`, never a menu index. See `canonical`. */
+    readonly value: string
+}
+
 /** One question, as a client that is not a terminal needs to see it. */
 export interface ProvisionStep {
     readonly step: InitStep
     readonly prompt: string
-    /** The offered default. Empty means the answer is required unless `optional`. */
+    /**
+     * The offered default, as a value a client can use. Empty means the answer is required unless
+     * `optional`.
+     *
+     * **Canonical, never the wizard's own `fallback`.** A `Question` for a menu carries `"1"` —
+     * a 1-based index, which `validateAnswer` accepts from a terminal and which matches no
+     * `choices[].value` at all. Served raw it gave a `<select>` no selectable default; worse, the
+     * walk fed it back to itself, `presetById("1")` answered `undefined`, and `model` and `baseUrl`
+     * were therefore served with **empty** defaults where the terminal offers a real model id.
+     */
     readonly fallback: string
     /** An empty answer is a real answer. See `Question.optional`. */
     readonly optional: boolean
     /** Mask it, never echo it, never log it. Derived from `SECRET_STEPS`, not restated. */
     readonly secret: boolean
+    /** Absent means always asked. See `StepRequirement`. */
+    readonly requires?: StepRequirement
     readonly choices?: readonly {
         readonly value: string
         readonly label: string
@@ -308,25 +340,84 @@ export interface ProvisionStep {
 }
 
 /**
- * Every question the wizard can ask, in asking order, with its choices.
+ * Steps no API caller may answer, with the reason each is refused.
  *
- * **Walked from `nextQuestion` rather than written down**, which is the whole reason this is safe to
- * serve: the terminal's order, prompts, defaults and choice lists come from the same walk, so a
- * browser cannot render a stale form. A hand-kept list here would be the "two lists" shape that has
- * already cost this repo several rounds — `NO_MANIFEST`, `DOCUMENTED_CTRL_LETTERS`,
- * `THRESHOLD_ORDER`, each right when written and wrong at the next addition.
+ * One map, read by two things that must agree: `provisionSteps` leaves these out of the served
+ * list, and `provisionAgent` throws when one arrives anyway. Held together because a question
+ * offered by one and refused by the other puts a field in front of somebody that cannot be
+ * submitted — and the reverse, a step quietly *accepted* and acted on by nobody, is worse.
  *
- * **The directory questions are omitted**, because `provisionAgent` refuses them: a list that
- * offered a question the route rejects would put a field in front of somebody that cannot be
- * submitted, which is worse than not asking. The terminal still asks them — this list is what an
- * API client may answer, and that is a smaller set by exactly two.
- *
- * The walk takes each step's **fallback** as the answer, which is what makes it terminate and what
- * makes the branch it follows the default one. So the list is every question a caller accepting all
- * defaults would see — not every question that exists, because some are unreachable unless an
- * earlier answer opens them (`webBackend` needs `web: search`). A client sends the subset it wants
- * and `provisionAgent` fills the rest, exactly as `init --yes` does with flags.
+ * `daemon` is the one found by building the browser form. It was in `FLAG_FOR`, so it validated
+ * and landed in `answers`, and **only `init.ts` ever reads it** — so
+ * `POST /v1/agents {"answers":{"daemon":"service"}}` answered `201` and installed no service. It is
+ * also the question a running host has already answered: the response's `adopted` field *is* "yes,
+ * it is running in the background". It stayed invisible because the walk skips it unless a channel
+ * or the server is on, which the default path never is.
  */
+const REFUSED_STEPS: ReadonlyMap<InitStep, { readonly code: string; readonly hint: string }> =
+    new Map([
+        [
+            "dir",
+            {
+                code: "provision_directory_refused",
+                hint: "A provisioned agent lands in this host's sandbox, because where an agent lives on disk is the operator's decision rather than a caller's. Use `init --dir` at a terminal to put one somewhere else.",
+            },
+        ],
+        [
+            "dirChoice",
+            {
+                code: "provision_directory_refused",
+                hint: "A provisioned agent lands in this host's sandbox, because where an agent lives on disk is the operator's decision rather than a caller's. Use `init --dir` at a terminal to put one somewhere else.",
+            },
+        ],
+        [
+            "daemon",
+            {
+                code: "provision_daemon_refused",
+                hint: "This server is already hosting the agent you are creating — that is what `adopted` in the response means. Installing a service unit is `daemon install` at a terminal, and a route that writes one would be a web page installing a background process.",
+            },
+        ],
+    ])
+
+/**
+ * Choices a step offers at a terminal and the API cannot honour, with the reason.
+ *
+ * `skills: find` is a **screen**, not an answer: the terminal mounts a catalogue picker and writes
+ * the chosen refs into `skillsPick`. Over the wire it was accepted and produced `skills/.keep` —
+ * byte-identical to `none`, while the choice's own label promises a catalogue search. Filtered out
+ * of the served choices *and* refused, for the same reason `REFUSED_STEPS` is one map.
+ */
+const REFUSED_CHOICES: ReadonlyMap<
+    InitStep,
+    ReadonlyMap<string, { readonly code: string; readonly hint: string }>
+> = new Map([
+    [
+        "skills",
+        new Map([
+            [
+                "find",
+                {
+                    code: "provision_skills_search_refused",
+                    hint: "Searching the catalogues is an interactive picker, not an answer — over the wire it would write no skills and report success. Send `starter` or `none`, then `skills search` and `skills install` once the agent exists.",
+                },
+            ],
+        ]),
+    ],
+])
+
+/**
+ * The answer a client should send for a question's default.
+ *
+ * `validateAnswer` rather than a lookup, because it is the same function the route validates the
+ * answer with — so the served default cannot be a value the route would reject. A fallback that
+ * does not validate (the empty one on a required text question) passes through unchanged: empty is
+ * what "you must answer this" looks like on the wire, and `optional` says which it is.
+ */
+function canonical(question: Question): string {
+    const checked = validateAnswer(question.step, question.fallback)
+    return checked.ok ? checked.value : question.fallback
+}
+
 /**
  * One question, for a client that is not a terminal.
  *
@@ -336,48 +427,126 @@ export interface ProvisionStep {
  * restated, which is the half that must not drift: a second list of which answers are credentials
  * is the one worth getting wrong.
  */
-export function toProvisionStep(question: Question): ProvisionStep {
+export function toProvisionStep(question: Question, opened?: StepRequirement): ProvisionStep {
+    const refused = REFUSED_CHOICES.get(question.step)
     return {
         step: question.step,
         prompt: question.prompt,
-        fallback: question.fallback,
+        fallback: canonical(question),
         optional: question.optional === true,
         secret: SECRET_STEPS.has(question.step),
+        ...(opened === undefined ? {} : { requires: opened }),
         ...(question.options === undefined
             ? {}
             : {
-                  choices: question.options.map((option) => ({
-                      value: option.value,
-                      label: option.label,
-                      // `hint` kept separate from `label`: it is the dim half of a row, a reason
-                      // rather than a second label. Folding the two together is what produced a
-                      // 79-column row that wrapped at 80 into a line with no pointer and no number.
-                      ...(option.hint === undefined ? {} : { hint: option.hint }),
-                  })),
+                  choices: question.options
+                      .filter((option) => refused?.has(option.value) !== true)
+                      .map((option) => ({
+                          value: option.value,
+                          label: option.label,
+                          // `hint` kept separate from `label`: it is the dim half of a row, a reason
+                          // rather than a second label. Folding the two together is what produced a
+                          // 79-column row that wrapped at 80 into a line with no pointer and no number.
+                          ...(option.hint === undefined ? {} : { hint: option.hint }),
+                      })),
               }),
     }
 }
 
+/** How far a single walk may go before something is wrong. `STEP_ORDER` is 21 long. */
+const WALK_GUARD = 64
+
+/**
+ * Every question the wizard can ask, in asking order, with its choices and what opens it.
+ *
+ * **Walked from `nextQuestion` rather than written down**, which is the whole reason this is safe to
+ * serve: the terminal's order, prompts, defaults and choice lists come from the same walk, so a
+ * browser cannot render a stale form. A hand-kept list here would be the "two lists" shape that has
+ * already cost this repo several rounds — `NO_MANIFEST`, `DOCUMENTED_CTRL_LETTERS`,
+ * `THRESHOLD_ORDER`, each right when written and wrong at the next addition.
+ *
+ * ## Why one walk is not enough
+ *
+ * `nextQuestion` skips a question whose opening answer was not given, so following the **default**
+ * path lists thirteen of the eighteen askable steps and omits every credential but the model key:
+ * `telegramToken`, `telegramAllow`, `webBackend`, `webKey`, `composioKey`. A browser built on that
+ * could ask for a Telegram agent and not for its token, and would write an agent whose `.env` has
+ * to be filled at a terminal before it can start — which is the opposite of what provisioning from
+ * a browser is for.
+ *
+ * So the default path is walked first and its finds carry no `requires`; then every choice it
+ * offered is walked as a **branch**, and a step seen for the first time there is attributed to the
+ * branch that opened it. Breadth-first, so a step reachable two ways is attributed to the
+ * shallowest — and each `step=value` pair is walked at most once, which is what bounds this to
+ * roughly twenty short walks rather than a combinatorial explosion.
+ *
+ * The seed carries the **whole path** taken to reach a branch, not just its own answer: seeded with
+ * `webBackend` alone, `nextQuestion` skips it, because it is a question only for somebody who
+ * already said `web: search`.
+ *
+ * Ordering is restored from `STEP_ORDER` at the end, because a branch's finds are discovered after
+ * the default path has run past them and "in asking order" is what the wire promises.
+ *
+ * `REFUSED_STEPS` is omitted rather than offered: a question the route rejects is a field that
+ * cannot be submitted, which is worse than not asking.
+ */
 export function provisionSteps(defaults: QuestionDefaults): readonly ProvisionStep[] {
-    const answers: PartialAnswers = {}
-    const out: ProvisionStep[] = []
-    // Bounded: `nextQuestion` is a pure walk over a fixed order, so it terminates — but a bug there
-    // would hang a request rather than fail one, and a request that never answers is the worst
-    // failure an HTTP surface has.
-    for (let guard = 0; guard < 64; guard += 1) {
-        const question: Question | undefined = nextQuestion(answers, defaults)
-        if (question === undefined) break
-        // The walk advances past it either way; it is simply not offered.
-        if (question.step === "dir" || question.step === "dirChoice") {
-            answers[question.step] = question.fallback
-            continue
+    const found = new Map<InitStep, ProvisionStep>()
+    const walked = new Set<string>()
+
+    /** Follow one path to its end; return every branch it declined to take. */
+    const walk = (
+        seed: PartialAnswers,
+        opened?: StepRequirement,
+    ): readonly { readonly seed: PartialAnswers; readonly opened: StepRequirement }[] => {
+        const answers: PartialAnswers = { ...seed }
+        const branches: { readonly seed: PartialAnswers; readonly opened: StepRequirement }[] = []
+        // Bounded: `nextQuestion` is a pure walk over a fixed order, so it terminates — but a bug
+        // there would hang a request rather than fail one, and a request that never answers is the
+        // worst failure an HTTP surface has.
+        for (let guard = 0; guard < WALK_GUARD; guard += 1) {
+            const question: Question | undefined = nextQuestion(answers, defaults)
+            if (question === undefined) break
+            const value = canonical(question)
+            if (!REFUSED_STEPS.has(question.step) && !found.has(question.step)) {
+                found.set(question.step, toProvisionStep(question, opened))
+            }
+            for (const option of question.options ?? []) {
+                if (option.value === value) continue
+                if (REFUSED_CHOICES.get(question.step)?.has(option.value) === true) continue
+                branches.push({
+                    seed: { ...answers, [question.step]: option.value },
+                    opened: { step: question.step, value: option.value },
+                })
+            }
+            /**
+             * The **canonical** answer advances the walk, not the wizard's `fallback`.
+             *
+             * Storing `"1"` made the walk unable to read its own answers: `presetById("1")` is
+             * `undefined`, so `model` and `baseUrl` were offered with empty defaults, and every
+             * branch test (`partial.web !== "search"`) compared against an index. An optional step
+             * with no fallback answers empty, which is what it means — refusing there would make
+             * this list unreachable past the first secret.
+             */
+            answers[question.step] = value
         }
-        out.push(toProvisionStep(question))
-        // The fallback advances the walk. An optional step with no fallback answers empty, which is
-        // what it means: refusing there would make this list unreachable past the first secret.
-        answers[question.step] = question.fallback
+        return branches
     }
-    return out
+
+    const queue = [...walk({})]
+    for (let guard = 0; guard < WALK_GUARD && queue.length > 0; guard += 1) {
+        const next = queue.splice(0, queue.length)
+        for (const branch of next) {
+            const key = `${branch.opened.step}=${branch.opened.value}`
+            if (walked.has(key)) continue
+            walked.add(key)
+            queue.push(...walk(branch.seed, branch.opened))
+        }
+    }
+
+    return [...found.values()].sort(
+        (a, b) => STEP_ORDER.indexOf(a.step) - STEP_ORDER.indexOf(b.step),
+    )
 }
 
 export interface ProvisionRequest {
@@ -416,18 +585,36 @@ export function provisionAgent(input: ProvisionRequest): ProvisionResult {
             })
         }
         /**
-         * **The directory is not a caller's to choose.**
+         * Refused, never ignored, and read off `REFUSED_STEPS` rather than named here.
          *
-         * Refused rather than ignored: silently writing somewhere other than where a request asked
-         * is the class of surprise this repo writes decisions about, and a route that *honoured* a
-         * path would write wherever it was pointed. The loopback gate is not a reason to hand over
-         * the filesystem as well.
+         * **The directory is not a caller's to choose.** Silently writing somewhere other than
+         * where a request asked is the class of surprise this repo writes decisions about, and a
+         * route that *honoured* a path would write wherever it was pointed. The loopback gate is
+         * not a reason to hand over the filesystem as well. `daemon` is refused for the opposite
+         * reason: it was accepted and acted on by nobody.
          */
-        if (step === "dir" || step === "dirChoice") {
+        const refusedStep = REFUSED_STEPS.get(step)
+        if (refusedStep !== undefined) {
             throw new HarnessError({
-                code: "provision_directory_refused",
+                code: refusedStep.code,
                 message: `"${key}" cannot be set over the API.`,
-                hint: "A provisioned agent lands in this host's sandbox, because where an agent lives on disk is the operator's decision rather than a caller's. Use `init --dir` at a terminal to put one somewhere else.",
+                hint: refusedStep.hint,
+                field: key,
+            })
+        }
+        /**
+         * A choice this step offers at a terminal and the API cannot honour.
+         *
+         * Checked **before** `validateAnswer`, which accepts it: it is a real answer to a real
+         * question, and the problem is that the half implementing it lives in `init.ts`. Refusing
+         * it after validation would report it as an invalid value, which is a lie about why.
+         */
+        const refusedChoice = REFUSED_CHOICES.get(step)?.get(raw.trim().toLowerCase())
+        if (refusedChoice !== undefined) {
+            throw new HarnessError({
+                code: refusedChoice.code,
+                message: `${key} is ${JSON.stringify(raw)}, which this runtime cannot do over the API.`,
+                hint: refusedChoice.hint,
                 field: key,
             })
         }

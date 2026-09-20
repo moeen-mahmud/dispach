@@ -646,8 +646,14 @@ export type InitStep = keyof InitAnswers
  */
 export type PartialAnswers = Partial<Record<InitStep, string>>
 
-/** The asking order. `apiKeyEnv` is skipped when the chosen preset is keyless. */
-const STEP_ORDER: readonly InitStep[] = [
+/**
+ * The asking order. `apiKeyEnv` is skipped when the chosen preset is keyless.
+ *
+ * Exported so `provisionSteps` can put the served question list back into asking order after
+ * exploring the branches out of order. Reading the authority is not the same as copying it — a
+ * second array here would be the drift `NO_MANIFEST` and `THRESHOLD_ORDER` already cost.
+ */
+export const STEP_ORDER: readonly InitStep[] = [
     "user",
     "name",
     "purpose",

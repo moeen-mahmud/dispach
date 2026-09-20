@@ -195,6 +195,32 @@ export interface AgentClient {
      */
     reload(): Promise<{ readonly id: string; readonly adopted: readonly string[] }>
     schedules(): Promise<readonly ScheduleRecord[]>
+    /**
+     * Arm a schedule. The server validates the expression and the delivery target.
+     *
+     * Deliberately untyped beyond `Record`: the accepted shape is `prepareScheduleWrite`'s, in
+     * core, and a second declaration of it here is a second definition of what a valid schedule is
+     * — right when written and wrong at the next field.
+     */
+    createSchedule(schedule: Readonly<Record<string, unknown>>): Promise<ScheduleRecord>
+    updateSchedule(
+        scheduleId: string,
+        patch: Readonly<Record<string, unknown>>,
+    ): Promise<ScheduleRecord>
+    deleteSchedule(scheduleId: string): Promise<void>
+    /** Fire one now, out of band. Does **not** move its next scheduled run. */
+    runSchedule(scheduleId: string): Promise<{
+        readonly scheduleId: string
+        readonly turnId: string
+        readonly sessionKey: string
+    }>
+    /** One conversation's summary. `sessions()` is the listing. */
+    session(sessionKey: string): Promise<SessionSummary>
+    /** Move a conversation into a phase the manifest declares. */
+    setPhase(
+        sessionKey: string,
+        phase: string,
+    ): Promise<{ readonly sessionKey: string; readonly phase: string }>
     context(options?: { readonly sessionKey?: string; readonly input?: string }): Promise<unknown>
     /**
      * What is waiting on a person right now, oldest first.
@@ -409,6 +435,80 @@ export interface EventStreamOptions {
     readonly signal?: AbortSignal
 }
 
+/**
+ * One provisioning question, as `GET /v1/provision` serves it.
+ *
+ * Structural rather than imported from `@dispach/server`: the client talks to a wire, and a type
+ * dependency on the server package would make a browser bundle pull Zod in for a form.
+ */
+export interface ProvisionStepLike {
+    readonly step: string
+    readonly prompt: string
+    /** The default, already a value that may be sent back — never a menu index. */
+    readonly fallback: string
+    readonly optional: boolean
+    /** Mask it. Written once into the agent's `.env` at `0600`; no route reads it back. */
+    readonly secret: boolean
+    /**
+     * What opens this step, absent when it is always asked.
+     *
+     * Evaluate **transitively**: askable when the requirement is met *and* the step it names is
+     * itself askable. `lib/provision-form.ts` in `@dispach/web` is the reference implementation.
+     */
+    readonly requires?: { readonly step: string; readonly value: string }
+    readonly choices?: readonly {
+        readonly value: string
+        readonly label: string
+        readonly hint?: string
+    }[]
+}
+
+/** What this server will ask, and whether it can create an agent at all. */
+export interface ProvisionOfferLike {
+    /** A provisioner was injected. `false` means `POST /v1/agents` answers `501`. */
+    readonly available: boolean
+    /** This handler is on a loopback bind. `false` means the route answers `403`. */
+    readonly local: boolean
+    readonly steps: readonly ProvisionStepLike[]
+}
+
+/**
+ * What `POST /v1/agents` answers, `201` either way.
+ *
+ * `adopted` is the part worth reading: the agent is on disk whichever way this went, so a failed
+ * adoption is not a failed creation — telling somebody their request failed while a complete agent
+ * sits in the sandbox would send them to create a second one. An empty `adopted` with an `error` is
+ * "it exists and is not running", which is a different sentence and needs a different one shown.
+ */
+export interface ProvisionedAgentLike {
+    readonly id: string
+    readonly dir: string
+    /** Relative paths written, so a caller can report what it made without re-reading the disk. */
+    readonly files: readonly string[]
+    readonly adopted: readonly string[]
+    readonly error?: WireError
+}
+
+/** How far one credential reaches. Absent fields mean "everything". See `04-SPEC-WIRE.md`. */
+export interface KeyScopeLike {
+    readonly agents?: readonly string[]
+    /** A session-key prefix; a trailing `*` is accepted and ignored. */
+    readonly sessions?: string
+    readonly can?: readonly ("read" | "chat" | "write" | "admin")[]
+}
+
+/** A credential as a listing shows it. Never the secret — no route returns one twice. */
+export interface OperatorKeyLike {
+    readonly keyId: string
+    readonly label: string
+    readonly createdAt: string
+    readonly lastUsedAt?: string
+    readonly revokedAt?: string
+    /** Absent means unscoped: every agent, every session, all four capabilities. */
+    readonly scope?: KeyScopeLike
+    readonly expiresAt?: string
+}
+
 export interface DispachClient {
     agent(id: string): AgentClient
     /** Every agent this runtime hosts. */
@@ -418,6 +518,41 @@ export interface DispachClient {
     ready(): Promise<boolean>
     /** The firehose. Every event, optionally narrowed. */
     events(options?: EventStreamOptions): AsyncGenerator<EventStreamItem>
+    /**
+     * What this server will ask to create an agent.
+     *
+     * Answers even when provisioning is unavailable or remote — an empty list beside
+     * `available: false` says *why* a form cannot be offered, where a `501` would only say that one
+     * cannot.
+     */
+    provision(): Promise<ProvisionOfferLike>
+    /**
+     * Create an agent and adopt it into this host.
+     *
+     * Send a subset: anything left out takes its default, exactly as `init --yes` does with flags.
+     * A bad answer comes back as a `400` whose `field` names the step to fix.
+     */
+    createAgent(answers: Readonly<Record<string, string>>): Promise<ProvisionedAgentLike>
+    /**
+     * Every credential, live and revoked, with the sentence this server says about scope.
+     *
+     * Revoked ones are **shown**: the row is the only record a credential ever existed, and hiding
+     * it makes a revocation unverifiable.
+     */
+    keys(): Promise<{ readonly keys: readonly OperatorKeyLike[]; readonly scope: string }>
+    /**
+     * Mint one. **The secret comes back exactly once** and is stored only as a fingerprint.
+     *
+     * `expiresIn` is seconds from now; the response carries the absolute `expiresAt` this server
+     * computed. Relative going in, because an absolute instant would assert agreement with a clock
+     * the caller does not share.
+     */
+    createKey(input: {
+        readonly label: string
+        readonly scope?: KeyScopeLike & { readonly expiresIn?: number }
+    }): Promise<OperatorKeyLike & { readonly secret: string }>
+    /** Permanent. A revoked secret can never be re-presented. */
+    revokeKey(keyId: string): Promise<OperatorKeyLike>
 }
 
 /** Narrow an event by type, so a `switch` over a stream keeps its `data` typed. */
@@ -649,6 +784,54 @@ export function createClient(options: ClientOptions): DispachClient {
                 (await json<{ approvals: readonly PendingApproval[] }>("GET", at("/approvals")))
                     .approvals,
 
+            /**
+             * The schedule writes, which the client declared none of.
+             *
+             * `schedules()` could read them and nothing could create one, so any caller wanting to
+             * arm a schedule hand-rolled the call — which is how `keys.tsx` came to hand-roll the
+             * credential routes, and how a client comes to have two error shapes.
+             *
+             * The server refuses and validates; these do no checking of their own. A cron
+             * expression parsed here as well would be a second definition of what a valid schedule
+             * is, and `prepareScheduleWrite` is deliberately the one — a check only one of two
+             * writers performs is a check they disagree about.
+             */
+            createSchedule: (schedule) =>
+                json<ScheduleRecord>("POST", at("/schedules"), { body: schedule }),
+
+            updateSchedule: (scheduleId, patch) =>
+                json<ScheduleRecord>("PATCH", at(`/schedules/${encodeURIComponent(scheduleId)}`), {
+                    body: patch,
+                }),
+
+            deleteSchedule: async (scheduleId) => {
+                await json<unknown>("DELETE", at(`/schedules/${encodeURIComponent(scheduleId)}`))
+            },
+
+            /**
+             * Fire one now, out of band — it does **not** move the next scheduled run.
+             *
+             * Worth stating on the method rather than leaving to the route's docs: "run it now" and
+             * "pretend it fired" are different things, and a caller who believed the second would
+             * find the real one firing a minute later.
+             */
+            runSchedule: (scheduleId) =>
+                json<{ scheduleId: string; turnId: string; sessionKey: string }>(
+                    "POST",
+                    at(`/schedules/${encodeURIComponent(scheduleId)}/run`),
+                    { body: {} },
+                ),
+
+            session: (sessionKey) =>
+                json<SessionSummary>("GET", at(`/sessions/${encodeURIComponent(sessionKey)}`)),
+
+            setPhase: (sessionKey, phase) =>
+                json<{ sessionKey: string; phase: string }>(
+                    "POST",
+                    at(`/sessions/${encodeURIComponent(sessionKey)}/phase`),
+                    { body: { phase } },
+                ),
+
             approve: async (approvalId, granted) => {
                 await json<unknown>("POST", at(`/approvals/${encodeURIComponent(approvalId)}`), {
                     // Always sent, never defaulted. The server refuses a body without it for the
@@ -695,6 +878,23 @@ export function createClient(options: ClientOptions): DispachClient {
                 throw error
             }
         },
+
+        provision: () => json<ProvisionOfferLike>("GET", "/v1/provision"),
+        /**
+         * The credential routes, which this package declared none of.
+         *
+         * `packages/web`'s keys panel hand-rolled all three with its own `fetch`, its own header
+         * assembly and its own error handling — which is exactly what a typed client exists to stop,
+         * and why one endpoint there could throw a raw `TypeError` while its neighbours threw
+         * `DispachError`. A caller cannot write one `catch` against that.
+         */
+        keys: () => json<{ keys: readonly OperatorKeyLike[]; scope: string }>("GET", "/v1/keys"),
+        createKey: (input) =>
+            json<OperatorKeyLike & { secret: string }>("POST", "/v1/keys", { body: input }),
+        revokeKey: (keyId) =>
+            json<OperatorKeyLike>("DELETE", `/v1/keys/${encodeURIComponent(keyId)}`),
+        createAgent: (answers) =>
+            json<ProvisionedAgentLike>("POST", "/v1/agents", { body: { answers } }),
 
         async *events(opts) {
             const params = new URLSearchParams()

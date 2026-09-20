@@ -4613,6 +4613,136 @@ CLI's `serve` at all. The markup is covered by render tests against the real pay
 **Playwright's MCP server disconnected** after the last rebuild, so the final cosmetic fix was
 verified in the **served bundle** (`<code>` present, no literal backtick) rather than on screen.
 
+### 17.4 — Browser onboarding — **built** (2026-09-20)
+
+Ends Phase 17. The server half shipped in 16.5; this is the browser, the client methods, and three
+defects in that route that only a form would ever have hit.
+
+**The step list grew from 13 to 18, which is the stage.** `GET /v1/provision` was generated from
+`nextQuestion`'s walk — drift-proof, and following **one path**, so every question whose opening
+answer was never given was absent: `telegramToken`, `telegramAllow`, `webBackend`, `webKey`,
+`composioKey`. A browser could ask for `telegram: connected` and not for its token. `provisionSteps`
+now explores the branches breadth-first and declares `requires: { step, value }`; still one generated
+walk, ordering restored from `STEP_ORDER` (11.226).
+
+**Three defects in 16.5's route, all found by building the form.**
+
+1. **`fallback: "1"`** — a menu index, matching no `choices[].value`, so a `<select>` had no
+   selectable default. And the walk fed that index to *itself*: `presetById("1")` is `undefined`, so
+   `model` and `baseUrl` were served with **empty** defaults where the terminal offers real ones
+   (11.227).
+2. **`daemon` and `skills: find` were accepted and acted on by nobody** — `201` and no service
+   installed; `skills/.keep` and a report of success under a label promising a catalogue search
+   (11.228).
+3. **Every refusal was a `500` in the shipped image** — two `HarnessError` classes in one `--compile`
+   binary, so `instanceof` was false for anything the CLI-injected provisioner threw. Pre-existing
+   since 16.5, invisible to the whole suite (11.229).
+
+**What landed in the browser.** `lib/provision-form.ts` (pure: visibility, the submit gate, the
+payload, the blank secrets), `onboarding.tsx` (props only, so `renderToStaticMarkup` tests it),
+`?panel=new` as the sixth panel and the zero-agent landing, and `provision()` / `createAgent()` on
+`@dispach/client` — which the page uses rather than hand-rolling calls the way `keys.tsx` does
+(11.230).
+
+**Acceptance — in the container.**
+
+- [x] Rebuilt image healthy. Its own `0.0.0.0` bind answers `{available: true, local: false}` and
+      `POST /v1/agents` → `provisioning_not_local`: the gate holds, and it still serves the step list
+      so the page can say *which* reason.
+- [x] A loopback-bound `serve` inside the container: `{available: true, local: true, steps: 18}`,
+      4 secrets, 5 conditional, `model` defaulting to a real id and `baseUrl` to a real endpoint.
+- [x] All five refusals `400` with their code **and `field`** in the shipped binary —
+      `provision_directory_refused`, `provision_unknown_answer`, `provision_answer_invalid`,
+      `provision_daemon_refused`, `provision_skills_search_refused`. Every one was a `500` before.
+- [x] The page's own sequence, from the host through a TCP relay: claim exchanged for a key, empty
+      listing, offer read, create posted with a conditional secret → `201`, `adopted: ["vela"]`,
+      13 files, and the listing carries it as `loaded`.
+- [x] **The browser-typed Telegram token reached `.env` at `0600`**, the handle reached
+      `allowFrom: ["@moeen_m"]`, and the channel *used* that token on the wire — Telegram rejected it
+      because it is fake, which is the proof it travelled. Under the single-path walk that field could
+      not be asked for at all.
+- [x] The served bundle carries the panel: `app.js` 237,202 B (17.3: 230,969), `app.css` 7,336 B
+      (6,468). Every new string present.
+- [x] 3463 pass / 0 fail, node 1433 / 0, typecheck 0, lint at the 6 pre-existing warnings, boot ok.
+      All five new guards revert-checked.
+
+**Not verified: the paint.** Chrome's extension timed out on every call this session and Playwright's
+MCP server failed to connect at start-up, so nobody watched this render. The markup is covered by
+nine `renderToStaticMarkup` assertions and the bundle was checked as served — which is what 17.3 fell
+back to for the same reason, and it is **not** the same claim: 11.225 is the record of a page that had
+a perfect accessibility snapshot and was entirely black. A loopback server plus relay is left running
+at `http://localhost:7451/` for a one-click look.
+
+# Phase 18 — credentials a platform can hand out — **built** (2026-09-20)
+
+All five stages. A key still authenticates a *caller to a server*; what is new is that it can be
+**narrowed**, and that the narrowing is a boundary rather than a filter.
+
+### 18.1 — a principal on every request
+
+`authorise` answered *whether*, never *who*, so nothing else in this phase was expressible. It
+returns a `Principal` now (`open | token | key | claim`), threaded onto `RequestContext` as a
+**required** field, and it moved into `auth.ts` because `/v1/ws` has to resolve the same one —
+`createHandler` returns the dispatcher with its authenticator attached, so `serve.ts` composes no
+second copy of the rule (11.231).
+
+### 18.2 — scoped keys
+
+`scope` (JSON) and `expires_at` (a column, so `findLive` filters on it) on `operator_keys`,
+migration 17. Every field absent is byte-identical to an unscoped key, which is what keeps 11.197
+intact. `expiresIn` in, `expiresAt` out. A scope naming an agent this server does not hold is
+**refused at mint** (11.234).
+
+### 18.3 — scope as a boundary
+
+`capability` is a **required** field on `router.add` — a table beside the router would be a second
+list of routes — with the assignment documented in `04-SPEC-WIRE.md` and checked both ways. Out of
+scope is `404`, byte-identical to an imaginary id; a capability refusal is `403`. Listings filter
+(11.232, 11.233).
+
+### 18.4 — cross-origin
+
+16.1 built the allowlist and the refusal; this is the response side. The origin is echoed exactly,
+never `*`, never reflected unchecked; the preflight names `Authorization` or the browser strips the
+credential; no `Allow-Credentials`, because the credential is a header rather than a cookie (11.235).
+
+### 18.5 — the asymmetries that were simply bugs
+
+`/v1/ws` rejected operator keys outright. It now authenticates through the same function as every
+other route, with the credential in `Sec-WebSocket-Protocol` rather than a URL. `@dispach/client`
+gained the credential routes, the schedule writes and the session writes — the gap that had the web
+UI hand-rolling `fetch` calls with its own error handling (11.235, 11.236).
+
+**Three capabilities were assigned wrong on the first pass, in ways that compile perfectly**:
+`POST /messages` required `admin`, and `GET /v1/agents/:id` and `GET /turns/:turnId` required
+nothing. That is the argument for the table guard, and it is why the audit is a test.
+
+**Acceptance — in the container, against the shipped binary.**
+
+- [x] A scoped key minted through the API: `{agents:["minimal"], sessions:"team_42:*",
+      can:["chat","read"]}` with `expiresAt` computed server-side from `expiresIn: 3600`.
+- [x] `key_scope_agent_unknown` on a typo'd agent id, `field: scope.agents`.
+- [x] The boundary, every row: in-scope `200`; an imaginary agent and an out-of-scope one both
+      `404 agent_not_found`; `POST /schedules` and `GET /v1/keys` both `403 capability_required`;
+      writing into `team_7:` with a `team_42:` key `404 session_not_found`.
+- [x] CORS: a hostile origin `403` with **no** `Access-Control-*`; an allowed one echoed exactly
+      with `Vary: Origin`; the preflight carrying methods, `Authorization` and a max-age where it
+      previously carried none.
+- [x] **An operator key opens a WebSocket** — `open · negotiated protocol: dispach.bearer` — and was
+      `refused` before this phase. `?token=` still works; a wrong credential is refused.
+- [x] Expiry live: `200`, then `401 unauthorized` three seconds later — the same answer a revoked
+      key and a wrong one give.
+- [x] `dispach credential list` and `create --agents … --can … --expires 2h`, with the secret on
+      stdout alone (41 bytes captured through a pipe) and the reach printed to stderr.
+- [x] 3502 pass / 0 fail, node 1437 / 0, typecheck 0, lint at the 6 pre-existing warnings.
+      Every new guard revert-checked — `withAgent`, the firehose, the session body, the capability
+      gate, the socket broadcast, the socket credential.
+
+**Not done, deliberately.** `POST /v1/agents` is still gated to a loopback bind rather than opened
+to an admin-scoped key: provisioning writes files and starts a process, and opening that to a bearer
+token on a public bind deserves its own stage with its own threat model. The `admin` capability
+exists and gates credentials, start/stop and reload.
+
 ---
 
 ## Carried backlog

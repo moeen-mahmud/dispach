@@ -12,6 +12,8 @@
  * `tg%3A-100123` and a router that skipped decoding would look up a session that does not exist.
  */
 
+import type { Capability } from "@dispach/core"
+
 export interface RouteMatch {
     readonly params: Readonly<Record<string, string>>
 }
@@ -31,6 +33,22 @@ export interface Route<THandler> {
      * per probe rather than an error.
      */
     readonly streaming: boolean
+    /**
+     * What a scoped credential must be allowed to do to reach this route.
+     *
+     * **Required**, and that is the whole mechanism — the same reasoning as `CommandSpec.inSession`
+     * in the CLI: *"a flag added to the CLI reaches the TUI with nothing to remember"*. A capability
+     * table kept beside the router would be a second list of routes, which is the shape this repo
+     * has paid for repeatedly (`NO_MANIFEST`, `DOCUMENTED_CTRL_LETTERS`, `THRESHOLD_ORDER`) and the
+     * failure is always the same: right when written, wrong at the next addition, with nothing
+     * reporting the gap. Here the gap would be a route a narrow credential reaches unchecked.
+     *
+     * `"open"` means no capability is required — the probes, the webhook and the web assets, which
+     * are reachable with no credential at all. It is spelled out rather than left as `undefined`
+     * so that "this route is deliberately open" and "somebody has not decided yet" are not the same
+     * value.
+     */
+    readonly capability: Capability | "open"
 }
 
 interface Compiled<THandler> extends Route<THandler> {
@@ -44,12 +62,13 @@ export class Router<THandler> {
         method: string,
         pattern: string,
         handler: THandler,
-        options: { readonly streaming?: boolean } = {},
+        options: { readonly capability: Capability | "open"; readonly streaming?: boolean },
     ): this {
         this.#routes.push({
             method: method.toUpperCase(),
             pattern,
             handler,
+            capability: options.capability,
             streaming: options.streaming === true,
             segments: split(pattern),
         })
@@ -69,11 +88,12 @@ export class Router<THandler> {
      * that wants to answer a request from the table (as `HEAD` does) needs them.
      */
     routes(): readonly Route<THandler>[] {
-        return this.#routes.map(({ method, pattern, handler, streaming }) => ({
+        return this.#routes.map(({ method, pattern, handler, streaming, capability }) => ({
             method,
             pattern,
             handler,
             streaming,
+            capability,
         }))
     }
 
@@ -92,6 +112,7 @@ export class Router<THandler> {
               readonly handler: THandler
               readonly params: Readonly<Record<string, string>>
               readonly streaming: boolean
+              readonly capability: Capability | "open"
           }
         | { readonly kind: "method"; readonly allowed: readonly string[] }
         | { readonly kind: "none" } {
@@ -108,6 +129,7 @@ export class Router<THandler> {
                     handler: route.handler,
                     params,
                     streaming: route.streaming,
+                    capability: route.capability,
                 }
             }
         }

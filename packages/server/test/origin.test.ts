@@ -15,7 +15,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test"
-import { hostOf, isLoopback, originProblem } from "../src/origin.ts"
+import { corsHeaders, hostOf, isLoopback, originProblem, preflightHeaders } from "../src/origin.ts"
 import { cleanupWorkspaces, harness, TOKEN } from "./harness.ts"
 
 afterAll(cleanupWorkspaces)
@@ -228,5 +228,90 @@ describe("wired ahead of the open-path check, which is the point", () => {
             (await call("GET", "/v1/ready", { headers: { origin: "https://evil.example" } }))
                 .status,
         ).toBe(200)
+    })
+})
+
+describe("cross-origin responses", () => {
+    /**
+     * 16.1 built the allowlist and refused what was not on it. This is the other half: the headers
+     * that let a browser **use** a response it was allowed to make.
+     *
+     * The two are separate functions on purpose. A refusal applies to every caller; these headers
+     * apply only to a browser, and folding them together would make the guard look optional.
+     */
+    const policy = { host: "127.0.0.1", allowedOrigins: ["https://app.example.com"] }
+
+    function get(origin?: string): Request {
+        return new Request("http://127.0.0.1:7420/v1/health", {
+            headers: {
+                host: "127.0.0.1:7420",
+                ...(origin === undefined ? {} : { origin }),
+            },
+        })
+    }
+
+    test("an allowed origin is echoed exactly, and never as a wildcard", () => {
+        const headers = corsHeaders(get("https://app.example.com"), policy)
+        // `*` would let any page on the internet read an authenticated response; reflecting an
+        // unchecked origin is `*` with extra steps and is the famous version of this mistake.
+        expect(headers["access-control-allow-origin"]).toBe("https://app.example.com")
+        expect(Object.values(headers)).not.toContain("*")
+        // Or a cache hands a response allowed for one origin to a page on another.
+        expect(headers.vary).toBe("Origin")
+    })
+
+    test("an origin that would be refused gets no headers", () => {
+        // Belt and braces with `originProblem`, which has already returned a 403 — but these are
+        // two functions and a caller could call this one alone.
+        expect(corsHeaders(get("https://evil.example"), policy)).toEqual({})
+    })
+
+    test("a caller with no Origin gets none either", () => {
+        // A curl is not a browser. Sending CORS headers to one is noise that implies a policy
+        // nobody asked for.
+        expect(corsHeaders(get(), policy)).toEqual({})
+    })
+
+    test("credentials are never allowed, and that is not an omission", () => {
+        /**
+         * The credential here is a bearer header a page keeps in `localStorage`, not a cookie — so
+         * there is no ambient authority for a browser to attach, nothing for `SameSite` to protect,
+         * and no CSRF shape to introduce. Sending the header would invite the cookie-based design
+         * it implies.
+         */
+        expect(
+            corsHeaders(get("https://app.example.com"), policy)["access-control-allow-credentials"],
+        ).toBe(undefined)
+    })
+
+    test("a preflight names Authorization, or the browser strips the credential", () => {
+        /**
+         * The failure this prevents is the confusing one: the preflight passes, the browser drops
+         * the `Authorization` header from the real request, and a route that works perfectly from
+         * curl answers 401 in a page with nothing explaining why.
+         */
+        const request = new Request("http://127.0.0.1:7420/v1/agents", {
+            method: "OPTIONS",
+            headers: {
+                host: "127.0.0.1:7420",
+                origin: "https://app.example.com",
+                "access-control-request-headers": "authorization, idempotency-key",
+            },
+        })
+        const headers = preflightHeaders(request, ["GET", "POST"])
+        expect(headers["access-control-allow-methods"]).toBe("GET, POST")
+        // Echoed rather than enumerated: a fixed list goes stale the first time a client sends
+        // `Idempotency-Key`, which this API already accepts.
+        expect(headers["access-control-allow-headers"]).toBe("authorization, idempotency-key")
+    })
+
+    test("a preflight that asks for nothing still names the two that matter", () => {
+        const request = new Request("http://127.0.0.1:7420/v1/agents", {
+            method: "OPTIONS",
+            headers: { host: "127.0.0.1:7420", origin: "https://app.example.com" },
+        })
+        expect(preflightHeaders(request, ["GET"])["access-control-allow-headers"]).toBe(
+            "authorization, content-type",
+        )
     })
 })

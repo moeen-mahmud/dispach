@@ -33,6 +33,40 @@ export interface HarnessErrorInit {
     details?: ErrorDetail[]
 }
 
+/**
+ * The mark that survives being bundled twice.
+ *
+ * `Symbol.for` reads from the **global** symbol registry, so every copy of this module in a process
+ * — however it got there — computes the identical symbol. That is the whole point: `instanceof`
+ * compares prototypes, and two copies of this module have two `HarnessError` prototypes.
+ *
+ * **Measured, in the shipped image.** `bun build --compile` resolved `@dispach/core` to core's
+ * `src/index.ts` for `packages/cli`'s source and to its `dist/index.js` for the prebuilt
+ * `@dispach/server` it bundled — two classes in one binary. So `error instanceof HarnessError` in
+ * the server was **false** for every error the CLI-injected provisioner threw, and each refusal
+ * that had a code, a hint and a `field` came back as `500 internal_error`. `bun test` could not see
+ * it, because tests import source and there is only one copy of anything. Neither could a test that
+ * ran the built binary on the bun version this repo pins, because 1.3.5 resolves both to `dist` and
+ * agrees with itself — the resolution rule changed underneath, and it was never ours to rely on.
+ */
+const HARNESS_ERROR = Symbol.for("dispach.HarnessError")
+
+/**
+ * Is this one of ours, regardless of which copy of this module built it?
+ *
+ * **Use this, not `instanceof`, wherever the throw and the catch are in different packages.** Every
+ * such site in `packages/server` is one, and `boundaries.test.ts` there refuses `instanceof
+ * HarnessError` outright for that reason. Inside a single package the two are equivalent and
+ * `instanceof` reads better.
+ *
+ * Deliberately a property test rather than a `code`/`hint` duck-type: a plain object carrying those
+ * fields is what a *deserialised* error looks like, and treating one as a live `HarnessError` would
+ * call `toDetail()` on something that does not have it.
+ */
+export function isHarnessError(value: unknown): value is HarnessError {
+    return typeof value === "object" && value !== null && HARNESS_ERROR in value
+}
+
 /** Base for every error this runtime raises deliberately. */
 export class HarnessError extends Error {
     readonly code: string
@@ -43,6 +77,20 @@ export class HarnessError extends Error {
     constructor(init: HarnessErrorInit) {
         super(init.message, init.cause === undefined ? undefined : { cause: init.cause })
         this.name = new.target.name
+        /**
+         * The cross-bundle mark, set here and **not declared as a field**.
+         *
+         * A symbol-keyed field would reach the emitted `.d.ts`, which makes the class *nominal* —
+         * and `tsc` then reports the same duplication the runtime had, because `packages/cli`'s
+         * typecheck sees both `core/src/errors` and `core/dist/errors`. That is a real finding and
+         * the wrong place to spend it: the defect is two classes at **runtime**, the predicate is
+         * already a type guard, and putting the mark in the type buys nothing while breaking
+         * assignability across the very boundary this exists to bridge.
+         *
+         * In the constructor rather than on each subclass, so `UsageError` and `ConfigError` carry
+         * it with nothing to remember. Symbol-keyed, so it never reaches `JSON.stringify` or a diff.
+         */
+        ;(this as unknown as Record<symbol, boolean>)[HARNESS_ERROR] = true
         this.code = init.code
         this.hint = init.hint
         this.field = init.field

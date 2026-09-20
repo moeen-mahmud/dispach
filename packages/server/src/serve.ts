@@ -12,7 +12,7 @@
  */
 
 import { HarnessError } from "@dispach/core"
-import { createHandler, type HandlerOptions } from "./handler.ts"
+import { createHandler, type HandlerOptions, type ServerHandler } from "./handler.ts"
 import { isLoopback, originProblem } from "./origin.ts"
 import { HEARTBEAT_MS } from "./sse.ts"
 import { attachWebSocket, type WsSession } from "./ws.ts"
@@ -119,11 +119,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
 // ─── Bun ─────────────────────────────────────────────────────────────────────────────────
 
 function serveWithBun(
-    handler: (request: Request) => Promise<Response>,
+    handler: ServerHandler,
     options: ServeOptions,
     running: Map<string, AbortController>,
 ): RunningServer {
-    const bridge = attachWebSocket(options.runtime, options.token, running)
+    const bridge = attachWebSocket(options.runtime, handler.authenticate, running)
 
     const server = Bun.serve<WsSession, never>({
         port: options.port,
@@ -134,7 +134,7 @@ function serveWithBun(
         // heartbeat rather than hardcoded, so the two cannot drift apart again. Seconds, and Bun
         // caps it at 255.
         idleTimeout: Math.min(255, Math.ceil((HEARTBEAT_MS / 1000) * 3)),
-        fetch: (request, self) => {
+        fetch: async (request, self) => {
             const url = new URL(request.url)
             if (url.pathname !== "/v1/ws") return handler(request)
 
@@ -163,10 +163,22 @@ function serveWithBun(
                 })
             }
 
-            const attempt = bridge.accept(url)
+            const attempt = await bridge.accept(request)
             if (attempt.kind === "reject") return attempt.response
-            // `undefined` tells Bun the response is the upgrade itself.
-            if (self.upgrade(request, { data: attempt.session })) return undefined
+            /**
+             * `undefined` tells Bun the response is the upgrade itself.
+             *
+             * The chosen subprotocol is echoed in the handshake headers, or a browser that offered
+             * one closes the socket the instant it opens — with no readable reason, which is the
+             * worst kind of handshake failure to debug from the far side.
+             */
+            const upgraded = self.upgrade(request, {
+                data: attempt.session,
+                ...(attempt.protocol === undefined
+                    ? {}
+                    : { headers: { "sec-websocket-protocol": attempt.protocol } }),
+            })
+            if (upgraded) return undefined
             return new Response("upgrade failed", { status: 400 })
         },
         websocket: {

@@ -74,6 +74,7 @@ export {
     ConfigError,
     type ErrorDetail,
     HarnessError,
+    isHarnessError,
     ModelError,
     ToolError,
 } from "./errors.ts"
@@ -410,6 +411,9 @@ export type {
     AgentFootprint,
     AgentStateRecord,
     AgentStateStore,
+    // The scope vocabulary, exported as types because the server enforces it, the CLI mints with
+    // it and the client reads it back — three consumers, one definition.
+    Capability,
     DeliveryRecord,
     DeliveryStatus,
     EnqueueDelivery,
@@ -417,6 +421,7 @@ export type {
     HandoffOutcomeStatus,
     HandoffRecord,
     HandoffStore,
+    KeyScope,
     KVStore,
     // Exported so the CLI can read a lease's address without re-declaring the row's shape —
     // the `stop` path needs `baseUrl`, and a second definition of it is the drift this repo
@@ -444,7 +449,7 @@ export type {
     TurnStore,
     UpsertSchedule,
 } from "./store/store.ts"
-export { DEFAULT_KEY_TOUCH_MS } from "./store/store.ts"
+export { CAPABILITIES, DEFAULT_KEY_TOUCH_MS } from "./store/store.ts"
 export {
     type ArtifactSink,
     describeArtifact,

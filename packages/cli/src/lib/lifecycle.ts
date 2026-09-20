@@ -245,6 +245,16 @@ export interface HostReply {
     readonly status: number
     /** The server's own `error.message`, when it sent one. */
     readonly detail?: string
+    /**
+     * The parsed success body, for the callers that need one.
+     *
+     * `stop` and `start` only ever asked whether it worked, so this was discarded. Minting a
+     * credential is the first caller that needs what came back — the secret is printed **once** and
+     * exists nowhere else, so throwing the body away would make the command useless.
+     */
+    readonly body?: unknown
+    /** The server's `error.hint`, which is the half a person acts on. */
+    readonly hint?: string
 }
 
 /**
@@ -275,7 +285,14 @@ export async function postToHost(
             body: JSON.stringify(body),
             signal: AbortSignal.timeout(HOST_TIMEOUT_MS),
         })
-        if (response.ok) return { ok: true, status: response.status }
+        if (response.ok) {
+            const body: unknown = await response.json().catch(() => undefined)
+            return {
+                ok: true,
+                status: response.status,
+                ...(body === undefined ? {} : { body }),
+            }
+        }
         const parsed = (await response.json().catch(() => undefined)) as
             | { error?: { message?: string; hint?: string } }
             | undefined
@@ -283,6 +300,49 @@ export async function postToHost(
             ok: false,
             status: response.status,
             ...(parsed?.error?.message === undefined ? {} : { detail: parsed.error.message }),
+            ...(parsed?.error?.hint === undefined ? {} : { hint: parsed.error.hint }),
+        }
+    } catch (error) {
+        return {
+            ok: false,
+            status: 0,
+            detail: error instanceof Error ? error.message : String(error),
+        }
+    }
+}
+
+/**
+ * Any method against a running host, with the same bound and the same error shape.
+ *
+ * `postToHost` is this with `POST` and a body; both exist because a `GET` with a `content-type` and
+ * an empty body is a request some proxies mangle, and because the one-method version read better at
+ * the four call sites that had it. This is what `credential list` and `credential revoke` need.
+ */
+export async function callHost(
+    lease: LeaseRecord,
+    method: string,
+    path: string,
+    manifestPath?: string,
+): Promise<HostReply> {
+    const base = lease.baseUrl
+    if (base === undefined) return { ok: false, status: 0, detail: "this host serves no HTTP" }
+    const token = manifestPath === undefined ? undefined : hostToken(manifestPath)
+    try {
+        const response = await fetch(`${base}${path}`, {
+            method,
+            headers: token === undefined ? {} : { authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(HOST_TIMEOUT_MS),
+        })
+        const body: unknown = await response.json().catch(() => undefined)
+        if (response.ok) {
+            return { ok: true, status: response.status, ...(body === undefined ? {} : { body }) }
+        }
+        const parsed = body as { error?: { message?: string; hint?: string } } | undefined
+        return {
+            ok: false,
+            status: response.status,
+            ...(parsed?.error?.message === undefined ? {} : { detail: parsed.error.message }),
+            ...(parsed?.error?.hint === undefined ? {} : { hint: parsed.error.hint }),
         }
     } catch (error) {
         return {

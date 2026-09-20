@@ -34,21 +34,27 @@ describe("router", () => {
     test("captures and percent-decodes parameters", () => {
         // A session key is `{channel}:{peerId}` and a Telegram group id is negative, so real keys
         // arrive as `tg%3A-100123`. Skipping the decode looks up a session that does not exist.
-        const router = new Router<string>().add("GET", "/v1/agents/:id/sessions/:key", "h")
+        const router = new Router<string>().add("GET", "/v1/agents/:id/sessions/:key", "h", {
+            capability: "read",
+        })
         const match = router.match("GET", "/v1/agents/assistant/sessions/tg%3A-100123")
         expect(match.kind).toBe("found")
         if (match.kind === "found") expect(match.params.key).toBe("tg:-100123")
     })
 
     test("a known path under the wrong method is 405, not 404", () => {
-        const router = new Router<string>().add("POST", "/v1/agents/:id/messages", "h")
+        const router = new Router<string>().add("POST", "/v1/agents/:id/messages", "h", {
+            capability: "read",
+        })
         const match = router.match("GET", "/v1/agents/a/messages")
         expect(match.kind).toBe("method")
         if (match.kind === "method") expect(match.allowed).toEqual(["POST"])
     })
 
     test("a malformed escape matches nothing rather than producing mojibake", () => {
-        const router = new Router<string>().add("GET", "/v1/agents/:id", "h")
+        const router = new Router<string>().add("GET", "/v1/agents/:id", "h", {
+            capability: "read",
+        })
         expect(router.match("GET", "/v1/agents/%zz").kind).toBe("none")
     })
 })
@@ -907,7 +913,7 @@ describe("the websocket subscribe frame", () => {
 
     test("sets the filter from agentId", async () => {
         const { runtime } = await harness()
-        const bridge = attachWebSocket(runtime, undefined)
+        const bridge = attachWebSocket(runtime, async () => ({ kind: "open" }))
         const socket = fakeSocket(undefined)
 
         bridge.handlers.message(
@@ -930,7 +936,7 @@ describe("the websocket subscribe frame", () => {
         // The shape a client written against the old behaviour sends. Accepting it would leave the
         // same dead socket with a different cause, so it is an error with a hint.
         const { runtime } = await harness()
-        const bridge = attachWebSocket(runtime, undefined)
+        const bridge = attachWebSocket(runtime, async () => ({ kind: "open" }))
         const socket = fakeSocket("assistant")
 
         bridge.handlers.message(
@@ -952,7 +958,7 @@ describe("the websocket subscribe frame", () => {
         // Per socket, not per bridge. One client asking for tokens is what puts them on the bus;
         // it must not also put them on every other connected client's wire.
         const { runtime } = await harness()
-        const bridge = attachWebSocket(runtime, undefined)
+        const bridge = attachWebSocket(runtime, async () => ({ kind: "open" }))
         const reader = fakeSocket("assistant", true)
         const watcher = fakeSocket("assistant", false)
         bridge.handlers.open(reader.ws)
@@ -984,7 +990,7 @@ describe("the websocket subscribe frame", () => {
         // while somebody wants tokens — so the bus builds no per-token envelope for a bridge full
         // of progress watchers. Asserted against the bus's own counter rather than a symptom.
         const { runtime } = await harness()
-        const bridge = attachWebSocket(runtime, undefined)
+        const bridge = attachWebSocket(runtime, async () => ({ kind: "open" }))
         const before = runtime.bus.chunkSubscribers
 
         // First, the assertion the counter alone cannot make. `chunkSubscribers` is incremented by
@@ -1020,7 +1026,7 @@ describe("the websocket subscribe frame", () => {
 
     test("a subscribe frame can turn tokens on without reconnecting", async () => {
         const { runtime } = await harness()
-        const bridge = attachWebSocket(runtime, undefined)
+        const bridge = attachWebSocket(runtime, async () => ({ kind: "open" }))
         const socket = fakeSocket("assistant", false)
         bridge.handlers.open(socket.ws)
         const before = runtime.bus.chunkSubscribers
@@ -1294,7 +1300,7 @@ describe("a turn is stoppable from either surface", () => {
     test("a turn started over HTTP is found by a WebSocket stop frame", async () => {
         const running = new Map<string, AbortController>()
         const { call, runtime } = await harness({ running })
-        const bridge = attachWebSocket(runtime, undefined, running)
+        const bridge = attachWebSocket(runtime, async () => ({ kind: "open" }), running)
         const socket = fakeSocket("assistant")
         bridge.handlers.open(socket.ws)
 
@@ -1319,7 +1325,7 @@ describe("a turn is stoppable from either surface", () => {
     test("a turn started over a WebSocket is stoppable with POST /stop", async () => {
         const running = new Map<string, AbortController>()
         const { call, runtime } = await harness({ running })
-        const bridge = attachWebSocket(runtime, undefined, running)
+        const bridge = attachWebSocket(runtime, async () => ({ kind: "open" }), running)
         const socket = fakeSocket("assistant")
         bridge.handlers.open(socket.ws)
 

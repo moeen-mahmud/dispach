@@ -12,6 +12,7 @@
  * why `TurnStreams` exists — a client that comes back has to be able to find out what it missed.
  */
 
+import type { Capability as Cap, KeyScope } from "@dispach/core"
 import {
     type Agent,
     type AgentStateRecord,
@@ -20,6 +21,7 @@ import {
     EVENT_TYPES,
     entryPhase,
     HarnessError,
+    isHarnessError,
     isPhased,
     keyFingerprint,
     keyLabelProblem,
@@ -29,7 +31,6 @@ import {
     newKeySecret,
     newRunId,
     newTurnId,
-    type OperatorKeyStore,
     phasesFor,
     prepareScheduleWrite,
     type Runtime,
@@ -42,9 +43,18 @@ import {
     VERSION,
 } from "@dispach/core"
 import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
+import { authorise } from "./auth.ts"
 import type { ClaimTicket } from "./keys.ts"
 import { openapiDocument } from "./openapi.ts"
-import { isLoopback, type OriginPolicy, originProblem } from "./origin.ts"
+import {
+    corsHeaders,
+    isLoopback,
+    type OriginPolicy,
+    originProblem,
+    preflightHeaders,
+} from "./origin.ts"
+import { can, isScoped, type Principal, reachesAgent, reachesSession } from "./principal.ts"
+import { claimSpent, fail, forbidden } from "./respond.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
@@ -206,10 +216,32 @@ export interface Provisioner {
 export interface ProvisionStepWire {
     readonly step: string
     readonly prompt: string
+    /**
+     * The default, as a value a client may send back — never a menu index.
+     *
+     * A client renders `choices` as a control and needs a default that is one of them. The
+     * implementation resolves it through the same validator the route applies to the answer, so a
+     * served default cannot be a value `POST /v1/agents` would reject.
+     */
     readonly fallback: string
     readonly optional: boolean
     /** Mask it. A secret answer is written once at `0600` and never read back by any route. */
     readonly secret: boolean
+    /**
+     * What opens this step, absent when it is always asked.
+     *
+     * The wizard's walk skips a question whose opening answer was not given, and that is a
+     * condition a form cannot see. Declaring it lets a client render the whole question set and
+     * reveal a field when the choice that opens it is picked, instead of re-implementing the walk —
+     * which is the second-hand-kept-list shape this route exists to prevent.
+     *
+     * **Transitive:** a step is askable when its requirement is met *and* the step it names is
+     * itself askable. Only the nearest opening choice is recorded.
+     */
+    readonly requires?: {
+        readonly step: string
+        readonly value: string
+    }
     readonly choices?: readonly {
         readonly value: string
         readonly label: string
@@ -223,6 +255,15 @@ interface RequestContext {
     readonly request: Request
     readonly url: URL
     readonly params: Readonly<Record<string, string>>
+    /**
+     * Who is calling. **Required**, which is the point.
+     *
+     * An optional field would be one a route could forget to consult, and a route that forgets is a
+     * route with no boundary — the failure mode being that a scoped credential silently reaches
+     * something it was minted not to. `open` is a real member for the two honest cases: a route that
+     * needs no credential, and a server that requires none.
+     */
+    readonly principal: Principal
 }
 
 /**
@@ -255,7 +296,24 @@ const DOCS_PAGE = `<!doctype html>
 </html>
 `
 
-export function createHandler(options: HandlerOptions): (request: Request) => Promise<Response> {
+/**
+ * The HTTP handler, with the authenticator it built hung off it.
+ *
+ * The WebSocket upgrade has to authenticate the *same* way, and every input that decides it —
+ * the configured token, the key store, the boot claim, and the latch that says whether a
+ * credential is required at all — is composed in here. Handing the function back is what stops
+ * `serve.ts` assembling a second copy of that rule, which is how `/v1/ws` came to have its own
+ * comparison in the first place.
+ *
+ * A property on the function rather than a returned object, so every existing caller — and every
+ * embedder mounting this in their own stack — keeps passing it straight to `Bun.serve` unchanged.
+ */
+export type ServerHandler = ((request: Request) => Promise<Response>) & {
+    /** Resolve a credential without dispatching. `Response` is a refusal. */
+    readonly authenticate: (request: Request) => Promise<Principal | Response>
+}
+
+export function createHandler(options: HandlerOptions): ServerHandler {
     const { runtime } = options
     const token = options.token
     const now = options.now ?? (() => Date.now())
@@ -322,6 +380,32 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
         return problem === undefined ? undefined : fail(problem, 403)
     }
 
+    /**
+     * The `Access-Control-*` headers for a response this server has decided to send.
+     *
+     * Applied at the **one** place every response leaves through, rather than per route: a header
+     * added at 39 call sites is one the fortieth route will not have, and the symptom is a single
+     * endpoint that a browser cannot read for no visible reason.
+     *
+     * No policy means no headers, which is correct rather than lax: a handler mounted inside
+     * somebody else's framework did not tell us what it bound, and an `Access-Control-Allow-Origin`
+     * we cannot justify is worse than none — theirs is the stack that should be sending it.
+     */
+    const withCors = (request: Request, response: Response): Response => {
+        if (options.origin === undefined) return response
+        const extra = corsHeaders(request, options.origin)
+        if (Object.keys(extra).length === 0) return response
+        const headers = new Headers(response.headers)
+        for (const [name, value] of Object.entries(extra)) headers.set(name, value)
+        // Rebuilt rather than mutated: a `Response` from `fetch` or from a stream has immutable
+        // headers, and mutating one throws at the moment a browser is the only caller who notices.
+        return new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers,
+        })
+    }
+
     let closed = false
     const authRequired = async (): Promise<boolean> => {
         if (token !== undefined || closed) return true
@@ -329,17 +413,69 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
         return closed
     }
 
+    /**
+     * Who is calling, and may they reach this route at all.
+     *
+     * One function for both dispatch sites — the `HEAD` branch and the ordinary one — because two
+     * copies of an auth gate is how one of them gains an exemption the other does not. It was two
+     * copies before this, and they agreed only because nobody had edited either.
+     *
+     * Three states come back and each is a different thing. A `Response` is a refusal. A
+     * `Principal` is a caller. And `{ kind: "open" }` is the *absence* of a requirement — an open
+     * path, or a server that requires no credential at all — which reaches everything, exactly as
+     * it did before any of this existed.
+     *
+     * The capability check happens **here**, not in the routes, and its refusal is `403` while
+     * every scope refusal downstream is `404`: a capability answer discloses nothing about what
+     * exists, only about what this credential may do.
+     */
+    const resolve = async (
+        request: Request,
+        pathname: string,
+        capability: Cap | "open",
+    ): Promise<Principal | Response> => {
+        if (isOpenPath(pathname) || !(await authRequired())) return { kind: "open" }
+        const who = await authorise({
+            request,
+            expected: token,
+            keys: runtime.store.operatorKeys,
+            claim: options.claim,
+            pathname,
+            at: now(),
+        })
+        if (who instanceof Response) return who
+        /**
+         * A claim skips the capability check, because `authorise` has already made a **stricter**
+         * decision: it opens `POST /v1/keys` and nothing else, method and path together.
+         *
+         * Found by running the suite. `POST /v1/keys` requires `admin`, a claim holds no
+         * capabilities, so the gate answered `403` and the entire bootstrap broke — the one flow
+         * that has to work on a server with no credentials at all. Layering a capability check on
+         * top of a route scope is not "belt and braces" when one of them is a whitelist of exactly
+         * one route.
+         */
+        if (who.kind === "claim") return who
+        if (capability !== "open" && !can(who, capability)) {
+            return forbidden(capability, `${request.method} ${pathname}`)
+        }
+        return who
+    }
+
     const router = new Router<Handler>()
 
     // ─── Health ──────────────────────────────────────────────────────────────────────────
 
-    router.add("GET", "/v1/health", () =>
-        json({
-            status: "ok",
-            version: VERSION,
-            uptimeMs: now() - startedAt,
-            agents: runtime.list().length,
-        }),
+    router.add(
+        "GET",
+        "/v1/health",
+        () =>
+            json({
+                status: "ok",
+                version: VERSION,
+                uptimeMs: now() - startedAt,
+                agents: runtime.list().length,
+            }),
+        { capability: "open" },
     )
 
     /**
@@ -349,16 +485,21 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * process look dead to an orchestrator, which would restart it into the same outage. Channel
      * state is on the agent resource instead.
      */
-    router.add("GET", "/v1/ready", () => {
-        if (runtime.ready) return json({ status: "ready", agents: runtime.list().length })
-        // `"starting"`, not `"stopped"`. A runtime that has not reached readiness is on its way up,
-        // and "stopped" is what an orchestrator reads as "give up on this container". The
-        // `pending: []` this used to carry was a promise nothing filled: agents load inside
-        // `Runtime.create`, so there is no moment at which this route can be reached *and* name
-        // which agent it is waiting for. An empty array that is always empty says less than
-        // omitting it, because a reader cannot tell it from "nothing is pending".
-        return json({ status: "starting", agents: runtime.list().length }, 503)
-    })
+    router.add(
+        "GET",
+        "/v1/ready",
+        () => {
+            if (runtime.ready) return json({ status: "ready", agents: runtime.list().length })
+            // `"starting"`, not `"stopped"`. A runtime that has not reached readiness is on its way up,
+            // and "stopped" is what an orchestrator reads as "give up on this container". The
+            // `pending: []` this used to carry was a promise nothing filled: agents load inside
+            // `Runtime.create`, so there is no moment at which this route can be reached *and* name
+            // which agent it is waiting for. An empty array that is always empty says less than
+            // omitting it, because a reader cannot tell it from "nothing is pending".
+            return json({ status: "starting", agents: runtime.list().length }, 503)
+        },
+        { capability: "open" },
+    )
 
     // ─── Agents ──────────────────────────────────────────────────────────────────────────
 
@@ -380,70 +521,89 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * the listing answers "what exists", the resource answers "what is running". A 200 there would
      * have to invent a body for an agent with no tools, no window and no sessions in memory.
      */
-    router.add("GET", "/v1/agents", async () => {
-        const hosted = runtime.list().map((agent) => summary(runtime, agent))
-        const live = new Set(hosted.map((entry) => entry.id))
-        const stopped = (await runtime.store.agentState.list())
-            .filter((state) => !state.enabled && !live.has(state.agentId))
-            .map((state) => ({
-                id: state.agentId,
-                name: state.agentId,
-                status: "disabled" as const,
-                ...(state.reason === undefined ? {} : { reason: state.reason }),
-                ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
-            }))
-        return json([...hosted, ...stopped])
-    })
+    router.add(
+        "GET",
+        "/v1/agents",
+        async (context) => {
+            const hosted = runtime.list().map((agent) => summary(runtime, agent))
+            const live = new Set(hosted.map((entry) => entry.id))
+            const stopped = (await runtime.store.agentState.list())
+                .filter((state) => !state.enabled && !live.has(state.agentId))
+                .map((state) => ({
+                    id: state.agentId,
+                    name: state.agentId,
+                    status: "disabled" as const,
+                    ...(state.reason === undefined ? {} : { reason: state.reason }),
+                    ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+                }))
+            /**
+             * **Filtered by scope, and the stopped rows with it.**
+             *
+             * A listing is how a client discovers what it can reach, so a narrow key gets an honest
+             * answer about *its* world rather than a 403 about somebody else's. Filtering the
+             * disabled rows too is the half that is easy to miss: they are built from a different
+             * source (`agentState`, not `runtime.list()`), so a filter applied only to `hosted`
+             * would leak every *stopped* agent's id to a key scoped away from it — and an id is
+             * exactly what this is meant not to disclose.
+             */
+            return json(visibleAgents(context.principal, [...hosted, ...stopped]))
+        },
+        { capability: "read" },
+    )
 
-    router.add("GET", "/v1/agents/:id", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            // Both of these were the literal `0`, for every agent, whatever was configured — and
-            // the spec advertises them as "tool count, skills indexed, schedule count". A number
-            // that is always zero is worse than an absent field: it reads as a measurement.
-            //
-            // The schedule count comes from the **store**, which is the reconciled truth — what is
-            // armed right now, including rows the API created and rows a disabled manifest entry
-            // left behind. That is deliberately a different number from the one `agent.loaded`
-            // reports, which is the manifest's declared count because that event fires before
-            // reconciliation has run. Two honest numbers about two different moments; the spec
-            // says which is which.
-            const schedules = await agent.store.schedules.list(agent.id)
-            const team = runtime.team(agent.id)
-            return json({
-                ...summary(runtime, agent),
-                dialect: agent.describe().dialect,
-                window: agent.window,
-                tools: agent.tools.size,
-                // What the catalogue costs every turn, beside how many tools there are. A count
-                // says nothing about the bill: eight system tools and eight Composio ones differ
-                // by an order of magnitude, and this is the figure a person trims against.
-                catalogueTokens: agent.describe().catalogueTokens,
-                skills: agent.skills?.skills.length ?? 0,
-                schedules: schedules.length,
-                /**
-                 * Who this agent delegates to.
-                 *
-                 * Members are excluded from `GET /v1/agents` and from every route behind
-                 * `withAgent`, deliberately: an addressable member is a route around whatever
-                 * policy its supervisor carries. This is how they stay *observable* without
-                 * becoming reachable — the debugging value of a roster without a way to run one
-                 * directly. Absent rather than `[]` for an agent with no team, matching `phases`.
-                 */
-                ...(team.length === 0
-                    ? {}
-                    : {
-                          team: team.map((member) => ({
-                              id: member.id,
-                              task: member.task,
-                              // What the supervisor gets back, not the whole schema: a UI showing
-                              // a delegation needs the field names, and the member's own
-                              // `/tools` has the full version.
-                              artifact: Object.keys(member.artifact.properties),
-                          })),
-                      }),
-                warnings: [...agent.warnings, ...agent.tools.warnings],
-            })
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                // Both of these were the literal `0`, for every agent, whatever was configured — and
+                // the spec advertises them as "tool count, skills indexed, schedule count". A number
+                // that is always zero is worse than an absent field: it reads as a measurement.
+                //
+                // The schedule count comes from the **store**, which is the reconciled truth — what is
+                // armed right now, including rows the API created and rows a disabled manifest entry
+                // left behind. That is deliberately a different number from the one `agent.loaded`
+                // reports, which is the manifest's declared count because that event fires before
+                // reconciliation has run. Two honest numbers about two different moments; the spec
+                // says which is which.
+                const schedules = await agent.store.schedules.list(agent.id)
+                const team = runtime.team(agent.id)
+                return json({
+                    ...summary(runtime, agent),
+                    dialect: agent.describe().dialect,
+                    window: agent.window,
+                    tools: agent.tools.size,
+                    // What the catalogue costs every turn, beside how many tools there are. A count
+                    // says nothing about the bill: eight system tools and eight Composio ones differ
+                    // by an order of magnitude, and this is the figure a person trims against.
+                    catalogueTokens: agent.describe().catalogueTokens,
+                    skills: agent.skills?.skills.length ?? 0,
+                    schedules: schedules.length,
+                    /**
+                     * Who this agent delegates to.
+                     *
+                     * Members are excluded from `GET /v1/agents` and from every route behind
+                     * `withAgent`, deliberately: an addressable member is a route around whatever
+                     * policy its supervisor carries. This is how they stay *observable* without
+                     * becoming reachable — the debugging value of a roster without a way to run one
+                     * directly. Absent rather than `[]` for an agent with no team, matching `phases`.
+                     */
+                    ...(team.length === 0
+                        ? {}
+                        : {
+                              team: team.map((member) => ({
+                                  id: member.id,
+                                  task: member.task,
+                                  // What the supervisor gets back, not the whole schema: a UI showing
+                                  // a delegation needs the field names, and the member's own
+                                  // `/tools` has the full version.
+                                  artifact: Object.keys(member.artifact.properties),
+                              })),
+                          }),
+                    warnings: [...agent.warnings, ...agent.tools.warnings],
+                })
+            }),
+        { capability: "read" },
     )
 
     /**
@@ -464,36 +624,40 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * not this route's: a reload that killed somebody's half-finished answer to pick up a setting
      * would be a worse trade than waiting. `agent_turn_in_flight` names the count.
      */
-    router.add("POST", "/v1/agents/:id/reload", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            try {
-                const admitted = await runtime.replace(agent.id)
-                return json({
-                    id: agent.id,
-                    status: "loaded",
-                    // Every agent that came back, because replacing a supervisor replaces its team:
-                    // they load from one manifest as one unit, so a caller holding a list needs to
-                    // know the members are new instances too.
-                    adopted: admitted.map((entry) => entry.id),
-                })
-            } catch (error) {
-                // The runtime's own refusals carry the field and the remedy — a team member has no
-                // manifest of its own, a busy agent names its in-flight count. Paraphrasing either
-                // here would replace a precise answer with a vague one.
-                if (error instanceof HarnessError) {
-                    return fail(
-                        {
-                            code: error.code,
-                            message: error.message,
-                            hint: error.hint,
-                            ...(error.field === undefined ? {} : { field: error.field }),
-                        },
-                        error.code === "agent_turn_in_flight" ? 409 : 400,
-                    )
+    router.add(
+        "POST",
+        "/v1/agents/:id/reload",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                try {
+                    const admitted = await runtime.replace(agent.id)
+                    return json({
+                        id: agent.id,
+                        status: "loaded",
+                        // Every agent that came back, because replacing a supervisor replaces its team:
+                        // they load from one manifest as one unit, so a caller holding a list needs to
+                        // know the members are new instances too.
+                        adopted: admitted.map((entry) => entry.id),
+                    })
+                } catch (error) {
+                    // The runtime's own refusals carry the field and the remedy — a team member has no
+                    // manifest of its own, a busy agent names its in-flight count. Paraphrasing either
+                    // here would replace a precise answer with a vague one.
+                    if (isHarnessError(error)) {
+                        return fail(
+                            {
+                                code: error.code,
+                                message: error.message,
+                                hint: error.hint,
+                                ...(error.field === undefined ? {} : { field: error.field }),
+                            },
+                            error.code === "agent_turn_in_flight" ? 409 : 400,
+                        )
+                    }
+                    throw error
                 }
-                throw error
-            }
-        }),
+            }),
+        { capability: "admin" },
     )
 
     /**
@@ -539,13 +703,17 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * `servers` names the URL this request arrived on, so the page's "try it" calls the server the
      * document came from rather than a hardcoded localhost that is wrong in a container.
      */
-    router.add("GET", "/v1/openapi.json", (context) =>
-        json(
-            openapiDocument({
-                routes: router.routes(),
-                serverUrl: `${context.url.protocol}//${context.url.host}`,
-            }),
-        ),
+    router.add(
+        "GET",
+        "/v1/openapi.json",
+        (context) =>
+            json(
+                openapiDocument({
+                    routes: router.routes(),
+                    serverUrl: `${context.url.protocol}//${context.url.host}`,
+                }),
+            ),
+        { capability: "open" },
     )
 
     /**
@@ -568,14 +736,19 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 status: 200,
                 headers: { "content-type": "text/html; charset=utf-8" },
             }),
+        { capability: "open" },
     )
 
-    router.add("GET", "/v1/provision", () =>
-        json({
-            available: options.provision !== undefined,
-            local: provisioningIsLocal(),
-            steps: options.provision?.steps() ?? [],
-        }),
+    router.add(
+        "GET",
+        "/v1/provision",
+        () =>
+            json({
+                available: options.provision !== undefined,
+                local: provisioningIsLocal(),
+                steps: options.provision?.steps() ?? [],
+            }),
+        { capability: "read" },
     )
 
     /**
@@ -594,128 +767,137 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * then the refusal names the two ways to do it instead, because "not supported" with no
      * alternative is where somebody starts looking for a way round the gate.
      */
-    router.add("POST", "/v1/agents", async (context) => {
-        const provision = options.provision
-        if (provision === undefined) {
-            return fail(
-                {
-                    code: "provisioning_not_supported",
-                    message: "This server cannot create agents.",
-                    hint: "Creating one writes a directory of files from a question set this process was not given — an embedder mounting this handler over its own agent store is the case that lands here. Run `init` where the sandbox is, or mount an agent directory.",
-                },
-                501,
-            )
-        }
-        if (!provisioningIsLocal()) {
-            return fail(
-                {
-                    code: "provisioning_not_local",
-                    message: "Creating an agent is only allowed on a loopback bind.",
-                    hint: "This route writes files and starts an agent, and a token-less loopback server is a supported configuration — so it is gated on the bind rather than on a credential. This is also what refuses provisioning inside the container, whose CMD binds 0.0.0.0: mount a written agent at /agent, or run `init` on the host. A scoped admin key will open this on a public bind.",
-                },
-                403,
-            )
-        }
+    router.add(
+        "POST",
+        "/v1/agents",
+        async (context) => {
+            const provision = options.provision
+            if (provision === undefined) {
+                return fail(
+                    {
+                        code: "provisioning_not_supported",
+                        message: "This server cannot create agents.",
+                        hint: "Creating one writes a directory of files from a question set this process was not given — an embedder mounting this handler over its own agent store is the case that lands here. Run `init` where the sandbox is, or mount an agent directory.",
+                    },
+                    501,
+                )
+            }
+            if (!provisioningIsLocal()) {
+                return fail(
+                    {
+                        code: "provisioning_not_local",
+                        message: "Creating an agent is only allowed on a loopback bind.",
+                        hint: "This route writes files and starts an agent, and a token-less loopback server is a supported configuration — so it is gated on the bind rather than on a credential. This is also what refuses provisioning inside the container, whose CMD binds 0.0.0.0: mount a written agent at /agent, or run `init` on the host. A scoped admin key will open this on a public bind.",
+                    },
+                    403,
+                )
+            }
 
-        const body = await readJson(context.request)
-        if (body.kind === "error") return fail(body.error, 400)
-        /**
-         * `Record<string, string>`, checked by the schema — including the per-value type.
-         *
-         * Every answer is text on both front doors, and a number reaching `validateAnswer` would
-         * arrive as something it has no case for. The schema refuses it by path (`answers.server`),
-         * which is the field a caller has to fix; *which* steps exist is `GET /v1/provision`'s
-         * answer, not this schema's, because enumerating them here would be a second copy of
-         * `STEP_ORDER`.
-         */
-        const parsed = parseBody(ProvisionBody, body.value)
-        if (!parsed.ok) return fail(parsed.error, 400)
-        const text = parsed.value.answers
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            /**
+             * `Record<string, string>`, checked by the schema — including the per-value type.
+             *
+             * Every answer is text on both front doors, and a number reaching `validateAnswer` would
+             * arrive as something it has no case for. The schema refuses it by path (`answers.server`),
+             * which is the field a caller has to fix; *which* steps exist is `GET /v1/provision`'s
+             * answer, not this schema's, because enumerating them here would be a second copy of
+             * `STEP_ORDER`.
+             */
+            const parsed = parseBody(ProvisionBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const text = parsed.value.answers
 
-        let created: ReturnType<Provisioner["create"]>
-        try {
-            created = provision.create(text)
-        } catch (error) {
-            // The implementation knows why far better than this route does, so its hint passes
-            // through rather than being paraphrased.
-            if (error instanceof HarnessError) return fail(error.toDetail(), 400)
-            throw error
-        }
+            let created: ReturnType<Provisioner["create"]>
+            try {
+                created = provision.create(text)
+            } catch (error) {
+                // The implementation knows why far better than this route does, so its hint passes
+                // through rather than being paraphrased.
+                if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                throw error
+            }
 
-        /**
-         * Adopted after the files exist, and a failure here is reported **with the directory**.
-         *
-         * The agent is on disk either way, so a failed adoption is not a failed creation: telling
-         * somebody their request failed when a complete agent is sitting in the sandbox would send
-         * them to create a second one. `201` with `adopted: false` and the reason is the honest
-         * answer — the thing they asked for exists, and it is not running yet.
-         */
-        try {
-            const admitted = await runtime.adopt(created.manifestPath)
-            return json(
-                {
-                    id: created.agentId,
-                    dir: created.dir,
-                    files: created.files,
-                    adopted: admitted.map((agent) => agent.id),
-                },
-                201,
-            )
-        } catch (error) {
-            return json(
-                {
-                    id: created.agentId,
-                    dir: created.dir,
-                    files: created.files,
-                    adopted: [],
-                    error:
-                        error instanceof HarnessError
+            /**
+             * Adopted after the files exist, and a failure here is reported **with the directory**.
+             *
+             * The agent is on disk either way, so a failed adoption is not a failed creation: telling
+             * somebody their request failed when a complete agent is sitting in the sandbox would send
+             * them to create a second one. `201` with `adopted: false` and the reason is the honest
+             * answer — the thing they asked for exists, and it is not running yet.
+             */
+            try {
+                const admitted = await runtime.adopt(created.manifestPath)
+                return json(
+                    {
+                        id: created.agentId,
+                        dir: created.dir,
+                        files: created.files,
+                        adopted: admitted.map((agent) => agent.id),
+                    },
+                    201,
+                )
+            } catch (error) {
+                return json(
+                    {
+                        id: created.agentId,
+                        dir: created.dir,
+                        files: created.files,
+                        adopted: [],
+                        error: isHarnessError(error)
                             ? error.toDetail()
                             : {
                                   code: "provision_adopt_failed",
                                   message: error instanceof Error ? error.message : String(error),
                                   hint: "The agent was written and is not running. Fix what the message names and `start` it, or restart the host.",
                               },
-                },
-                201,
-            )
-        }
-    })
-
-    router.add("POST", "/v1/agents/:id/stop", async (context) => {
-        const id = context.params.id ?? ""
-        const hosted = runtime.list().some((agent) => agent.id === id)
-        const known = await runtime.store.agentState.get(id)
-        // Neither hosted nor ever recorded means there is nothing here by that name. A 200 would
-        // report having stopped something that does not exist, which is the shape of answer that
-        // lets a typo look like success.
-        if (!hosted && known === undefined) return notFound("agent", id)
-
-        const body = await readJson(context.request)
-        if (body.kind === "error") return fail(body.error, 400)
-        const parsed = parseBody(StopBody, body.value)
-        if (!parsed.ok) return fail(parsed.error, 400)
-        const reason = parsed.value.reason?.trim()
-        const state = await runtime.store.agentState.disable(
-            id,
-            new Date(options.now?.() ?? Date.now()).toISOString(),
-            // An empty or whitespace-only note is no note. Kept here rather than in the schema
-            // because "" is a legal string a client may genuinely send meaning "no reason".
-            reason === undefined || reason === "" ? undefined : reason,
-        )
-
-        if (hosted) {
-            try {
-                await runtime.dispose(id, "stopped")
-            } catch (error) {
-                if (error instanceof HarnessError && error.code === "agent_turn_in_flight") {
-                    return fail(error.toDetail(), 409)
-                }
-                throw error
+                    },
+                    201,
+                )
             }
-        }
-        return json({ id, status: "disabled", ...stateFields(state) })
-    })
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "POST",
+        "/v1/agents/:id/stop",
+        async (context) => {
+            const id = context.params.id ?? ""
+            const hosted = runtime.list().some((agent) => agent.id === id)
+            const known = await runtime.store.agentState.get(id)
+            // Neither hosted nor ever recorded means there is nothing here by that name. A 200 would
+            // report having stopped something that does not exist, which is the shape of answer that
+            // lets a typo look like success.
+            if (!hosted && known === undefined) return notFound("agent", id)
+
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(StopBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const reason = parsed.value.reason?.trim()
+            const state = await runtime.store.agentState.disable(
+                id,
+                new Date(options.now?.() ?? Date.now()).toISOString(),
+                // An empty or whitespace-only note is no note. Kept here rather than in the schema
+                // because "" is a legal string a client may genuinely send meaning "no reason".
+                reason === undefined || reason === "" ? undefined : reason,
+            )
+
+            if (hosted) {
+                try {
+                    await runtime.dispose(id, "stopped")
+                } catch (error) {
+                    if (isHarnessError(error) && error.code === "agent_turn_in_flight") {
+                        return fail(error.toDetail(), 409)
+                    }
+                    throw error
+                }
+            }
+            return json({ id, status: "disabled", ...stateFields(state) })
+        },
+        { capability: "admin" },
+    )
 
     /**
      * Switch it back on, and adopt it into this host now.
@@ -729,191 +911,205 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * refusal is what stops every other caller reversing a stop by accident, and this is the one
      * caller that means to.
      */
-    router.add("POST", "/v1/agents/:id/start", async (context) => {
-        const id = context.params.id ?? ""
-        if (runtime.list().some((agent) => agent.id === id)) {
-            // Already running. Enabled anyway, because a hosted agent with a `disabled` row is a
-            // state a crash between the two writes above can leave behind, and this is the command
-            // that would otherwise have no way to clear it.
+    router.add(
+        "POST",
+        "/v1/agents/:id/start",
+        async (context) => {
+            const id = context.params.id ?? ""
+            if (runtime.list().some((agent) => agent.id === id)) {
+                // Already running. Enabled anyway, because a hosted agent with a `disabled` row is a
+                // state a crash between the two writes above can leave behind, and this is the command
+                // that would otherwise have no way to clear it.
+                const state = await runtime.store.agentState.enable(id)
+                return json({ id, status: "loaded", ...stateFields(state) })
+            }
+
+            const resolve = options.resolveAgent
+            if (resolve === undefined) {
+                return fail(
+                    {
+                        code: "start_not_supported",
+                        message:
+                            "This server cannot look up a manifest for an agent it is not hosting.",
+                        hint: "Starting a stopped agent needs its manifest, which lives wherever agents live — the sandbox for the CLI, a mounted path for a container. This process was built without that lookup, so pass the agent to `serve` and restart it instead.",
+                    },
+                    501,
+                )
+            }
+
+            const source = resolve(id)
+            if (source === undefined) return notFound("agent", id)
+
             const state = await runtime.store.agentState.enable(id)
-            return json({ id, status: "loaded", ...stateFields(state) })
-        }
-
-        const resolve = options.resolveAgent
-        if (resolve === undefined) {
-            return fail(
-                {
-                    code: "start_not_supported",
-                    message:
-                        "This server cannot look up a manifest for an agent it is not hosting.",
-                    hint: "Starting a stopped agent needs its manifest, which lives wherever agents live — the sandbox for the CLI, a mounted path for a container. This process was built without that lookup, so pass the agent to `serve` and restart it instead.",
-                },
-                501,
-            )
-        }
-
-        const source = resolve(id)
-        if (source === undefined) return notFound("agent", id)
-
-        const state = await runtime.store.agentState.enable(id)
-        try {
-            const admitted = await runtime.adopt(source)
-            return json({
-                id,
-                status: "loaded",
-                ...stateFields(state),
-                adopted: admitted.map((agent) => agent.id),
-            })
-        } catch (error) {
-            // Put back, because the agent is not running and a row saying otherwise is the
-            // "looks live and is not" failure this table exists to prevent. Reported with the
-            // adoption's own error, which names the real fault — a missing key, a bad manifest.
-            await runtime.store.agentState.disable(
-                id,
-                new Date(options.now?.() ?? Date.now()).toISOString(),
-                "start failed",
-            )
-            if (error instanceof HarnessError) return fail(error.toDetail(), 400)
-            throw error
-        }
-    })
+            try {
+                const admitted = await runtime.adopt(source)
+                return json({
+                    id,
+                    status: "loaded",
+                    ...stateFields(state),
+                    adopted: admitted.map((agent) => agent.id),
+                })
+            } catch (error) {
+                // Put back, because the agent is not running and a row saying otherwise is the
+                // "looks live and is not" failure this table exists to prevent. Reported with the
+                // adoption's own error, which names the real fault — a missing key, a bad manifest.
+                await runtime.store.agentState.disable(
+                    id,
+                    new Date(options.now?.() ?? Date.now()).toISOString(),
+                    "start failed",
+                )
+                if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                throw error
+            }
+        },
+        { capability: "admin" },
+    )
 
     // ─── Turns ───────────────────────────────────────────────────────────────────────────
 
-    router.add("POST", "/v1/agents/:id/messages", async (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const body = await readJson(context.request)
-            if (body.kind === "error") return fail(body.error, 400)
+    router.add(
+        "POST",
+        "/v1/agents/:id/messages",
+        async (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
 
-            /**
-             * Shape from the schema; meaning from the two parsers below.
-             *
-             * `MessageBody` owns the types, the trim and the enum — including the trust-boundary
-             * refusal on `from.kind`, whose nearest-match suggestion moved into a custom Zod error
-             * rather than being lost. `parseDeliver` and `parseFrom` then only *build* their values.
-             * A schema that validated and a parser that re-validated would be two owners of one
-             * field, which is the drift this refactor exists to remove.
-             */
-            const parsed = parseBody(MessageBody, body.value)
-            if (!parsed.ok) return fail(parsed.error, 400)
-            const input = parsed.value
+                /**
+                 * Shape from the schema; meaning from the two parsers below.
+                 *
+                 * `MessageBody` owns the types, the trim and the enum — including the trust-boundary
+                 * refusal on `from.kind`, whose nearest-match suggestion moved into a custom Zod error
+                 * rather than being lost. `parseDeliver` and `parseFrom` then only *build* their values.
+                 * A schema that validated and a parser that re-validated would be two owners of one
+                 * field, which is the drift this refactor exists to remove.
+                 */
+                const parsed = parseBody(MessageBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const input = parsed.value
 
-            // Per-token frames are opt-in, and the *reader* decides — so the query parameter on the
-            // stream routes is the primary control and this is the writer's way to ask on the
-            // inline-stream path, where there is no second request to carry one. Strict `=== true`,
-            // like `stream`: the schema rejects the string "false", so this cannot be read as
-            // asking by a client that sent one.
-            const wantsChunks = input.chunks === true
-            const text = input.text
+                // Per-token frames are opt-in, and the *reader* decides — so the query parameter on the
+                // stream routes is the primary control and this is the writer's way to ask on the
+                // inline-stream path, where there is no second request to carry one. Strict `=== true`,
+                // like `stream`: the schema rejects the string "false", so this cannot be read as
+                // asking by a client that sent one.
+                const wantsChunks = input.chunks === true
+                const text = input.text
 
-            const sessionKey = input.sessionKey ?? "api:default"
-            const deliver = parseDeliver(input.deliver)
-            if (deliver.kind === "error") return fail(deliver.error, 400)
+                const sessionKey = input.sessionKey ?? "api:default"
+                // The one place a caller *names* a session they may never have seen. Without this,
+                // a key scoped to `team_42:` could write into `team_7:`'s conversation simply by
+                // asking — which is the difference between a filter and a boundary.
+                const outside = outsideSession(context, sessionKey)
+                if (outside !== undefined) return outside
+                const deliver = parseDeliver(input.deliver)
+                if (deliver.kind === "error") return fail(deliver.error, 400)
 
-            const from = parseFrom(input.from)
-            if (from.kind === "error") return fail(from.error, 400)
+                const from = parseFrom(input.from)
+                if (from.kind === "error") return fail(from.error, 400)
 
-            const idempotency = parseIdempotencyKey(context.request)
-            if (idempotency.kind === "error") return fail(idempotency.error, 400)
+                const idempotency = parseIdempotencyKey(context.request)
+                if (idempotency.kind === "error") return fail(idempotency.error, 400)
 
-            const turnId = newTurnId()
+                const turnId = newTurnId()
 
-            /**
-             * The key is claimed **here**, before `agent.send`, and awaited.
-             *
-             * This handler answers `202` and lets the turn run detached, so the turn row appears
-             * some milliseconds later — a claim that waited for the row would leave the window
-             * between two retries wide open, and that window is the only thing the feature exists
-             * to close. Claiming synchronously makes the second request deterministic rather than
-             * a race: it either wins the insert or reads the winner's turn id.
-             *
-             * A mismatch is a `409` rather than a replay. A client that recycled a key by accident
-             * would otherwise be told its second, different message succeeded — the one new failure
-             * an idempotency key introduces that not having one does not.
-             */
-            if (idempotency.key !== undefined) {
-                const claim = await agent.store.turns.claimInboundKey({
-                    agentId: agent.id,
-                    key: idempotency.key,
-                    turnId,
-                    inputHash: await inputHash(sessionKey, text),
-                    now: new Date(),
-                })
-                if (claim.kind === "replay") {
-                    return json({ turnId: claim.turnId, sessionKey, replayed: true }, 200)
-                }
-                if (claim.kind === "mismatch") {
-                    return fail(
-                        {
-                            code: "idempotency_key_reused",
-                            message: `Idempotency-Key "${idempotency.key}" was already used for a different message.`,
-                            hint: `It belongs to turn ${claim.turnId}, whose text or session differed from this request's. Nothing was run. Use a fresh key for a new message, or resend the original text byte for byte to get that turn back. A key is remembered for 24 hours.`,
-                            field: "Idempotency-Key",
-                        },
-                        409,
-                    )
-                }
-            }
-            const controller = new AbortController()
-            running.set(turnId, controller)
-            // Before `send`, and **unconditionally** — the condition was the bug.
-            //
-            // `Agent.send` awaits the session write before emitting anything, so a caller who POSTs
-            // without `stream` and then immediately GETs the stream with the turn id it was just
-            // handed arrived before `turn.start` and was told "no buffer for this turn in this
-            // process" — for a turn that was about to run. Opening here makes that deterministic
-            // rather than a race: the buffer exists before this handler's next statement, so it
-            // exists before the caller can possibly hold the id.
-            //
-            // The cost is an empty buffer per turn nobody streams, evicted by the retention policy
-            // that already runs on `turn.end`. `attach` still refuses to create one for an unknown
-            // id, which is the decision that keeps a typo'd turn id distinguishable from a real one.
-            // Chunk interest is declared here, synchronously, because the bus only builds a
-            // per-token envelope while somebody is listening — and an SSE `start` callback runs
-            // after this handler returns, by which point the first tokens are already gone.
-            runtime.streams.open(turnId, { chunks: wantsChunks })
-
-            // Detached on purpose. The response returns before this settles, and nothing about the
-            // turn's lifetime depends on the connection that started it.
-            const work = agent
-                .send(text, {
-                    sessionKey,
-                    turnId,
-                    source: "api",
-                    ...(from.from === undefined ? {} : { from: from.from }),
-                    signal: controller.signal,
-                })
-                .then(async (result) => {
-                    if (deliver.target === undefined || result.text.trim() === "") return
-                    await runtime.channels.deliver({
+                /**
+                 * The key is claimed **here**, before `agent.send`, and awaited.
+                 *
+                 * This handler answers `202` and lets the turn run detached, so the turn row appears
+                 * some milliseconds later — a claim that waited for the row would leave the window
+                 * between two retries wide open, and that window is the only thing the feature exists
+                 * to close. Claiming synchronously makes the second request deterministic rather than
+                 * a race: it either wins the insert or reads the winner's turn id.
+                 *
+                 * A mismatch is a `409` rather than a replay. A client that recycled a key by accident
+                 * would otherwise be told its second, different message succeeded — the one new failure
+                 * an idempotency key introduces that not having one does not.
+                 */
+                if (idempotency.key !== undefined) {
+                    const claim = await agent.store.turns.claimInboundKey({
                         agentId: agent.id,
-                        sessionKey,
-                        channelId: deliver.target.channel,
-                        recipient: deliver.target.to,
+                        key: idempotency.key,
                         turnId,
-                        text: result.text,
+                        inputHash: await inputHash(sessionKey, text),
+                        now: new Date(),
                     })
-                })
-                .catch(() => {
-                    // The turn's own error event already carries the cause, and the turn row records
-                    // it. Swallowed here so a detached rejection does not become an unhandled one.
-                })
-                .finally(() => {
-                    running.delete(turnId)
-                })
-            void work
+                    if (claim.kind === "replay") {
+                        return json({ turnId: claim.turnId, sessionKey, replayed: true }, 200)
+                    }
+                    if (claim.kind === "mismatch") {
+                        return fail(
+                            {
+                                code: "idempotency_key_reused",
+                                message: `Idempotency-Key "${idempotency.key}" was already used for a different message.`,
+                                hint: `It belongs to turn ${claim.turnId}, whose text or session differed from this request's. Nothing was run. Use a fresh key for a new message, or resend the original text byte for byte to get that turn back. A key is remembered for 24 hours.`,
+                                field: "Idempotency-Key",
+                            },
+                            409,
+                        )
+                    }
+                }
+                const controller = new AbortController()
+                running.set(turnId, controller)
+                // Before `send`, and **unconditionally** — the condition was the bug.
+                //
+                // `Agent.send` awaits the session write before emitting anything, so a caller who POSTs
+                // without `stream` and then immediately GETs the stream with the turn id it was just
+                // handed arrived before `turn.start` and was told "no buffer for this turn in this
+                // process" — for a turn that was about to run. Opening here makes that deterministic
+                // rather than a race: the buffer exists before this handler's next statement, so it
+                // exists before the caller can possibly hold the id.
+                //
+                // The cost is an empty buffer per turn nobody streams, evicted by the retention policy
+                // that already runs on `turn.end`. `attach` still refuses to create one for an unknown
+                // id, which is the decision that keeps a typo'd turn id distinguishable from a real one.
+                // Chunk interest is declared here, synchronously, because the bus only builds a
+                // per-token envelope while somebody is listening — and an SSE `start` callback runs
+                // after this handler returns, by which point the first tokens are already gone.
+                runtime.streams.open(turnId, { chunks: wantsChunks })
 
-            if (input.stream !== true) return json({ turnId, sessionKey }, 202)
+                // Detached on purpose. The response returns before this settles, and nothing about the
+                // turn's lifetime depends on the connection that started it.
+                const work = agent
+                    .send(text, {
+                        sessionKey,
+                        turnId,
+                        source: "api",
+                        ...(from.from === undefined ? {} : { from: from.from }),
+                        signal: controller.signal,
+                    })
+                    .then(async (result) => {
+                        if (deliver.target === undefined || result.text.trim() === "") return
+                        await runtime.channels.deliver({
+                            agentId: agent.id,
+                            sessionKey,
+                            channelId: deliver.target.channel,
+                            recipient: deliver.target.to,
+                            turnId,
+                            text: result.text,
+                        })
+                    })
+                    .catch(() => {
+                        // The turn's own error event already carries the cause, and the turn row records
+                        // it. Swallowed here so a detached rejection does not become an unhandled one.
+                    })
+                    .finally(() => {
+                        running.delete(turnId)
+                    })
+                void work
 
-            // 202 with an SSE body, whose first frame is the same object the non-streaming path
-            // returns. That is what "returns 202 … then streams SSE" means without inventing a
-            // second response.
-            return streamTurn(runtime, turnId, {
-                accepted: { turnId, sessionKey },
-                status: 202,
-                chunks: wantsChunks,
-            })
-        }),
+                if (input.stream !== true) return json({ turnId, sessionKey }, 202)
+
+                // 202 with an SSE body, whose first frame is the same object the non-streaming path
+                // returns. That is what "returns 202 … then streams SSE" means without inventing a
+                // second response.
+                return streamTurn(runtime, turnId, {
+                    accepted: { turnId, sessionKey },
+                    status: 202,
+                    chunks: wantsChunks,
+                })
+            }),
+        { capability: "chat" },
     )
 
     /**
@@ -963,32 +1159,36 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                     chunks: context.url.searchParams.get("chunks") === "true",
                 })
             }),
-        { streaming: true },
+        { capability: "read", streaming: true },
     )
 
-    router.add("POST", "/v1/agents/:id/turns/:turnId/stop", (context) =>
-        withAgent(runtime, context, () => {
-            const turnId = context.params.turnId ?? ""
-            const controller = running.get(turnId)
-            if (controller === undefined) {
-                return fail(
-                    {
-                        code: "turn_not_running",
-                        // What is actually true, which is narrower than what this used to claim.
-                        // It said "not running in this process" — false of a turn a channel or a
-                        // schedule started, which *is* running here and simply left no cancel
-                        // handle on this surface. Nothing in core records in-flight turns, so the
-                        // handle exists only for turns this API started.
-                        message: `No cancel handle for turn ${turnId} on this API.`,
-                        hint: "This surface can stop a turn it started. A turn that has already finished cannot be stopped at all — read its final state from GET /v1/agents/:id/turns/:turnId. A turn started by a channel, a schedule, or another process is running without a handle here.",
-                    },
-                    409,
-                )
-            }
-            controller.abort()
-            // Partial content is persisted on explicit stop — this path — and never on disconnect.
-            return json({ turnId, stopping: true }, 202)
-        }),
+    router.add(
+        "POST",
+        "/v1/agents/:id/turns/:turnId/stop",
+        (context) =>
+            withAgent(runtime, context, () => {
+                const turnId = context.params.turnId ?? ""
+                const controller = running.get(turnId)
+                if (controller === undefined) {
+                    return fail(
+                        {
+                            code: "turn_not_running",
+                            // What is actually true, which is narrower than what this used to claim.
+                            // It said "not running in this process" — false of a turn a channel or a
+                            // schedule started, which *is* running here and simply left no cancel
+                            // handle on this surface. Nothing in core records in-flight turns, so the
+                            // handle exists only for turns this API started.
+                            message: `No cancel handle for turn ${turnId} on this API.`,
+                            hint: "This surface can stop a turn it started. A turn that has already finished cannot be stopped at all — read its final state from GET /v1/agents/:id/turns/:turnId. A turn started by a channel, a schedule, or another process is running without a handle here.",
+                        },
+                        409,
+                    )
+                }
+                controller.abort()
+                // Partial content is persisted on explicit stop — this path — and never on disconnect.
+                return json({ turnId, stopping: true }, 202)
+            }),
+        { capability: "chat" },
     )
 
     // ─── Approvals ───────────────────────────────────────────────────────────────────────
@@ -1009,10 +1209,14 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * registry "has no use for" an agent id otherwise; it does now, and `pending` takes it as a
      * required argument so the disclosing call is the one that does not compile.
      */
-    router.add("GET", "/v1/agents/:id/approvals", (context) =>
-        withAgent(runtime, context, async (agent) =>
-            json({ approvals: approvals.pending(agent.id) }),
-        ),
+    router.add(
+        "GET",
+        "/v1/agents/:id/approvals",
+        (context) =>
+            withAgent(runtime, context, async (agent) =>
+                json({ approvals: approvals.pending(agent.id) }),
+            ),
+        { capability: "read" },
     )
 
     /**
@@ -1028,27 +1232,31 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * keeping a record of settled approvals, and a client that can ask "was this one denied an hour
      * ago" is a client relying on state this registry says plainly that it does not keep.
      */
-    router.add("POST", "/v1/agents/:id/approvals/:approvalId", (context) =>
-        withAgent(runtime, context, async () => {
-            const body = await readJson(context.request)
-            if (body.kind === "error") return fail(body.error, 400)
-            const parsed = parseBody(ApprovalBody, body.value)
-            if (!parsed.ok) return fail(parsed.error, 400)
-            const input = parsed.value
+    router.add(
+        "POST",
+        "/v1/agents/:id/approvals/:approvalId",
+        (context) =>
+            withAgent(runtime, context, async () => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(ApprovalBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const input = parsed.value
 
-            const approvalId = context.params.approvalId ?? ""
-            if (!approvals.resolve(approvalId, input.granted)) {
-                return fail(
-                    {
-                        code: "approval_not_found",
-                        message: `No approval with id ${approvalId} is waiting.`,
-                        hint: 'It was answered already, or its turn ended while it waited — a stopped or timed-out turn abandons its question, and `approval.resolved` reports that as `by: "abandoned"`. GET /v1/agents/:id/approvals lists what is actually waiting. Nothing about a settled approval is kept, so this is also the answer for an id that was never real.',
-                    },
-                    404,
-                )
-            }
-            return json({ approvalId, granted: input.granted })
-        }),
+                const approvalId = context.params.approvalId ?? ""
+                if (!approvals.resolve(approvalId, input.granted)) {
+                    return fail(
+                        {
+                            code: "approval_not_found",
+                            message: `No approval with id ${approvalId} is waiting.`,
+                            hint: 'It was answered already, or its turn ended while it waited — a stopped or timed-out turn abandons its question, and `approval.resolved` reports that as `by: "abandoned"`. GET /v1/agents/:id/approvals lists what is actually waiting. Nothing about a settled approval is kept, so this is also the answer for an id that was never real.',
+                        },
+                        404,
+                    )
+                }
+                return json({ approvalId, granted: input.granted })
+            }),
+        { capability: "chat" },
     )
 
     // ─── The browser surface ─────────────────────────────────────────────────────────────
@@ -1087,9 +1295,13 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * calling `/v1/agentss` gets HTML where it expected JSON and the failure surfaces as a parse
      * error far from the typo. The page has no client-side routes, so nothing needs it.
      */
-    router.add("GET", "/", (context) => web("/", context))
-    router.add("GET", "/assets/app.js", (context) => web("/assets/app.js", context))
-    router.add("GET", "/assets/app.css", (context) => web("/assets/app.css", context))
+    router.add("GET", "/", (context) => web("/", context), { capability: "open" })
+    router.add("GET", "/assets/app.js", (context) => web("/assets/app.js", context), {
+        capability: "open",
+    })
+    router.add("GET", "/assets/app.css", (context) => web("/assets/app.css", context), {
+        capability: "open",
+    })
 
     // ─── Operator keys ───────────────────────────────────────────────────────────────────
 
@@ -1102,60 +1314,122 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * would be spent on a request that did not need it. Checking it first means a ticket is only
      * ever consumed by a caller that actually exchanged it.
      */
-    router.add("POST", "/v1/keys", async (context) => {
-        /**
-         * Whether the credential on this request *is* the claim — compared, never merely detected.
-         *
-         * The first version asked "did this request present a bearer at all", which is true of the
-         * configured token and of every key, so an entirely ordinary `POST` was answered
-         * `claim_spent`. Every call that mints a key went through it, so the whole route was broken
-         * by a question that looked equivalent and was not.
-         */
-        const usedClaim =
-            options.claim !== undefined && presentedClaim(context.request) === options.claim.token
+    router.add(
+        "POST",
+        "/v1/keys",
+        async (context) => {
+            /**
+             * Whether the credential on this request *is* the claim — compared, never merely detected.
+             *
+             * The first version asked "did this request present a bearer at all", which is true of the
+             * configured token and of every key, so an entirely ordinary `POST` was answered
+             * `claim_spent`. Every call that mints a key went through it, so the whole route was broken
+             * by a question that looked equivalent and was not.
+             */
+            const usedClaim =
+                options.claim !== undefined &&
+                presentedClaim(context.request) === options.claim.token
 
-        const body = await readJson(context.request)
-        if (body.kind === "error") return fail(body.error, 400)
-        // Shape here; the display rule stays in `keyLabelProblem`, which decides what a label may
-        // *contain* — a wire schema has no business knowing how wide a listing row is.
-        const parsed = parseBody(KeyBody, body.value)
-        if (!parsed.ok) return fail(parsed.error, 400)
-        const input = parsed.value
-        const problem = keyLabelProblem(input.label)
-        if (problem !== undefined) {
-            return fail(
-                {
-                    code: "key_label_invalid",
-                    message: problem,
-                    hint: `A label is shown in a listing and in the UI, so it is at most ${MAX_KEY_LABEL} printable characters on one line. It is a display name, not a description.`,
-                    field: "label",
-                },
-                400,
-            )
-        }
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            // Shape here; the display rule stays in `keyLabelProblem`, which decides what a label may
+            // *contain* — a wire schema has no business knowing how wide a listing row is.
+            const parsed = parseBody(KeyBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const input = parsed.value
+            const problem = keyLabelProblem(input.label)
+            if (problem !== undefined) {
+                return fail(
+                    {
+                        code: "key_label_invalid",
+                        message: problem,
+                        hint: `A label is shown in a listing and in the UI, so it is at most ${MAX_KEY_LABEL} printable characters on one line. It is a display name, not a description.`,
+                        field: "label",
+                    },
+                    400,
+                )
+            }
 
-        /**
-         * Spent **after** validation and before the write.
-         *
-         * After, because burning a one-use bootstrap credential on a malformed label would leave an
-         * operator with a spent ticket, no key, and a restart as the only way back — while the
-         * request that failed is one they can simply retry. Before the write, because that ordering
-         * makes a lost race a refusal rather than a second key: two claims arriving together both
-         * pass the gate while the ticket is live, and only one `spend()` returns true.
-         */
-        if (usedClaim && options.claim?.spend() !== true) return claimSpent()
+            /**
+             * Spent **after** validation and before the write.
+             *
+             * After, because burning a one-use bootstrap credential on a malformed label would leave an
+             * operator with a spent ticket, no key, and a restart as the only way back — while the
+             * request that failed is one they can simply retry. Before the write, because that ordering
+             * makes a lost race a refusal rather than a second key: two claims arriving together both
+             * pass the gate while the ticket is live, and only one `spend()` returns true.
+             */
+            if (usedClaim && options.claim?.spend() !== true) return claimSpent()
 
-        const secret = newKeySecret()
-        const record = await runtime.store.operatorKeys.issue({
-            keyId: newKeyId(now()),
-            label: input.label.trim(),
-            fingerprint: await keyFingerprint(secret),
-            createdAt: new Date(now()).toISOString(),
-        })
-        // `secret` is spread in beside the record rather than being part of it: `OperatorKeyRecord`
-        // has no field for one, so there is no shape in which a stored or listed key carries it.
-        return json({ ...record, secret }, 201)
-    })
+            /**
+             * A scope naming an agent this server does not hold is **reported**, not stored.
+             *
+             * The failure it prevents is the one this repo keeps finding under a different name: a
+             * credential that authenticates perfectly and reaches nothing, indistinguishable from a
+             * working key until somebody tries to use it — and by then the mint is hours in the
+             * past and the typo is invisible. A `400` naming the id at the moment it is typed is
+             * the only cheap place to catch it, the same argument `telegramHandle` makes about a
+             * username that cannot exist.
+             *
+             * Checked against *hosted* agents plus the durably-stopped ones, because scoping a key
+             * to an agent somebody switched off for the weekend is entirely reasonable and refusing
+             * it would be a refusal nobody can act on.
+             */
+            const scope = input.scope
+            if (scope?.agents !== undefined) {
+                const hosted = new Set(runtime.list().map((agent) => agent.id))
+                for (const state of await runtime.store.agentState.list()) hosted.add(state.agentId)
+                const unknown = scope.agents.filter((id) => !hosted.has(id))
+                if (unknown.length > 0) {
+                    return fail(
+                        {
+                            code: "key_scope_agent_unknown",
+                            message: `No agent ${unknown.map((id) => JSON.stringify(id)).join(", ")} on this server.`,
+                            hint: "A key scoped to an agent that does not exist authenticates and then reaches nothing, which looks exactly like a working credential until it is used. GET /v1/agents lists what this server holds, stopped agents included.",
+                            field: "scope.agents",
+                        },
+                        400,
+                    )
+                }
+            }
+
+            const expiresAt =
+                scope?.expiresIn === undefined
+                    ? undefined
+                    : new Date(now() + scope.expiresIn * 1000).toISOString()
+            /**
+             * `expiresIn` does **not** travel into the stored scope.
+             *
+             * It is a request-shaped field — seconds from a moment that has now passed — and
+             * storing it beside the absolute `expiresAt` would be two answers to one question, the
+             * second of which is wrong the instant it is written.
+             */
+            const stored: KeyScope | undefined =
+                scope === undefined
+                    ? undefined
+                    : {
+                          ...(scope.agents === undefined ? {} : { agents: scope.agents }),
+                          ...(scope.sessions === undefined ? {} : { sessions: scope.sessions }),
+                          ...(scope.can === undefined ? {} : { can: scope.can }),
+                      }
+
+            const secret = newKeySecret()
+            const record = await runtime.store.operatorKeys.issue({
+                keyId: newKeyId(now()),
+                label: input.label.trim(),
+                fingerprint: await keyFingerprint(secret),
+                createdAt: new Date(now()).toISOString(),
+                ...(stored === undefined || Object.keys(stored).length === 0
+                    ? {}
+                    : { scope: stored }),
+                ...(expiresAt === undefined ? {} : { expiresAt }),
+            })
+            // `secret` is spread in beside the record rather than being part of it: `OperatorKeyRecord`
+            // has no field for one, so there is no shape in which a stored or listed key carries it.
+            return json({ ...record, secret }, 201)
+        },
+        { capability: "admin" },
+    )
 
     /**
      * List keys — labels and metadata, never secrets.
@@ -1164,17 +1438,31 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * cannot see the result of is one they will do twice, and the row is the only record that a
      * credential ever existed.
      */
-    router.add("GET", "/v1/keys", async () => {
-        const keys = await runtime.store.operatorKeys.list()
-        return json({
-            keys,
-            /**
-             * Said on the wire, because the plan's rule was "said in the UI, not discovered" and a
-             * UI is one consumer. Every key reaches every session; keys are authentication only.
-             */
-            scope: "Every key authenticates every route for every agent this server holds. Keys are authentication, not authorisation.",
-        })
-    })
+    router.add(
+        "GET",
+        "/v1/keys",
+        async () => {
+            const keys = await runtime.store.operatorKeys.list()
+            return json({
+                keys,
+                /**
+                 * Said on the wire, because the plan's rule was "said in the UI, not discovered" and a
+                 * UI is one consumer. Every key reaches every session; keys are authentication only.
+                 */
+                /**
+                 * The sentence had to change with the behaviour, and that is why it is asserted.
+                 *
+                 * It read *"Every key authenticates every route for every agent this server holds. Keys
+                 * are authentication, not authorisation."* — true until a scope could narrow one, and a
+                 * client that had cached that claim would now be wrong about its own credential. What
+                 * replaces it says the same thing about an **unscoped** key, states what a scope is,
+                 * and says what it is not, in the one place a client is already reading.
+                 */
+                scope: "A key with no scope authenticates every route for every agent this server holds. A scope narrows an already-authenticated caller — it names agents, a session prefix and capabilities, and it is not an identity: there are no users, teams or roles here.",
+            })
+        },
+        { capability: "admin" },
+    )
 
     /**
      * Revoke one. Idempotent, and it never reports a lie about what is now true.
@@ -1184,96 +1472,136 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * id that never existed is the 404, which is the only case where the answer "it is revoked"
      * would be a statement about nothing.
      */
-    router.add("DELETE", "/v1/keys/:keyId", async (context) => {
-        const keyId = context.params.keyId ?? ""
-        const record = await runtime.store.operatorKeys.revoke(keyId, new Date(now()).toISOString())
-        if (record === undefined)
-            // Its own hint, because the default one talks about session keys and channel segments —
-            // true of the 404 this server returns most often and about nothing here. Found by
-            // reading real output: a caller who has just been told to check for a channel segment
-            // in a key id is a caller looking in the wrong place.
-            return notFound(
-                "key",
+    router.add(
+        "DELETE",
+        "/v1/keys/:keyId",
+        async (context) => {
+            const keyId = context.params.keyId ?? ""
+            const record = await runtime.store.operatorKeys.revoke(
                 keyId,
-                "The id is the `keyId` from POST /v1/keys, not the secret — GET /v1/keys lists them. An already-revoked key is a 200 carrying its original stamp, so this really does mean no such key exists.",
+                new Date(now()).toISOString(),
             )
-        return json(record)
-    })
+            if (record === undefined)
+                // Its own hint, because the default one talks about session keys and channel segments —
+                // true of the 404 this server returns most often and about nothing here. Found by
+                // reading real output: a caller who has just been told to check for a channel segment
+                // in a key id is a caller looking in the wrong place.
+                return notFound(
+                    "key",
+                    keyId,
+                    "The id is the `keyId` from POST /v1/keys, not the secret — GET /v1/keys lists them. An already-revoked key is a 200 carrying its original stamp, so this really does mean no such key exists.",
+                )
+            return json(record)
+        },
+        { capability: "admin" },
+    )
 
     // ─── Turns, continued ────────────────────────────────────────────────────────────────
 
-    router.add("GET", "/v1/agents/:id/turns/:turnId", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const record = await agent.store.turns.get(context.params.turnId ?? "")
-            if (record === undefined) return notFound("turn", context.params.turnId ?? "")
-            return json(record)
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id/turns/:turnId",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const record = await agent.store.turns.get(context.params.turnId ?? "")
+                if (record === undefined) return notFound("turn", context.params.turnId ?? "")
+                return json(record)
+            }),
+        { capability: "read" },
     )
 
     // ─── Sessions ────────────────────────────────────────────────────────────────────────
 
-    router.add("GET", "/v1/agents/:id/sessions", (context) =>
-        withAgent(runtime, context, async (agent) =>
-            json(await agent.store.sessions.list(agent.id)),
-        ),
+    router.add(
+        "GET",
+        "/v1/agents/:id/sessions",
+        (context) =>
+            withAgent(runtime, context, async (agent) =>
+                json(visibleSessions(context.principal, await agent.store.sessions.list(agent.id))),
+            ),
+        { capability: "read" },
     )
 
-    router.add("GET", "/v1/agents/:id/sessions/:key", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const key = context.params.key ?? ""
-            const record = await agent.store.sessions.get(agent.id, key)
-            if (record === undefined) return notFound("session", key)
-            return json(record)
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id/sessions/:key",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const key = context.params.key ?? ""
+                const outside = outsideSession(context, key)
+                if (outside !== undefined) return outside
+                const record = await agent.store.sessions.get(agent.id, key)
+                if (record === undefined) return notFound("session", key)
+                return json(record)
+            }),
+        { capability: "read" },
     )
 
-    router.add("GET", "/v1/agents/:id/sessions/:key/messages", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const before = context.url.searchParams.get("before")
-            const limit = context.url.searchParams.get("limit")
-            const page = await agent.store.messages.page(agent.id, context.params.key ?? "", {
-                ...(before === null ? {} : { before: Number.parseInt(before, 10) }),
-                ...(limit === null ? {} : { limit: Number.parseInt(limit, 10) }),
-            })
-            return json(page)
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id/sessions/:key/messages",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const before = context.url.searchParams.get("before")
+                const limit = context.url.searchParams.get("limit")
+                const outside = outsideSession(context, context.params.key ?? "")
+                if (outside !== undefined) return outside
+                const page = await agent.store.messages.page(agent.id, context.params.key ?? "", {
+                    ...(before === null ? {} : { before: Number.parseInt(before, 10) }),
+                    ...(limit === null ? {} : { limit: Number.parseInt(limit, 10) }),
+                })
+                return json(page)
+            }),
+        { capability: "read" },
     )
 
-    router.add("DELETE", "/v1/agents/:id/sessions/:key", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            // History only. Memory markdown is a file artifact and is never deleted by an API call.
-            await agent.store.sessions.clear(agent.id, context.params.key ?? "")
-            return json({ cleared: context.params.key ?? "", memoryFilesKept: true })
-        }),
+    router.add(
+        "DELETE",
+        "/v1/agents/:id/sessions/:key",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                // History only. Memory markdown is a file artifact and is never deleted by an API call.
+                const outside = outsideSession(context, context.params.key ?? "")
+                if (outside !== undefined) return outside
+                await agent.store.sessions.clear(agent.id, context.params.key ?? "")
+                return json({ cleared: context.params.key ?? "", memoryFilesKept: true })
+            }),
+        { capability: "write" },
     )
 
-    router.add("POST", "/v1/agents/:id/sessions/:key/phase", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const body = await readJson(context.request)
-            if (body.kind === "error") return fail(body.error, 400)
-            const parsed = parseBody(PhaseBody, body.value)
-            if (!parsed.ok) return fail(parsed.error, 400)
-            // Shape here; whether the agent *declares* this phase is checked below, where the
-            // manifest is — a wire schema cannot know one agent's phase names.
-            const phase = parsed.value.phase
-            if (typeof phase !== "string" && phase !== null) {
-                return fail(
-                    {
-                        code: "phase_invalid",
-                        message: "phase must be a string, or null to clear it.",
-                        hint: 'Send { "phase": "triage" }. Phase-scoped tool visibility arrives in Phase 7; the column is written now so a session carries the value across a restart.',
-                        field: "phase",
-                    },
-                    400,
+    router.add(
+        "POST",
+        "/v1/agents/:id/sessions/:key/phase",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(PhaseBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                // Shape here; whether the agent *declares* this phase is checked below, where the
+                // manifest is — a wire schema cannot know one agent's phase names.
+                const phase = parsed.value.phase
+                if (typeof phase !== "string" && phase !== null) {
+                    return fail(
+                        {
+                            code: "phase_invalid",
+                            message: "phase must be a string, or null to clear it.",
+                            hint: 'Send { "phase": "triage" }. Phase-scoped tool visibility arrives in Phase 7; the column is written now so a session carries the value across a restart.',
+                            field: "phase",
+                        },
+                        400,
+                    )
+                }
+                const outside = outsideSession(context, context.params.key ?? "")
+                if (outside !== undefined) return outside
+                await agent.store.sessions.setPhase(
+                    agent.id,
+                    context.params.key ?? "",
+                    phase === null ? undefined : phase,
                 )
-            }
-            await agent.store.sessions.setPhase(
-                agent.id,
-                context.params.key ?? "",
-                phase === null ? undefined : phase,
-            )
-            return json({ phase })
-        }),
+                return json({ phase })
+            }),
+        { capability: "write" },
     )
 
     // ─── Introspection ───────────────────────────────────────────────────────────────────
@@ -1283,149 +1611,181 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
     // Listing includes disabled by default — decision 9.4, and the reason is that hiding a
     // switched-off schedule makes it indistinguishable from one that was never written. `?enabled=`
     // filters when somebody actually wants that.
-    router.add("GET", "/v1/agents/:id/schedules", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const enabled = context.url.searchParams.get("enabled")
-            const rows = await agent.store.schedules.list(
-                agent.id,
-                enabled === null ? {} : { enabled: enabled === "true" },
-            )
-            return json({ schedules: rows })
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id/schedules",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const enabled = context.url.searchParams.get("enabled")
+                const rows = await agent.store.schedules.list(
+                    agent.id,
+                    enabled === null ? {} : { enabled: enabled === "true" },
+                )
+                return json({ schedules: rows })
+            }),
+        { capability: "read" },
     )
 
-    router.add("POST", "/v1/agents/:id/schedules", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const body = await readJson(context.request)
-            if (body.kind === "error") return fail(body.error, 400)
-            return writeSchedule(runtime, agent, body.value, undefined)
-        }),
+    router.add(
+        "POST",
+        "/v1/agents/:id/schedules",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                return writeSchedule(runtime, agent, body.value, undefined)
+            }),
+        { capability: "write" },
     )
 
-    router.add("GET", "/v1/agents/:id/schedules/:sid", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const sid = context.params.sid ?? ""
-            const row = await agent.store.schedules.get(agent.id, sid)
-            return row === undefined ? notFound("schedule", sid) : json(row)
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id/schedules/:sid",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const sid = context.params.sid ?? ""
+                const row = await agent.store.schedules.get(agent.id, sid)
+                return row === undefined ? notFound("schedule", sid) : json(row)
+            }),
+        { capability: "read" },
     )
 
-    router.add("PATCH", "/v1/agents/:id/schedules/:sid", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const sid = context.params.sid ?? ""
-            const existing = await agent.store.schedules.get(agent.id, sid)
-            if (existing === undefined) return notFound("schedule", sid)
+    router.add(
+        "PATCH",
+        "/v1/agents/:id/schedules/:sid",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const sid = context.params.sid ?? ""
+                const existing = await agent.store.schedules.get(agent.id, sid)
+                if (existing === undefined) return notFound("schedule", sid)
 
-            const body = await readJson(context.request)
-            if (body.kind === "error") return fail(body.error, 400)
-            const patch =
-                body.value === null || typeof body.value !== "object" || Array.isArray(body.value)
-                    ? {}
-                    : (body.value as Record<string, unknown>)
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const patch =
+                    body.value === null ||
+                    typeof body.value !== "object" ||
+                    Array.isArray(body.value)
+                        ? {}
+                        : (body.value as Record<string, unknown>)
 
-            // The whole schedule is revalidated, never the patch alone: a change to `expr` can make
-            // a previously-fine `timezone` unsatisfiable, and validating a fragment cannot see that.
-            const { id: _ignoredId, ...fields } = patch
-            const merged: Record<string, unknown> = {
-                kind: existing.kind,
-                expr: existing.expr,
-                task: existing.task,
-                deliver:
-                    existing.deliverChannel === undefined || existing.deliverTo === undefined
-                        ? "none"
-                        : { channel: existing.deliverChannel, to: existing.deliverTo },
-                session: existing.sessionMode,
-                enabled: existing.enabled,
-                ...(existing.timezone === undefined ? {} : { timezone: existing.timezone }),
-                ...(existing.role === undefined ? {} : { role: existing.role }),
-                ...fields,
-                // The id is the row's identity and the key reconciliation matches on, so a patch
-                // that renamed it would create a second schedule and orphan the first. Dropped from
-                // the incoming fields above rather than overwritten after them, which TypeScript
-                // rejects as a duplicate key — and rightly: two spellings of the same intent in one
-                // literal is how the wrong one eventually wins.
-                id: existing.id,
-            }
-            return writeSchedule(runtime, agent, merged, existing)
-        }),
+                // The whole schedule is revalidated, never the patch alone: a change to `expr` can make
+                // a previously-fine `timezone` unsatisfiable, and validating a fragment cannot see that.
+                const { id: _ignoredId, ...fields } = patch
+                const merged: Record<string, unknown> = {
+                    kind: existing.kind,
+                    expr: existing.expr,
+                    task: existing.task,
+                    deliver:
+                        existing.deliverChannel === undefined || existing.deliverTo === undefined
+                            ? "none"
+                            : { channel: existing.deliverChannel, to: existing.deliverTo },
+                    session: existing.sessionMode,
+                    enabled: existing.enabled,
+                    ...(existing.timezone === undefined ? {} : { timezone: existing.timezone }),
+                    ...(existing.role === undefined ? {} : { role: existing.role }),
+                    ...fields,
+                    // The id is the row's identity and the key reconciliation matches on, so a patch
+                    // that renamed it would create a second schedule and orphan the first. Dropped from
+                    // the incoming fields above rather than overwritten after them, which TypeScript
+                    // rejects as a duplicate key — and rightly: two spellings of the same intent in one
+                    // literal is how the wrong one eventually wins.
+                    id: existing.id,
+                }
+                return writeSchedule(runtime, agent, merged, existing)
+            }),
+        { capability: "write" },
     )
 
-    router.add("DELETE", "/v1/agents/:id/schedules/:sid", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const sid = context.params.sid ?? ""
-            const removed = await agent.store.schedules.remove(agent.id, sid)
-            if (!removed) return notFound("schedule", sid)
-            runtime.scheduler.changed()
-            return json({ removed: sid })
-        }),
+    router.add(
+        "DELETE",
+        "/v1/agents/:id/schedules/:sid",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const sid = context.params.sid ?? ""
+                const removed = await agent.store.schedules.remove(agent.id, sid)
+                if (!removed) return notFound("schedule", sid)
+                runtime.scheduler.changed()
+                return json({ removed: sid })
+            }),
+        { capability: "write" },
     )
 
     // Out of band: fires now, and does **not** move the schedule's own next run. Someone testing a
     // schedule at 15:00 must not find that its 08:00 slot has moved.
-    router.add("POST", "/v1/agents/:id/schedules/:sid/run", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const sid = context.params.sid ?? ""
-            const row = await agent.store.schedules.get(agent.id, sid)
-            if (row === undefined) return notFound("schedule", sid)
+    router.add(
+        "POST",
+        "/v1/agents/:id/schedules/:sid/run",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const sid = context.params.sid ?? ""
+                const row = await agent.store.schedules.get(agent.id, sid)
+                if (row === undefined) return notFound("schedule", sid)
 
-            const runId = newRunId()
-            const sessionKey = scheduleSessionKey(row.sessionMode, row.id, runId)
-            const turnId = newTurnId()
-            // This route mints a turn id and hands it back at 202, so it owes the same buffer the
-            // message route does — and did not open one at all, which made `GET …/stream` on a
-            // manually fired schedule answer "no buffer" for a turn that was running.
-            //
-            // The invariant, worth stating because there are exactly three places that mint an id
-            // and give it to a caller: **whoever hands out a turn id opens its buffer first.**
-            runtime.streams.open(turnId)
-            // Detached, like every other turn on this surface: the client gets a handle and reads
-            // the stream, and a disconnect never cancels the work.
-            void agent
-                .send(row.task, {
-                    sessionKey,
-                    turnId,
-                    source: `schedule:${row.id}:manual`,
-                    ...(row.role === undefined ? {} : { role: row.role }),
-                })
-                .catch(() => {
-                    // Reported on the bus by the turn itself; swallowed here so an unhandled
-                    // rejection cannot take the server down.
-                })
-            return json({ scheduleId: row.id, turnId, sessionKey, outOfBand: true }, 202)
-        }),
+                const runId = newRunId()
+                const sessionKey = scheduleSessionKey(row.sessionMode, row.id, runId)
+                const turnId = newTurnId()
+                // This route mints a turn id and hands it back at 202, so it owes the same buffer the
+                // message route does — and did not open one at all, which made `GET …/stream` on a
+                // manually fired schedule answer "no buffer" for a turn that was running.
+                //
+                // The invariant, worth stating because there are exactly three places that mint an id
+                // and give it to a caller: **whoever hands out a turn id opens its buffer first.**
+                runtime.streams.open(turnId)
+                // Detached, like every other turn on this surface: the client gets a handle and reads
+                // the stream, and a disconnect never cancels the work.
+                void agent
+                    .send(row.task, {
+                        sessionKey,
+                        turnId,
+                        source: `schedule:${row.id}:manual`,
+                        ...(row.role === undefined ? {} : { role: row.role }),
+                    })
+                    .catch(() => {
+                        // Reported on the bus by the turn itself; swallowed here so an unhandled
+                        // rejection cannot take the server down.
+                    })
+                return json({ scheduleId: row.id, turnId, sessionKey, outOfBand: true }, 202)
+            }),
+        { capability: "write" },
     )
 
-    router.add("GET", "/v1/agents/:id/tools", (context) =>
-        withAgent(runtime, context, (agent) => {
-            // `tags` and phase visibility are both in the spec's own description of this route and
-            // neither was here. `tags` is the vocabulary `phases.*.allow` matches as `tag:<name>`,
-            // so without it a reader cannot tell why a tool is in a phase it did not name.
-            //
-            // `phases` is **omitted** rather than `[]` on an unphased agent. An empty array reads
-            // as "visible in no phase", which is the opposite of the truth — an unphased agent
-            // shows every tool always — and `isPhased` is the same one-line question the runtime
-            // asks before registering `phase_set` at all.
-            const phases = agent.manifest.phases
-            const phased = isPhased(phases)
-            return json(
-                agent.tools.specs().map((spec) => ({
-                    slug: spec.slug,
-                    summary: spec.summary,
-                    mutating: spec.mutating,
-                    trust: spec.trust,
-                    // Why a provider tool declares itself trusted when the default is untrusted.
-                    // It exists because the boot warning fired on every start of every
-                    // system-provider agent, and a warning always present for a correct
-                    // configuration is one nobody reads — so the reason belongs where a person is
-                    // already looking at the catalogue. Omitted here, an attached reader sees the
-                    // column silently blank, which is the same failure one layer out.
-                    ...(spec.trustReason === undefined ? {} : { trustReason: spec.trustReason }),
-                    provider: spec.provider ?? "local",
-                    tags: spec.tags,
-                    ...(phased ? { phases: phasesFor(phases, spec) } : {}),
-                })),
-            )
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id/tools",
+        (context) =>
+            withAgent(runtime, context, (agent) => {
+                // `tags` and phase visibility are both in the spec's own description of this route and
+                // neither was here. `tags` is the vocabulary `phases.*.allow` matches as `tag:<name>`,
+                // so without it a reader cannot tell why a tool is in a phase it did not name.
+                //
+                // `phases` is **omitted** rather than `[]` on an unphased agent. An empty array reads
+                // as "visible in no phase", which is the opposite of the truth — an unphased agent
+                // shows every tool always — and `isPhased` is the same one-line question the runtime
+                // asks before registering `phase_set` at all.
+                const phases = agent.manifest.phases
+                const phased = isPhased(phases)
+                return json(
+                    agent.tools.specs().map((spec) => ({
+                        slug: spec.slug,
+                        summary: spec.summary,
+                        mutating: spec.mutating,
+                        trust: spec.trust,
+                        // Why a provider tool declares itself trusted when the default is untrusted.
+                        // It exists because the boot warning fired on every start of every
+                        // system-provider agent, and a warning always present for a correct
+                        // configuration is one nobody reads — so the reason belongs where a person is
+                        // already looking at the catalogue. Omitted here, an attached reader sees the
+                        // column silently blank, which is the same failure one layer out.
+                        ...(spec.trustReason === undefined
+                            ? {}
+                            : { trustReason: spec.trustReason }),
+                        provider: spec.provider ?? "local",
+                        tags: spec.tags,
+                        ...(phased ? { phases: phasesFor(phases, spec) } : {}),
+                    })),
+                )
+            }),
+        { capability: "read" },
     )
 
     /**
@@ -1442,48 +1802,56 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * happens per turn in the harness and is written nowhere, so the field would need a store
      * column. The spec drops the promise rather than this route faking it with a null.
      */
-    router.add("GET", "/v1/agents/:id/skills", (context) =>
-        withAgent(runtime, context, (agent) => {
-            const catalogue = agent.skills
-            if (catalogue === undefined) return json({ skills: [], configured: false })
-            return json({
-                configured: true,
-                maxActive: catalogue.maxActive,
-                threshold: catalogue.threshold,
-                // Whether every entry came off the cache, which is what the boot criterion
-                // measures — and the difference between a cold scan and a warm one is seconds.
-                cached: catalogue.cached,
-                skills: catalogue.skills.map((skill) => ({
-                    name: skill.name,
-                    description: skill.frontmatter.description,
-                    tokens: skill.tokens,
-                    // Selection is BM25 over the description, so there is no keyword list to
-                    // report here — that is knowledge's gate, not skills'. `whenNotToUse` is
-                    // reported because it is the half of a skill's guidance that has no other
-                    // surface, and absent is a valid and warned-about state rather than an error.
-                    ...(skill.frontmatter.whenNotToUse === undefined
-                        ? {}
-                        : { whenNotToUse: skill.frontmatter.whenNotToUse }),
-                    // Runnable entries in `scripts/`, exposed as tools only while the skill is
-                    // active. Named rather than counted: a skill's scripts are the part an
-                    // operator has to have approved.
-                    scripts: skill.scripts.map((plan) => plan.slug),
-                })),
-            })
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id/skills",
+        (context) =>
+            withAgent(runtime, context, (agent) => {
+                const catalogue = agent.skills
+                if (catalogue === undefined) return json({ skills: [], configured: false })
+                return json({
+                    configured: true,
+                    maxActive: catalogue.maxActive,
+                    threshold: catalogue.threshold,
+                    // Whether every entry came off the cache, which is what the boot criterion
+                    // measures — and the difference between a cold scan and a warm one is seconds.
+                    cached: catalogue.cached,
+                    skills: catalogue.skills.map((skill) => ({
+                        name: skill.name,
+                        description: skill.frontmatter.description,
+                        tokens: skill.tokens,
+                        // Selection is BM25 over the description, so there is no keyword list to
+                        // report here — that is knowledge's gate, not skills'. `whenNotToUse` is
+                        // reported because it is the half of a skill's guidance that has no other
+                        // surface, and absent is a valid and warned-about state rather than an error.
+                        ...(skill.frontmatter.whenNotToUse === undefined
+                            ? {}
+                            : { whenNotToUse: skill.frontmatter.whenNotToUse }),
+                        // Runnable entries in `scripts/`, exposed as tools only while the skill is
+                        // active. Named rather than counted: a skill's scripts are the part an
+                        // operator has to have approved.
+                        scripts: skill.scripts.map((plan) => plan.slug),
+                    })),
+                })
+            }),
+        { capability: "read" },
     )
 
-    router.add("GET", "/v1/agents/:id/context", (context) =>
-        withAgent(runtime, context, async (agent) => {
-            const sessionKey = context.url.searchParams.get("sessionKey")
-            const input = context.url.searchParams.get("input")
-            return json(
-                await agent.previewContext({
-                    ...(sessionKey === null ? {} : { sessionKey }),
-                    ...(input === null ? {} : { input }),
-                }),
-            )
-        }),
+    router.add(
+        "GET",
+        "/v1/agents/:id/context",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const sessionKey = context.url.searchParams.get("sessionKey")
+                const input = context.url.searchParams.get("input")
+                return json(
+                    await agent.previewContext({
+                        ...(sessionKey === null ? {} : { sessionKey }),
+                        ...(input === null ? {} : { input }),
+                    }),
+                )
+            }),
+        { capability: "read" },
     )
 
     // ─── Channel webhooks ────────────────────────────────────────────────────────────────
@@ -1495,25 +1863,30 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
      * body and routes by id. `handleWebhook` answers 404 for both an unknown agent and an unknown
      * channel, so probing this path cannot enumerate the runtime.
      */
-    router.add("POST", "/v1/channels/:channelId/webhook/:agentId", async (context) => {
-        const body = await readJson(context.request)
-        if (body.kind === "error") return fail(body.error, 400)
+    router.add(
+        "POST",
+        "/v1/channels/:channelId/webhook/:agentId",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
 
-        const headers: Record<string, string> = {}
-        context.request.headers.forEach((value, key) => {
-            headers[key.toLowerCase()] = value
-        })
+            const headers: Record<string, string> = {}
+            context.request.headers.forEach((value, key) => {
+                headers[key.toLowerCase()] = value
+            })
 
-        const outcome = await runtime.channels.handleWebhook(
-            context.params.agentId ?? "",
-            context.params.channelId ?? "",
-            { body: body.value, headers },
-        )
-        return new Response(outcome.detail ?? "", {
-            status: outcome.status,
-            headers: { "content-type": "text/plain; charset=utf-8" },
-        })
-    })
+            const outcome = await runtime.channels.handleWebhook(
+                context.params.agentId ?? "",
+                context.params.channelId ?? "",
+                { body: body.value, headers },
+            )
+            return new Response(outcome.detail ?? "", {
+                status: outcome.status,
+                headers: { "content-type": "text/plain; charset=utf-8" },
+            })
+        },
+        { capability: "open" },
+    )
 
     // ─── Event stream ────────────────────────────────────────────────────────────────────
 
@@ -1537,6 +1910,12 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
         "/v1/events",
         (context) => {
             const agentId = context.url.searchParams.get("agentId")
+            // Named explicitly, so it answers like every other named agent rather than opening a
+            // stream that silently matches nothing — which is the failure `unknown_event_type`
+            // below was added to remove, in a different costume.
+            if (agentId !== null && !reachesAgent(context.principal, agentId)) {
+                return notFound("agent", agentId)
+            }
             const types = context.url.searchParams.get("types")?.split(",").filter(Boolean)
             const asked = context.url.searchParams.get("chunks") === "true"
             const implied = types?.includes("model.chunk") === true
@@ -1583,6 +1962,29 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                         "*",
                         (event) => {
                             if (agentId !== null && event.agentId !== agentId) return
+                            /**
+                             * **The scope, on the firehose.**
+                             *
+                             * `?agentId=` is a convenience filter a caller chooses; this is a
+                             * boundary they cannot. Without it a key scoped to one agent could open
+                             * `/v1/events` with no parameter at all and read every other agent's
+                             * turns, prompts and tool calls — the widest disclosure on the surface,
+                             * and reachable by *omitting* something rather than by asking for it.
+                             *
+                             * An event with no `agentId` is runtime-wide and belongs to everyone; a
+                             * session-scoped one is checked too, because a key narrowed to a
+                             * session prefix is narrowed for reading as much as for writing.
+                             */
+                            if (
+                                event.agentId !== undefined &&
+                                !reachesAgent(context.principal, event.agentId)
+                            )
+                                return
+                            if (
+                                event.sessionKey !== undefined &&
+                                !reachesSession(context.principal, event.sessionKey)
+                            )
+                                return
                             if (
                                 types !== undefined &&
                                 types.length > 0 &&
@@ -1596,12 +1998,12 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 },
             })
         },
-        { streaming: true },
+        { capability: "read", streaming: true },
     )
 
     // ─── Dispatch ────────────────────────────────────────────────────────────────────────
 
-    return async (request: Request): Promise<Response> => {
+    const dispatch = async (request: Request): Promise<Response> => {
         let url: URL
         try {
             url = new URL(request.url)
@@ -1640,10 +2042,27 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                     ...(paths.allowed.includes("GET") && !streams ? ["HEAD"] : []),
                     "OPTIONS",
                 ]
-                return new Response(null, {
-                    status: 204,
-                    headers: { allow: allow.join(", ") },
-                })
+                /**
+                 * A real preflight, not just an `Allow`.
+                 *
+                 * This answered `204` with `Allow` and no `Access-Control-*` at all, which is
+                 * useless as a preflight *and* useless as a guard: a browser reads the missing
+                 * headers as "not permitted", so no third-party page could call this API even with
+                 * its origin explicitly allowed. The `Allow` header stays — it is the HTTP answer
+                 * to `OPTIONS` and is what a non-browser caller is asking for.
+                 */
+                return withCors(
+                    request,
+                    new Response(null, {
+                        status: 204,
+                        headers: {
+                            allow: allow.join(", "),
+                            ...(options.origin === undefined
+                                ? {}
+                                : preflightHeaders(request, allow)),
+                        },
+                    }),
+                )
             }
             // Falls through to the 404 below. An OPTIONS for a path that does not exist is a 404,
             // not a 204 listing nothing — the second reads as "this path exists and accepts
@@ -1681,17 +2100,8 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                 const crossOrigin = refuseOrigin(request)
                 if (crossOrigin !== undefined) return crossOrigin
 
-                if (!isOpenPath(url.pathname) && (await authRequired())) {
-                    const unauthorized = await authorise({
-                        request,
-                        expected: token,
-                        keys: runtime.store.operatorKeys,
-                        claim: options.claim,
-                        pathname: url.pathname,
-                        at: now(),
-                    })
-                    if (unauthorized !== undefined) return unauthorized
-                }
+                const who = await resolve(request, url.pathname, get.capability)
+                if (who instanceof Response) return who
 
                 // The headers GET would return, with no body. The handler really runs — that is
                 // what makes the status and the content-type true rather than guessed.
@@ -1699,8 +2109,12 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
                     request,
                     url,
                     params: get.params,
+                    principal: who,
                 })
-                return new Response(null, { status: response.status, headers: response.headers })
+                return withCors(
+                    request,
+                    new Response(null, { status: response.status, headers: response.headers }),
+                )
             }
         }
 
@@ -1734,20 +2148,31 @@ export function createHandler(options: HandlerOptions): (request: Request) => Pr
         const crossOrigin = refuseOrigin(request)
         if (crossOrigin !== undefined) return crossOrigin
 
-        if (!isOpenPath(url.pathname) && (await authRequired())) {
-            const unauthorized = await authorise({
-                request,
-                expected: token,
-                keys: runtime.store.operatorKeys,
-                claim: options.claim,
-                pathname: url.pathname,
-                at: now(),
-            })
-            if (unauthorized !== undefined) return unauthorized
-        }
+        const who = await resolve(request, url.pathname, match.capability)
+        if (who instanceof Response) return who
 
-        return await runHandler(match.handler, { request, url, params: match.params })
+        return withCors(
+            request,
+            await runHandler(match.handler, {
+                request,
+                url,
+                params: match.params,
+                principal: who,
+            }),
+        )
     }
+
+    /**
+     * The same resolution, without dispatching — for the WebSocket handshake.
+     *
+     * `"/v1/ws"` is the pathname it is asked about, and the capability is `read`: a socket only
+     * ever receives events, and a `stop` frame is refused by the same registry `POST /stop` uses.
+     * Naming the path rather than taking one is deliberate — this is not a general-purpose
+     * authenticator for any route, it is the one the socket needs.
+     */
+    return Object.assign(dispatch, {
+        authenticate: (request: Request) => resolve(request, "/v1/ws", "read"),
+    })
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────────────
@@ -1794,14 +2219,13 @@ async function writeSchedule(
         runtime.scheduler.changed()
         return json(saved, existing === undefined ? 201 : 200)
     } catch (error) {
-        const detail =
-            error instanceof HarnessError
-                ? error.toDetail()
-                : {
-                      code: "schedule_invalid",
-                      message: error instanceof Error ? error.message : String(error),
-                      hint: "See docs/02-SPEC-MANIFEST.md for the schedule fields.",
-                  }
+        const detail = isHarnessError(error)
+            ? error.toDetail()
+            : {
+                  code: "schedule_invalid",
+                  message: error instanceof Error ? error.message : String(error),
+                  hint: "See docs/02-SPEC-MANIFEST.md for the schedule fields.",
+              }
         return fail(detail, 400)
     }
 }
@@ -1833,17 +2257,6 @@ function json(body: unknown, status = 200): Response {
 }
 
 /** Every error goes out in the one envelope the spec fixes. */
-function fail(
-    error: ErrorDetail,
-    status: number,
-    extraHeaders: Record<string, string> = {},
-): Response {
-    return new Response(JSON.stringify({ error }), {
-        status,
-        headers: { "content-type": "application/json; charset=utf-8", ...extraHeaders },
-    })
-}
-
 /**
  * Paths reachable without the token.
  *
@@ -1908,7 +2321,7 @@ async function runHandler(handler: Handler, context: RequestContext): Promise<Re
     try {
         return await handler(context)
     } catch (error) {
-        if (error instanceof HarnessError) return fail(error.toDetail(), 400)
+        if (isHarnessError(error)) return fail(error.toDetail(), 400)
         return fail(
             {
                 code: "internal_error",
@@ -1963,126 +2376,6 @@ function presentedClaim(request: Request): string | undefined {
     return value === "" ? undefined : value
 }
 
-function presentedToken(request: Request): string {
-    const header = request.headers.get("authorization") ?? ""
-    return header.startsWith("Bearer ") ? header.slice(7) : ""
-}
-
-/**
- * Whether this request may proceed, checked against every credential this server accepts.
- *
- * ## Three credentials, in a fixed order, and the order is the design
- *
- * 1. **The configured token**, from `server.tokenEnv`. Still a first-class credential and not
- *    demoted to a bootstrap: a platform calls server-to-server with the container's token and has
- *    to keep working once a person has also minted a browser key. It cannot be revoked through this
- *    API — it is the environment's, and a route that could revoke it would be a route that locks an
- *    operator out of their own container.
- * 2. **An operator key**, matched by fingerprint. One indexed read; `auth/keys.ts` carries the
- *    argument for why that is a single SHA-256 rather than a KDF.
- * 3. **The boot claim**, which authenticates `POST /v1/keys` and nothing else. Scoped here rather
- *    than trusted to the route, so a claim presented to any other path is an ordinary `401` instead
- *    of a partial credential whose blast radius depends on which handler remembered to check.
- *
- * The token is tried first because it is a constant-time compare with no I/O, so the common
- * server-to-server case never touches the database. It is deliberately **not** dispatched on the
- * key prefix, which would read as tidier and would lock out an operator whose `server.tokenEnv`
- * value happens to begin with it.
- *
- * ## The failure never says which part was wrong
- *
- * One message for a missing token, a wrong token, a revoked key and an unknown key. Distinguishing
- * them tells an attacker their request *shape* is right, which is the more useful half of the
- * answer — and "revoked" specifically would confirm that a leaked credential had once been real.
- */
-async function authorise(input: {
-    readonly request: Request
-    readonly expected: string | undefined
-    readonly keys: OperatorKeyStore
-    readonly claim: ClaimTicket | undefined
-    readonly pathname: string
-    readonly at: number
-}): Promise<Response | undefined> {
-    const presented = presentedToken(input.request)
-
-    if (input.expected !== undefined && timingSafeEqual(presented, input.expected)) return undefined
-
-    if (presented !== "") {
-        const record = await input.keys.findLive(await keyFingerprint(presented))
-        if (record !== undefined) {
-            // Coarse, and awaited rather than fired and forgotten: an unawaited write can outlive
-            // the response and land after the store has closed, which throws from a context with
-            // nothing to catch it.
-            await input.keys.touch(record.keyId, new Date(input.at).toISOString())
-            return undefined
-        }
-        if (input.claim !== undefined && timingSafeEqual(presented, input.claim.token)) {
-            /**
-             * A claim opens exactly one **route**, which is a method *and* a path.
-             *
-             * Scoping on the path alone is the obvious version and was wrong: `/v1/keys` is shared
-             * by the listing, so a claim could read every credential on the server — labels,
-             * ids, and which of them are live — before exchanging itself for anything. Caught by
-             * the test that asserts it opens one route and no other, which is exactly the shape
-             * that would have looked correct in review.
-             *
-             * Scoped here rather than trusted to the route, so a claim presented anywhere else is
-             * an ordinary 401 rather than a partial credential whose blast radius depends on which
-             * handler remembered to check.
-             */
-            if (input.request.method !== "POST" || input.pathname !== "/v1/keys")
-                return unauthorized()
-            // Recognised and used up. This is the one credential failure worth distinguishing:
-            // unlike a wrong key it discloses nothing the caller does not already hold, and the
-            // alternative is a bootstrap that fails with no way to tell a spent ticket from a
-            // mistyped paste. A claim from an *earlier boot* is not recognisable at all and falls
-            // through to the generic answer, which is honest — this process has never seen it.
-            if (!input.claim.live()) return claimSpent()
-            return undefined
-        }
-    }
-
-    return unauthorized()
-}
-
-/**
- * The one refusal every failed credential shares, built in one place so they cannot drift.
- *
- * A missing token, a wrong token, a revoked key, an unknown key and a claim presented to the wrong
- * path all answer with this. Two of those are tempting to distinguish and both would tell an
- * attacker their request *shape* is right, which is the more useful half of the answer — "revoked"
- * would additionally confirm that a leaked credential had once been real.
- */
-function unauthorized(): Response {
-    return fail(
-        {
-            code: "unauthorized",
-            message: "Missing or invalid bearer token.",
-            hint: "Send Authorization: Bearer <token>, where the token is either the value of the variable named by server.tokenEnv or an operator key from POST /v1/keys. A revoked key and a wrong one answer the same way on purpose.",
-        },
-        401,
-    )
-}
-
-/** Two callers — the gate and the route's race loser — so the answer cannot differ between them. */
-function claimSpent(): Response {
-    return fail(
-        {
-            code: "claim_spent",
-            message: "That claim has already been exchanged.",
-            hint: "A claim is good for one key. Use the key it minted; if it is lost, restart with --claim to print a new one — a claim lives in the process rather than the database, so it never outlives the boot that printed it.",
-        },
-        401,
-    )
-}
-
-function timingSafeEqual(a: string, b: string): boolean {
-    if (a.length !== b.length) return false
-    let diff = 0
-    for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
-    return diff === 0
-}
-
 function withAgent(
     runtime: Runtime,
     context: RequestContext,
@@ -2091,7 +2384,63 @@ function withAgent(
     const id = context.params.id ?? ""
     const agent = runtime.list().find((candidate) => candidate.id === id)
     if (agent === undefined) return notFound("agent", id)
+    /**
+     * **Out of scope answers 404, and it is the same 404.**
+     *
+     * Byte-identical to the answer for an agent that does not exist, deliberately: a `403` here
+     * would confirm the agent is real, which turns a key scoped to one agent into a way to
+     * enumerate every other one on the server. The same reasoning `unauthorized()` gives for not
+     * distinguishing a revoked key from a wrong one, one layer up.
+     *
+     * This is the **single** choke point for agent scope, which is why it is here rather than in
+     * each route: 24 of the 39 routes reach an agent through this function, and a check written at
+     * each of them is a check the twenty-fifth will not have.
+     */
+    if (!reachesAgent(context.principal, id)) return notFound("agent", id)
     return work(agent)
+}
+
+/**
+ * The agents this caller may see, in listing order.
+ *
+ * Filtered rather than refused: a listing is how a client discovers what it can reach, and a scoped
+ * key asking "what is there" should get an honest answer about *its* world rather than a 403 about
+ * somebody else's. The unscoped path returns the array untouched, so the common case costs nothing.
+ */
+function visibleAgents<T extends { readonly id: string }>(
+    principal: Principal,
+    agents: readonly T[],
+): readonly T[] {
+    if (!isScoped(principal)) return agents
+    return agents.filter((agent) => reachesAgent(principal, agent.id))
+}
+
+/**
+ * The sessions this caller may see.
+ *
+ * Same argument as `visibleAgents`, and the same reason it is a function rather than a filter
+ * written at each call site: `GET /sessions` is not the only place a session key is listed.
+ */
+function visibleSessions<T extends { readonly sessionKey: string }>(
+    principal: Principal,
+    sessions: readonly T[],
+): readonly T[] {
+    if (!isScoped(principal)) return sessions
+    return sessions.filter((session) => reachesSession(principal, session.sessionKey))
+}
+
+/**
+ * A named session this caller may not reach, as a 404 — or `undefined` when they may.
+ *
+ * Every route taking `:key`, plus `POST /messages` where the key arrives in the **body**. That one
+ * is the reason this is a helper: a caller may name any session they like there, so without a check
+ * a key scoped to `team_42:` could write into `team_7:`'s conversation, which is the boundary being
+ * bought here rather than a filter.
+ */
+function outsideSession(context: RequestContext, sessionKey: string): Response | undefined {
+    return reachesSession(context.principal, sessionKey)
+        ? undefined
+        : notFound("session", sessionKey)
 }
 
 /**

@@ -157,3 +157,66 @@ export function originProblem(request: Request, policy: OriginPolicy): ErrorDeta
         field: "server.allowedOrigins",
     }
 }
+
+/**
+ * The `Access-Control-*` headers for a request this server has already decided to answer.
+ *
+ * Called **after** `originProblem`, never instead of it: this adds the headers that let a browser
+ * *use* a response, and the decision about whether to produce one at all was made there. Two
+ * functions rather than one because the refusal applies to every caller and these headers apply
+ * only to a browser — a curl gets neither, and folding them together would make the guard look
+ * optional.
+ *
+ * **The origin is echoed, exactly, and only when it matched.** Never `*`, which would let any page
+ * on the internet read an authenticated response; and never reflected unchecked, which is `*` with
+ * extra steps and is the mistake this pattern is famous for.
+ *
+ * **No `Access-Control-Allow-Credentials`, and that is not an omission.** The credential here is a
+ * bearer header a page keeps in `localStorage`, not a cookie — so there is no ambient authority for
+ * a browser to attach, nothing for `SameSite` to protect, and no CSRF shape to introduce. Sending
+ * the header would invite exactly the cookie-based design it implies.
+ */
+export function corsHeaders(
+    request: Request,
+    policy: OriginPolicy,
+): Readonly<Record<string, string>> {
+    const rawOrigin = request.headers.get("origin")
+    if (rawOrigin === null) return {}
+    // `originProblem` has already refused anything not allowed, so reaching here means this origin
+    // is one of: loopback, a configured entry, or same-origin on a public bind. Re-deriving the
+    // verdict here would be a second copy of that decision.
+    if (originProblem(request, policy) !== undefined) return {}
+    return {
+        "access-control-allow-origin": rawOrigin,
+        // So a cache does not hand a response allowed for one origin to a page on another.
+        vary: "Origin",
+    }
+}
+
+/**
+ * The extra headers a **preflight** needs, on top of `Allow` and the CORS pair.
+ *
+ * The synthesised `OPTIONS` answered with `Allow` and no `Access-Control-*` at all, which made it
+ * useless as a preflight *and* useless as a guard — a browser reading it concluded the request was
+ * not permitted, so no third-party page could call this API even with its origin allowed.
+ *
+ * `Authorization` is the header that matters: without naming it, a preflight passes and the actual
+ * request is then stripped of its credential by the browser, which presents as a mysterious 401 on
+ * a route that works from curl.
+ */
+export function preflightHeaders(
+    request: Request,
+    allow: readonly string[],
+): Readonly<Record<string, string>> {
+    const asked = request.headers.get("access-control-request-headers")
+    return {
+        "access-control-allow-methods": allow.join(", "),
+        // Echoed rather than enumerated: a fixed list is one that goes stale the first time a
+        // client sends `Idempotency-Key`, which this API already accepts. The request has been
+        // origin-checked, so the headers it asks for are asked by a page we already trust.
+        "access-control-allow-headers": asked ?? "authorization, content-type",
+        // Ten minutes. Long enough that a chatty client is not preflighting every call, short
+        // enough that changing `server.allowedOrigins` takes effect within a coffee break.
+        "access-control-max-age": "600",
+    }
+}

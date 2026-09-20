@@ -344,12 +344,23 @@ describe("revoking", () => {
 })
 
 describe("the listing", () => {
-    test("says on the wire that keys are authentication only", async () => {
+    test("says on the wire what a key reaches, and what a scope is not", async () => {
         const { call } = await harness({ token: TOKEN })
         const body = (await (await call("GET", "/v1/keys")).json()) as { scope: string }
-        // The plan's rule was "said in the UI, not discovered". A UI is one consumer of this route,
-        // and a property nobody states is one every client re-derives differently.
-        expect(body.scope).toContain("authentication")
+        /**
+         * The plan's rule was "said in the UI, not discovered". A UI is one consumer of this route,
+         * and a property nobody states is one every client re-derives differently.
+         *
+         * The sentence had to **change with the behaviour** in 18.2, which is the whole reason this
+         * is asserted: it used to read "Every key authenticates every route for every agent", true
+         * until a scope could narrow one — and a client that had cached that claim would now be
+         * wrong about its own credential. So the assertion covers all three things it must say.
+         */
+        expect(body.scope).toContain("no scope")
+        expect(body.scope).toContain("narrows")
+        // And what it is not, in the same place — because the field names will be read as a role
+        // system by the first person who sees them.
+        expect(body.scope).toContain("not an identity")
     })
 
     test("shows revoked keys rather than hiding them", async () => {

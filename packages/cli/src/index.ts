@@ -447,6 +447,33 @@ async function dispatch(argv: readonly string[]): Promise<number> {
             })
         }
 
+        case "credential": {
+            const { credentialCommand } = await import("#credential")
+            return await credentialCommand({
+                // Action at positional 0 and the id at 1 — the `web run <agent>` shape, which
+                // `manifestIndex` already reads off the spec, so the parser needed no change.
+                action: manifestPath ?? "",
+                ...(positionals[1] === undefined ? {} : { keyId: positionals[1] }),
+                ...(flags.str("label") === undefined
+                    ? {}
+                    : { label: flags.str("label") as string }),
+                ...(flags.str("agents") === undefined
+                    ? {}
+                    : { agents: flags.str("agents") as string }),
+                ...(flags.str("sessions") === undefined
+                    ? {}
+                    : { sessions: flags.str("sessions") as string }),
+                ...(flags.str("can") === undefined ? {} : { can: flags.str("can") as string }),
+                ...(flags.str("expires") === undefined
+                    ? {}
+                    : { expires: flags.str("expires") as string }),
+                ...(flags.str("store") === undefined
+                    ? {}
+                    : { store: flags.str("store") as string }),
+                json: flags.bool("json"),
+            })
+        }
+
         case "daemon": {
             const lines = flags.num("lines")
             return await daemonCommand({

@@ -37,3 +37,7 @@ examples/*/memory/
 # to the Docker daemon. It is committed now, deliberately, because a build context is a
 # disclosure surface and the right contents of one are not a local preference.
 local_test/
+
+# docs
+10-*.md
+11-*.md
