@@ -16,7 +16,14 @@
  * pending question to a page reload.
  */
 
-import type { AgentClient, DispachClient, PendingApproval, SessionSummary } from "@dispach/client"
+import type {
+    AgentClient,
+    DispachClient,
+    PendingApproval,
+    ScheduleRecord,
+    SessionSummary,
+    ToolSummary,
+} from "@dispach/client"
 import { DispachError } from "@dispach/client"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Composer, Rows } from "./chat.tsx"
@@ -29,7 +36,17 @@ import {
     rememberKey,
     resolveCredential,
 } from "./lib/auth.ts"
+import { hrefFor, type PanelName, placeFrom } from "./lib/deep-link.ts"
 import { EMPTY, emptyFor, reduce, type Transcript, withUser } from "./lib/transcript.ts"
+import {
+    AgentList,
+    type AgentRow,
+    type ChannelRow,
+    ChannelsPanel,
+    SchedulesPanel,
+    SERVER_PANELS,
+    ToolsPanel,
+} from "./panels.tsx"
 
 /** Where a live turn id is parked so a refresh can reattach. Per tab, not per browser. */
 const LIVE_TURN = "dispach.turn"
@@ -155,18 +172,80 @@ function PasteCredential(props: {
     )
 }
 
-type Panel = { readonly kind: "chat" } | { readonly kind: "keys" }
+/**
+ * Where you are. A name rather than a variant object, because it is also what goes in the URL.
+ *
+ * It was `{kind:"chat"} | {kind:"keys"}` — a discriminated union carrying no data, which is a
+ * string with extra steps. Now that a place is round-tripped through the address bar, the string
+ * *is* the state, and `lib/deep-link.ts` owns which names are real so the shell cannot invent one.
+ */
+/**
+ * Whether a thrown error is the agent having gone, rather than anything else.
+ *
+ * At module scope on purpose. Defined inside the component it is stable-looking and is not —
+ * recreated every render, so the exhaustive-deps rule wants it in three dependency lists, and
+ * putting it there makes every memo around it change on every render. It reads nothing from the
+ * component, so the honest fix is that it is not part of one. (Not the rule's *offered* fix, which
+ * is to add the dependency — this repo has a recorded case where taking that offer enforced a cap
+ * once at mount and never again.)
+ */
+const isGone = (caught: unknown): boolean => caught instanceof DispachError && caught.status === 404
+
+type Panel = PanelName
+
+/** What the bar says for a panel that is not the chat. Keyed, so a new panel needs a title. */
+const TITLES: Readonly<Record<Exclude<Panel, "chat">, string>> = {
+    tools: "Tools",
+    schedules: "Schedules",
+    channels: "Channels",
+    keys: "Operator keys",
+}
 
 function Workspace(props: {
     readonly baseUrl: string
     readonly token: string | undefined
 }): React.ReactElement {
     const clientRef = useRef<DispachClient>(makeClient(props.baseUrl, props.token))
+    const [agents, setAgents] = useState<readonly AgentRow[]>([])
     const [agentId, setAgentId] = useState<string>()
     const [agentName, setAgentName] = useState<string>()
+    const [starting, setStarting] = useState<string>()
+    /** Any question already waiting, for a page that opened after the turn blocked. */
+    const [pending, setPending] = useState<readonly PendingApproval[]>([])
+
+    /**
+     * The current agent is no longer hosted. Stop asking, and say so.
+     *
+     * **Found in a browser, and only visible there.** With a page open on an agent that was then
+     * stopped, every agent-scoped fetch — approvals on a 5-second timer, plus the panels — answered
+     * 404 in a loop, dozens of times, with nothing on screen. The approvals poller's own comment
+     * justified it: *"a failed poll is not worth a banner; the next one will say so"*, which is true
+     * of a transient failure and false of a 404, because the next one says the same thing forever.
+     *
+     * A 404 on an agent route means exactly one thing — `withAgent` could not resolve it — so it is
+     * not a poll to retry, it is a selection that has expired. The listing is re-read because that
+     * is what turns this into something actionable: the agent reappears as a stopped row in the
+     * picker, with the `start` that fixes it.
+     */
+    const agentGone = useCallback(async () => {
+        setAgentId(undefined)
+        setAgentName(undefined)
+        setPending([])
+        setError("this agent is no longer running on this server — start it from the list")
+        try {
+            setAgents(await clientRef.current.agents())
+        } catch {
+            // The listing failing too means the server itself is unreachable, which the next
+            // interaction reports. Replacing the sentence above with a transport error would trade
+            // a useful message for a vaguer one.
+        }
+    }, [])
+
     const [sessions, setSessions] = useState<readonly SessionSummary[]>([])
     const [sessionKey, setSessionKey] = useState<string>()
-    const [panel, setPanel] = useState<Panel>({ kind: "chat" })
+    // Seeded from the address, so a bookmark of a panel opens on it. `useState`'s initialiser
+    // semantics are what make this a seed rather than a prop that would fight a later navigation.
+    const [panel, setPanel] = useState<Panel>(() => placeFrom(window.location.href).panel)
     const [state, setState] = useState<Transcript>(EMPTY)
     const [draft, setDraft] = useState("")
     const [error, setError] = useState<string>()
@@ -197,6 +276,9 @@ function Workspace(props: {
                 // **The first agent that is actually running.** The listing carries a thin row for
                 // a stopped one so a picker can offer to start it, and taking `agents[0]` blindly
                 // would open a chat against an agent with no runtime behind it — every send a 404.
+                // The whole list is kept, stopped rows included: a picker that hid them would
+                // leave somebody who switched an agent off with no way to discover that they had.
+                setAgents(agents)
                 const running = agents.filter((entry) => entry.status !== "disabled")
                 const first = running.find((entry) => entry.id === asked) ?? running[0]
                 if (first === undefined) return
@@ -223,9 +305,13 @@ function Workspace(props: {
         try {
             setSessions(await agent.sessions())
         } catch (caught) {
-            setError(describe(caught))
+            // Routed through the same predicate as every other agent-scoped fetch. Left to set a
+            // raw error, this races the sentence `agentGone` writes and sometimes wins — so the
+            // page would report `agent_not_found` where it has one plain explanation to give.
+            if (isGone(caught)) void agentGone()
+            else setError(describe(caught))
         }
-    }, [agent])
+    }, [agent, agentGone])
 
     useEffect(() => {
         void refreshSessions()
@@ -269,8 +355,6 @@ function Workspace(props: {
         void follow(parked, agent)
     }, [agent, follow])
 
-    /** Any question already waiting, for a page that opened after the turn blocked. */
-    const [pending, setPending] = useState<readonly PendingApproval[]>([])
     useEffect(() => {
         if (agent === undefined) return
         let live = true
@@ -280,8 +364,11 @@ function Workspace(props: {
                 .then((list) => {
                     if (live) setPending(list)
                 })
-                .catch(() => {
-                    /* a failed poll is not worth a banner; the next one will say so */
+                .catch((caught: unknown) => {
+                    // A transient failure is not worth a banner and the next poll will say so. A
+                    // 404 is not transient: the agent is gone, and retrying every five seconds
+                    // forever is the silent failure this used to be.
+                    if (live && isGone(caught)) void agentGone()
                 })
         }
         tick()
@@ -293,7 +380,7 @@ function Workspace(props: {
             live = false
             window.clearInterval(timer)
         }
-    }, [agent])
+    }, [agent, agentGone])
 
     const send = async () => {
         const text = draft.trim()
@@ -327,7 +414,7 @@ function Workspace(props: {
     }
 
     const openSession = async (key: string | undefined) => {
-        setPanel({ kind: "chat" })
+        setPanel("chat")
         setSessionKey(key)
         setState(EMPTY)
         setDraft("")
@@ -342,6 +429,102 @@ function Workspace(props: {
         }
     }
 
+    /**
+     * The report panels' data, fetched when one is opened rather than at mount.
+     *
+     * Lazily because it is read-only and nobody is billed for what they do not look at, and
+     * **re-fetched on every open** rather than cached: a tool catalogue changes on a reload and a
+     * schedule's next run moves every time it fires, so a cached panel is one that quietly shows
+     * yesterday. `/v1/agents/:id` is one request for the channels, and its `channels[]` carries the
+     * `needs_input` payload precisely so a page that opened *after* the QR was issued still has it.
+     */
+    const [report, setReport] = useState<{
+        readonly tools: readonly ToolSummary[]
+        readonly schedules: readonly ScheduleRecord[]
+        readonly channels: readonly ChannelRow[]
+    }>({ tools: [], schedules: [], channels: [] })
+
+    useEffect(() => {
+        if (agent === undefined) return
+        if (panel !== "tools" && panel !== "schedules" && panel !== "channels") return
+        let cancelled = false
+        void (async () => {
+            try {
+                const [tools, schedules, described] = await Promise.all([
+                    agent.tools(),
+                    agent.schedules(),
+                    agent.describe(),
+                ])
+                // The panel may have changed while these were in flight, and a late write would
+                // repaint a surface nobody is looking at with data for one they left.
+                if (cancelled) return
+                setReport({ tools, schedules, channels: described.channels ?? [] })
+            } catch (caught) {
+                if (cancelled) return
+                if (isGone(caught)) void agentGone()
+                else setError(describe(caught))
+            }
+        })()
+        return () => {
+            cancelled = true
+        }
+    }, [agent, panel, agentGone])
+
+    /**
+     * Move, and put it in the address bar.
+     *
+     * `replaceState` rather than `pushState`: the browser's back button would otherwise walk the
+     * panel history, and a person who opened tools and pressed back expects to leave the page
+     * rather than return to the chat they were on two clicks ago. The same choice `lib/auth.ts`
+     * makes for a spent claim, for a different reason.
+     */
+    const goTo = useCallback(
+        (next: { readonly panel?: Panel; readonly agentId?: string }) => {
+            const panelNext = next.panel ?? panel
+            const agentNext = next.agentId ?? agentId
+            setPanel(panelNext)
+            if (next.agentId !== undefined && next.agentId !== agentId) {
+                setAgentId(next.agentId)
+                setAgentName(agents.find((entry) => entry.id === next.agentId)?.name)
+                // A different agent is a different conversation and a different transcript. Reset
+                // rather than carry: showing one agent's reply under another's name is the worst
+                // available outcome, and the store has the history either way.
+                setSessionKey(undefined)
+                setState(EMPTY)
+                setDraft("")
+            }
+            window.history.replaceState(
+                null,
+                "",
+                hrefFor(window.location.href, {
+                    ...(agentNext === undefined ? {} : { agentId: agentNext }),
+                    panel: panelNext,
+                }),
+            )
+        },
+        [agentId, agents, panel],
+    )
+
+    /**
+     * Switch a stopped agent back on, and re-read the listing rather than assuming it worked.
+     *
+     * `POST /start` answers with the lifecycle row and `adopted[]`, but adoption can fail for a
+     * reason this page cannot know — a missing key, a manifest that no longer loads — and the route
+     * reports that by putting the row back. So the listing is the source of truth afterwards, not
+     * the response.
+     */
+    const startAgent = useCallback(async (id: string) => {
+        setStarting(id)
+        try {
+            await clientRef.current.agent(id).start()
+            setAgents(await clientRef.current.agents())
+        } catch (caught) {
+            setError(describe(caught))
+        } finally {
+            setStarting(undefined)
+        }
+    }, [])
+
     return (
         <div className="shell">
             <aside className="side">
@@ -350,11 +533,32 @@ function Workspace(props: {
                     <div style={{ fontSize: 12, color: "var(--dim)" }}>{agentName ?? "…"}</div>
                 </header>
                 <nav>
+                    {/*
+                     * Agents first, and only when there is more than one.
+                     *
+                     * A picker on a single-agent server is a control with one option — noise on the
+                     * shape this runtime is most often deployed in, one agent per container. The
+                     * *stopped* rows are the exception: those appear whatever the count, because an
+                     * agent that is off and invisible is the failure `dispach stop` was designed
+                     * around, and here it would leave a blank page with nothing explaining it.
+                     */}
+                    {agents.length > 1 || agents.some((entry) => entry.status === "disabled") ? (
+                        <>
+                            <div className="group">Agents</div>
+                            <AgentList
+                                agents={agents}
+                                current={agentId}
+                                onSelect={(id) => goTo({ agentId: id })}
+                                onStart={(id) => void startAgent(id)}
+                                {...(starting === undefined ? {} : { starting })}
+                            />
+                        </>
+                    ) : null}
                     <div className="group">Conversation</div>
                     <button
                         type="button"
                         className="row-button"
-                        aria-current={panel.kind === "chat" && sessionKey === undefined}
+                        aria-current={panel === "chat" && sessionKey === undefined}
                         onClick={() => void openSession(undefined)}
                     >
                         + new
@@ -364,23 +568,30 @@ function Workspace(props: {
                             type="button"
                             key={session.sessionKey}
                             className="row-button"
-                            aria-current={
-                                panel.kind === "chat" && sessionKey === session.sessionKey
-                            }
+                            aria-current={panel === "chat" && sessionKey === session.sessionKey}
                             onClick={() => void openSession(session.sessionKey)}
                         >
                             {session.sessionKey}
                         </button>
                     ))}
                     <div className="group">Server</div>
-                    <button
-                        type="button"
-                        className="row-button"
-                        aria-current={panel.kind === "keys"}
-                        onClick={() => setPanel({ kind: "keys" })}
-                    >
-                        keys
-                    </button>
+                    {/*
+                     * Generated from `SERVER_PANELS`, so a panel added to the union appears here
+                     * with nothing to remember. A hand-kept copy of this list is the shape this
+                     * repo has paid for repeatedly — `NO_MANIFEST` omitting `soul`, the wire doc's
+                     * six phantom event rows — and it is always right on the day it is written.
+                     */}
+                    {SERVER_PANELS.map((entry) => (
+                        <button
+                            type="button"
+                            key={entry.panel}
+                            className="row-button"
+                            aria-current={panel === entry.panel}
+                            onClick={() => goTo({ panel: entry.panel })}
+                        >
+                            {entry.label}
+                        </button>
+                    ))}
                 </nav>
                 <footer>
                     <span className={`dot ${state.running ? "busy" : "live"}`} />
@@ -408,8 +619,8 @@ function Workspace(props: {
 
             <main className="main">
                 <div className="bar">
-                    <strong>{panel.kind === "keys" ? "Operator keys" : (agentName ?? "")}</strong>
-                    {panel.kind === "chat" ? <span>{sessionKey ?? "new conversation"}</span> : null}
+                    <strong>{panel === "chat" ? (agentName ?? "") : TITLES[panel]}</strong>
+                    {panel === "chat" ? <span>{sessionKey ?? "new conversation"}</span> : null}
                     <span className="spacer" />
                     {pending.length > 0 ? (
                         <span style={{ color: "var(--warn)" }}>
@@ -418,14 +629,28 @@ function Workspace(props: {
                     ) : null}
                 </div>
 
-                {panel.kind === "keys" ? (
+                {panel !== "chat" ? (
                     <div className="scroll">
                         <div className="pad">
-                            <Keys
-                                client={clientRef.current}
-                                baseUrl={props.baseUrl}
-                                token={props.token}
-                            />
+                            {error === undefined ? null : <p className="row note bad">{error}</p>}
+                            {panel === "keys" ? (
+                                <Keys
+                                    client={clientRef.current}
+                                    baseUrl={props.baseUrl}
+                                    token={props.token}
+                                />
+                            ) : null}
+                            {panel === "tools" ? <ToolsPanel tools={report.tools} /> : null}
+                            {panel === "schedules" ? (
+                                <SchedulesPanel schedules={report.schedules} />
+                            ) : null}
+                            {panel === "channels" ? (
+                                // `now` is passed rather than read inside the component, so a stale
+                                // payload is judged against one clock and the rendering stays
+                                // deterministic — a component reading the clock is one whose test
+                                // passes or fails depending on the time of day.
+                                <ChannelsPanel channels={report.channels} now={Date.now()} />
+                            ) : null}
                         </div>
                     </div>
                 ) : (

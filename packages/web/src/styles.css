@@ -410,3 +410,144 @@ td.revoked {
         display: none;
     }
 }
+
+/* ─── the picker and the report panels ──────────────────────────────────── */
+
+/*
+ * A stopped agent is dimmed rather than hidden, and its row grows a second line.
+ *
+ * `disabled` on the button is doing the load-bearing work: a stopped agent's resource answers 404,
+ * so selecting one would open a chat where every send fails. The colour is what makes the state
+ * readable at a glance; the attribute is what makes it true.
+ */
+.agent-row {
+    display: block;
+}
+.agent-row .row-button:disabled {
+    color: var(--dim);
+    cursor: default;
+}
+.agent-off {
+    color: var(--warn);
+    font-size: 11px;
+}
+.agent-note {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    padding: 0 9px 6px 9px;
+    font-size: 11px;
+    color: var(--dim);
+}
+
+.link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    font-size: 11px;
+    text-decoration: underline;
+    cursor: pointer;
+}
+.link:disabled {
+    color: var(--dim);
+    cursor: default;
+    text-decoration: none;
+}
+
+.empty {
+    color: var(--dim);
+    font-size: 13px;
+    max-width: 60ch;
+}
+
+.panel-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.panel-table th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+    padding: 6px 10px 6px 0;
+    border-bottom: 1px solid var(--line);
+}
+.panel-table td {
+    padding: 9px 10px 9px 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+}
+/* A disabled schedule reads as one, rather than looking like every other row. */
+.panel-table tr.off td {
+    color: var(--dim);
+}
+.sub {
+    color: var(--dim);
+    font-size: 11px;
+    margin-top: 2px;
+    max-width: 52ch;
+}
+
+.channel {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+}
+.channel h3 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    font-weight: 500;
+}
+.status {
+    margin: 0;
+    font-size: 12px;
+}
+.status-connected {
+    color: var(--ok);
+}
+.status-error,
+.status-disconnected {
+    color: var(--bad);
+}
+/*
+ * `needs_input` is warning-coloured on purpose: it is not a failure, and it is not fine either —
+ * the channel is up and waiting for a person, which is the one state somebody has to *act* on.
+ */
+.status-needs_input {
+    color: var(--warn);
+}
+
+.channel-input {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 6px;
+    background: var(--ground);
+}
+.payload {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    /* A QR's payload is one long line. Wrapping beats a horizontal scrollbar nobody finds. */
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 9em;
+    overflow-y: auto;
+}
+/*
+ * A stale payload is dimmed and labelled, never removed. WhatsApp rotates its QR about every 20
+ * seconds, so hiding the expired one leaves an empty box in the gap before the next arrives —
+ * which reads as the page having broken rather than as a code having lapsed.
+ */
+.channel-input.stale .payload {
+    opacity: 0.45;
+}
+.warn {
+    color: var(--warn);
+    font-size: 12px;
+    margin: 0 0 6px;
+}

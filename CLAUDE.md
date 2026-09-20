@@ -2105,6 +2105,31 @@ Never claim a performance property without a number in `evals/` and a script to 
   into a `run`-mode runtime, opening a Telegram long-poll nobody asked for. That is the exact
   surprise `startChannels` exists to prevent, and the reason a one-shot `run --input` would then
   hang on exit.
+- **A tree that does not paint is invisible to everything except a screenshot.** `schedules()` in
+  `packages/client` was declared `Promise<readonly ScheduleRecord[]>` while the route answers
+  `{schedules: [...]}`, and nothing noticed for three phases because **nothing called it** — the
+  `includeHistory` shape, where a declaration with no consumer is wrong for as long as it has none
+  and its type asserts otherwise throughout. `tsc` was satisfied. The first real caller threw
+  `schedules.map is not a function` during render, React unmounted the tree, and the page went
+  **entirely black** — while the accessibility snapshot taken a second earlier showed a complete,
+  correct-looking DOM. That gap is the case for a real-browser pass that a DOM test cannot make.
+  The guard asserts `Array.isArray` on every list read against a real handler, because what went
+  wrong was the *kind* of value and every assertion about its contents passed right up to `.map`.
+- **A 404 is a selection that has expired, not a poll to retry.** A page open on an agent that was
+  then stopped answered 404 on `/approvals` every five seconds forever, plus the panels and the
+  session list, **with nothing on screen** — licensed by the poller's own comment, *"a failed poll
+  is not worth a banner; the next one will say so"*, which is true of a transient failure and false
+  of a 404. All three call sites route it to one handler that clears the selection, says so, and
+  re-reads the listing, so the agent reappears as a stopped row with the `start` that fixes it. The
+  guard counts the call sites rather than mocking a timer: what was missing was the single owner,
+  and a fourth fetch has to join them.
+- **The browser may start an agent and may not stop one.** Listing a stopped agent with its reason
+  is the honest half — somebody who switched one off otherwise gets a blank page and no way to find
+  out — but `stop` from a browser is one click from making an agent unreachable for everybody,
+  durably and across restarts, with nothing like the typed confirmation `remove` demands. And a
+  panel takes its data as **props**: that is what makes `renderToStaticMarkup` a real render test
+  with no DOM and no new dependency, and why `now` is passed into the channel panel rather than read
+  inside it — a component reading the clock is one whose test depends on the time of day.
 - **A bind is not an address, and a laptop cannot show you the difference.** `web url` printed
   `http://0.0.0.0:7420/` from inside the container — every interface, and a link nothing can click.
   `claimUrl` had made that substitution since Phase 13; the new builder took the lease's published

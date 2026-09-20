@@ -4555,6 +4555,64 @@ out of its two inline copies in `keys.ts` into one `browsableHost`, which immedi
 second defect neither copy handled — `URL.hostname` returns IPv6 **bracketed**, so `[::]` never
 matched the bare `::` comparison. `claimUrl` had shipped with that since Phase 13.
 
+### 17.3 — The web UI grows up — **built** (2026-09-20)
+
+Scoped deliberately: the picker, deep links and the **read-only** panels. Provisioning is 17.4,
+because creating an agent from a browser is a different kind of work — a multi-step form, masked
+secrets, and a write that adopts a live agent — and keeping them apart means the browser
+verification here creates nothing.
+
+**What landed.**
+
+- `AgentList` replaces `agents[0]`. It appears only when it has something to say; a stopped agent
+  is listed with its reason and a `start`; `stop` is deliberately absent (decision 11.223).
+- `lib/deep-link.ts` — `?agent=&panel=`, pure. `chat` writes no parameter; an unknown panel falls
+  back to the chat; an unrelated parameter survives a navigation, including never re-adding a
+  stripped `claim`.
+- `panels.tsx` — `ToolsPanel`, `SchedulesPanel`, `ChannelsPanel`. All props, no fetching, so
+  `renderToStaticMarkup` tests them with **no DOM and no new dependency**. The channel panel is
+  16.6's payoff: it renders `needs_input`, marks a lapsed payload without hiding it, and shows an
+  unknown `kind` as text.
+- `SERVER_PANELS` generates the sidebar, so a sixth panel needs nothing remembered.
+- The 404 loop fixed and guarded (11.224), and `@dispach/client`'s `schedules()` unwrapped (11.225).
+
+**Acceptance — in the container, in a real browser.** *This closes 15.3's outstanding item.*
+
+- [x] `docker compose up -d --build --wait` → healthy; the page served at `/`, `app.js` 230,969 B
+      and `app.css` 6,468 B, both under the measured ceiling.
+- [x] The credential gate paints; a pasted key is exchanged, stored, and **stripped from the address
+      bar** while `?panel=schedules` beside it survives.
+- [x] Clicking `tools` put `?agent=minimal&panel=tools` in the address bar, marked the row
+      `[active]`, and titled the bar `Tools`.
+- [x] A **cold load** of `?agent=minimal&panel=channels` landed on that panel with the right title
+      and the right row active.
+- [x] Stopped the agent by API: the **Agents** group appeared with `minimal · stopped`, `[disabled]`,
+      the reason, and a `start`. Clicking `start` brought it back and the group correctly vanished.
+- [x] The stopped row survived a full `--build` rebuild — 16.3's durable switch, incidentally.
+- [x] A screenshot of the schedules panel, read back: sidebar, accent-highlighted row, title, empty
+      state, footer. It paints.
+- [x] 3424 pass / 0 fail, node 1433 / 0, typecheck 0, lint clean, `bench:boot` ok, `check:deps` ok.
+      Both new guards revert-checked.
+
+**Three defects, all found in the browser and none reachable from the host suite.**
+
+1. **A 404 loop with nothing on screen.** A page open on an agent that was then stopped polled
+   `/approvals`, `/sessions` and the panels forever. Fixed, guarded, and the error count verified
+   flat across three further poll intervals.
+2. **`schedules()` returned the wrong shape** and had never been called. It threw during render, so
+   React unmounted the tree and the page was **entirely black** — while the accessibility snapshot
+   taken a second earlier showed a complete, correct-looking DOM. Nothing but a screenshot sees
+   that.
+3. **Literal backticks in my own empty state**, where the tools panel used `<code>`. Cosmetic, and
+   exactly what a visual pass is for.
+
+**Not verified in a browser:** a live `needs_input` channel. Producing one needs a transport that
+emits it, and the carried `defineChannel` defect means a plugin channel cannot load through the
+CLI's `serve` at all. The markup is covered by render tests against the real payload shape.
+
+**Playwright's MCP server disconnected** after the last rebuild, so the final cosmetic fix was
+verified in the **served bundle** (`<code>` present, no literal backtick) rather than on screen.
+
 ---
 
 ## Carried backlog

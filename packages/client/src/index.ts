@@ -24,6 +24,17 @@
  */
 
 import type { AnyEvent, EventDataMap, EventType, ScheduleRecord, TurnSender } from "@dispach/core"
+
+/**
+ * Re-exported, because a consumer of `schedules()` cannot name its own return type otherwise.
+ *
+ * The browser is the caller that made this a defect: it imports this package and **must not**
+ * import `@dispach/core`'s barrel, which is 1.18 MB of Zod and a YAML parser (decision 11.199).
+ * Telling it to reach past this package for a type is telling it to pay four hundred times the
+ * bundle for one interface.
+ */
+export type { ScheduleRecord } from "@dispach/core"
+
 import { DispachError, errorFromResponse, transportError, type WireError } from "./errors.ts"
 import {
     type EventStreamItem,
@@ -620,7 +631,19 @@ export function createClient(options: ClientOptions): DispachClient {
                     body: {},
                 }),
 
-            schedules: () => json<readonly ScheduleRecord[]>("GET", at("/schedules")),
+            /**
+             * Unwrapped, because the route wraps it — and this was declared as a bare array and
+             * **never called** until 17.3's panel became the first consumer, at which point the
+             * page crashed on `schedules.map is not a function` and React took the whole tree down
+             * to a black screen.
+             *
+             * `approvals` directly above has always unwrapped correctly, which is what makes this
+             * the `includeHistory` shape rather than a typo: a declaration with no consumer is
+             * wrong for as long as nobody uses it, and its type says otherwise the whole time.
+             */
+            schedules: async () =>
+                (await json<{ schedules: readonly ScheduleRecord[] }>("GET", at("/schedules")))
+                    .schedules,
 
             approvals: async () =>
                 (await json<{ approvals: readonly PendingApproval[] }>("GET", at("/approvals")))
