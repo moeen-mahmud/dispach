@@ -4805,7 +4805,24 @@ one to version, one to transfer.
 empty directory, and uses the package the three documented ways. Reading the bundle instead is not an
 option — it is minified, and a regex for `from "x"` matches the word *from* inside a help string.
 
-**A fourth defect, found by CI rather than by me.** `bun install --frozen-lockfile` refused a
+**Four more defects, every one found by an environment that was not my working tree.** The
+lockfile refused after a package rename, and underneath it the bundled siblings were declared in no
+dependency field at all, so a **fresh checkout could not build** — `Could not resolve:
+"@dispach/tools-web"` — while the working tree kept passing on symlinks left from before the edit.
+`bin` was `"./dist/index.js"`, and npm strips a `./` prefix along with **the whole entry**, so the
+published package would have installed no command: `npm i -g dispach` then `dispach: command not
+found`, and every local check green because `npm install <tarball>` tolerates what `npm publish`
+removes. `files` listed a `README.md` that did not exist, which npm ignores **in silence**, so 0.1.0
+would have gone out with a blank page on the registry. And the fix for *that* — copying the root
+README in `build` — broke the **image**, whose builder has no readme to copy.
+
+One root cause, three environments, and each bug was invisible to the other two: `rsync`-to-`/tmp`
+for a fresh checkout, `npm publish --dry-run` for the normalised manifest, `docker build` for the
+image. `verify:package` now asserts npm has **nothing to correct** and that a readme of real size
+ships, both revert-checked; the fresh-tree declaration is a boundaries test; and the readme copy
+moved to `prepack`, where it is needed at pack time and never during a compile.
+
+**The original fourth defect, in detail.** `bun install --frozen-lockfile` refused a
 lockfile that had not been regenerated after the package rename — and underneath that, a worse one:
 the bundled siblings were moved out of `dependencies` and not into `devDependencies`, so a **fresh
 checkout could not build at all** (`Could not resolve: "@dispach/tools-web"`). Locally it kept

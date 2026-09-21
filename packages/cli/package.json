@@ -39,8 +39,9 @@
     },
     "scripts": {
         "dev": "bun run ./src/index.ts",
-        "build": "cp ../../README.md ./README.md && rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --splitting --production --sourcemap=linked --external ink --external react --external 'react/*' --banner '#!/usr/bin/env node' && bun build ./src/client.ts ./src/wire.ts --outdir dist --target node --format esm --production --sourcemap=linked && tsc -p tsconfig.build.json",
-        "typecheck": "tsc -p tsconfig.json"
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --splitting --production --sourcemap=linked --external ink --external react --external 'react/*' --banner '#!/usr/bin/env node' && bun build ./src/client.ts ./src/wire.ts --outdir dist --target node --format esm --production --sourcemap=linked && tsc -p tsconfig.build.json",
+        "typecheck": "tsc -p tsconfig.json",
+        "prepack": "cp ../../README.md ./README.md"
     },
     "dependencies": {
         "ink": "7.1.1",
