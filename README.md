@@ -302,15 +302,38 @@ in flight, and exits 0.
 
 ## Hosting with Compose
 
-The one-command path. `docker compose up` brings up a server with an agent, an exposed API and the
-**web UI on the same origin** — nothing to configure but a token and a model key.
+The one-command path. `docker compose up` brings up a server with **no agents**, an exposed API,
+the **web UI on the same origin** and the API reference beside it — nothing to configure but a
+token.
 
 ```bash
-cp .env.example .env               # then DISPACH_API_TOKEN and MODEL_API_KEY
+cp .env.example .env               # then DISPACH_API_TOKEN
 docker compose up -d --build --wait
-curl localhost:7420/v1/ready
-docker compose logs agent          # the claim link — open it once to get a browser key
+curl localhost:7420/v1/ready       # {"status":"ready","agents":0}
+docker compose logs server         # the claim link — open it once to get a browser key
 ```
+
+**Zero agents is the supported first state, not an empty one.** The API and the page exist before
+there is anything to talk to, which is what makes provisioning through them possible at all — and
+it is why no model key is required to start. An earlier version of this file defaulted to mounting
+the repository's own `examples/minimal`, so a fresh clone came up hosting a sample assistant nobody
+asked for; a sample is a thing you ask for. `http://localhost:7420/docs` is the reference, and
+`/v1/openapi.json` is the document behind it — both unauthenticated, because the moment a reference
+is most useful is before you have a credential.
+
+An agent reaches the container two ways, and `serve` needs no argument for either:
+
+```bash
+docker compose exec server dispach init --user "<you>" --name milo   # inside, onto the volume
+echo 'AGENT_DIR=./my-agent' >> .env                                  # or mount one; see the
+                                                                     # commented block in compose
+```
+
+`init` leaves `MODEL_API_KEY=` empty in the agent's `.env` on purpose — filling it is step 1 of what
+it prints. Until it is filled the server **names that agent as not served and stays up**, which it
+did not always do: one half-provisioned agent used to exit the host, and `restart: unless-stopped`
+turned that into a crash loop that took the API and the page down with it. A host does not get to
+fail because one of N agents is misconfigured.
 
 Then open `http://localhost:7420` and paste nothing: the claim link in the logs carries a one-time
 token the page exchanges for a key it keeps. Reading the container's own output is what confers
@@ -341,9 +364,13 @@ One thing the claim link cannot know: it is built from the port the server **bou
 always 7420 inside the container. Set `HOST_PORT` to anything else and the link needs that port
 substituted by hand.
 
-Four things in that file are answers to defaults that bite, and they are commented there rather
+Five things in that file are answers to defaults that bite, and they are commented there rather
 than left to be discovered:
 
+- **`name: dispach`.** Compose names a container `<project>-<service>-<n>` and takes the project
+  from the *directory name*, so this container was `castellan-agent-1` for as long as the checkout
+  kept the pre-rename name — a stale brand with nothing in the tree for `git grep` to find, since
+  the string was never in a file. Set explicitly, it is `dispach-server-1` wherever you clone to.
 - **No `command:` override.** The image's CMD carries `--host 0.0.0.0`; a compose `command:`
   replaces CMD wholesale, so adding one drops the host flag and the process listens on loopback
   *inside* the container, which no published port can reach.
@@ -355,16 +382,19 @@ than left to be discovered:
 - **`/agent` is read-write.** The skills cache and `memory_write` both write beside the manifest.
 - **`stop_grace_period: 30s`.** The 10 s default can SIGKILL an outbox flush mid-write.
 
-The model reaches the container through the *environment* rather than through a `.env` beside the
-manifest, which is the documented precedence: the ambient environment beats an agent's own file,
-so an operator can configure the agent their container runs.
+A **mounted** agent takes its model through the *environment* rather than through a `.env` beside
+the manifest, which is the documented precedence: the ambient environment beats an agent's own
+file, so an operator can configure the agent their container runs. Those three variables are
+commented out alongside the mount they belong to — an agent created *inside* the container has its
+own `.env` and needs none of them.
 
-One agent per container **by choice, not by limitation**: `serve` accepts several manifests and one
-process hosts N agents (decision 8.5), but a shared process means one agent's runaway `exec` starves
-the others, so the image runs one. A second agent is a second service with its
-own port, its own agent directory and **its own state volume** — a commented example in the
-compose file shows the shape, including why sharing a volume would have two boots deleting each
-other's schedules.
+A second agent needs **no second container**: one process hosts N agents (decision 8.5) and a bare
+`serve` hosts every enabled agent in the sandbox, so `dispach init` inside this one is enough. A
+second container is for *isolation* rather than capacity — a shared process means one agent's
+runaway `exec` starves the others — and it needs its own port and **its own home volume**, since
+two sharing one would share a `store.db` whose rows are keyed by agent id and each boot would
+delete the other's schedules while reporting success. A commented example in the compose file shows
+the shape.
 
 ## Developing against the container
 
@@ -376,9 +406,14 @@ and different `realpath` semantics. Those have never been exercised until now.
 
 ```bash
 cp .env.example .env                                  # token + a model key
+# uncomment the /agent mount and the MODEL_* block in docker-compose.yml, then:
 echo 'AGENT_DIR=./examples/shell-agent' >> .env       # an agent that can actually run things
 docker compose up -d --build --wait
 ```
+
+`AGENT_DIR` on its own does nothing now — the mount it feeds is commented out, so that no clone
+comes up hosting an example. Uncommenting is the opt-in, and it is two adjacent blocks rather than
+one because a mounted agent needs the model variables the server itself does not.
 
 Then the loop. `--build` on `up` rebuilds only what changed, and layer caching means a source-only
 edit re-runs `bun run build` and nothing before it:
@@ -386,7 +421,7 @@ edit re-runs `bun run build` and nothing before it:
 ```bash
 docker compose up -d --build --wait     # after any source change
 docker compose logs -f                  # what it is saying
-docker compose exec agent sh            # a shell in the container, as uid 1000
+docker compose exec server sh           # a shell in the container, as uid 1000
 docker compose down                     # stop;  down -v also discards the home volume
 ```
 

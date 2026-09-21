@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -414,4 +414,127 @@ describe("the signal handlers are registered before the socket binds", () => {
         expect(SOURCE).toContain("const stopRequested = waitForSignal()")
         expect(SOURCE).toContain("await stopRequested")
     })
+})
+
+/**
+ * A misconfigured agent in the sandbox must not take the host down.
+ *
+ * **Found by running the container, not by reading the code.** `init` writes an agent whose `.env`
+ * holds `MODEL_API_KEY=` — empty on purpose, since step 1 of what it prints is "add your key". A
+ * bare `serve` hosts every enabled agent in the sandbox, so that one agent made `loadManifest`
+ * throw, the host exited 1, and `restart: unless-stopped` restarted it into the same failure: nine
+ * restarts, no API, no web UI. The always-on server that exists to provision agents, taken down by
+ * an agent halfway through being provisioned.
+ *
+ * Both directions are asserted, because the fix is an asymmetry rather than a tolerance: a
+ * **discovered** agent is skipped and named, a **named** one still refuses. Reverting either half
+ * turns one of these two red.
+ */
+describe("a broken agent does not take the host down", () => {
+    /** A sandbox with one loadable agent and one whose key is missing from the environment. */
+    function sandbox(): string {
+        const home = mkdtempSync(join(tmpdir(), "serve-sandbox-"))
+        const agents = join(home, BRAND.stateDir, "agents")
+        for (const [id, keyEnv] of [
+            ["fine", "MODEL_API_KEY"],
+            ["halfdone", "KEY_NOBODY_SET"],
+        ] as const) {
+            const dir = join(agents, id)
+            mkdirSync(dir, { recursive: true })
+            writeFileSync(
+                join(dir, "agent.yaml"),
+                `apiVersion: ${BRAND.apiVersion}
+id: ${id}
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: ${keyEnv}
+server:
+  enabled: true
+`,
+                "utf8",
+            )
+        }
+        return home
+    }
+
+    /** `serve` against that sandbox. `manifests` empty is the bare, discovering form. */
+    async function serveSandbox(
+        home: string,
+        manifests: readonly string[] = [],
+    ): Promise<{ readonly out: string; readonly exited: boolean }> {
+        const store = join(home, "store.db")
+        const child = spawn(
+            process.execPath,
+            [BINARY, "serve", ...manifests, "--port", "0", "--store", store],
+            {
+                env: {
+                    ...process.env,
+                    HOME: home,
+                    // **The override IS the sandbox root**, not the home directory above it —
+                    // `sandboxRoot` returns it verbatim rather than joining `stateDir` onto it.
+                    // Pointed at `home`, discovery looked in `<home>/agents`, found nothing, and
+                    // the banner listed no agents at all: a green-looking run asserting nothing.
+                    [`${BRAND.envPrefix}HOME`]: join(home, BRAND.stateDir),
+                    MODEL_API_KEY: "test-key",
+                    [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+                    // Or the ambient environment satisfies the very variable this fixture
+                    // withholds, and the broken agent loads perfectly.
+                    KEY_NOBODY_SET: "",
+                },
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        )
+        let out = ""
+        const settled = await new Promise<boolean>((resolve, reject) => {
+            const overall = setTimeout(() => reject(new Error(`no outcome:\n${out}`)), 25_000)
+            let quiet: ReturnType<typeof setTimeout> | undefined
+            const done = (exited: boolean) => {
+                clearTimeout(overall)
+                if (quiet !== undefined) clearTimeout(quiet)
+                resolve(exited)
+            }
+            const collect = (chunk: Buffer) => {
+                out += chunk.toString()
+                if (!out.includes("serving on")) return
+                if (quiet !== undefined) clearTimeout(quiet)
+                quiet = setTimeout(() => done(false), 400)
+            }
+            child.stdout.on("data", collect)
+            child.stderr.on("data", collect)
+            child.on("exit", () => done(true))
+        })
+        if (!settled) child.kill("SIGTERM")
+        return { out, exited: settled }
+    }
+
+    test("a bare serve stays up, serves the good agent and names the broken one", async () => {
+        const home = sandbox()
+        const { out, exited } = await serveSandbox(home)
+        rmSync(home, { recursive: true, force: true })
+
+        // The host is up. This is the assertion that was false: it exited 1 into a restart loop.
+        expect(exited).toBe(false)
+        expect(out).toContain("serving on")
+        expect(out).toContain("fine —")
+        // And says so, because a skipped agent nothing mentions is the failure this repo keeps
+        // finding. The path is the actionable half — the fix is in the `.env` beside it.
+        expect(out).toContain("NOT served")
+        expect(out).toContain("halfdone")
+        expect(out).toContain("KEY_NOBODY_SET")
+    }, 30_000)
+
+    test("a manifest named on the command line still refuses", async () => {
+        const home = sandbox()
+        const named = join(home, BRAND.stateDir, "agents", "halfdone", "agent.yaml")
+        const { out, exited } = await serveSandbox(home, [named])
+        rmSync(home, { recursive: true, force: true })
+
+        // Asked for that agent by path, so skipping it would serve something other than what was
+        // requested — the worse error, and the direction `hostableAgents` already distinguishes.
+        expect(exited).toBe(true)
+        expect(out).toContain("KEY_NOBODY_SET")
+        expect(out).not.toContain("serving on")
+    }, 30_000)
 })

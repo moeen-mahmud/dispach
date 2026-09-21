@@ -20,6 +20,7 @@ import {
     BRAND,
     EventBus,
     HarnessError,
+    isHarnessError,
     loadManifest,
     Runtime,
 } from "@dispach/core"
@@ -99,14 +100,51 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     const switchedOff = hostable.filter((entry) => !entry.enabled)
     const wanted = hostable.filter((entry) => entry.enabled)
 
-    const manifests = wanted.map((entry) => ({
-        path: entry.manifestPath,
-        loaded: loadManifest(entry.manifestPath, {
-            knownProviders: PROVIDER_IDS,
-            knownChannels: CHANNEL_IDS,
-            env,
-        }),
-    }))
+    /**
+     * **A discovered agent that will not load is skipped; a named one still refuses.**
+     *
+     * The asymmetry is the whole point, and it was found by running the container rather than by
+     * reading this. `init` writes a manifest whose `.env` holds `MODEL_API_KEY=` — empty, by its
+     * own design, since step 1 of what it prints is "add your key". A bare `serve` hosts every
+     * enabled agent in the sandbox, so one freshly created agent made `loadManifest` throw, the
+     * host exited 1, and `restart: unless-stopped` restarted it into the same failure: **9
+     * restarts, the API gone, the web UI gone** — the always-on server that exists to provision
+     * agents taken down by an agent halfway through being provisioned. The message was perfect and
+     * went to `docker logs`, which is the 57 MB lesson with the polarity reversed: not a bad
+     * message in a file nobody opens, a correct one nobody can act on because the thing that would
+     * let them act is what died.
+     *
+     * So a host does not get to fail because one of N agents is misconfigured. That is the same
+     * reasoning `listAgents` uses to show a broken directory rather than omitting it, and the same
+     * reasoning behind `GET /v1/agents` carrying a stopped row: the listing says what exists, the
+     * resource says what is running.
+     *
+     * A **named** manifest is the other case and keeps throwing. The caller asked for that agent by
+     * path, so quietly serving something else is the worse error — exactly the direction
+     * `hostableAgents` already distinguishes, which is why the condition here is the same one.
+     */
+    const discovered = options.manifestPaths.length === 0
+    const manifests: { path: string; loaded: ReturnType<typeof loadManifest> }[] = []
+    const broken: { path: string; detail: string; hint?: string }[] = []
+    for (const entry of wanted) {
+        try {
+            manifests.push({
+                path: entry.manifestPath,
+                loaded: loadManifest(entry.manifestPath, {
+                    knownProviders: PROVIDER_IDS,
+                    knownChannels: CHANNEL_IDS,
+                    env,
+                }),
+            })
+        } catch (error) {
+            if (!discovered) throw error
+            broken.push({
+                path: entry.manifestPath,
+                detail: isHarnessError(error) ? error.message : String(error),
+                ...(isHarnessError(error) && error.hint !== undefined ? { hint: error.hint } : {}),
+            })
+        }
+    }
     /**
      * **Zero agents is a running server, not a failure.**
      *
@@ -426,6 +464,15 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                     agentId: entry.agentId,
                     ...(entry.reason === undefined ? {} : { reason: entry.reason }),
                 })),
+                // A third way an agent can be absent, and the one that reads as a bug rather than
+                // as a choice: its manifest would not load. Named for the same reason as the two
+                // above — a scripted caller has to be able to tell "no agent is broken" from "this
+                // build does not say".
+                broken: broken.map((entry) => ({
+                    path: entry.path,
+                    detail: entry.detail,
+                    ...(entry.hint === undefined ? {} : { hint: entry.hint }),
+                })),
             })}\n`,
         )
     } else {
@@ -479,6 +526,19 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                     entry.reason === undefined ? "" : ` (${entry.reason})`
                 }, \`${BRAND.slug} start ${entry.agentId}\`\n`,
             )
+        }
+
+        /**
+         * What would not load, with the reason and the file.
+         *
+         * Printed rather than thrown, because throwing is what took the host down — and printed
+         * *loudly*, because "skipped" is the one state a person reads as working. The path is the
+         * actionable half: the fix is almost always a key missing from the `.env` beside it, which
+         * is precisely the state `init` leaves an agent in on purpose.
+         */
+        for (const entry of broken) {
+            process.stdout.write(`  ${entry.path} — NOT served: ${entry.detail}\n`)
+            if (entry.hint !== undefined) process.stdout.write(`    hint: ${entry.hint}\n`)
         }
 
         for (const held of runtime.declined) {

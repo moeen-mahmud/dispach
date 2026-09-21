@@ -3,7 +3,7 @@
 #   cp .env.example .env               # then a token and a model key
 #   docker compose up -d --build --wait
 #   curl localhost:7420/v1/ready
-#   docker compose logs agent          # the claim link, for the web UI at localhost:7420
+#   docker compose logs server         # the claim link, for the web UI at localhost:7420
 #
 # **`--build` is not optional after the first run**, and leaving it off is a trap rather than a
 # slow path: `image:` below names a tag, compose builds only when that tag is *absent*, so a second
@@ -15,8 +15,16 @@
 #
 # Most of what follows is a default that would otherwise bite, so each one says which.
 
+# **The project name, because the default is the directory name.** Compose names a container
+# `<project>-<service>-<n>` and takes the project from whatever the checkout happens to be called —
+# so this container was `castellan-agent-1` for as long as the directory kept the old name, with no
+# brand string anywhere in the tree for `git grep` to find. Set explicitly, it is `dispach-server-1`
+# wherever the repository is cloned to.
+name: dispach
+
 services:
-    agent:
+    # `server`, not `agent`: this hosts zero or more agents and is not one. It comes up with none.
+    server:
         build:
             context: .
             dockerfile: docker/Dockerfile
@@ -42,31 +50,23 @@ services:
             - "${HOST_PORT:-7420}:7420"
 
         environment:
-            # `:?` fails at `up` time with this message rather than letting the container start and
-            # refuse. Both refusals are correct; only one of them is visible without reading logs.
+            # **The only required variable.** `:?` fails at `up` time with this message rather than
+            # letting the container start and refuse. Both refusals are correct; only one of them is
+            # visible without reading logs.
             DISPACH_API_TOKEN: ${DISPACH_API_TOKEN:?set DISPACH_API_TOKEN in .env — the image binds 0.0.0.0 and refuses to serve the world unauthenticated}
 
-            # The model. Passed through the *environment* rather than read from a `.env` beside the
-            # manifest, because `examples/minimal/.env` is gitignored — a fresh clone has nothing
-            # there — and because the ambient environment deliberately beats the agent's own file:
-            # an operator has to be able to configure the agent their container runs.
-            MODEL_ID: ${MODEL_ID:?set MODEL_ID in .env}
-            MODEL_BASE_URL: ${MODEL_BASE_URL:?set MODEL_BASE_URL in .env}
-            MODEL_API_KEY: ${MODEL_API_KEY:?set MODEL_API_KEY in .env}
+            # **A model key is deliberately NOT required here.** This comes up with zero agents, so
+            # there is nothing for a model key to configure — demanding three of them to start a
+            # server that hosts nothing is friction for a state the server is designed to be in.
+            # They belong to the mounted-agent shape below and are commented out with it.
 
         volumes:
-            # **Read-write, not `:ro`.** The skills cache writes to `<agentDir>/.dispach/` and
-            # `memory_write` appends to the workspace files beside the manifest. Mounted read-only,
-            # an agent boots and then fails the first time it is asked to remember something.
-            - "${AGENT_DIR:-./examples/minimal}:/agent"
-
-            # **The agent's home, and now the only state volume.** It was `/state` with
-            # `DISPACH_HOME` pointing at it, which produced two disjoint agents directories: `init`
-            # wrote to `/state/agents` while the CMD served `/agent`, so an agent created inside the
+            # **The agent's home, and the only volume.** It was `/state` with `DISPACH_HOME`
+            # pointing at it, which produced two disjoint agents directories: `init` wrote to
+            # `/state/agents` while the CMD served `/agent`, so an agent created inside the
             # container was invisible to every listing and nothing would ever serve it. The image
-            # sets no `DISPACH_HOME` at all now — `HOME` decides, so the paths are a laptop's
-            # (`~/.dispach/store.db`, `~/.dispach/agents/`) and the mounted manifest appears in that
-            # one directory as `primary`, linked at start by the entrypoint.
+            # sets no `DISPACH_HOME` at all now — `HOME` decides, so the paths are a laptop's:
+            # `~/.dispach/store.db`, `~/.dispach/agents/`, `~/.dispach/logs/`.
             #
             # A **named** volume, which is the whole reason the most common first-run failure is
             # unreachable here: a named volume inherits uid 1000 from the image, while a host path
@@ -76,6 +76,34 @@ services:
             # It now also holds the `uv` cache and the cloned skills catalogues, which used to sit on
             # a tmpfs and be thrown away on every restart.
             - dispach-home:/home/dispach
+
+            # ─── Mounting an agent from the host: opt in ─────────────────────────────────
+            #
+            # **Nothing is mounted by default, and that is the fix for a real defect.** This line
+            # used to read `"${AGENT_DIR:-./examples/minimal}:/agent"`, so `docker compose up` on a
+            # fresh clone silently hosted the repository's *example* agent — a container advertised
+            # as a server arrived with somebody else's assistant already answering on it. A sample
+            # is a thing you ask for, never a thing you get.
+            #
+            # With no mount the server comes up hosting nothing, which is the supported state: the
+            # API and the web UI are there first, and an agent is created through them or with
+            # `docker compose exec server dispach init`. The entrypoint's symlink is guarded on
+            # `/agent/agent.yaml` existing, so it makes no link and `~/.dispach/agents/` stays empty.
+            #
+            # Uncomment both halves together — the mount and the model variables it needs. The model
+            # goes through the *environment* rather than a `.env` beside the manifest because the
+            # ambient environment deliberately beats the agent's own file: an operator has to be
+            # able to configure the agent their container runs.
+            #
+            # Read-write, not `:ro` — the skills cache writes to `<agentDir>/.dispach/` and
+            # `memory_write` appends to the workspace files beside the manifest.
+            #
+            # - "${AGENT_DIR:-./examples/minimal}:/agent"
+            #
+            #   environment:
+            #       MODEL_ID: ${MODEL_ID:?set MODEL_ID in .env}
+            #       MODEL_BASE_URL: ${MODEL_BASE_URL:?set MODEL_BASE_URL in .env}
+            #       MODEL_API_KEY: ${MODEL_API_KEY:?set MODEL_API_KEY in .env}
 
         # ─── Containment ──────────────────────────────────────────────────────────────────
         #
@@ -148,23 +176,23 @@ services:
                 max-size: "10m"
                 max-file: "3"
 
-    # A second agent is a second service, and the cost is worth seeing rather than describing:
-    # `serve` takes one manifest, so one agent per container is the topology. Each needs its own
-    # port, its own agent directory, and **its own state volume** — two containers sharing one
-    # would share a `store.db` whose rows are keyed by agent id, and reconciliation ends with
-    # `removeManifestExcept`, so each boot would delete the other's schedules and report success.
+    # **A second agent needs no second service.** One process hosts N agents (decision 8.5) and
+    # `serve` with no manifest hosts every enabled agent in the sandbox — so a second agent is
+    # `dispach init` inside this container, and the running server adopts it with no restart.
     #
-    # agent-two:
+    # A second *container* is for isolation rather than for capacity: a shared process means one
+    # agent's runaway `exec` starves the others. If that is what you want, it needs its own port
+    # and **its own home volume** — two containers sharing one would share a `store.db` whose rows
+    # are keyed by agent id, and reconciliation ends with `removeManifestExcept`, so each boot
+    # would delete the other's schedules and report success.
+    #
+    # server-two:
     #     image: dispach:local
     #     ports:
     #         - "7421:7420"
     #     environment:
     #         DISPACH_API_TOKEN: ${DISPACH_API_TOKEN:?}
-    #         MODEL_ID: ${MODEL_ID:?}
-    #         MODEL_BASE_URL: ${MODEL_BASE_URL:?}
-    #         MODEL_API_KEY: ${MODEL_API_KEY:?}
     #     volumes:
-    #         - "./my-other-agent:/agent"
     #         - dispach-home-two:/home/dispach
     #     init: true
     #     stop_grace_period: 30s
