@@ -66,8 +66,8 @@ them.
 
 | | |
 | --- | --- |
-| boot to `runtime.ready` | 27 ms idle; the budget is 1000 ms and CI fails at 1200 |
-| the published package | 345 files, 2.5 MB packed, 9.0 MB unpacked |
+| boot, process start → ready | 56 ms median, 17 ms of it inside `Runtime.create`; the budget is 1000 ms and CI fails at 1200 |
+| the published package | 346 files, 2.5 MB packed, 7.9 MB unpacked |
 | the compiled binary | 60-85 MB, four targets, ad-hoc signed on macOS |
 | streaming | 108 chunks on a live turn at p50 0.0 ms between them |
 | NLT vs native | +13.5pp on deepseek-chat, almost entirely on tasks whose right answer is to call nothing |
