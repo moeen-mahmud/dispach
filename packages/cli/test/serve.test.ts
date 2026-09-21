@@ -538,3 +538,93 @@ server:
         expect(out).not.toContain("serving on")
     }, 30_000)
 })
+
+/**
+ * The banner is the only output a container deployment has, and three things in it were wrong.
+ *
+ * All three were reported by someone reading `docker logs` and clicking what was there, which is
+ * the only way any of them surfaces: on a laptop `serve` binds `127.0.0.1`, so the substitution
+ * never fires and the sign-off is true.
+ */
+describe("the banner names things a person can actually use", () => {
+    /** `serve` on a chosen bind, with a token because a non-loopback bind demands one. */
+    async function banner(host: string): Promise<string> {
+        const dir = agentDir(`banner-${host.replace(/[^a-z0-9]/gi, "")}`)
+        const store = join(mkdtempSync(join(tmpdir(), "serve-banner-")), "store.db")
+        const child = spawn(
+            process.execPath,
+            [
+                BINARY,
+                "serve",
+                join(dir, "agent.yaml"),
+                "--host",
+                host,
+                "--port",
+                "0",
+                "--store",
+                store,
+            ],
+            {
+                env: {
+                    ...process.env,
+                    MODEL_API_KEY: "test-key",
+                    [`${BRAND.envPrefix}API_TOKEN`]: "banner-test-token",
+                    [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+                },
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        )
+        let out = ""
+        await new Promise<void>((resolve, reject) => {
+            const overall = setTimeout(() => reject(new Error(`no banner:\n${out}`)), 25_000)
+            let quiet: ReturnType<typeof setTimeout> | undefined
+            const collect = (chunk: Buffer) => {
+                out += chunk.toString()
+                if (!out.includes("serving on")) return
+                if (quiet !== undefined) clearTimeout(quiet)
+                quiet = setTimeout(() => {
+                    clearTimeout(overall)
+                    resolve()
+                }, 400)
+            }
+            child.stdout.on("data", collect)
+            child.stderr.on("data", collect)
+            child.on("exit", () => {
+                clearTimeout(overall)
+                resolve()
+            })
+        })
+        child.kill("SIGTERM")
+        rmSync(dir, { recursive: true, force: true })
+        return out
+    }
+
+    test("a wildcard bind is printed as loopback, and the bind is still named", async () => {
+        const out = await banner("0.0.0.0")
+        // The defect: `http://0.0.0.0:7420` was the banner's first and most prominent line, and a
+        // browser does nothing with it. `browsableHost` existed for this and had three callers;
+        // this was the fourth and never got it.
+        expect(out).not.toContain("serving on http://0.0.0.0")
+        expect(out).toContain("serving on http://127.0.0.1:")
+        // And the wildcard is still disclosed, because "listening on every interface" is a
+        // security-relevant fact that showing loopback alone would hide.
+        expect(out).toContain("bound 0.0.0.0")
+    }, 30_000)
+
+    test("a loopback bind gets no parenthetical, because nothing was substituted", async () => {
+        const out = await banner("127.0.0.1")
+        expect(out).toContain("serving on http://127.0.0.1:")
+        expect(out).not.toContain("bound 127.0.0.1")
+    }, 30_000)
+
+    test("the web UI and the API reference are named", async () => {
+        const out = await banner("0.0.0.0")
+        // Both have been served unauthenticated since they shipped and neither was mentioned
+        // anywhere a person looks. A surface nobody is told about is a surface nobody has.
+        expect(out).toContain("web UI http://127.0.0.1:")
+        expect(out).toContain("/docs")
+        // Never the wildcard, in any line of it.
+        expect(out).not.toContain("0.0.0.0:0")
+        expect(out.split("\n").filter((line) => line.includes("http://0.0.0.0"))).toEqual([])
+    }, 30_000)
+})

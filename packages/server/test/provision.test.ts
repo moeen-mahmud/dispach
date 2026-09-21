@@ -132,12 +132,14 @@ describe("the step list", () => {
         const body = (await (await local(call)("GET", "/v1/provision")).json()) as {
             available: boolean
             local: boolean
+            allowed: boolean
             steps: unknown[]
         }
-        // More useful than a status code a client has to interpret. An embedder over its own
-        // agent store is what lands here; the container has a provisioner and is refused by the
-        // bind instead.
-        expect(body).toEqual({ available: false, local: true, steps: [] })
+        // More useful than a status code a client has to interpret. An embedder over its own agent
+        // store is what lands here — `allowed` is still true, because nothing about *this caller*
+        // is the problem: a loopback admin may provision, there is simply no provisioner to do it.
+        // The two fields answer different questions and a page needs both to say which.
+        expect(body).toEqual({ available: false, local: true, allowed: true, steps: [] })
         await runtime.stop()
     })
 })
@@ -230,14 +232,40 @@ describe("what the route refuses", () => {
         await runtime.stop()
     })
 
-    test("a public bind is 403, whatever credential is presented", async () => {
+    /**
+     * **The gate is the credential, not only the bind — and the bind-only version refused the
+     * safer case.**
+     *
+     * A token-less loopback server was allowed to provision while a token-authenticated `0.0.0.0`
+     * one was refused, so the rule was strictest exactly where a credential had been presented.
+     * The container is the second case, which made the browser onboarding panel the one panel
+     * structurally impossible in the only deployment that ships it: claim exchanged, first screen a
+     * refusal. This test asserted that as correct behaviour, `whatever credential is presented`.
+     */
+    test("a public bind with an authenticated admin provisions", async () => {
         const dir = workspace(OTHER)
         const { runtime, call } = await harness({
             token: TOKEN,
             provision: fakeProvisioner(`${dir}/agent.yaml`),
-            // A real public bind. The route writes files and starts an agent, so it is gated on the
-            // *bind* rather than on a credential — a token-less loopback server is supported, and
-            // the origin guard protects a browser caller rather than a curl.
+            origin: { host: "0.0.0.0" },
+        })
+        const response = await call("POST", "/v1/agents", {
+            body: { answers: { name: "x" } },
+            headers: { host: "example.com:7420" },
+        })
+        expect(response.status).toBe(201)
+        await runtime.stop()
+    })
+
+    test("**a public bind that required no credential is still refused**", async () => {
+        const dir = workspace(OTHER)
+        // `token` omitted, so the handler is `allowUnauthenticated` and every principal is `open`.
+        // This is the case the gate exists for and the only one it should ever have been about: a
+        // filesystem write reachable from the network by anybody at all. `can(open, "admin")` is
+        // true by definition, which is why the route's declared capability cannot catch this and
+        // `mayProvision` tests the principal's *kind*.
+        const { runtime, call } = await harness({
+            provision: fakeProvisioner(`${dir}/agent.yaml`),
             origin: { host: "0.0.0.0" },
         })
         const response = await call("POST", "/v1/agents", {
@@ -251,12 +279,30 @@ describe("what the route refuses", () => {
         await runtime.stop()
     })
 
-    test("a handler that was never told what it bound is not local", async () => {
+    test("GET /v1/provision reports `allowed` about the caller, not the bind", async () => {
         const dir = workspace(OTHER)
-        // `origin` omitted. A handler mounted inside somebody else's router is the case that must
-        // not get a filesystem write for free, so the absent case reads as *not* loopback.
         const { runtime, call } = await harness({
             token: TOKEN,
+            provision: fakeProvisioner(`${dir}/agent.yaml`),
+            origin: { host: "0.0.0.0" },
+        })
+        const offer = (await (
+            await call("GET", "/v1/provision", { headers: { host: "example.com:7420" } })
+        ).json()) as { local: boolean; allowed: boolean }
+        // The page branched on `local` and therefore told an authenticated admin they could not do
+        // what they could. Both fields are reported; they disagree here, which is the whole point.
+        expect({ local: offer.local, allowed: offer.allowed }).toEqual({
+            local: false,
+            allowed: true,
+        })
+        await runtime.stop()
+    })
+
+    test("a handler that was never told what it bound still needs a credential", async () => {
+        const dir = workspace(OTHER)
+        // `origin` omitted — a handler mounted inside somebody else's router, which must not get a
+        // filesystem write for free. Unauthenticated, that is still a refusal.
+        const { runtime, call } = await harness({
             provision: fakeProvisioner(`${dir}/agent.yaml`),
         })
         expect(

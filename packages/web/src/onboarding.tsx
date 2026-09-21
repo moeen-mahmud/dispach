@@ -50,13 +50,21 @@ function refusal(offer: ProvisionOfferLike): React.ReactElement | undefined {
             </p>
         )
     }
-    if (!offer.local) {
+    /**
+     * `allowed`, never `local` — the field about *this caller* rather than about the bind.
+     *
+     * Branching on `local` put this refusal in front of every container operator, who had just
+     * exchanged a claim for an admin credential and could in fact create an agent. The panel that
+     * exists to make onboarding possible was the one panel that refused it, in the only deployment
+     * that ships it.
+     */
+    if (!offer.allowed) {
         return (
             <p className="empty">
-                Creating an agent is allowed only on a loopback bind, and this server is reachable
-                from elsewhere. That is also what refuses it inside the container, whose{" "}
-                <code>CMD</code> binds <code>0.0.0.0</code>: mount a written agent at{" "}
-                <code>/agent</code>, or run <code>dispach init</code> on the host.
+                Creating an agent needs a loopback bind or a credential with the <code>admin</code>{" "}
+                capability, and this request has neither. On a server reachable from elsewhere, set{" "}
+                <code>server.tokenEnv</code> or present an operator key minted with{" "}
+                <code>can: [admin]</code> — or mount a written agent at <code>/agent</code>.
             </p>
         )
     }

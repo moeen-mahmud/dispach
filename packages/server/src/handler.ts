@@ -374,6 +374,30 @@ export function createHandler(options: HandlerOptions): ServerHandler {
     const provisioningIsLocal = (): boolean =>
         options.origin !== undefined && isLoopback(options.origin.host)
 
+    /**
+     * May this caller create an agent?
+     *
+     * **The bind alone was the wrong question, and it refused the safer of the two cases.** A
+     * token-less loopback server allowed provisioning while a token-authenticated `0.0.0.0` one
+     * refused it — so the gate was strictest exactly where a credential had been presented and
+     * loosest where none had. The container is the second case, which made the browser onboarding
+     * panel the one panel structurally impossible in the only deployment that ships with it: the
+     * page opened, the claim exchanged, and the first screen was a refusal.
+     *
+     * So the risk is named properly. What must never be reachable from the network is provisioning
+     * on a server that asked for **no** credential at all, which is `kind: "open"` — the route's
+     * declared `capability: "admin"` cannot speak to that, because an open principal reaches
+     * everything by definition. An authenticated caller holding `admin` is precisely the case
+     * 18.2's scoped keys were built for, and precisely what this route's own refusal has been
+     * promising in its hint since it was written.
+     *
+     * `can` is consulted rather than assumed from the route's capability: this reads as its own
+     * decision at the one place it is made, and a future route sharing this predicate inherits the
+     * check rather than the assumption.
+     */
+    const mayProvision = (who: Principal): boolean =>
+        provisioningIsLocal() || (who.kind !== "open" && can(who, "admin"))
+
     const refuseOrigin = (request: Request): Response | undefined => {
         if (options.origin === undefined) return undefined
         const problem = originProblem(request, options.origin)
@@ -742,10 +766,23 @@ export function createHandler(options: HandlerOptions): ServerHandler {
     router.add(
         "GET",
         "/v1/provision",
-        () =>
+        (context) =>
             json({
                 available: options.provision !== undefined,
+                // A fact about the bind, kept because it is one and because removing a field is a
+                // breaking change inside `v: 1`.
                 local: provisioningIsLocal(),
+                /**
+                 * **May *this caller* create an agent** — which is the question a page is actually
+                 * asking, and not the one `local` answers.
+                 *
+                 * The onboarding panel was built on `local`, so in the container it rendered
+                 * "allowed only on a loopback bind" to an operator who had just authenticated with
+                 * an admin credential and could in fact do it. A field that describes the server
+                 * where the client needs a decision about itself is how a correct refusal becomes a
+                 * wrong one.
+                 */
+                allowed: mayProvision(context.principal),
                 steps: options.provision?.steps() ?? [],
             }),
         { capability: "read" },
@@ -782,12 +819,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     501,
                 )
             }
-            if (!provisioningIsLocal()) {
+            if (!mayProvision(context.principal)) {
                 return fail(
                     {
                         code: "provisioning_not_local",
-                        message: "Creating an agent is only allowed on a loopback bind.",
-                        hint: "This route writes files and starts an agent, and a token-less loopback server is a supported configuration — so it is gated on the bind rather than on a credential. This is also what refuses provisioning inside the container, whose CMD binds 0.0.0.0: mount a written agent at /agent, or run `init` on the host. A scoped admin key will open this on a public bind.",
+                        message:
+                            "Creating an agent needs either a loopback bind or a credential with the admin capability.",
+                        hint: "This route writes files and starts an agent. A token-less loopback server is a supported configuration, so on a non-loopback bind it asks for a credential instead — set server.tokenEnv (the container's DISPACH_API_TOKEN does this) or present an operator key minted with `can: [admin]`. What is refused is provisioning on a server that required no credential at all and is reachable from the network.",
                     },
                     403,
                 )

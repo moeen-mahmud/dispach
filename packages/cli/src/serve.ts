@@ -25,6 +25,7 @@ import {
     Runtime,
 } from "@dispach/core"
 import {
+    browsableHost,
     claimCommand,
     claimUrl,
     createApprovalRegistry,
@@ -32,6 +33,7 @@ import {
     serve,
 } from "@dispach/server"
 import { ambientEnv } from "#lib/ambient"
+import { inContainer } from "#lib/bootstrap"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
 import { hostableAgents, manifestForId } from "#lib/lifecycle"
@@ -476,7 +478,31 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             })}\n`,
         )
     } else {
-        process.stdout.write(`${BRAND.name} serving on ${running.url}\n`)
+        /**
+         * **A bind is not an address.** `running.url` carries whatever was bound, so the container
+         * printed `http://0.0.0.0:7420` — a URL a browser does nothing with, as the first and most
+         * prominent line of the banner. `browsableHost` has existed since Phase 13 for exactly
+         * this and its own docstring notes it had two copies before a third caller arrived; this is
+         * the fourth, and it never got it. A laptop cannot show the defect: `serve` there binds
+         * `127.0.0.1` and the substitution never fires.
+         *
+         * The bind is still named when it differs, because "listening on every interface" is a
+         * security-relevant fact and quietly showing loopback instead would hide it.
+         */
+        const browsable = `http://${browsableHost(host)}:${running.port}`
+        const boundNote = browsable === running.url ? "" : ` (bound ${host} — every interface)`
+        process.stdout.write(`${BRAND.name} serving on ${browsable}${boundNote}\n`)
+
+        /**
+         * The web UI and the reference, named because nothing named them.
+         *
+         * Both have been served unauthenticated since they shipped and neither appeared anywhere a
+         * person looks — the API reference in particular, which is the single thing most worth
+         * knowing about a server you have just started and cannot yet call. A surface nobody is
+         * told about is a surface nobody has, which is the `includeHistory` shape applied to a page
+         * rather than to a field.
+         */
+        process.stdout.write(`  web UI ${browsable}/ · API reference ${browsable}/docs\n`)
         for (const agent of agents) {
             const channels = runtime.channels.statusOf(agent.id)
             const suffix =
@@ -592,10 +618,23 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             process.stdout.write(
                 `  running as a background service · ${BRAND.slug} daemon status ${agents[0]?.id ?? ""}\n`,
             )
+        } else if (inContainer()) {
+            /**
+             * A container has no terminal to lose and is already supervised.
+             *
+             * The generic line told an operator reading `docker logs` to press ctrl-c — in a
+             * terminal that does not exist — and to run `daemon install <agent>`, which is both the
+             * per-agent form 16.4 retires *and* a second supervisor underneath the one that started
+             * this process. Two pieces of advice, neither actionable, on the last line of the only
+             * output a container deployment has.
+             */
+            process.stdout.write(
+                "  supervised by the container runtime — it stops with the container, and SIGTERM finishes the delivery in flight.\n",
+            )
         } else {
             process.stdout.write(
-                `  ctrl-c to stop — this ends when the terminal does. \`${BRAND.slug} daemon install ${
-                    agents[0]?.id ?? "<agent>"
+                `  ctrl-c to stop — this ends when the terminal does. \`${BRAND.slug} daemon install${
+                    agents[0]?.id === undefined ? "" : ` ${agents[0].id}`
                 }\` keeps it running.\n`,
             )
         }

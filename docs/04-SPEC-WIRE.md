@@ -62,7 +62,7 @@ and WebSocket surfaces can return:
 | `agent_turn_in_flight` | 409 | A reload or stop was asked for while a turn is running. It names the count; retry when the turn ends, because aborting one to apply a setting is the worse trade. |
 | `agent_not_replaceable` | 400 | `reload` on a team member, which has no manifest of its own — replace its supervisor, which reloads the team as one unit. |
 | `provisioning_not_supported` | 501 | This server was built with no provisioner — an embedder over its own agent store. The container has one and is refused by the bind instead. |
-| `provisioning_not_local` | 403 | `POST /v1/agents` on a non-loopback bind. A scoped admin key opens it later; until then the refusal names `init` and mounting. |
+| `provisioning_not_local` | 403 | `POST /v1/agents` with neither a loopback bind nor a credential carrying `admin`. What is refused is a filesystem write on a server that required **no** credential and is reachable from the network — the bind-only version of this refused the safer case, since a token-less loopback server was allowed while an authenticated public one was not. |
 | `request_body_invalid` | 400 | A body failed its schema and the failing field declared no code of its own. Carries the field. |
 | `agent_stop_invalid` | 400 | `stop` was sent a `reason` that is not a string. |
 | `provision_answers_required` | 400 | The body has no `answers` object. |
@@ -154,7 +154,7 @@ POST /v1/agents/:id/reload
 GET  /v1/openapi.json    → the generated OpenAPI 3.1 document
 GET  /docs               → a browser reference over it
 
-GET  /v1/provision       → { available, local, steps[] }
+GET  /v1/provision       → { available, local, allowed, steps[] }
 POST /v1/agents            { answers: {step: value, …} }
                          → 201 { id, dir, files[], adopted[] }
 ```
@@ -195,15 +195,30 @@ field that cannot be submitted is worse than a missing one.
 way, so a failed adoption is not a failed creation — reporting the request as failed would send
 somebody to create a second copy of an agent that already exists.
 
-Gated to a **loopback bind**, answering `403 provisioning_not_local` otherwise: the route writes
-files and starts an agent, a token-less loopback server is a supported configuration, and the origin
-guard protects a browser caller rather than a curl. `501 provisioning_not_supported` on a server
+Gated to a **loopback bind or an authenticated credential carrying `admin`**, answering
+`403 provisioning_not_local` otherwise. The route writes files and starts an agent, and a token-less
+loopback server is a supported configuration — so what must never be reachable is provisioning on a
+server that required **no** credential at all and is on the network. The route's declared
+`capability: "admin"` cannot express that on its own: an `open` principal reaches everything by
+definition, so the check is on the principal's *kind*. `501 provisioning_not_supported` on a server
 built with no provisioner, which is an embedder mounting this handler over its own agent store.
 
-**The container is covered by the bind rather than by the 501.** Its `CMD` binds `0.0.0.0`, so
-provisioning there answers `403` — a fact about what was bound rather than about what somebody
-remembered to omit. `GET /v1/provision` reports `available: true, local: false` for exactly that
-case, so a client knows the questions are real and the route will refuse it.
+**A bind-only gate refused the safer of the two cases**, and that is why this changed. The container
+binds `0.0.0.0` and requires `DISPACH_API_TOKEN`, so it was refused while a token-less loopback
+server was allowed — strictest exactly where a credential had been presented. It also made the
+browser onboarding panel the one panel structurally impossible in the only deployment that ships it.
+
+`GET /v1/provision` therefore reports **two** fields, and a client branches on the second:
+
+| | |
+| --- | --- |
+| `local` | a fact about the **server** — is this handler on a loopback bind |
+| `allowed` | a fact about **this request** — may this caller create an agent |
+
+They agree on a laptop and disagree on an authenticated container. The web UI branched on `local`
+and told an operator holding an admin credential that they were not allowed to do what they were
+allowed to do, which is what a field describing the server does when a page needs a decision about
+itself.
 
 **`stop` and `start` are the durable switch, not a signal.** `stop` writes the agent off in the
 store *and* drops it from this host now; the row is what makes it survive a restart, and the drop is

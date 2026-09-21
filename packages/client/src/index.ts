@@ -467,8 +467,16 @@ export interface ProvisionStepLike {
 export interface ProvisionOfferLike {
     /** A provisioner was injected. `false` means `POST /v1/agents` answers `501`. */
     readonly available: boolean
-    /** This handler is on a loopback bind. `false` means the route answers `403`. */
+    /** This handler is on a loopback bind. A fact about the server, not about you. */
     readonly local: boolean
+    /**
+     * May *this caller* provision, which is the field to branch on.
+     *
+     * `local` describes the bind; this describes the request. They differ on exactly the
+     * deployment that ships the onboarding page — an authenticated container — where branching on
+     * `local` told an admin they were not allowed to do what they were allowed to do.
+     */
+    readonly allowed: boolean
     readonly steps: readonly ProvisionStepLike[]
 }
 

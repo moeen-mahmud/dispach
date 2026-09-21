@@ -62,6 +62,24 @@ export type SkipReason =
     | "is-the-service"
 
 /**
+ * Are we inside a container?
+ *
+ * A container is already supervised by whatever started it, and its entrypoint is `serve` — so it
+ * neither wants a bootstrap nor has a terminal to lose. `/.dockerenv` is Docker's own marker; the
+ * `container` variable covers podman and a hand-rolled image.
+ *
+ * Exported because the *banner* needs it too, and for the reason `browsableHost` gives about having
+ * had two copies before a third caller arrived: the sign-off line told a container operator to
+ * press ctrl-c in a terminal that does not exist and to run `daemon install` against a supervisor
+ * that is already doing the job.
+ */
+export function inContainer(
+    env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+    return existsSync("/.dockerenv") || env.container !== undefined
+}
+
+/**
  * Why we are not doing this, checked before anything is read.
  *
  * Ordered cheapest-first and by *specificity*: `is-the-service` is checked before `in-container`
@@ -74,9 +92,7 @@ export function skipReason(options: BootstrapOptions): SkipReason | undefined {
     if (options.disabled === true) return "disabled-by-flag"
     if (env[`${BRAND.envPrefix}SERVICE`] !== undefined) return "is-the-service"
     if (env[`${BRAND.envPrefix}NO_BOOTSTRAP`] !== undefined) return "disabled-by-env"
-    // A container is already supervised by whatever started it, and its entrypoint is `serve`.
-    // `/.dockerenv` is Docker's own marker; the brand variable covers a hand-rolled image.
-    if (existsSync("/.dockerenv") || env.container !== undefined) return "in-container"
+    if (inContainer(env)) return "in-container"
     // Not politeness: a CI job that installed a LaunchAgent would leave it behind on a shared
     // runner, and the job after it would inherit a server nobody asked for.
     if (env.CI !== undefined) return "in-ci"
