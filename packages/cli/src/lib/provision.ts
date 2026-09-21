@@ -42,6 +42,7 @@ import {
     type QuestionDefaults,
     SECRET_STEPS,
     STEP_ORDER,
+    slugify,
     validateAnswer,
 } from "#lib/init-flow"
 
@@ -645,12 +646,41 @@ export function provisionAgent(input: ProvisionRequest): ProvisionResult {
      * come from there and nowhere else, and a caller that computes one itself has bypassed the
      * override every test depends on.
      */
-    const targetDir = resolve(join(input.defaults.agentDirBase, answers.name))
+    /**
+     * **Through `dirFor`, and the slug — not the typed name.**
+     *
+     * This read `join(agentDirBase, answers.name)` and returned `agentId: answers.name`, while the
+     * manifest it writes declares `id: slugify(name)` and the terminal derives its directory
+     * through the same `slugify` (`dirFor`). So one question had two answers depending on the
+     * surface, and a name that is not already kebab-case broke three things at once:
+     *
+     * - `POST /v1/agents` answered `{ id: "Milo", adopted: ["milo"] }`, so the browser's
+     *   `adopted.includes(id)` was false and it reported a running agent as **"written, and not
+     *   running"** — with no error text, because there had been no error.
+     * - the directory landed at `agents/Milo` while every route keys on `milo`, so
+     *   `validate milo` at a terminal was refused with *"Known agents: Milo. Did you mean Milo?"*
+     * - 17.4's acceptance missed all of it by provisioning an agent called `vela`, already a slug.
+     *
+     * `dirFor` is the shared derivation rather than a second copy of it, which is the rule this
+     * module's own comment fifteen lines up is a monument to. `agentId` is the id the *manifest*
+     * declares, because that is what `Runtime.adopt` returns and what every route addresses.
+     */
+    const slug = slugify(answers.name)
+    const derived = dirFor("sandbox", answers.name, input.defaults)
+    if (derived === undefined) {
+        throw new HarnessError({
+            code: "provision_dir_unresolved",
+            message: `No directory could be derived for ${JSON.stringify(answers.name)}.`,
+            hint: 'This is a bug in the CLI: `dirFor("sandbox", …)` must always resolve a path. It returns undefined only when the name is missing, which `complete()` has already refused.',
+            field: "name",
+        })
+    }
+    const targetDir = resolve(derived)
     const files = planFiles({ ...answers, dir: targetDir })
     writeAgentFiles(targetDir, files)
 
     return {
-        agentId: answers.name,
+        agentId: slug,
         dir: targetDir,
         manifestPath: join(targetDir, "agent.yaml"),
         files: files.map((file) => file.relPath),

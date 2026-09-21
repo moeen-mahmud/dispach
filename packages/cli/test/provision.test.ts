@@ -18,7 +18,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { HarnessError } from "@dispach/core"
-import { SECRET_STEPS } from "#lib/init-flow"
+import { dirFor, SECRET_STEPS } from "#lib/init-flow"
 import { provisionAgent, provisionSteps, toProvisionStep } from "#lib/provision"
 
 const dirs: string[] = []
@@ -208,7 +208,19 @@ describe("creating an agent from a partial answer set", () => {
         const base = defaults()
         const result = provisionAgent({ answers: { user: "Ada", name: "Milo" }, defaults: base })
 
-        expect(result.agentId).toBe("Milo")
+        /**
+         * **The slug, which is the id the manifest declares.** This line read `toBe("Milo")` — the
+         * typed name — three lines above an assertion that the manifest says `id: milo`. The two
+         * contradicted each other in one test, and the test passed, because nothing joined them up.
+         *
+         * What it cost: `POST /v1/agents` answered `{ id: "Milo", adopted: ["milo"] }`, so the
+         * browser's `adopted.includes(id)` was false and it reported a running agent as "written,
+         * and not running" with no error text — there had been no error. The directory landed at
+         * `agents/Milo` while every route keys on `milo`, so `dispach validate milo` was refused
+         * with "Known agents: Milo. Did you mean Milo?". 17.4's acceptance run missed all of it by
+         * using the name `vela`, which is already a slug.
+         */
+        expect(result.agentId).toBe("milo")
         expect(result.manifestPath).toBe(join(result.dir, "agent.yaml"))
         /**
          * **Inside the base this call was handed**, which is the assertion that was missing.
@@ -226,6 +238,51 @@ describe("creating an agent from a partial answer set", () => {
         expect(result.files).toContain("agent.yaml")
         expect(result.files).toContain("workspace/SOUL.md")
         expect(readFileSync(result.manifestPath, "utf8")).toContain("id: milo")
+    })
+
+    /**
+     * **One identity per agent, read out of the generated file rather than from the return value.**
+     *
+     * The guard this repo has needed six times for this exact shape (`apiKeyEnv`,
+     * `ChatMessage.toolCalls`, `TurnInput.skills`, `ToolContext.readArtifact`,
+     * `ToolContext.memoryDir`, `init --schedules daily`): a test at the **far end** that reads the
+     * value back out, not one at the layer that sets it.
+     *
+     * A name with a space and a capital is the case that broke — every surface agreed while the
+     * name happened to be a slug already, so the divergence was invisible to a whole phase's
+     * acceptance run.
+     */
+    test("a name that is not already a slug still has one identity everywhere", () => {
+        const base = defaults()
+        const result = provisionAgent({
+            answers: { user: "Ada", name: "My Bot" },
+            defaults: base,
+        })
+
+        // The manifest is the authority: whatever it declares is what `Runtime.adopt` returns and
+        // what every route addresses.
+        const manifest = readFileSync(result.manifestPath, "utf8")
+        expect(manifest).toContain("id: my-bot")
+        expect(manifest).toContain("name: My Bot")
+
+        // And all three agree with it. `agentId` is what the HTTP route reports as `id` and
+        // compares against `adopted`; the directory is what `resolveAgentRef` looks the agent up by.
+        expect(result.agentId).toBe("my-bot")
+        expect(result.dir).toBe(join(base.agentDirBase, "my-bot"))
+        expect(result.dir.endsWith("My Bot")).toBe(false)
+    })
+
+    test("the terminal and the wire derive the same directory from one name", () => {
+        // Two front doors, one question. `provisionAgent` recomputed the path from the raw name
+        // while the wizard derived it through `dirFor`, so the same answers produced
+        // `agents/My Bot` over HTTP and `agents/my-bot` at a terminal. `dirFor` is now the single
+        // derivation, which is the rule this module's own header is a monument to.
+        const base = defaults()
+        const result = provisionAgent({
+            answers: { user: "Ada", name: "Milo The Cat" },
+            defaults: base,
+        })
+        expect(result.dir).toBe(dirFor("sandbox", "Milo The Cat", base))
     })
 
     test("the .env is 0600 and nothing reads it back", () => {

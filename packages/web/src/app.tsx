@@ -27,7 +27,7 @@ import type {
     ToolSummary,
 } from "@dispach/client"
 import { DispachError } from "@dispach/client"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Composer, Rows } from "./chat.tsx"
 import { Keys } from "./keys.tsx"
 import {
@@ -39,6 +39,7 @@ import {
     resolveCredential,
 } from "./lib/auth.ts"
 import { hrefFor, type PanelName, placeFrom } from "./lib/deep-link.ts"
+import { type LiveStream, liveStream } from "./lib/live.ts"
 import { initialAnswers, missingAnswers, payloadFor } from "./lib/provision-form.ts"
 import { EMPTY, emptyFor, reduce, type Transcript, withUser } from "./lib/transcript.ts"
 import { Onboarding } from "./onboarding.tsx"
@@ -255,6 +256,13 @@ function Workspace(props: {
     const [draft, setDraft] = useState("")
     const [error, setError] = useState<string>()
     const stopRef = useRef<(() => Promise<void>) | undefined>(undefined)
+    /**
+     * One stream per turn, owned outside this component so it can be tested.
+     *
+     * `lib/live.ts` holds the reasoning. The short version: this file is where the untested code
+     * was, and a guard written against a component whose effects never mount could not fail.
+     */
+    const liveRef = useRef<LiveStream>(liveStream())
 
     /**
      * Which agent, and its name for the title.
@@ -321,13 +329,39 @@ function Workspace(props: {
             .catch((caught: unknown) => setError(describe(caught)))
     }, [])
 
-    const agent: AgentClient | undefined =
-        agentId === undefined ? undefined : clientRef.current.agent(agentId)
+    /**
+     * The per-agent facade, **memoised on the id** — and this one line is load-bearing.
+     *
+     * `client.agent(id)` builds a fresh object literal on every call, so calling it in the render
+     * body gave `agent` a new identity every render. Everything keyed on it followed:
+     * `refreshSessions`, then `follow`, then the reattach effect below — which has no cleanup, so
+     * each render started *another* `/stream?chunks=true` for the same turn, and each stream's
+     * `setState` committed a render that started another.
+     *
+     * Every one of those streams folded into one `Transcript` and one **mutable** `StreamFilter`, so
+     * a real session rendered `DoingDoingDoingDoing good good good…` and then the finished reply
+     * eight more times. The proof was in the screenshot: the first block read `thinking · 1068
+     * chars` and every repeat `178`, and 1068 = 178 × 6 — six streams interleaving into one buffer,
+     * then eight late attaches each replaying the turn and committing a clean copy of their own.
+     *
+     * The same loop hammered `GET /sessions` until the browser refused new connections and reported
+     * a *same-origin* fetch as `Failed to fetch`. The CLI has never had this: `lib/source.ts:281`
+     * guards with `if (pump !== undefined) return` on a subscription mounted on stable deps.
+     */
+    const agent: AgentClient | undefined = useMemo(
+        () => (agentId === undefined ? undefined : clientRef.current.agent(agentId)),
+        [agentId],
+    )
 
     const refreshSessions = useCallback(async () => {
         if (agent === undefined) return
         try {
             setSessions(await agent.sessions())
+            // **Cleared on success, or one transient failure is permanent.** The old code set the
+            // error and never unset it, and because the string was identical every time React
+            // bailed out of the re-render — so the banner sat there with nothing retrying behind
+            // it. A poll that recovers has to say so on the surface that reported the fault.
+            setError(undefined)
         } catch (caught) {
             // Routed through the same predicate as every other agent-scoped fetch. Left to set a
             // raw error, this races the sentence `agentGone` writes and sometimes wins — so the
@@ -341,23 +375,49 @@ function Workspace(props: {
         void refreshSessions()
     }, [refreshSessions])
 
-    /** Follow one turn to its end, folding every frame into the transcript. */
+    /**
+     * Follow one turn to its end, folding every frame into the transcript.
+     *
+     * **One stream per turn, enforced rather than hoped for.** The gate is `lib/live.ts`, which is
+     * this package's spelling of `cli/src/lib/source.ts:281`'s `if (pump !== undefined) return`.
+     * The memo above stops the effect below from re-firing; the gate stops everything else — a
+     * second `send`, a `StrictMode` double-invoke, a future effect that gains a dependency — from
+     * opening a second subscription into the same accumulator. The memo alone would have fixed
+     * today's symptom and left the shape that produced it.
+     *
+     * The abort is the other half, and it comes from the same place. `AgentClient.stream` has taken
+     * a `signal` since the client was written and this call site passed none, so a stream outlived
+     * the agent and session it was started for: `goTo` and `openSession` both reset the transcript
+     * and neither could stop a stream still writing into it. `handle.stop()` is a *server-side turn
+     * cancel* and was never the same thing as hanging up.
+     */
     const follow = useCallback(
         async (turnId: string, forAgent: AgentClient) => {
+            const live = liveRef.current
+            const signal = live.begin(turnId)
+            // Already following this turn. Opening a second stream is what produced six copies of
+            // one reply interleaved into a single accumulator.
+            if (signal === undefined) return
             const handle = forAgent.turn(turnId)
             stopRef.current = () => handle.stop()
             try {
                 sessionStorage.setItem(LIVE_TURN, turnId)
-                for await (const item of handle.stream({ chunks: true })) {
+                for await (const item of handle.stream({ chunks: true, signal })) {
                     setState((previous) => reduce(previous, item))
                 }
             } catch (caught) {
-                setError(describe(caught))
-                setState((previous) => ({ ...previous, running: false }))
+                // An abort is this page closing the stream on purpose — a session switch, an agent
+                // switch, an unmount. Reporting it would put a transport error on screen for an
+                // action the reader just took.
+                if (!signal.aborted) {
+                    setError(describe(caught))
+                    setState((previous) => ({ ...previous, running: false }))
+                }
             } finally {
+                live.finish(turnId)
                 sessionStorage.removeItem(LIVE_TURN)
                 stopRef.current = undefined
-                void refreshSessions()
+                if (!signal.aborted) void refreshSessions()
             }
         },
         [refreshSessions],
@@ -377,6 +437,9 @@ function Workspace(props: {
         if (parked === null) return
         setState((previous) => ({ ...previous, running: true }))
         void follow(parked, agent)
+        // The cleanup this never had. Without it, a change of agent left the previous agent's
+        // stream writing into a transcript the page had already replaced.
+        return () => liveRef.current.abort()
     }, [agent, follow])
 
     useEffect(() => {
@@ -438,6 +501,10 @@ function Workspace(props: {
     }
 
     const openSession = async (key: string | undefined) => {
+        // Close the live stream *before* replacing the transcript it is writing into. Without this
+        // a turn started in one conversation went on appending rows to the next one — the
+        // transcript was reset, the stream was not, and nothing connected the two.
+        liveRef.current.abort()
         setPanel("chat")
         setSessionKey(key)
         setState(EMPTY)
@@ -874,8 +941,23 @@ async function history(
     const body = (await response.json()) as {
         messages?: { role?: string; content?: string; origin?: string }[]
     }
-    return (body.messages ?? [])
+    /**
+     * **Reversed, because the page is newest-first and the screen is oldest-first.**
+     *
+     * `GET …/messages` pages *backwards* on purpose — `store.ts`'s `pageFirst` is `ORDER BY id DESC`
+     * and `nextBefore` is the page's oldest id, which is how a chat scrolls up. Rendered in wire
+     * order the whole conversation came out upside down, with each assistant reply sitting *above*
+     * the question that prompted it, because the reply has the higher rowid. The CLI has always
+     * reversed here (`cli/src/lib/source.ts:393`) and said why; this consumer never did, and the
+     * wire spec documented no order at all, which is what let the two disagree.
+     */
+    return [...(body.messages ?? [])]
+        .reverse()
         .filter(
+            // `origin` is what separates prose from what the runtime authored — an observation, a
+            // tool call, a repair, a digest. Under NLT the invocation *is* the content, so without
+            // this a resumed conversation shows `ACTION:` blocks as replies. It needs the field to
+            // actually be on the wire to do anything; see `MessagePage` in the wire spec.
             (message) =>
                 message.origin === undefined &&
                 (message.role === "user" || message.role === "assistant") &&
@@ -888,8 +970,15 @@ async function history(
         }))
 }
 
+/**
+ * One sentence for the screen — and **it does not re-append the hint**.
+ *
+ * `DispachError`'s constructor already embeds it: `super(`${message}\n  hint: ${hint}`)`. Appending
+ * `— ${hint}` on top of that rendered every transport failure with the hint printed twice, in one
+ * paragraph, which is how the sessions banner came to read `hint: Check the base URL … — Check the
+ * base URL …`. `message` is the whole readable error; `detail` is the part before the hint.
+ */
 function describe(error: unknown): string {
-    if (error instanceof DispachError)
-        return error.hint === "" ? error.message : `${error.message} — ${error.hint}`
+    if (error instanceof DispachError) return error.message
     return error instanceof Error ? error.message : String(error)
 }
