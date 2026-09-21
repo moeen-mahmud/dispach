@@ -467,10 +467,13 @@ channels:
     allowFrom: ["@moeen"]
     # webhookUrl: https://agent.example.com/v1/channels/tg/webhook/reference
     # secretTokenEnv: TELEGRAM_WEBHOOK_SECRET   # naming it and leaving it unset is refused
-  # WhatsApp is Phase 4's non-goal — the type is not registered, so this would fail at load.
-  # - type: whatsapp
-  #   id: wa
-  #   authDir: ./.dispach/wa-auth
+  # `telegram` is the only type this binary registers. A second one comes from a plugin — see
+  # `plugins:` above and docs/03-SPEC-PLUGIN-API.md — and `type` then names whatever that plugin
+  # registered with `defineChannel(id, factory)`, carrying whatever fields it reads. Commented
+  # because this file must validate with no plugin installed, and an unregistered type is refused
+  # at load rather than ignored.
+  # - type: smoke
+  #   id: sm
 
 # A delivery target names a channel's **id**, not its type. Checked at load rather than at the
 # first scheduled run, which is otherwise where it surfaces.

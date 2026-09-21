@@ -71,6 +71,14 @@ and WebSocket surfaces can return:
 | `provision_directory_refused` | 400 | `dir` or `dirChoice` over the wire. The sandbox decides; see above. |
 | `provision_daemon_refused` | 400 | `daemon` over the wire. The host answering the request is already the daemon. |
 | `provision_skills_search_refused` | 400 | `skills: "find"`, which needs an interactive picker. Points at `skills install`. |
+| `schedule_manifest_owned` | 409 | `PATCH` or `DELETE` on a schedule the manifest declares. Reconciliation restores every field from the file at the next boot, so the write would be undone and reported as success. Change the manifest entry instead. |
+| `config_path_unknown` | 400 | `PATCH /config` named a field this surface does not set. Carries the nearest real path — or, for `channels[].allowFrom`, the action that does set it. |
+| `config_value_unreadable` | 400 | `value` is not a string, or is text no parser can read. It is read exactly as a terminal reads it. |
+| `config_confirm_required` | 409 | One of the two edits whose only purpose is to stop a check running, without `confirm: true`. The message is the reason. Nothing was written. |
+| `config_not_editable` | 409 | The agent was loaded from an object rather than a file, so there is no manifest to change. |
+| `manifest_edit_invalid` | 400 | The edit would make the manifest invalid — the schema, the schedules or the providers refused the result. Nothing was written. |
+| `manifest_edit_unreadable` | 400 | The manifest could not be read to change it. Nothing was written. |
+| `manifest_value_unreadable` | 400 | `value` parses as neither a scalar, a list nor a map. Guessing is how `tools.pinned: "exec"` becomes a one-character tool list. |
 | `capability_required` | 403 | The key is real and its `scope.can` does not include what this route needs. **403, where out-of-scope is 404** — see below. |
 | `key_scope_invalid` | 400 | `scope` is not an object. |
 | `key_scope_agents_invalid` | 400 | `scope.agents` is not a list of ids. |
@@ -130,8 +138,13 @@ Each entry of `channels[]` is `{ id, type, status, detail?, input? }`. `status` 
 `starting | connected | disconnected | error | needs_input`, and **a consumer must tolerate a
 sixth**: the set can grow inside `v: 1` while a field's type cannot.
 
-`needs_input` means the transport is running and cannot finish connecting until a *person* acts —
-WhatsApp's link-device QR is the first instance. It carries
+`needs_input` means the transport is running and cannot finish connecting until a *person* acts.
+**Nothing in this tree produces it**, and that is worth stating on the page a client reads: the
+state, its payload, the storage, the agent resource, the `serve` banner and the browser panel are
+all built and all exercised by tests, and the first real producer will be a plugin channel — a
+link-device QR being the motivating case, which is where the `kind: "qr"` vocabulary comes from.
+Until 0.1.1 a plugin could not supply a channel through this binary at all, so the producer was not
+merely absent but unreachable; `docs/03-SPEC-PLUGIN-API.md` records what that was. It carries
 `input: { kind: "qr", payload, issuedAt, expiresAt? }`: `payload` is the bytes to render, `detail`
 the sentence explaining them, and `issuedAt` what makes staleness visible, because WhatsApp rotates
 its QR roughly every 20 seconds and a code nobody can tell is expired reads as a broken scanner.
@@ -545,6 +558,8 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/start` | `admin` |
 | `POST /v1/agents/:id/stop` | `admin` |
+| `GET /v1/agents/:id/config` | `admin` |
+| `PATCH /v1/agents/:id/config` | `admin` |
 | `GET /v1/keys` | `admin` |
 | `POST /v1/keys` | `admin` |
 | `DELETE /v1/keys/:keyId` | `admin` |
@@ -598,11 +613,33 @@ POST   /v1/agents/:id/sessions/:key/phase    → { phase }
 `DELETE` clears conversation state only. Memory markdown is a file artifact and is never
 deleted by an API call.
 
-A message in the `messages` listing carries `role`, `content`, and — under the `native` tool
-dialect only — `toolCalls` on an assistant turn that asked for tools, and `toolCallId` on a `tool`
-message saying which call it answers. Both are absent under `nlt`, where the invocation is the
-content. They are part of the message rather than decoration: a client reconstructing a prompt from
-this listing and dropping them would produce a trace an endpoint rejects.
+**The `messages` page is newest-first, and `nextBefore` walks backwards.** `ORDER BY id DESC`,
+with `nextBefore` carrying the page's *oldest* id — so paging with `before=` goes back through the
+conversation, which is what a client scrolling up needs and what makes a first page with no cursor
+the most recent messages. **A consumer displaying a conversation must reverse it.**
+
+Documented here because the absence of this paragraph *was the defect*. Nothing stated an order, so
+the two consumers disagreed: `packages/cli` reversed with a comment saying why, the browser did not,
+and the web transcript rendered upside down with every assistant reply sitting above the question
+that prompted it. Both consumers were reasonable about an unstated contract, which is why the fix is
+a sentence here and not only a `.reverse()` there. Related trap for a renderer: the two rows of one
+turn share `createdAt` to the millisecond, so a display that re-sorts by timestamp rather than
+reversing gets the *assistant above the user* inside each turn — `id` is the only total order.
+
+A message carries `role`, `content`, and — under the `native` tool dialect only — `toolCalls` on an
+assistant turn that asked for tools, and `toolCallId` on a `tool` message saying which call it
+answers. Both are absent under `nlt`, where the invocation is the content. They are part of the
+message rather than decoration: a client reconstructing a prompt from this listing and dropping them
+would produce a trace an endpoint rejects.
+
+`origin` is present on a row the **runtime** authored — `observation`, `call`, `repair`, `digest` —
+and **absent on anything a person or the model said as prose**. It is an allowlist of prose rather
+than a blocklist of machinery, so a fifth origin added later is excluded by default; a client
+rendering a conversation should show the rows with no `origin` and skip the rest. Absent rather than
+`null`, which is what lets `origin === undefined` be the whole test. Under `nlt` an assistant
+message that called a tool carries its prose *and* the `ACTION` block in one `origin: "call"` row,
+so a client that wants the narration has to strip the block rather than drop the row — which is what
+`packages/cli`'s `proseOf` does at read time.
 
 ### Schedules
 
@@ -648,6 +685,51 @@ GET /v1/agents/:id/tools     → resolved catalogue with tags, mutating, trust, 
 GET /v1/agents/:id/skills    → indexed skills with description, token cost and script slugs
 GET /v1/agents/:id/context   → the assembled context for the next turn, with token counts per slot
 ```
+
+### Configuration (the person's editor)
+
+```
+GET   /v1/agents/:id/config     → every field this surface may set, what it does, and its current value
+PATCH /v1/agents/:id/config     → set one field, then replace the agent so it takes effect
+```
+
+**Both are `admin`, and neither is `config_set`.** There are two editors of `agent.yaml` and they
+do not have the same authority: `config_set` is the *agent's* and is floored, because an agent that
+could widen its own inbound gate could be talked into widening it by the message it is reading.
+`dispach config` is the *person's* and nothing in it is floored. This route is that same editor
+reached remotely — the unfloored set, the same two confirmations. It is not a role: the browser
+mints itself an unscoped key because the browser is the owner.
+
+The settable set is `SETTINGS` in core, so it cannot drift from the terminal's. `channels[].allowFrom`
+and `tools.providers.<id>.writeRoots` are in that table and **not** settable here: one is a key inside
+a list entry, which the source editor cannot index, and the other is named by its own action.
+
+A value read back is the manifest's **source** text, unexpanded — `${MODEL_ID}` comes back as
+`${MODEL_ID}`. An editor showing the loaded value and writing it back would bake the expansion in,
+turning a manifest that follows its environment into one that does not.
+
+```json
+{ "path": "limits.maxSteps", "value": "40" }
+```
+
+`value` is **text**, exactly as it is typed at a terminal, read by the same parser the `config`
+command uses: a bare word, a number, `true`, a list as `["a", "b"]`, a map as `{k: v}`. One parser,
+because two would eventually disagree about whether `["a", "b"]` is a list of two strings.
+
+Two fields carry a `confirm` sentence — `tools.policy.deny` and `tools.untrusted.onMutate` — and
+each is refused with `config_confirm_required` until `{ "confirm": true }` accompanies the value.
+They are the two edits whose only purpose is to stop a check running.
+
+The reply reports the write and the *application* separately:
+
+```json
+{ "path": "limits.maxSteps", "before": 6, "after": 40, "reflowed": false, "applied": true }
+```
+
+An agent's settings are fixed for its instance's lifetime, so the change is applied by replacing the
+agent. `dispose` refuses while a turn is in flight — the file is written by then, so the reply says
+`"applied": false` with the reason under `pending`, and the edit takes effect at the next start.
+Reporting 409 as though nothing had happened would leave a written manifest described as unwritten.
 
 `/context` exists because "why did it do that?" is almost always a context question, and
 guessing at it is how days get lost.

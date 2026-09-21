@@ -628,3 +628,131 @@ describe("the banner names things a person can actually use", () => {
         expect(out.split("\n").filter((line) => line.includes("http://0.0.0.0"))).toEqual([])
     }, 30_000)
 })
+
+describe("a plugin-supplied channel loads under serve", () => {
+    /**
+     * `PluginContext.defineChannel` is documented public API that did not work through this binary.
+     *
+     * `Runtime.create` had always been right — it loads an agent's plugins, then validates
+     * `channels[].type` against `Object.keys(supply.channels)`, which includes whatever they
+     * registered. Every CLI surface pre-loaded the manifest *first* against the static
+     * `CHANNEL_IDS` table, so `channel_type_unknown` refused a correct manifest before the plugin
+     * that would satisfy it was imported. `serve` is the one that matters, because `serve` is what
+     * hosts channels.
+     *
+     * The reason it stayed invisible is the useful half: `telegram` reaches the runtime as
+     * `channels: { telegram }` from the CLI's own table and never through the plugin path, so the
+     * documented API had **no in-tree consumer**. This test is that consumer.
+     *
+     * Spawned rather than unit-tested on purpose. The bug lives in the ordering of two loads inside
+     * one command, and a test that called `loadManifest` itself would be choosing the ordering it
+     * meant to check — the same reason `bundle.test.ts` starts the binary.
+     */
+    function pluginSandbox(): string {
+        const dir = mkdtempSync(join(tmpdir(), "serve-plugin-"))
+        /**
+         * A channel plugin, as small as the contract allows.
+         *
+         * `start` returns once *running* rather than once connected, which is the contract and also
+         * what keeps this fixture from needing a network. `send` reports success for a message
+         * nothing sends here — the assertion is that the manifest **loads and is served**, which is
+         * exactly what was impossible before.
+         */
+        writeFileSync(
+            join(dir, "smoke-channel.mjs"),
+            `export default {
+    name: "smoke-channel",
+    version: "1.0.0",
+    // The semver **range** this plugin claims, checked against the host's. A mismatch is a loud
+    // load failure rather than a silent rollback, which is the one thing the runtime this replaces
+    // got wrong badly enough to be worth copying the opposite of.
+    dispachApi: "^0.1",
+    setup(context) {
+        context.defineChannel("smoke", (channel) => ({
+            id: channel.id,
+            type: "smoke",
+            limits: { maxMessageChars: 4096, idempotentSend: false },
+            async start() {},
+            async stop() {},
+            async send() {
+                return { ok: true, providerMessageId: "smoke-1" }
+            },
+        }))
+    },
+}
+`,
+            "utf8",
+        )
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: smoked
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: MODEL_API_KEY
+plugins:
+  - ./smoke-channel.mjs
+channels:
+  - type: smoke
+    id: sm
+    allowFrom: ["someone"]
+server:
+  enabled: true
+`,
+            "utf8",
+        )
+        return dir
+    }
+
+    test("the manifest loads, the host stays up, and the channel is served", async () => {
+        const dir = pluginSandbox()
+        const { out, exited } = await serveAll([join(dir, "agent.yaml")])
+        // The refusal this replaces, by code. Named rather than matched loosely, because the
+        // failure was a *specific* check firing in the wrong pass.
+        expect(out).not.toContain("channel_type_unknown")
+        // A **named** manifest, so a load failure exits rather than being skipped — which makes
+        // "did not exit" a real assertion here rather than a tolerance.
+        expect(exited).toBe(false)
+        expect(out).toContain("serving on")
+        expect(out).toContain("smoked")
+        rmSync(dir, { recursive: true, force: true })
+    }, 30_000)
+
+    test("a genuinely unknown channel type is still refused, and the host still survives it", async () => {
+        /**
+         * The other direction, and the reason the fix is a second pass here rather than moving the
+         * check into `Runtime.create`.
+         *
+         * Two things have to remain true at once: a plugin channel loads, *and* a nonsense one is
+         * refused where the skip-and-report loop can see it. Moving the check into `Runtime.create`
+         * would satisfy the first and break the second — that refusal would throw from an unguarded
+         * `sources.map` and take every other agent on the host with it, which is the crash loop
+         * that loop exists to prevent, arriving by a different route.
+         */
+        const dir = mkdtempSync(join(tmpdir(), "serve-nochan-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: nochan
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: MODEL_API_KEY
+channels:
+  - type: carrier-pigeon
+    id: cp
+server:
+  enabled: true
+`,
+            "utf8",
+        )
+        const { out, exited } = await serveAll([join(dir, "agent.yaml")])
+        // Named, so it refuses — the asymmetry `hostableAgents` draws, unchanged by this work.
+        expect(exited).toBe(true)
+        expect(out).toContain("carrier-pigeon")
+        rmSync(dir, { recursive: true, force: true })
+    }, 30_000)
+})

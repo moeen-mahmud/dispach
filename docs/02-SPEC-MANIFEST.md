@@ -97,9 +97,6 @@ channels:
     mode: longpoll
     tokenEnv: TELEGRAM_BOT_TOKEN
     allowFrom: ["@moeen"]
-  - type: whatsapp
-    id: wa
-    authDir: ./.dispach/wa-auth
 
 delivery:
   default: tg
@@ -670,7 +667,16 @@ Common fields; type-specific fields are validated by the channel's own schema.
 | `enabled` | Default true. |
 
 Telegram: `tokenEnv`, `mode` (`longpoll` \| `webhook`), `webhookPath`, `secretTokenEnv`.
-WhatsApp: `authDir`, `printQr`.
+
+**`telegram` is the only type this binary registers.** A second one comes from a plugin —
+`PluginContext.defineChannel(id, factory)`, `docs/03-SPEC-PLUGIN-API.md` — and `type` then names
+whatever that plugin registered, with the entry carrying whatever fields it reads. Nothing installs
+at runtime, so a plugin is resolved from `plugins:` at boot.
+
+This table used to list a `whatsapp` type with `authDir` and `printQr` fields. **No such package
+has ever been committed on any branch**, and those two fields were read by nothing — a spec
+describing a channel that does not exist is worse than an absent one, because a manifest written
+against it fails to load with a message about the type rather than about the documentation.
 
 Channel connection failures never block readiness; they surface as `agent.channel.error`.
 

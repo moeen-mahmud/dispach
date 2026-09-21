@@ -177,7 +177,7 @@ packages/core/       the loop, context, tools, skills, memory, store, schedule, 
 packages/cli/        `dispach` binary — lib/ plumbing, components/ Ink, pure reducers at top level
 packages/server/     HTTP/SSE/WS surface
 packages/client/     typed client for the API — reattach, streams, typed errors
-packages/channel-*/  Telegram, WhatsApp
+packages/channel-*/  Telegram. A second channel comes from a plugin, not from here
 packages/tools-*/    system (shell, files), Composio, web, MCP
 docs/                design + plan (read these)
 evals/               fixtures/ the shared catalogue and tasks; tools/ committed results.

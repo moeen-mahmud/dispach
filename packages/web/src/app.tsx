@@ -18,6 +18,7 @@
 
 import type {
     AgentClient,
+    AgentConfig,
     DispachClient,
     PendingApproval,
     ProvisionedAgentLike,
@@ -48,6 +49,7 @@ import {
     type AgentRow,
     type ChannelRow,
     ChannelsPanel,
+    ConfigPanel,
     SchedulesPanel,
     SERVER_PANELS,
     ToolsPanel,
@@ -204,6 +206,7 @@ const TITLES: Readonly<Record<Exclude<Panel, "chat">, string>> = {
     tools: "Tools",
     schedules: "Schedules",
     channels: "Channels",
+    config: "Settings",
     keys: "Operator keys",
 }
 
@@ -533,23 +536,47 @@ function Workspace(props: {
         readonly tools: readonly ToolSummary[]
         readonly schedules: readonly ScheduleRecord[]
         readonly channels: readonly ChannelRow[]
+        readonly config?: AgentConfig
     }>({ tools: [], schedules: [], channels: [] })
+
+    /**
+     * Re-read the panels' data.
+     *
+     * A function rather than only an effect, because the **writing** panels need it: a schedule
+     * added or a setting saved changes what the listing says, and patching the local copy from a
+     * response would be a second opinion about the server's state — the same reasoning `startAgent`
+     * and `createAgent` already use for re-reading the agent listing instead of trusting `adopted`.
+     */
+    const refreshReport = useCallback(async (target: AgentClient) => {
+        const [tools, schedules, described, config] = await Promise.all([
+            target.tools(),
+            target.schedules(),
+            target.describe(),
+            // Fetched with the rest rather than on its own panel, because a *write* to it has
+            // to refresh everything: setting `schedules` or `tools.pinned` through the config
+            // panel changes what the schedule and tool panels say, and one round trip that
+            // leaves two panels stale is how a surface comes to disagree with itself.
+            target.config(),
+        ])
+        setReport({ tools, schedules, channels: described.channels ?? [], config })
+    }, [])
 
     useEffect(() => {
         if (agent === undefined) return
-        if (panel !== "tools" && panel !== "schedules" && panel !== "channels") return
+        if (
+            panel !== "tools" &&
+            panel !== "schedules" &&
+            panel !== "channels" &&
+            panel !== "config"
+        )
+            return
         let cancelled = false
         void (async () => {
             try {
-                const [tools, schedules, described] = await Promise.all([
-                    agent.tools(),
-                    agent.schedules(),
-                    agent.describe(),
-                ])
+                await refreshReport(agent)
                 // The panel may have changed while these were in flight, and a late write would
                 // repaint a surface nobody is looking at with data for one they left.
                 if (cancelled) return
-                setReport({ tools, schedules, channels: described.channels ?? [] })
             } catch (caught) {
                 if (cancelled) return
                 if (isGone(caught)) void agentGone()
@@ -559,7 +586,63 @@ function Workspace(props: {
         return () => {
             cancelled = true
         }
-    }, [agent, panel, agentGone])
+    }, [agent, panel, agentGone, refreshReport])
+
+    /**
+     * One writer for both editing panels, and the reason it is one function.
+     *
+     * Every write here has the same three obligations: say which row is busy so the rest of the
+     * page stays usable, re-read the listing rather than patch it, and report a refusal with the
+     * server's own words. Four call sites each doing that is four places for one of the three to go
+     * missing — and the one that goes missing silently is the re-read, which leaves a panel showing
+     * a schedule that has been deleted.
+     */
+    const [writing, setWriting] = useState<string>()
+    const [writeNote, setWriteNote] = useState<string>()
+    const write = useCallback(
+        async (key: string, work: (target: AgentClient) => Promise<string | undefined>) => {
+            if (agent === undefined) return
+            setWriting(key)
+            setError(undefined)
+            setWriteNote(undefined)
+            try {
+                const note = await work(agent)
+                setWriteNote(note)
+                await refreshReport(agent)
+            } catch (caught) {
+                if (isGone(caught)) void agentGone()
+                else setError(describe(caught))
+            } finally {
+                setWriting(undefined)
+            }
+        },
+        [agent, agentGone, refreshReport],
+    )
+
+    /**
+     * Save one setting.
+     *
+     * `applied` is read rather than assumed. The file is written before the agent is replaced and
+     * `dispose` refuses while a turn is in flight, so a successful write can legitimately come back
+     * unapplied — and saying "saved" alone would describe a change that is not in force. The
+     * server's own `pending.message` is passed through, because it knows why far better than this
+     * page does.
+     */
+    const saveSetting = useCallback(
+        (path: string, value: string, options: { confirm: boolean }) =>
+            void write(path, async (target) => {
+                const result = await target.setConfig(path, value, {
+                    ...(options.confirm ? { confirm: true } : {}),
+                })
+                if (result.applied) {
+                    return result.reflowed
+                        ? `${path} saved. The manifest was re-serialised, so its comments have moved — worth a look at the diff.`
+                        : undefined
+                }
+                return `${path} was written to the manifest and is not in force yet: ${result.pending?.message ?? "the agent could not be replaced"} It takes effect at the next start.`
+            }),
+        [write],
+    )
 
     /**
      * What this server will ask to create an agent, and whether it will at all.
@@ -854,7 +937,56 @@ function Workspace(props: {
                             ) : null}
                             {panel === "tools" ? <ToolsPanel tools={report.tools} /> : null}
                             {panel === "schedules" ? (
-                                <SchedulesPanel schedules={report.schedules} />
+                                <SchedulesPanel
+                                    schedules={report.schedules}
+                                    {...(writing === undefined ? {} : { busy: writing })}
+                                    onCreate={(schedule) =>
+                                        void write(String(schedule.id), (target) =>
+                                            target.createSchedule(schedule).then(() => undefined),
+                                        )
+                                    }
+                                    onDelete={(id) =>
+                                        void write(id, (target) =>
+                                            target.deleteSchedule(id).then(() => undefined),
+                                        )
+                                    }
+                                    /*
+                                     * Out of band, and it does **not** move the next scheduled run.
+                                     * Said on the row rather than left to the route's docs: "run it
+                                     * now" and "pretend it fired" are different things, and
+                                     * somebody who believed the second would find the real one
+                                     * firing a minute later.
+                                     */
+                                    onRun={(id) =>
+                                        void write(id, async (target) => {
+                                            const fired = await target.runSchedule(id)
+                                            return `${id} fired out of band as ${fired.turnId} — its next scheduled run has not moved.`
+                                        })
+                                    }
+                                    onToggle={(id, enabled) =>
+                                        void write(id, (target) =>
+                                            target
+                                                .updateSchedule(id, { enabled })
+                                                .then(() => undefined),
+                                        )
+                                    }
+                                />
+                            ) : null}
+                            {panel === "config" ? (
+                                report.config === undefined ? (
+                                    <p className="empty">reading this agent's settings…</p>
+                                ) : (
+                                    <ConfigPanel
+                                        settings={report.config.settings}
+                                        editable={report.config.editable}
+                                        {...(report.config.file === undefined
+                                            ? {}
+                                            : { file: report.config.file })}
+                                        {...(writing === undefined ? {} : { busy: writing })}
+                                        {...(writeNote === undefined ? {} : { note: writeNote })}
+                                        onSet={saveSetting}
+                                    />
+                                )
                             ) : null}
                             {panel === "channels" ? (
                                 // `now` is passed rather than read inside the component, so a stale

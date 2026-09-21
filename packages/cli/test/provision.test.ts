@@ -282,7 +282,13 @@ describe("creating an agent from a partial answer set", () => {
             answers: { user: "Ada", name: "Milo The Cat" },
             defaults: base,
         })
-        expect(result.dir).toBe(dirFor("sandbox", "Milo The Cat", base))
+        // Named and asserted defined before the comparison: `dirFor` answers `undefined` when it
+        // cannot resolve a base, and `expect(aString).toBe(undefined)` would fail for the wrong
+        // reason — reporting a slug bug where the fixture is what is wrong. It is also what makes
+        // this typecheck, which `bun run typecheck` had been red on since this test landed.
+        const expected = dirFor("sandbox", "Milo The Cat", base)
+        expect(expected).toBeDefined()
+        expect(result.dir).toBe(expected as string)
     })
 
     test("the .env is 0600 and nothing reads it back", () => {

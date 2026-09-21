@@ -50,7 +50,6 @@ dispach/
 │   ├── server/                  @dispach/server
 │   ├── client/                  @dispach/client             typed client for /v1
 │   ├── channel-telegram/        @dispach/channel-telegram
-│   ├── channel-whatsapp/        @dispach/channel-whatsapp   (Baileys)
 │   ├── tools-composio/          @dispach/tools-composio
 │   ├── tools-system/            @dispach/tools-system       shell + files
 │   ├── tools-web/               @dispach/tools-web          search + fetch

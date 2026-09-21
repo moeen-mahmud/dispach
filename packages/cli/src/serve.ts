@@ -15,14 +15,17 @@
  * in a log file.
  */
 
+import { dirname, resolve } from "node:path"
 import {
     AgentManifestSchema,
+    agentPluginSupply,
     BRAND,
     EventBus,
     HarnessError,
     isHarnessError,
     loadManifest,
     Runtime,
+    readManifestHeader,
 } from "@dispach/core"
 import {
     browsableHost,
@@ -37,14 +40,7 @@ import { inContainer } from "#lib/bootstrap"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
 import { hostableAgents, manifestForId } from "#lib/lifecycle"
-import {
-    BUILT_IN_PLUGINS,
-    CHANNEL_IDS,
-    CHANNELS,
-    PROVIDER_IDS,
-    scriptRunner,
-    TOOL_PROVIDERS,
-} from "#lib/providers"
+import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { provisionAgent, provisionSteps } from "#lib/provision"
 import { agentsDir, storePath } from "#lib/sandbox"
 
@@ -130,11 +126,58 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     const broken: { path: string; detail: string; hint?: string }[] = []
     for (const entry of wanted) {
         try {
+            /**
+             * **Two passes, because `serve` is what hosts channels and a plugin may supply one.**
+             *
+             * This used to be one `loadManifest` against the static `CHANNEL_IDS` and
+             * `PROVIDER_IDS` tables, and that made `PluginContext.defineChannel` — documented
+             * public API — **not work through this binary at all**: a manifest naming a
+             * plugin-supplied channel was refused with `channel_type_unknown` here, before the
+             * plugin that would have satisfied it was ever imported. `Runtime.create` had always
+             * been right, passing `Object.keys(supply.channels)`; it simply never got the chance.
+             *
+             * The recorded hazard with its polarity reversed — *a check only one surface performs
+             * is a check the two disagree about*, refusing a correct manifest rather than admitting
+             * a broken one — and invisible because `telegram` arrives from the CLI's own table and
+             * never through the plugin path, so the public API had no in-tree consumer.
+             *
+             * `validate.ts` is the surface that already does this and the two now agree, which is
+             * the argument for this shape over moving the check into `Runtime.create`: that would
+             * need core to know whether the caller *named* these manifests or discovered them —
+             * the asymmetry below, which belongs to the caller — and a manifest naming a genuinely
+             * unknown channel would then throw from an unguarded `sources.map` and take the whole
+             * host down, which is the crash loop this loop exists to prevent, arriving by another
+             * route.
+             *
+             * The cost is one extra `setup()` for an agent that declares plugins.
+             * `agentPluginSupply` returns immediately when `refs` is empty, so an agent with no
+             * `plugins:` block — which is nearly all of them — pays nothing at all. And the load
+             * happening **here** is a strengthening rather than a cost: a plugin that throws on
+             * import used to do it inside `Runtime.create`, where it killed the host, and now makes
+             * one discovered agent broken-and-skipped like any other bad manifest.
+             */
+            const header = readManifestHeader(entry.manifestPath)
+            const supply = await agentPluginSupply({
+                refs: header.plugins ?? [],
+                agentId: header.id ?? entry.manifestPath,
+                paths: {
+                    workspace: dirname(resolve(entry.manifestPath)),
+                    state: dirname(resolve(entry.manifestPath)),
+                    manifest: resolve(entry.manifestPath),
+                },
+                env,
+                // A throwaway bus, like `validate`'s: `Runtime.create` loads these again and emits
+                // the real `plugin.loaded` on the real bus, and a pre-load emitting onto it would
+                // report every plugin twice to anything watching.
+                bus: new EventBus({ runtimeId: "serve-preload" }),
+                builtIn: BUILT_IN_PLUGINS,
+                base: { toolProviders: TOOL_PROVIDERS, channels: CHANNELS },
+            })
             manifests.push({
                 path: entry.manifestPath,
                 loaded: loadManifest(entry.manifestPath, {
-                    knownProviders: PROVIDER_IDS,
-                    knownChannels: CHANNEL_IDS,
+                    knownProviders: Object.keys(supply.toolProviders),
+                    knownChannels: Object.keys(supply.channels),
                     env,
                 }),
             })

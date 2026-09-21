@@ -23,7 +23,8 @@ export default {
   ],
   configSchema: TelegramConfig,          // zod schema, optional
   async setup(ctx) {
-    ctx.defineChannel({ /* ... */ })
+    // `(id, factory)`, not an object. The id is the `type` a manifest's `channels[]` entry names.
+    ctx.defineChannel("telegram", (channel) => new TelegramTransport(channel))
   },
 } satisfies Plugin
 ```
@@ -117,6 +118,21 @@ Duplicate export`, which `bun test` walks straight past because tests import sou
 is in the bundle. The CLI statically imports the first-party packages to register them, so a loader
 that also `import()`ed them by name would produce a binary that fails to start. The registry keeps
 each module imported exactly one way.
+
+**Any surface that pre-loads a manifest must do the same two passes, and for three phases one of
+them did not.** `Runtime.create` has always been right — plugins, then `loadManifest` with
+`knownChannels: Object.keys(supply.channels)`. Every CLI command pre-loads a manifest of its own
+first, and `serve` did that against the binary's static channel table: so a manifest naming a
+plugin-supplied channel was refused with `channel_type_unknown` *before the plugin that would have
+satisfied it was imported*, and `defineChannel` — documented here, implemented, conformance-tested
+— did not work through the binary at all. Fixed in 0.1.1 for `serve` and `validate`, the two that
+host and check channels.
+
+It stayed invisible because `telegram` reaches the runtime as `channels: { telegram }` from the
+CLI's own table and never through the plugin path, so this page's central registration function had
+**no in-tree consumer**. `packages/cli/test/serve.test.ts` is now that consumer: a two-field plugin
+defining one channel, loaded by the real binary. A public API with no caller is a public API that is
+wrong for as long as it has none.
 
 Loading happens **once per agent**, before that agent's manifest is validated. That ordering is
 forced: `loadManifest` checks `tools.provider` and a channel `type` against the ids the host can
@@ -284,7 +300,14 @@ In-process functions. Same catalogue, same budget, same phase rules as provider 
 
 ## Middleware
 
-Built in Phase 9B. The wrapping shape, not before/after events. Wrapping permits retry, substitution, and
+Built in Phase 9B, and **no first-party plugin uses it.** Recorded rather than left to be
+discovered: this runtime's own name for a declaration with no consumer is the `includeHistory`
+shape, and the cost of one is that its types assert a contract nothing has ever exercised. The four
+wrap points are covered by tests in `packages/core`; what has no in-tree caller is a *plugin* that
+registers one, which is the same gap `defineChannel` had until 0.1.1 and which was worth exactly one
+sentence then too.
+
+The wrapping shape, not before/after events. Wrapping permits retry, substitution, and
 short-circuit; events permit only observation. Events are derived from the wrap points, so
 nothing is lost by choosing wrapping.
 

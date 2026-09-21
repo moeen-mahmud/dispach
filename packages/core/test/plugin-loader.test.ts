@@ -11,6 +11,7 @@ import { EventBus } from "../src/events/bus.ts"
 import type { AnyEvent } from "../src/events/types.ts"
 import { loadPlugins } from "../src/plugins/loader.ts"
 import type { Plugin, PluginContext } from "../src/plugins/plugin.ts"
+import { VERSION } from "../src/version.ts"
 import { describe, expect, test } from "./_harness.ts"
 
 const PATHS = { workspace: "/tmp/ws", state: "/tmp/state", manifest: "/tmp/ws/agent.yaml" }
@@ -115,7 +116,10 @@ describe("the version gate", () => {
         expect(failure.code).toBe("plugin_api_mismatch")
         expect(failure.message).toContain("old")
         expect(failure.message).toContain("^2")
-        expect(failure.message).toContain("0.1.0")
+        // Against the constant, not the literal it used to be. The claim is *"the message names the
+        // host's version"*, and a hardcoded one turns that into a chore the next bump pays — this
+        // test is what went red on 0.1.1 rather than anything about the gate.
+        expect(failure.message).toContain(VERSION)
     })
 
     test("a range that cannot be checked is its own failure, not a mismatch", async () => {
