@@ -84,6 +84,57 @@ describe("one published package", () => {
     })
 })
 
+describe("what the build needs", () => {
+    /**
+     * **Every workspace package this package's source imports is declared.**
+     *
+     * Found by CI, after `bun install --frozen-lockfile` refused a lockfile I had not regenerated.
+     * The deeper problem was underneath that: the siblings were moved out of `dependencies` because
+     * they are *bundled* — correct — and not into `devDependencies`, which is where a build-time
+     * dependency belongs. On a working tree that already had the symlinks, `bun run build` kept
+     * passing. On a fresh checkout it failed with `Could not resolve: "@dispach/tools-web"`.
+     *
+     * That is the recorded *"verify a workflow change against a fresh clone, never against your
+     * working tree"* hazard, and it is invisible to every other test in this repo — the suite
+     * imports source, and the source resolves because the links are already there.
+     *
+     * `devDependencies` is the honest place: a consumer installing the tarball must **not** get
+     * them, because their code is already inside `dist/`, and the build must have them because
+     * `src/` imports them by name.
+     */
+    test("every workspace sibling the source imports is a declared dependency", () => {
+        const declared = new Set([
+            ...Object.keys(manifest.dependencies),
+            ...Object.keys(
+                (manifest as { devDependencies?: Record<string, string> }).devDependencies ?? {},
+            ),
+        ])
+        const imported = new Set<string>()
+        const walk = (dir: string): void => {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+                const path = join(dir, entry.name)
+                if (entry.isDirectory()) {
+                    walk(path)
+                    continue
+                }
+                if (!/\.tsx?$/.test(entry.name)) continue
+                // Source, not the bundle: this file is not minified, so `from "x"` means what it
+                // says. The same scan over `dist/` matched the word *from* inside a help string.
+                for (const match of readFileSync(path, "utf8").matchAll(
+                    /from\s+"(@[a-z-]+\/[a-z-]+)(?:\/[^"]*)?"/g,
+                )) {
+                    imported.add(match[1] ?? "")
+                }
+            }
+        }
+        walk(join(CLI, "src"))
+        const undeclared = [...imported].filter((name) => !declared.has(name)).sort()
+        expect(undeclared).toEqual([])
+        // And it found something, rather than passing by having scanned nothing.
+        expect(imported.size).toBeGreaterThan(3)
+    })
+})
+
 describe("what ships in dist", () => {
     /**
      * Read from the built directory, so this is skipped rather than green when nothing is built —

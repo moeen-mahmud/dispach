@@ -4805,6 +4805,16 @@ one to version, one to transfer.
 empty directory, and uses the package the three documented ways. Reading the bundle instead is not an
 option — it is minified, and a regex for `from "x"` matches the word *from* inside a help string.
 
+**A fourth defect, found by CI rather than by me.** `bun install --frozen-lockfile` refused a
+lockfile that had not been regenerated after the package rename — and underneath that, a worse one:
+the bundled siblings were moved out of `dependencies` and not into `devDependencies`, so a **fresh
+checkout could not build at all** (`Could not resolve: "@dispach/tools-web"`). Locally it kept
+working, because the symlinks were already in `node_modules` from before the edit. That is the
+recorded *"verify a workflow change against a fresh clone"* hazard, and the whole of CI now passes
+on a tree with no `node_modules` and no `dist`: frozen install, lint, build, typecheck, 3510 tests,
+node 1438, `check:deps`, `bench:boot`, `verify:package`. A boundaries test asserts the declaration
+so it cannot recur.
+
 **What the tag ships.** `v0.1.0` builds four signed binaries, a GitHub release, a Homebrew formula, a
 multi-arch GHCR image, and — when `NPM_TOKEN` is set — the npm package. The npm step is **skipped
 rather than failed** without the token, because a release should not go red over a credential that

@@ -2313,6 +2313,18 @@ Never claim a performance property without a number in `evals/` and a script to 
   literal. `--production` stays because it is also what selects `react/jsx-runtime` over the **dev**
   runtime, and the two cannot be separated by flags. Same family as the `instanceof` failure: a
   bundler's freedom to rewrite code meeting an assumption ordinary TypeScript cannot check.
+- **A bundled dependency is a `devDependency`, and getting that wrong is invisible in a working
+  tree.** The siblings were moved out of `dependencies` because they are bundled into `dist/` —
+  correct, a consumer must not install code that is already in the tarball — and not into
+  `devDependencies`, where a *build-time* dependency belongs. Locally `bun run build` kept passing,
+  because the symlinks were already in `node_modules` from before the edit. CI failed twice: first
+  `bun install --frozen-lockfile` refused a lockfile nobody had regenerated after a package rename,
+  and then the build itself with `Could not resolve: "@dispach/tools-web"`. **Regenerate `bun.lock`
+  in the same commit as any package.json change**, and verify on a tree with no `node_modules` and
+  no `dist` — `rsync -a --exclude node_modules --exclude dist . /tmp/fresh` is enough. A boundaries
+  test now asserts that every `@dispach/*` specifier `packages/cli/src` imports is declared
+  somewhere; it scans **source**, which is not minified, unlike the `dist/` scan that matched the
+  word *from* inside a help string.
 - **One npm name, and `exports["."]` is the library rather than the CLI.** Nine workspace packages
   publish as one — `dispach`, with the command at `bin` and the client at `dispach/client` — so there
   is one thing to own, version and transfer. `"."` pointed at the entry carrying the shebang, so

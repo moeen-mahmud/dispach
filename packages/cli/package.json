@@ -50,6 +50,13 @@
         "access": "public"
     },
     "devDependencies": {
+        "@dispach/channel-telegram": "workspace:*",
+        "@dispach/client": "workspace:*",
+        "@dispach/core": "workspace:*",
+        "@dispach/server": "workspace:*",
+        "@dispach/tools-composio": "workspace:*",
+        "@dispach/tools-system": "workspace:*",
+        "@dispach/tools-web": "workspace:*",
         "@types/react": "19.2.18",
         "ink-testing-library": "4.0.0",
         "react-devtools-core": "6.1.5"
