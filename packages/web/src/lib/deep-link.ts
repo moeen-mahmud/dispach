@@ -15,11 +15,12 @@
 /**
  * The panels the shell can show. `chat` is the one you land on.
  *
- * `new` is the odd one: it is the only panel that *writes*, and the only one the page may land on
- * without being asked to — a server hosting no agents has nothing else to show, and
- * `dispach web run` with no agent points here.
+ * `new` is the odd one: it is the only panel the page may land on *without being asked to* — a
+ * server hosting no agents has nothing else to show, and `dispach web run` with no agent points
+ * here. It was also the only one that wrote anything until `config` and the schedule form joined
+ * it, which is what 0.1.1 was about.
  */
-export const PANELS = ["chat", "new", "tools", "schedules", "channels", "keys"] as const
+export const PANELS = ["chat", "new", "tools", "schedules", "channels", "config", "keys"] as const
 
 export type PanelName = (typeof PANELS)[number]
 

@@ -566,12 +566,33 @@ describe("sessions", () => {
         await runtime.stop()
     })
 
-    test("messages page newest-first and carry the tool fields", async () => {
+    /**
+     * **The page is newest-first, and that is a contract rather than an accident.**
+     *
+     * This test has been named "newest-first" since it was written and asserted only that the list
+     * was non-empty — so the order it claims to pin was free to be anything, and the wire spec
+     * documented no order either. The browser read the page in wire order and rendered every
+     * conversation upside down, with each assistant reply above the question that prompted it. The
+     * CLI reversed and said why (`cli/src/lib/source.ts:393`); two consumers, one unstated rule.
+     *
+     * Descending is right for the route: `nextBefore` is the page's *oldest* id, so `before=` walks
+     * backwards, which is how a chat scrolls up. What was missing is anything that fails when it
+     * changes. A display wants ascending and reverses at the edge.
+     */
+    test("messages page newest-first, which is what `before` pages backwards from", async () => {
         const { call, runtime } = await withSession()
         const body = (await (
             await call("GET", "/v1/agents/assistant/sessions/api%3As/messages?limit=10")
-        ).json()) as { messages: { role: string; content: string }[] }
-        expect(body.messages.length).toBeGreaterThan(0)
+        ).json()) as { messages: { role: string; content: string; id: number }[] }
+        expect(body.messages.length).toBeGreaterThan(1)
+        // Ids strictly descending. Asserted on `id` rather than on `createdAt`, because both rows
+        // of one turn share a timestamp to the millisecond — which is also why the assistant landed
+        // above the user in the browser: it has the higher rowid, not a later clock.
+        const ids = body.messages.map((message) => message.id)
+        expect(ids).toEqual([...ids].sort((a, b) => b - a))
+        // The newest row is first, so the user's own "hi" — written before the reply — is last.
+        expect(body.messages.at(-1)?.role).toBe("user")
+        expect(body.messages.at(-1)?.content).toBe("hi")
         await runtime.stop()
     })
 

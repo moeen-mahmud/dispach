@@ -12,6 +12,7 @@
  * why `TurnStreams` exists — a client that comes back has to be able to find out what it missed.
  */
 
+import { readFile } from "node:fs/promises"
 import type { Capability as Cap, KeyScope } from "@dispach/core"
 import {
     type Agent,
@@ -19,6 +20,7 @@ import {
     type AnyEvent,
     type ErrorDetail,
     EVENT_TYPES,
+    editManifest,
     entryPhase,
     HarnessError,
     isHarnessError,
@@ -26,18 +28,23 @@ import {
     keyFingerprint,
     keyLabelProblem,
     MAX_KEY_LABEL,
+    manifestValueAt,
     nearest,
     newKeyId,
     newKeySecret,
     newRunId,
     newTurnId,
+    PERSON_SETTABLE_PATHS,
+    parseSettingValue,
     phasesFor,
     prepareScheduleWrite,
     type Runtime,
     type ScheduleRecord,
     SENDER_KINDS,
+    SETTINGS,
     type SenderKind,
     scheduleSessionKey,
+    settingByPath,
     type TurnRecord,
     type TurnSender,
     VERSION,
@@ -60,6 +67,7 @@ import { sseResponse } from "./sse.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
 import {
     ApprovalBody,
+    ConfigBody,
     KeyBody,
     MessageBody,
     PhaseBody,
@@ -373,6 +381,30 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      */
     const provisioningIsLocal = (): boolean =>
         options.origin !== undefined && isLoopback(options.origin.host)
+
+    /**
+     * May this caller create an agent?
+     *
+     * **The bind alone was the wrong question, and it refused the safer of the two cases.** A
+     * token-less loopback server allowed provisioning while a token-authenticated `0.0.0.0` one
+     * refused it — so the gate was strictest exactly where a credential had been presented and
+     * loosest where none had. The container is the second case, which made the browser onboarding
+     * panel the one panel structurally impossible in the only deployment that ships with it: the
+     * page opened, the claim exchanged, and the first screen was a refusal.
+     *
+     * So the risk is named properly. What must never be reachable from the network is provisioning
+     * on a server that asked for **no** credential at all, which is `kind: "open"` — the route's
+     * declared `capability: "admin"` cannot speak to that, because an open principal reaches
+     * everything by definition. An authenticated caller holding `admin` is precisely the case
+     * 18.2's scoped keys were built for, and precisely what this route's own refusal has been
+     * promising in its hint since it was written.
+     *
+     * `can` is consulted rather than assumed from the route's capability: this reads as its own
+     * decision at the one place it is made, and a future route sharing this predicate inherits the
+     * check rather than the assumption.
+     */
+    const mayProvision = (who: Principal): boolean =>
+        provisioningIsLocal() || (who.kind !== "open" && can(who, "admin"))
 
     const refuseOrigin = (request: Request): Response | undefined => {
         if (options.origin === undefined) return undefined
@@ -742,10 +774,23 @@ export function createHandler(options: HandlerOptions): ServerHandler {
     router.add(
         "GET",
         "/v1/provision",
-        () =>
+        (context) =>
             json({
                 available: options.provision !== undefined,
+                // A fact about the bind, kept because it is one and because removing a field is a
+                // breaking change inside `v: 1`.
                 local: provisioningIsLocal(),
+                /**
+                 * **May *this caller* create an agent** — which is the question a page is actually
+                 * asking, and not the one `local` answers.
+                 *
+                 * The onboarding panel was built on `local`, so in the container it rendered
+                 * "allowed only on a loopback bind" to an operator who had just authenticated with
+                 * an admin credential and could in fact do it. A field that describes the server
+                 * where the client needs a decision about itself is how a correct refusal becomes a
+                 * wrong one.
+                 */
+                allowed: mayProvision(context.principal),
                 steps: options.provision?.steps() ?? [],
             }),
         { capability: "read" },
@@ -782,12 +827,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     501,
                 )
             }
-            if (!provisioningIsLocal()) {
+            if (!mayProvision(context.principal)) {
                 return fail(
                     {
                         code: "provisioning_not_local",
-                        message: "Creating an agent is only allowed on a loopback bind.",
-                        hint: "This route writes files and starts an agent, and a token-less loopback server is a supported configuration — so it is gated on the bind rather than on a credential. This is also what refuses provisioning inside the container, whose CMD binds 0.0.0.0: mount a written agent at /agent, or run `init` on the host. A scoped admin key will open this on a public bind.",
+                        message:
+                            "Creating an agent needs either a loopback bind or a credential with the admin capability.",
+                        hint: "This route writes files and starts an agent. A token-less loopback server is a supported configuration, so on a non-loopback bind it asks for a credential instead — set server.tokenEnv (the container's DISPACH_API_TOKEN does this) or present an operator key minted with `can: [admin]`. What is refused is provisioning on a server that required no credential at all and is reachable from the network.",
                     },
                     403,
                 )
@@ -1658,6 +1704,8 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const sid = context.params.sid ?? ""
                 const existing = await agent.store.schedules.get(agent.id, sid)
                 if (existing === undefined) return notFound("schedule", sid)
+                const owned = manifestOwned(existing)
+                if (owned !== undefined) return owned
 
                 const body = await readJson(context.request)
                 if (body.kind === "error") return fail(body.error, 400)
@@ -1702,6 +1750,12 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         (context) =>
             withAgent(runtime, context, async (agent) => {
                 const sid = context.params.sid ?? ""
+                // Read before removing: the row is what says who owns it, and a delete that has
+                // already happened cannot be refused.
+                const existing = await agent.store.schedules.get(agent.id, sid)
+                if (existing === undefined) return notFound("schedule", sid)
+                const owned = manifestOwned(existing)
+                if (owned !== undefined) return owned
                 const removed = await agent.store.schedules.remove(agent.id, sid)
                 if (!removed) return notFound("schedule", sid)
                 runtime.scheduler.changed()
@@ -1747,6 +1801,168 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 return json({ scheduleId: row.id, turnId, sessionKey, outOfBand: true }, 202)
             }),
         { capability: "write" },
+    )
+
+    /**
+     * The person's editor, over HTTP.
+     *
+     * ## Why this is not `config_set` with a URL in front of it
+     *
+     * There are two editors of `agent.yaml` and they do not have the same authority.
+     * `config_set` is the **agent's**, and it is floored — an agent that could widen its own inbound
+     * gate could be talked into widening it by the very message it is reading, and `config_set` sits
+     * in `policy.allow` on a real manifest, so the write gate would not stop that. `dispach config`
+     * is the **person's**, and *nothing in it is floored*: refusing them is what left the fields
+     * decision 11.29 reserves for a person — `allowFrom`, `server.host`, `server.tokenEnv`,
+     * `writeRoots` — with the worst ergonomics in the system.
+     *
+     * This route is the third row of that table: the person, remotely. Same unfloored set, same two
+     * confirmations, because the browser is the owner — it mints itself an unscoped key for exactly
+     * that reason. Not a role, not an admin: there are no users, teams or roles here at all.
+     *
+     * ## Why the value is read out of the file rather than off `agent.manifest`
+     *
+     * `agent.manifest` is loaded, expanded and validated. `${MODEL_ID}` has become a model id there,
+     * so an editor showing that value and writing it back would silently **bake the expansion in** —
+     * turning a manifest that follows its environment into one that does not, reported as an
+     * unrelated edit. `manifestValueAt` reads the source: unexpanded, exactly as written.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/config",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const source = runtime.sourceOf(agent.id)
+                const file = typeof source === "string" ? source : undefined
+                const text = file === undefined ? undefined : await readFile(file, "utf8")
+                return json({
+                    // Named rather than implied: an object-form manifest has no file to edit, and a
+                    // client that cannot tell will offer a form whose save can only fail.
+                    ...(file === undefined ? { editable: false } : { editable: true, file }),
+                    settings: SETTINGS.filter((setting) =>
+                        PERSON_SETTABLE_PATHS.includes(setting.path),
+                    ).map((setting) => ({
+                        path: setting.path,
+                        means: setting.means,
+                        ...(setting.confirm === undefined ? {} : { confirm: setting.confirm }),
+                        ...(text === undefined
+                            ? {}
+                            : { value: manifestValueAt(text, setting.path.split(".")) }),
+                    })),
+                })
+            }),
+        { capability: "admin" },
+    )
+
+    router.add(
+        "PATCH",
+        "/v1/agents/:id/config",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(ConfigBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+
+                const source = runtime.sourceOf(agent.id)
+                if (typeof source !== "string") {
+                    return fail(
+                        {
+                            code: "config_not_editable",
+                            message: `"${agent.id}" was loaded from an object, not from a file, so it has no manifest to change.`,
+                            hint: "An embedder holding new settings passes the new object to dispose() and adopt(). This route edits a manifest on disk.",
+                        },
+                        409,
+                    )
+                }
+
+                const setting = settingByPath(parsed.value.path)
+                // `via` and the placeholder paths are in `SETTINGS` and not in
+                // `PERSON_SETTABLE_PATHS`, so the membership test is the one that decides — and the
+                // refusal reads the row anyway, because `channels[].allowFrom` can name the command
+                // that does set it instead of answering "no such setting" about a real field.
+                if (setting === undefined || !PERSON_SETTABLE_PATHS.includes(setting.path)) {
+                    return fail(
+                        {
+                            code: "config_path_unknown",
+                            message:
+                                setting?.via === undefined
+                                    ? `"${parsed.value.path}" is not a field this surface sets.`
+                                    : `"${parsed.value.path}" is set by \`${setting.via}\`, not by a dotted path.`,
+                            hint:
+                                setting?.via === undefined
+                                    ? `GET /v1/agents/:id/config lists every one. Nearest: ${nearest(parsed.value.path, PERSON_SETTABLE_PATHS) ?? PERSON_SETTABLE_PATHS.join(", ")}.`
+                                    : "It is a key inside a list entry, and the source editor matches a key at an indent — it cannot index a sequence. That action also validates the handle against the service that issues it.",
+                            field: "path",
+                        },
+                        400,
+                    )
+                }
+
+                // The two edits whose only purpose is to stop a check running. Refused rather than
+                // logged: `confirm` absent is not consent, and the sentence is the row's own, so the
+                // terminal and the browser ask the same question in the same words.
+                if (setting.confirm !== undefined && parsed.value.confirm !== true) {
+                    return fail(
+                        {
+                            code: "config_confirm_required",
+                            message: setting.confirm,
+                            hint: 'Send { "confirm": true } beside the value to make this change anyway. Nothing has been written.',
+                            field: "confirm",
+                        },
+                        409,
+                    )
+                }
+
+                let result: Awaited<ReturnType<typeof editManifest>>
+                try {
+                    result = await editManifest({
+                        file: source,
+                        path: setting.path.split("."),
+                        // One parser for the person's two editors — see `ConfigBody`. Throws by name
+                        // rather than guessing, because guessing is how `tools.pinned: "exec"`
+                        // becomes a one-character tool list.
+                        value: parseSettingValue(parsed.value.value),
+                    })
+                } catch (error) {
+                    if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                    throw error
+                }
+
+                /**
+                 * Applied by **replacing the agent**, and reported separately from the write.
+                 *
+                 * An agent's settings are fixed for its instance's lifetime — the catalogue resolves
+                 * once and slot 1 renders once, on purpose — so a write alone changes nothing that is
+                 * running. `replace` is what 16.2 built for this.
+                 *
+                 * It can legitimately fail: `dispose` refuses while a turn is in flight, because the
+                 * alternative is closing a store under a turn recorded as `running`. The file is
+                 * already written at that point and saying so is the only honest answer — the edit
+                 * takes effect at the next start, which is exactly what `dispach config set` reports.
+                 * Returning 409 and implying nothing happened would be rule 8 with better manners.
+                 */
+                let applied: ErrorDetail | undefined
+                try {
+                    await runtime.replace(agent.id)
+                } catch (error) {
+                    if (!isHarnessError(error)) throw error
+                    applied = error.toDetail()
+                }
+
+                return json({
+                    path: setting.path,
+                    before: result.before,
+                    after: result.after,
+                    // A reflowed file is correct and its comments have moved, which is a surprise a
+                    // person should hear from the surface that did it rather than from `git diff`.
+                    reflowed: result.reflowed,
+                    ...(applied === undefined
+                        ? { applied: true }
+                        : { applied: false, pending: applied }),
+                })
+            }),
+        { capability: "admin" },
     )
 
     router.add(
@@ -2184,6 +2400,36 @@ export function createHandler(options: HandlerOptions): ServerHandler {
  * accept and refuse exactly the same things — a check only one of two writers performs is a check
  * they disagree about.
  */
+/**
+ * Refuse a write to a schedule the **manifest** declares.
+ *
+ * `reconcileSchedules` loops over every schedule in the file and upserts it with `origin:
+ * "manifest"` and every field from the file, so an edit through here lasts exactly until the next
+ * boot: a PATCH is overwritten and a DELETE is re-created with a fresh anchor. The route reported
+ * `200`, the listing agreed, and one restart later it was back — hard rule 8's exact shape, and the
+ * failure `schedules --disable` already refuses at the terminal for the same reason.
+ *
+ * Found while putting a browser in front of these routes: the CLI had the check and the API did not,
+ * which is *"a check that only one surface performs is a check the two disagree about"* one surface
+ * further out. The prose differs because the audiences do — the terminal names the file and the line
+ * to change, a client gets a code to branch on — but both refuse rather than write.
+ *
+ * Not fixed by editing `agent.yaml` from here: `manifest/edit.ts` is the one writer, and a schedule
+ * lives in a sequence whose index this route has no business knowing. `PATCH /config` sets the whole
+ * `schedules` list, which is the honest way to change a declared one.
+ */
+function manifestOwned(existing: ScheduleRecord): Response | undefined {
+    if (existing.origin !== "manifest") return undefined
+    return fail(
+        {
+            code: "schedule_manifest_owned",
+            message: `Schedule "${existing.id}" is declared in this agent's manifest, so the manifest decides it.`,
+            hint: "Writing it here would last until the next start — reconciliation restores every field from the file, enabled included. Change the `schedules:` entry instead, with PATCH /v1/agents/:id/config, or create a separate schedule through this route.",
+        },
+        409,
+    )
+}
+
 async function writeSchedule(
     runtime: Runtime,
     agent: Agent,

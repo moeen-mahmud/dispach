@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -414,4 +414,345 @@ describe("the signal handlers are registered before the socket binds", () => {
         expect(SOURCE).toContain("const stopRequested = waitForSignal()")
         expect(SOURCE).toContain("await stopRequested")
     })
+})
+
+/**
+ * A misconfigured agent in the sandbox must not take the host down.
+ *
+ * **Found by running the container, not by reading the code.** `init` writes an agent whose `.env`
+ * holds `MODEL_API_KEY=` — empty on purpose, since step 1 of what it prints is "add your key". A
+ * bare `serve` hosts every enabled agent in the sandbox, so that one agent made `loadManifest`
+ * throw, the host exited 1, and `restart: unless-stopped` restarted it into the same failure: nine
+ * restarts, no API, no web UI. The always-on server that exists to provision agents, taken down by
+ * an agent halfway through being provisioned.
+ *
+ * Both directions are asserted, because the fix is an asymmetry rather than a tolerance: a
+ * **discovered** agent is skipped and named, a **named** one still refuses. Reverting either half
+ * turns one of these two red.
+ */
+describe("a broken agent does not take the host down", () => {
+    /** A sandbox with one loadable agent and one whose key is missing from the environment. */
+    function sandbox(): string {
+        const home = mkdtempSync(join(tmpdir(), "serve-sandbox-"))
+        const agents = join(home, BRAND.stateDir, "agents")
+        for (const [id, keyEnv] of [
+            ["fine", "MODEL_API_KEY"],
+            ["halfdone", "KEY_NOBODY_SET"],
+        ] as const) {
+            const dir = join(agents, id)
+            mkdirSync(dir, { recursive: true })
+            writeFileSync(
+                join(dir, "agent.yaml"),
+                `apiVersion: ${BRAND.apiVersion}
+id: ${id}
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: ${keyEnv}
+server:
+  enabled: true
+`,
+                "utf8",
+            )
+        }
+        return home
+    }
+
+    /** `serve` against that sandbox. `manifests` empty is the bare, discovering form. */
+    async function serveSandbox(
+        home: string,
+        manifests: readonly string[] = [],
+    ): Promise<{ readonly out: string; readonly exited: boolean }> {
+        const store = join(home, "store.db")
+        const child = spawn(
+            process.execPath,
+            [BINARY, "serve", ...manifests, "--port", "0", "--store", store],
+            {
+                env: {
+                    ...process.env,
+                    HOME: home,
+                    // **The override IS the sandbox root**, not the home directory above it —
+                    // `sandboxRoot` returns it verbatim rather than joining `stateDir` onto it.
+                    // Pointed at `home`, discovery looked in `<home>/agents`, found nothing, and
+                    // the banner listed no agents at all: a green-looking run asserting nothing.
+                    [`${BRAND.envPrefix}HOME`]: join(home, BRAND.stateDir),
+                    MODEL_API_KEY: "test-key",
+                    [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+                    // Or the ambient environment satisfies the very variable this fixture
+                    // withholds, and the broken agent loads perfectly.
+                    KEY_NOBODY_SET: "",
+                },
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        )
+        let out = ""
+        const settled = await new Promise<boolean>((resolve, reject) => {
+            const overall = setTimeout(() => reject(new Error(`no outcome:\n${out}`)), 25_000)
+            let quiet: ReturnType<typeof setTimeout> | undefined
+            const done = (exited: boolean) => {
+                clearTimeout(overall)
+                if (quiet !== undefined) clearTimeout(quiet)
+                resolve(exited)
+            }
+            const collect = (chunk: Buffer) => {
+                out += chunk.toString()
+                if (!out.includes("serving on")) return
+                if (quiet !== undefined) clearTimeout(quiet)
+                quiet = setTimeout(() => done(false), 400)
+            }
+            child.stdout.on("data", collect)
+            child.stderr.on("data", collect)
+            child.on("exit", () => done(true))
+        })
+        if (!settled) child.kill("SIGTERM")
+        return { out, exited: settled }
+    }
+
+    test("a bare serve stays up, serves the good agent and names the broken one", async () => {
+        const home = sandbox()
+        const { out, exited } = await serveSandbox(home)
+        rmSync(home, { recursive: true, force: true })
+
+        // The host is up. This is the assertion that was false: it exited 1 into a restart loop.
+        expect(exited).toBe(false)
+        expect(out).toContain("serving on")
+        expect(out).toContain("fine —")
+        // And says so, because a skipped agent nothing mentions is the failure this repo keeps
+        // finding. The path is the actionable half — the fix is in the `.env` beside it.
+        expect(out).toContain("NOT served")
+        expect(out).toContain("halfdone")
+        expect(out).toContain("KEY_NOBODY_SET")
+    }, 30_000)
+
+    test("a manifest named on the command line still refuses", async () => {
+        const home = sandbox()
+        const named = join(home, BRAND.stateDir, "agents", "halfdone", "agent.yaml")
+        const { out, exited } = await serveSandbox(home, [named])
+        rmSync(home, { recursive: true, force: true })
+
+        // Asked for that agent by path, so skipping it would serve something other than what was
+        // requested — the worse error, and the direction `hostableAgents` already distinguishes.
+        expect(exited).toBe(true)
+        expect(out).toContain("KEY_NOBODY_SET")
+        expect(out).not.toContain("serving on")
+    }, 30_000)
+})
+
+/**
+ * The banner is the only output a container deployment has, and three things in it were wrong.
+ *
+ * All three were reported by someone reading `docker logs` and clicking what was there, which is
+ * the only way any of them surfaces: on a laptop `serve` binds `127.0.0.1`, so the substitution
+ * never fires and the sign-off is true.
+ */
+describe("the banner names things a person can actually use", () => {
+    /** `serve` on a chosen bind, with a token because a non-loopback bind demands one. */
+    async function banner(host: string): Promise<string> {
+        const dir = agentDir(`banner-${host.replace(/[^a-z0-9]/gi, "")}`)
+        const store = join(mkdtempSync(join(tmpdir(), "serve-banner-")), "store.db")
+        const child = spawn(
+            process.execPath,
+            [
+                BINARY,
+                "serve",
+                join(dir, "agent.yaml"),
+                "--host",
+                host,
+                "--port",
+                "0",
+                "--store",
+                store,
+            ],
+            {
+                env: {
+                    ...process.env,
+                    MODEL_API_KEY: "test-key",
+                    [`${BRAND.envPrefix}API_TOKEN`]: "banner-test-token",
+                    [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+                },
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        )
+        let out = ""
+        await new Promise<void>((resolve, reject) => {
+            const overall = setTimeout(() => reject(new Error(`no banner:\n${out}`)), 25_000)
+            let quiet: ReturnType<typeof setTimeout> | undefined
+            const collect = (chunk: Buffer) => {
+                out += chunk.toString()
+                if (!out.includes("serving on")) return
+                if (quiet !== undefined) clearTimeout(quiet)
+                quiet = setTimeout(() => {
+                    clearTimeout(overall)
+                    resolve()
+                }, 400)
+            }
+            child.stdout.on("data", collect)
+            child.stderr.on("data", collect)
+            child.on("exit", () => {
+                clearTimeout(overall)
+                resolve()
+            })
+        })
+        child.kill("SIGTERM")
+        rmSync(dir, { recursive: true, force: true })
+        return out
+    }
+
+    test("a wildcard bind is printed as loopback, and the bind is still named", async () => {
+        const out = await banner("0.0.0.0")
+        // The defect: `http://0.0.0.0:7420` was the banner's first and most prominent line, and a
+        // browser does nothing with it. `browsableHost` existed for this and had three callers;
+        // this was the fourth and never got it.
+        expect(out).not.toContain("serving on http://0.0.0.0")
+        expect(out).toContain("serving on http://127.0.0.1:")
+        // And the wildcard is still disclosed, because "listening on every interface" is a
+        // security-relevant fact that showing loopback alone would hide.
+        expect(out).toContain("bound 0.0.0.0")
+    }, 30_000)
+
+    test("a loopback bind gets no parenthetical, because nothing was substituted", async () => {
+        const out = await banner("127.0.0.1")
+        expect(out).toContain("serving on http://127.0.0.1:")
+        expect(out).not.toContain("bound 127.0.0.1")
+    }, 30_000)
+
+    test("the web UI and the API reference are named", async () => {
+        const out = await banner("0.0.0.0")
+        // Both have been served unauthenticated since they shipped and neither was mentioned
+        // anywhere a person looks. A surface nobody is told about is a surface nobody has.
+        expect(out).toContain("web UI http://127.0.0.1:")
+        expect(out).toContain("/docs")
+        // Never the wildcard, in any line of it.
+        expect(out).not.toContain("0.0.0.0:0")
+        expect(out.split("\n").filter((line) => line.includes("http://0.0.0.0"))).toEqual([])
+    }, 30_000)
+})
+
+describe("a plugin-supplied channel loads under serve", () => {
+    /**
+     * `PluginContext.defineChannel` is documented public API that did not work through this binary.
+     *
+     * `Runtime.create` had always been right — it loads an agent's plugins, then validates
+     * `channels[].type` against `Object.keys(supply.channels)`, which includes whatever they
+     * registered. Every CLI surface pre-loaded the manifest *first* against the static
+     * `CHANNEL_IDS` table, so `channel_type_unknown` refused a correct manifest before the plugin
+     * that would satisfy it was imported. `serve` is the one that matters, because `serve` is what
+     * hosts channels.
+     *
+     * The reason it stayed invisible is the useful half: `telegram` reaches the runtime as
+     * `channels: { telegram }` from the CLI's own table and never through the plugin path, so the
+     * documented API had **no in-tree consumer**. This test is that consumer.
+     *
+     * Spawned rather than unit-tested on purpose. The bug lives in the ordering of two loads inside
+     * one command, and a test that called `loadManifest` itself would be choosing the ordering it
+     * meant to check — the same reason `bundle.test.ts` starts the binary.
+     */
+    function pluginSandbox(): string {
+        const dir = mkdtempSync(join(tmpdir(), "serve-plugin-"))
+        /**
+         * A channel plugin, as small as the contract allows.
+         *
+         * `start` returns once *running* rather than once connected, which is the contract and also
+         * what keeps this fixture from needing a network. `send` reports success for a message
+         * nothing sends here — the assertion is that the manifest **loads and is served**, which is
+         * exactly what was impossible before.
+         */
+        writeFileSync(
+            join(dir, "smoke-channel.mjs"),
+            `export default {
+    name: "smoke-channel",
+    version: "1.0.0",
+    // The semver **range** this plugin claims, checked against the host's. A mismatch is a loud
+    // load failure rather than a silent rollback, which is the one thing the runtime this replaces
+    // got wrong badly enough to be worth copying the opposite of.
+    dispachApi: "^0.1",
+    setup(context) {
+        context.defineChannel("smoke", (channel) => ({
+            id: channel.id,
+            type: "smoke",
+            limits: { maxMessageChars: 4096, idempotentSend: false },
+            async start() {},
+            async stop() {},
+            async send() {
+                return { ok: true, providerMessageId: "smoke-1" }
+            },
+        }))
+    },
+}
+`,
+            "utf8",
+        )
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: smoked
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: MODEL_API_KEY
+plugins:
+  - ./smoke-channel.mjs
+channels:
+  - type: smoke
+    id: sm
+    allowFrom: ["someone"]
+server:
+  enabled: true
+`,
+            "utf8",
+        )
+        return dir
+    }
+
+    test("the manifest loads, the host stays up, and the channel is served", async () => {
+        const dir = pluginSandbox()
+        const { out, exited } = await serveAll([join(dir, "agent.yaml")])
+        // The refusal this replaces, by code. Named rather than matched loosely, because the
+        // failure was a *specific* check firing in the wrong pass.
+        expect(out).not.toContain("channel_type_unknown")
+        // A **named** manifest, so a load failure exits rather than being skipped — which makes
+        // "did not exit" a real assertion here rather than a tolerance.
+        expect(exited).toBe(false)
+        expect(out).toContain("serving on")
+        expect(out).toContain("smoked")
+        rmSync(dir, { recursive: true, force: true })
+    }, 30_000)
+
+    test("a genuinely unknown channel type is still refused, and the host still survives it", async () => {
+        /**
+         * The other direction, and the reason the fix is a second pass here rather than moving the
+         * check into `Runtime.create`.
+         *
+         * Two things have to remain true at once: a plugin channel loads, *and* a nonsense one is
+         * refused where the skip-and-report loop can see it. Moving the check into `Runtime.create`
+         * would satisfy the first and break the second — that refusal would throw from an unguarded
+         * `sources.map` and take every other agent on the host with it, which is the crash loop
+         * that loop exists to prevent, arriving by a different route.
+         */
+        const dir = mkdtempSync(join(tmpdir(), "serve-nochan-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: nochan
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: MODEL_API_KEY
+channels:
+  - type: carrier-pigeon
+    id: cp
+server:
+  enabled: true
+`,
+            "utf8",
+        )
+        const { out, exited } = await serveAll([join(dir, "agent.yaml")])
+        // Named, so it refuses — the asymmetry `hostableAgents` draws, unchanged by this work.
+        expect(exited).toBe(true)
+        expect(out).toContain("carrier-pigeon")
+        rmSync(dir, { recursive: true, force: true })
+    }, 30_000)
 })

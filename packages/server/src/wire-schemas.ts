@@ -231,6 +231,37 @@ export const StopBody = z.object({
     }),
 })
 
+/**
+ * `PATCH /v1/agents/:id/config`
+ *
+ * The **value is text**, exactly as it is at a terminal, and core's `parseSettingValue` reads it —
+ * one parser for the person's two editors, which is what that function's own docstring asks for:
+ * *"the two must not disagree about whether `["a", "b"]` is a list of two strings"*, one accepting it
+ * and the other storing the literal characters. A browser sending real JSON loses nothing, because
+ * `["a", "b"]` and `{k: v}` are valid in both languages; what it gains is that `40` means the number
+ * on both surfaces and `tools.pinned: "exec"` cannot become a one-character tool list on either.
+ *
+ * `confirm` is the person's acknowledgement of the two edits whose only purpose is to stop a check
+ * running — carried as a field rather than a query flag because it belongs to the edit it approves.
+ */
+export const ConfigBody = z.object({
+    path: refuse(z.string().min(1), {
+        code: "config_path_unknown",
+        hint: "GET /v1/agents/:id/config lists every field this surface may change, with what each one does.",
+        description:
+            "A dotted path, exactly as it appears in the manifest — `tools.pinned`, `model.main.id`.",
+    }),
+    value: refuse(z.string(), {
+        code: "config_value_unreadable",
+        hint: 'Text, the way it is typed at a terminal: a bare word, a number, true or false, a list as ["a", "b"], or a map as {k: v}. Quote anything containing a colon or a "#".',
+        description: "The new value, as text. Read by the same parser the `config` command uses.",
+    }),
+    confirm: annotate(
+        z.boolean().optional(),
+        "Required only for a field whose own row carries a `confirm` sentence. Absent is not consent.",
+    ),
+})
+
 /** `POST /v1/agents` — see the module comment for why the answers are not enumerated here. */
 export const ProvisionBody = z.object({
     answers: refuse(

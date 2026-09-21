@@ -288,9 +288,13 @@ describe("the 404 loop, guarded at the source", () => {
         // what a missing agent means.
         expect(source).toContain("caught instanceof DispachError && caught.status === 404")
         expect(source.match(/status === 404/g)?.length).toBe(1)
-        // All three: the approvals timer, the report panels, the session list. Counted rather than
-        // named, because a fourth fetch added later has to join them.
-        expect(source.match(/isGone\(caught\)/g)?.length).toBe(3)
+        // Four now: the approvals timer, the report panels, the session list, and `write` — the one
+        // writer behind the settings and schedule panels. Counted rather than named, because a
+        // *fifth* fetch added later has to join them; and this count is what caught the fourth,
+        // which is the guard working rather than a number to keep bumping. A write is the case that
+        // matters most of the three reads: somebody saving a setting on an agent that has just been
+        // stopped otherwise gets a transport error where "this agent is gone" is the answer.
+        expect(source.match(/isGone\(caught\)/g)?.length).toBe(4)
         // And the handler clears the selection, or the page keeps a current agent that is gone.
         expect(source).toContain("setAgentId(undefined)")
     })

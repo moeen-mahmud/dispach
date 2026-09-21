@@ -1020,6 +1020,22 @@ export class Runtime {
      * rebuilds the instance with identical settings — which is honest rather than useful. An
      * embedder holding new settings should `dispose` and `adopt` the new object.
      */
+    /**
+     * The manifest an agent was loaded from, for a surface that means to edit it.
+     *
+     * One accessor over the map `replace` already reads, rather than a second place that knows how
+     * an agent's file is found: the id-versus-directory split has cost a round before, and a caller
+     * guessing `<dir>/agent.yaml` would be wrong for any manifest not named that.
+     *
+     * A `string` is a path and can be edited; a `Record` is an object-form manifest with no file
+     * behind it, and a caller that means to write **must** distinguish the two rather than
+     * stringify. Roots only — a team member has no manifest of its own, so this answers `undefined`
+     * for one, which is the same answer `replace` gives and for the same reason.
+     */
+    sourceOf(agentId: string): AgentSource | undefined {
+        return this.#sources.get(agentId)
+    }
+
     async replace(agentId: string): Promise<readonly Agent[]> {
         const source = this.#sources.get(agentId)
         if (source === undefined) {

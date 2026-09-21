@@ -193,8 +193,16 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 # nothing. A non-loopback bind requires an API token by design, so a published container needs
 # `DISPACH_API_TOKEN` and refuses to start without it rather than binding the world unauthenticated.
 #
-# `primary` is a bare ref, resolved through the same `resolveAgentRef` path a laptop uses, rather than
-# `/agent/agent.yaml`. That is what makes the mounted agent visible to `dispach agents` and to the
-# picker instead of being a second, invisible agents directory.
+# **No agent is named, and that is the point.** This used to be `serve primary`, which made the
+# image refuse to start unless something was mounted at `/agent` — so the compose file defaulted to
+# mounting the repository's own example, and `docker compose up` on a fresh clone came up hosting a
+# sample agent nobody asked for. A bare `serve` hosts every *enabled agent in the sandbox*, which is
+# none on a fresh volume and is the supported state: the API and the web UI exist before there is
+# anything to talk to, which is what makes provisioning through them possible at all.
+#
+# A mounted agent still works and needs no flag: `entrypoint.sh` links `/agent` into the sandbox as
+# `primary`, so the same bare `serve` finds it through `listAgents` exactly as it finds one created
+# with `dispach init`. One CMD, both shapes — and the mount is what decides, rather than an argument
+# here that has to agree with it.
 ENTRYPOINT ["entrypoint.sh"]
-CMD ["serve", "primary", "--host", "0.0.0.0"]
+CMD ["serve", "--host", "0.0.0.0"]

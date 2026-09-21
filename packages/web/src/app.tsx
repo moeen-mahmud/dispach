@@ -18,6 +18,7 @@
 
 import type {
     AgentClient,
+    AgentConfig,
     DispachClient,
     PendingApproval,
     ProvisionedAgentLike,
@@ -27,7 +28,7 @@ import type {
     ToolSummary,
 } from "@dispach/client"
 import { DispachError } from "@dispach/client"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Composer, Rows } from "./chat.tsx"
 import { Keys } from "./keys.tsx"
 import {
@@ -39,6 +40,7 @@ import {
     resolveCredential,
 } from "./lib/auth.ts"
 import { hrefFor, type PanelName, placeFrom } from "./lib/deep-link.ts"
+import { type LiveStream, liveStream } from "./lib/live.ts"
 import { initialAnswers, missingAnswers, payloadFor } from "./lib/provision-form.ts"
 import { EMPTY, emptyFor, reduce, type Transcript, withUser } from "./lib/transcript.ts"
 import { Onboarding } from "./onboarding.tsx"
@@ -47,6 +49,7 @@ import {
     type AgentRow,
     type ChannelRow,
     ChannelsPanel,
+    ConfigPanel,
     SchedulesPanel,
     SERVER_PANELS,
     ToolsPanel,
@@ -203,6 +206,7 @@ const TITLES: Readonly<Record<Exclude<Panel, "chat">, string>> = {
     tools: "Tools",
     schedules: "Schedules",
     channels: "Channels",
+    config: "Settings",
     keys: "Operator keys",
 }
 
@@ -255,6 +259,13 @@ function Workspace(props: {
     const [draft, setDraft] = useState("")
     const [error, setError] = useState<string>()
     const stopRef = useRef<(() => Promise<void>) | undefined>(undefined)
+    /**
+     * One stream per turn, owned outside this component so it can be tested.
+     *
+     * `lib/live.ts` holds the reasoning. The short version: this file is where the untested code
+     * was, and a guard written against a component whose effects never mount could not fail.
+     */
+    const liveRef = useRef<LiveStream>(liveStream())
 
     /**
      * Which agent, and its name for the title.
@@ -321,13 +332,39 @@ function Workspace(props: {
             .catch((caught: unknown) => setError(describe(caught)))
     }, [])
 
-    const agent: AgentClient | undefined =
-        agentId === undefined ? undefined : clientRef.current.agent(agentId)
+    /**
+     * The per-agent facade, **memoised on the id** — and this one line is load-bearing.
+     *
+     * `client.agent(id)` builds a fresh object literal on every call, so calling it in the render
+     * body gave `agent` a new identity every render. Everything keyed on it followed:
+     * `refreshSessions`, then `follow`, then the reattach effect below — which has no cleanup, so
+     * each render started *another* `/stream?chunks=true` for the same turn, and each stream's
+     * `setState` committed a render that started another.
+     *
+     * Every one of those streams folded into one `Transcript` and one **mutable** `StreamFilter`, so
+     * a real session rendered `DoingDoingDoingDoing good good good…` and then the finished reply
+     * eight more times. The proof was in the screenshot: the first block read `thinking · 1068
+     * chars` and every repeat `178`, and 1068 = 178 × 6 — six streams interleaving into one buffer,
+     * then eight late attaches each replaying the turn and committing a clean copy of their own.
+     *
+     * The same loop hammered `GET /sessions` until the browser refused new connections and reported
+     * a *same-origin* fetch as `Failed to fetch`. The CLI has never had this: `lib/source.ts:281`
+     * guards with `if (pump !== undefined) return` on a subscription mounted on stable deps.
+     */
+    const agent: AgentClient | undefined = useMemo(
+        () => (agentId === undefined ? undefined : clientRef.current.agent(agentId)),
+        [agentId],
+    )
 
     const refreshSessions = useCallback(async () => {
         if (agent === undefined) return
         try {
             setSessions(await agent.sessions())
+            // **Cleared on success, or one transient failure is permanent.** The old code set the
+            // error and never unset it, and because the string was identical every time React
+            // bailed out of the re-render — so the banner sat there with nothing retrying behind
+            // it. A poll that recovers has to say so on the surface that reported the fault.
+            setError(undefined)
         } catch (caught) {
             // Routed through the same predicate as every other agent-scoped fetch. Left to set a
             // raw error, this races the sentence `agentGone` writes and sometimes wins — so the
@@ -341,23 +378,49 @@ function Workspace(props: {
         void refreshSessions()
     }, [refreshSessions])
 
-    /** Follow one turn to its end, folding every frame into the transcript. */
+    /**
+     * Follow one turn to its end, folding every frame into the transcript.
+     *
+     * **One stream per turn, enforced rather than hoped for.** The gate is `lib/live.ts`, which is
+     * this package's spelling of `cli/src/lib/source.ts:281`'s `if (pump !== undefined) return`.
+     * The memo above stops the effect below from re-firing; the gate stops everything else — a
+     * second `send`, a `StrictMode` double-invoke, a future effect that gains a dependency — from
+     * opening a second subscription into the same accumulator. The memo alone would have fixed
+     * today's symptom and left the shape that produced it.
+     *
+     * The abort is the other half, and it comes from the same place. `AgentClient.stream` has taken
+     * a `signal` since the client was written and this call site passed none, so a stream outlived
+     * the agent and session it was started for: `goTo` and `openSession` both reset the transcript
+     * and neither could stop a stream still writing into it. `handle.stop()` is a *server-side turn
+     * cancel* and was never the same thing as hanging up.
+     */
     const follow = useCallback(
         async (turnId: string, forAgent: AgentClient) => {
+            const live = liveRef.current
+            const signal = live.begin(turnId)
+            // Already following this turn. Opening a second stream is what produced six copies of
+            // one reply interleaved into a single accumulator.
+            if (signal === undefined) return
             const handle = forAgent.turn(turnId)
             stopRef.current = () => handle.stop()
             try {
                 sessionStorage.setItem(LIVE_TURN, turnId)
-                for await (const item of handle.stream({ chunks: true })) {
+                for await (const item of handle.stream({ chunks: true, signal })) {
                     setState((previous) => reduce(previous, item))
                 }
             } catch (caught) {
-                setError(describe(caught))
-                setState((previous) => ({ ...previous, running: false }))
+                // An abort is this page closing the stream on purpose — a session switch, an agent
+                // switch, an unmount. Reporting it would put a transport error on screen for an
+                // action the reader just took.
+                if (!signal.aborted) {
+                    setError(describe(caught))
+                    setState((previous) => ({ ...previous, running: false }))
+                }
             } finally {
+                live.finish(turnId)
                 sessionStorage.removeItem(LIVE_TURN)
                 stopRef.current = undefined
-                void refreshSessions()
+                if (!signal.aborted) void refreshSessions()
             }
         },
         [refreshSessions],
@@ -377,6 +440,9 @@ function Workspace(props: {
         if (parked === null) return
         setState((previous) => ({ ...previous, running: true }))
         void follow(parked, agent)
+        // The cleanup this never had. Without it, a change of agent left the previous agent's
+        // stream writing into a transcript the page had already replaced.
+        return () => liveRef.current.abort()
     }, [agent, follow])
 
     useEffect(() => {
@@ -438,6 +504,10 @@ function Workspace(props: {
     }
 
     const openSession = async (key: string | undefined) => {
+        // Close the live stream *before* replacing the transcript it is writing into. Without this
+        // a turn started in one conversation went on appending rows to the next one — the
+        // transcript was reset, the stream was not, and nothing connected the two.
+        liveRef.current.abort()
         setPanel("chat")
         setSessionKey(key)
         setState(EMPTY)
@@ -466,23 +536,47 @@ function Workspace(props: {
         readonly tools: readonly ToolSummary[]
         readonly schedules: readonly ScheduleRecord[]
         readonly channels: readonly ChannelRow[]
+        readonly config?: AgentConfig
     }>({ tools: [], schedules: [], channels: [] })
+
+    /**
+     * Re-read the panels' data.
+     *
+     * A function rather than only an effect, because the **writing** panels need it: a schedule
+     * added or a setting saved changes what the listing says, and patching the local copy from a
+     * response would be a second opinion about the server's state — the same reasoning `startAgent`
+     * and `createAgent` already use for re-reading the agent listing instead of trusting `adopted`.
+     */
+    const refreshReport = useCallback(async (target: AgentClient) => {
+        const [tools, schedules, described, config] = await Promise.all([
+            target.tools(),
+            target.schedules(),
+            target.describe(),
+            // Fetched with the rest rather than on its own panel, because a *write* to it has
+            // to refresh everything: setting `schedules` or `tools.pinned` through the config
+            // panel changes what the schedule and tool panels say, and one round trip that
+            // leaves two panels stale is how a surface comes to disagree with itself.
+            target.config(),
+        ])
+        setReport({ tools, schedules, channels: described.channels ?? [], config })
+    }, [])
 
     useEffect(() => {
         if (agent === undefined) return
-        if (panel !== "tools" && panel !== "schedules" && panel !== "channels") return
+        if (
+            panel !== "tools" &&
+            panel !== "schedules" &&
+            panel !== "channels" &&
+            panel !== "config"
+        )
+            return
         let cancelled = false
         void (async () => {
             try {
-                const [tools, schedules, described] = await Promise.all([
-                    agent.tools(),
-                    agent.schedules(),
-                    agent.describe(),
-                ])
+                await refreshReport(agent)
                 // The panel may have changed while these were in flight, and a late write would
                 // repaint a surface nobody is looking at with data for one they left.
                 if (cancelled) return
-                setReport({ tools, schedules, channels: described.channels ?? [] })
             } catch (caught) {
                 if (cancelled) return
                 if (isGone(caught)) void agentGone()
@@ -492,7 +586,63 @@ function Workspace(props: {
         return () => {
             cancelled = true
         }
-    }, [agent, panel, agentGone])
+    }, [agent, panel, agentGone, refreshReport])
+
+    /**
+     * One writer for both editing panels, and the reason it is one function.
+     *
+     * Every write here has the same three obligations: say which row is busy so the rest of the
+     * page stays usable, re-read the listing rather than patch it, and report a refusal with the
+     * server's own words. Four call sites each doing that is four places for one of the three to go
+     * missing — and the one that goes missing silently is the re-read, which leaves a panel showing
+     * a schedule that has been deleted.
+     */
+    const [writing, setWriting] = useState<string>()
+    const [writeNote, setWriteNote] = useState<string>()
+    const write = useCallback(
+        async (key: string, work: (target: AgentClient) => Promise<string | undefined>) => {
+            if (agent === undefined) return
+            setWriting(key)
+            setError(undefined)
+            setWriteNote(undefined)
+            try {
+                const note = await work(agent)
+                setWriteNote(note)
+                await refreshReport(agent)
+            } catch (caught) {
+                if (isGone(caught)) void agentGone()
+                else setError(describe(caught))
+            } finally {
+                setWriting(undefined)
+            }
+        },
+        [agent, agentGone, refreshReport],
+    )
+
+    /**
+     * Save one setting.
+     *
+     * `applied` is read rather than assumed. The file is written before the agent is replaced and
+     * `dispose` refuses while a turn is in flight, so a successful write can legitimately come back
+     * unapplied — and saying "saved" alone would describe a change that is not in force. The
+     * server's own `pending.message` is passed through, because it knows why far better than this
+     * page does.
+     */
+    const saveSetting = useCallback(
+        (path: string, value: string, options: { confirm: boolean }) =>
+            void write(path, async (target) => {
+                const result = await target.setConfig(path, value, {
+                    ...(options.confirm ? { confirm: true } : {}),
+                })
+                if (result.applied) {
+                    return result.reflowed
+                        ? `${path} saved. The manifest was re-serialised, so its comments have moved — worth a look at the diff.`
+                        : undefined
+                }
+                return `${path} was written to the manifest and is not in force yet: ${result.pending?.message ?? "the agent could not be replaced"} It takes effect at the next start.`
+            }),
+        [write],
+    )
 
     /**
      * What this server will ask to create an agent, and whether it will at all.
@@ -787,7 +937,56 @@ function Workspace(props: {
                             ) : null}
                             {panel === "tools" ? <ToolsPanel tools={report.tools} /> : null}
                             {panel === "schedules" ? (
-                                <SchedulesPanel schedules={report.schedules} />
+                                <SchedulesPanel
+                                    schedules={report.schedules}
+                                    {...(writing === undefined ? {} : { busy: writing })}
+                                    onCreate={(schedule) =>
+                                        void write(String(schedule.id), (target) =>
+                                            target.createSchedule(schedule).then(() => undefined),
+                                        )
+                                    }
+                                    onDelete={(id) =>
+                                        void write(id, (target) =>
+                                            target.deleteSchedule(id).then(() => undefined),
+                                        )
+                                    }
+                                    /*
+                                     * Out of band, and it does **not** move the next scheduled run.
+                                     * Said on the row rather than left to the route's docs: "run it
+                                     * now" and "pretend it fired" are different things, and
+                                     * somebody who believed the second would find the real one
+                                     * firing a minute later.
+                                     */
+                                    onRun={(id) =>
+                                        void write(id, async (target) => {
+                                            const fired = await target.runSchedule(id)
+                                            return `${id} fired out of band as ${fired.turnId} — its next scheduled run has not moved.`
+                                        })
+                                    }
+                                    onToggle={(id, enabled) =>
+                                        void write(id, (target) =>
+                                            target
+                                                .updateSchedule(id, { enabled })
+                                                .then(() => undefined),
+                                        )
+                                    }
+                                />
+                            ) : null}
+                            {panel === "config" ? (
+                                report.config === undefined ? (
+                                    <p className="empty">reading this agent's settings…</p>
+                                ) : (
+                                    <ConfigPanel
+                                        settings={report.config.settings}
+                                        editable={report.config.editable}
+                                        {...(report.config.file === undefined
+                                            ? {}
+                                            : { file: report.config.file })}
+                                        {...(writing === undefined ? {} : { busy: writing })}
+                                        {...(writeNote === undefined ? {} : { note: writeNote })}
+                                        onSet={saveSetting}
+                                    />
+                                )
                             ) : null}
                             {panel === "channels" ? (
                                 // `now` is passed rather than read inside the component, so a stale
@@ -874,8 +1073,23 @@ async function history(
     const body = (await response.json()) as {
         messages?: { role?: string; content?: string; origin?: string }[]
     }
-    return (body.messages ?? [])
+    /**
+     * **Reversed, because the page is newest-first and the screen is oldest-first.**
+     *
+     * `GET …/messages` pages *backwards* on purpose — `store.ts`'s `pageFirst` is `ORDER BY id DESC`
+     * and `nextBefore` is the page's oldest id, which is how a chat scrolls up. Rendered in wire
+     * order the whole conversation came out upside down, with each assistant reply sitting *above*
+     * the question that prompted it, because the reply has the higher rowid. The CLI has always
+     * reversed here (`cli/src/lib/source.ts:393`) and said why; this consumer never did, and the
+     * wire spec documented no order at all, which is what let the two disagree.
+     */
+    return [...(body.messages ?? [])]
+        .reverse()
         .filter(
+            // `origin` is what separates prose from what the runtime authored — an observation, a
+            // tool call, a repair, a digest. Under NLT the invocation *is* the content, so without
+            // this a resumed conversation shows `ACTION:` blocks as replies. It needs the field to
+            // actually be on the wire to do anything; see `MessagePage` in the wire spec.
             (message) =>
                 message.origin === undefined &&
                 (message.role === "user" || message.role === "assistant") &&
@@ -888,8 +1102,15 @@ async function history(
         }))
 }
 
+/**
+ * One sentence for the screen — and **it does not re-append the hint**.
+ *
+ * `DispachError`'s constructor already embeds it: `super(`${message}\n  hint: ${hint}`)`. Appending
+ * `— ${hint}` on top of that rendered every transport failure with the hint printed twice, in one
+ * paragraph, which is how the sessions banner came to read `hint: Check the base URL … — Check the
+ * base URL …`. `message` is the whole readable error; `detail` is the part before the hint.
+ */
 function describe(error: unknown): string {
-    if (error instanceof DispachError)
-        return error.hint === "" ? error.message : `${error.message} — ${error.hint}`
+    if (error instanceof DispachError) return error.message
     return error instanceof Error ? error.message : String(error)
 }

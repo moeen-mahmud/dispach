@@ -163,14 +163,35 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         summary: "Move a session into a declared phase.",
         body: PhaseBody,
     },
+    "GET /v1/agents/:id/config": {
+        summary: "Every manifest field this surface may set, what it does, and its current value.",
+    },
+    "PATCH /v1/agents/:id/config": {
+        summary: "Set one manifest field, then replace the agent so it takes effect.",
+        statuses: [
+            { code: 409, when: "the field carries a confirm sentence and `confirm` was not true" },
+            { code: 409, when: "the agent came from an object, so there is no manifest to edit" },
+            { code: 400, when: "the path is not settable here, or the result would not validate" },
+        ],
+    },
     "GET /v1/agents/:id/schedules": { summary: "Every schedule, from the store." },
     "POST /v1/agents/:id/schedules": {
         summary: "Create a schedule. Validated by the manifest's own schedule rules.",
         statuses: [{ code: 201, when: "created" }],
     },
     "GET /v1/agents/:id/schedules/:sid": { summary: "One schedule's row." },
-    "PATCH /v1/agents/:id/schedules/:sid": { summary: "Replace a schedule the API created." },
-    "DELETE /v1/agents/:id/schedules/:sid": { summary: "Delete a schedule the API created." },
+    "PATCH /v1/agents/:id/schedules/:sid": {
+        summary: "Replace a schedule the API created.",
+        statuses: [
+            { code: 409, when: "the manifest declares it, so reconciliation would undo the write" },
+        ],
+    },
+    "DELETE /v1/agents/:id/schedules/:sid": {
+        summary: "Delete a schedule the API created.",
+        statuses: [
+            { code: 409, when: "the manifest declares it, so the next boot would re-create it" },
+        ],
+    },
     "POST /v1/agents/:id/schedules/:sid/run": { summary: "Fire a schedule now, out of band." },
     "GET /v1/agents/:id/tools": { summary: "The resolved catalogue, with trust and phases." },
     "GET /v1/agents/:id/skills": { summary: "What the skills index holds." },

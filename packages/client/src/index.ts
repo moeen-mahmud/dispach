@@ -214,6 +214,33 @@ export interface AgentClient {
         readonly turnId: string
         readonly sessionKey: string
     }>
+    /**
+     * Every manifest field a person may set here, what it does, and its current value.
+     *
+     * The values are the manifest's **source** text, unexpanded — `${MODEL_ID}` comes back as
+     * `${MODEL_ID}`. A caller that showed the loaded value and wrote it back would bake the
+     * expansion in, turning a manifest that follows its environment into one that does not.
+     */
+    config(): Promise<AgentConfig>
+    /**
+     * Set one field, then let the server replace the agent so it takes effect.
+     *
+     * `value` is **text**, exactly as it is typed at a terminal, and core's `parseSettingValue`
+     * reads it — a list is `["a", "b"]`, a map is `{k: v}`, a number is `40`. Not a JSON value,
+     * deliberately: one parser serves both of the person's editors, and two would eventually
+     * disagree about whether `["a", "b"]` is a list of two strings.
+     *
+     * Read `applied` rather than assuming it. The file is written before the agent is replaced and
+     * `dispose` refuses while a turn is in flight, so a successful write can legitimately arrive
+     * with `applied: false` and the reason under `pending` — the edit then takes effect at the next
+     * start. Two fields need `confirm: true`; `config()` says which by carrying a `confirm`
+     * sentence on the row.
+     */
+    setConfig(
+        path: string,
+        value: string,
+        options?: { readonly confirm?: boolean },
+    ): Promise<ConfigWriteResult>
     /** One conversation's summary. `sessions()` is the listing. */
     session(sessionKey: string): Promise<SessionSummary>
     /** Move a conversation into a phase the manifest declares. */
@@ -353,6 +380,57 @@ export interface ToolSummary {
     readonly phases?: readonly string[]
 }
 
+/** One editable manifest field, as `GET /v1/agents/:id/config` reports it. */
+export interface ConfigSetting {
+    /** Dotted, exactly as it appears in the file. */
+    readonly path: string
+    /** What it does, addressed to a person reading a list. */
+    readonly means: string
+    /**
+     * Why a person is asked to confirm, when they are.
+     *
+     * Present on exactly two fields — the ones whose only purpose is to stop a check running. A
+     * client must show this sentence and send `confirm: true` only after somebody has read it.
+     */
+    readonly confirm?: string
+    /**
+     * The current value, unexpanded. **Absent when the file does not set the field**, which is not
+     * the same as set to nothing — it is what lets a control distinguish "unset" from "empty".
+     */
+    readonly value?: unknown
+}
+
+export interface AgentConfig {
+    /**
+     * `false` for an agent loaded from an object rather than a file.
+     *
+     * Named rather than implied by an empty list: an embedder's programmatic manifest has no file
+     * behind it, and a client that could not tell would offer a form whose save can only fail.
+     */
+    readonly editable: boolean
+    /** Absolute path of the manifest, when there is one. */
+    readonly file?: string
+    readonly settings: readonly ConfigSetting[]
+}
+
+export interface ConfigWriteResult {
+    readonly path: string
+    /** What was there. `undefined` when the field was not set. */
+    readonly before: unknown
+    readonly after: unknown
+    /**
+     * The source editor could not place the path, so the file was re-serialised.
+     *
+     * Worth surfacing rather than swallowing: a reflowed manifest is correct and its comments have
+     * moved, which a person should hear from the thing that did it rather than from `git diff`.
+     */
+    readonly reflowed: boolean
+    /** Whether the running agent was replaced, so the change is in force now. */
+    readonly applied: boolean
+    /** Why it is not, when `applied` is false. The write already happened either way. */
+    readonly pending?: { readonly code: string; readonly message: string; readonly hint: string }
+}
+
 export interface SkillsReport {
     /** `false` when the agent declares no `skills:` block at all. */
     readonly configured: boolean
@@ -467,8 +545,16 @@ export interface ProvisionStepLike {
 export interface ProvisionOfferLike {
     /** A provisioner was injected. `false` means `POST /v1/agents` answers `501`. */
     readonly available: boolean
-    /** This handler is on a loopback bind. `false` means the route answers `403`. */
+    /** This handler is on a loopback bind. A fact about the server, not about you. */
     readonly local: boolean
+    /**
+     * May *this caller* provision, which is the field to branch on.
+     *
+     * `local` describes the bind; this describes the request. They differ on exactly the
+     * deployment that ships the onboarding page — an authenticated container — where branching on
+     * `local` told an admin they were not allowed to do what they were allowed to do.
+     */
+    readonly allowed: boolean
     readonly steps: readonly ProvisionStepLike[]
 }
 
@@ -821,6 +907,19 @@ export function createClient(options: ClientOptions): DispachClient {
                     at(`/schedules/${encodeURIComponent(scheduleId)}/run`),
                     { body: {} },
                 ),
+
+            config: () => json<AgentConfig>("GET", at("/config")),
+
+            setConfig: (path, value, options) =>
+                json<ConfigWriteResult>("PATCH", at("/config"), {
+                    // `confirm` is spread rather than sent as `false`: absent is not consent, and a
+                    // literal `false` reads as a considered refusal of a question nobody asked.
+                    body: {
+                        path,
+                        value,
+                        ...(options?.confirm === undefined ? {} : { confirm: options.confirm }),
+                    },
+                }),
 
             session: (sessionKey) =>
                 json<SessionSummary>("GET", at(`/sessions/${encodeURIComponent(sessionKey)}`)),

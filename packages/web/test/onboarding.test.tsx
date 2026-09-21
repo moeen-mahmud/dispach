@@ -54,7 +54,10 @@ const STEPS: readonly ProvisionStepLike[] = [
 ]
 
 function offer(overrides: Partial<ProvisionOfferLike> = {}): ProvisionOfferLike {
-    return { available: true, local: true, steps: STEPS, ...overrides }
+    // `allowed` is what the panel branches on — `local` is a fact about the server and answers a
+    // different question. The two differ on an authenticated container, which is where branching on
+    // `local` put a refusal in front of an operator who could in fact create an agent.
+    return { available: true, local: true, allowed: true, steps: STEPS, ...overrides }
 }
 
 function form(
@@ -156,9 +159,10 @@ describe("a server that will not provision says which reason", () => {
         expect(none).toContain("dispach init")
         expect(none).not.toContain("provision-name")
 
-        const remote = renderToStaticMarkup(
+        // Not allowed: the bind is public *and* no credential carried admin.
+        const refused = renderToStaticMarkup(
             createElement(Onboarding, {
-                offer: offer({ local: false }),
+                offer: offer({ local: false, allowed: false }),
                 answers: initialAnswers(STEPS),
                 busy: false,
                 touched: false,
@@ -167,10 +171,35 @@ describe("a server that will not provision says which reason", () => {
                 onOpen: () => {},
             }),
         )
-        expect(remote).toContain("loopback")
-        // And it names the container, which is the deployment this is reached from most often.
-        expect(remote).toContain("0.0.0.0")
-        expect(remote).not.toContain("provision-name")
+        expect(refused).toContain("loopback")
+        // And it names the way out, which is a credential rather than a different deployment.
+        expect(refused).toContain("admin")
+        expect(refused).toContain("server.tokenEnv")
+        expect(refused).not.toContain("provision-name")
+    })
+
+    /**
+     * **A public bind the caller is allowed on renders the form**, which is the container.
+     *
+     * The panel used to branch on `local`, so every container operator — authenticated, holding an
+     * admin credential, able to create an agent — was shown "allowed only on a loopback bind" as
+     * the first screen after exchanging their claim. The one panel that makes onboarding possible,
+     * refusing it in the only deployment that ships it.
+     */
+    test("a public bind with an allowed caller still renders the form", () => {
+        const html = renderToStaticMarkup(
+            createElement(Onboarding, {
+                offer: offer({ local: false, allowed: true }),
+                answers: initialAnswers(STEPS),
+                busy: false,
+                touched: false,
+                onAnswer: () => {},
+                onSubmit: () => {},
+                onOpen: () => {},
+            }),
+        )
+        expect(html).toContain("provision-name")
+        expect(html).not.toContain("loopback")
     })
 })
 

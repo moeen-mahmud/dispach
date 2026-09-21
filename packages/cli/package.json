@@ -1,7 +1,7 @@
 {
     "name": "dispach",
-    "version": "0.1.0",
-    "description": "A lightweight, model-agnostic AI agent runtime \u2014 the CLI, the server, and a typed client.",
+    "version": "0.1.1",
+    "description": "A lightweight, model-agnostic AI agent runtime — the CLI, the server, and a typed client.",
     "license": "Apache-2.0",
     "author": "Moeen Mahmud",
     "repository": {

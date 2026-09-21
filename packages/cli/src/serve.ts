@@ -15,15 +15,20 @@
  * in a log file.
  */
 
+import { dirname, resolve } from "node:path"
 import {
     AgentManifestSchema,
+    agentPluginSupply,
     BRAND,
     EventBus,
     HarnessError,
+    isHarnessError,
     loadManifest,
     Runtime,
+    readManifestHeader,
 } from "@dispach/core"
 import {
+    browsableHost,
     claimCommand,
     claimUrl,
     createApprovalRegistry,
@@ -31,17 +36,11 @@ import {
     serve,
 } from "@dispach/server"
 import { ambientEnv } from "#lib/ambient"
+import { inContainer } from "#lib/bootstrap"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
 import { hostableAgents, manifestForId } from "#lib/lifecycle"
-import {
-    BUILT_IN_PLUGINS,
-    CHANNEL_IDS,
-    CHANNELS,
-    PROVIDER_IDS,
-    scriptRunner,
-    TOOL_PROVIDERS,
-} from "#lib/providers"
+import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { provisionAgent, provisionSteps } from "#lib/provision"
 import { agentsDir, storePath } from "#lib/sandbox"
 
@@ -99,14 +98,98 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     const switchedOff = hostable.filter((entry) => !entry.enabled)
     const wanted = hostable.filter((entry) => entry.enabled)
 
-    const manifests = wanted.map((entry) => ({
-        path: entry.manifestPath,
-        loaded: loadManifest(entry.manifestPath, {
-            knownProviders: PROVIDER_IDS,
-            knownChannels: CHANNEL_IDS,
-            env,
-        }),
-    }))
+    /**
+     * **A discovered agent that will not load is skipped; a named one still refuses.**
+     *
+     * The asymmetry is the whole point, and it was found by running the container rather than by
+     * reading this. `init` writes a manifest whose `.env` holds `MODEL_API_KEY=` — empty, by its
+     * own design, since step 1 of what it prints is "add your key". A bare `serve` hosts every
+     * enabled agent in the sandbox, so one freshly created agent made `loadManifest` throw, the
+     * host exited 1, and `restart: unless-stopped` restarted it into the same failure: **9
+     * restarts, the API gone, the web UI gone** — the always-on server that exists to provision
+     * agents taken down by an agent halfway through being provisioned. The message was perfect and
+     * went to `docker logs`, which is the 57 MB lesson with the polarity reversed: not a bad
+     * message in a file nobody opens, a correct one nobody can act on because the thing that would
+     * let them act is what died.
+     *
+     * So a host does not get to fail because one of N agents is misconfigured. That is the same
+     * reasoning `listAgents` uses to show a broken directory rather than omitting it, and the same
+     * reasoning behind `GET /v1/agents` carrying a stopped row: the listing says what exists, the
+     * resource says what is running.
+     *
+     * A **named** manifest is the other case and keeps throwing. The caller asked for that agent by
+     * path, so quietly serving something else is the worse error — exactly the direction
+     * `hostableAgents` already distinguishes, which is why the condition here is the same one.
+     */
+    const discovered = options.manifestPaths.length === 0
+    const manifests: { path: string; loaded: ReturnType<typeof loadManifest> }[] = []
+    const broken: { path: string; detail: string; hint?: string }[] = []
+    for (const entry of wanted) {
+        try {
+            /**
+             * **Two passes, because `serve` is what hosts channels and a plugin may supply one.**
+             *
+             * This used to be one `loadManifest` against the static `CHANNEL_IDS` and
+             * `PROVIDER_IDS` tables, and that made `PluginContext.defineChannel` — documented
+             * public API — **not work through this binary at all**: a manifest naming a
+             * plugin-supplied channel was refused with `channel_type_unknown` here, before the
+             * plugin that would have satisfied it was ever imported. `Runtime.create` had always
+             * been right, passing `Object.keys(supply.channels)`; it simply never got the chance.
+             *
+             * The recorded hazard with its polarity reversed — *a check only one surface performs
+             * is a check the two disagree about*, refusing a correct manifest rather than admitting
+             * a broken one — and invisible because `telegram` arrives from the CLI's own table and
+             * never through the plugin path, so the public API had no in-tree consumer.
+             *
+             * `validate.ts` is the surface that already does this and the two now agree, which is
+             * the argument for this shape over moving the check into `Runtime.create`: that would
+             * need core to know whether the caller *named* these manifests or discovered them —
+             * the asymmetry below, which belongs to the caller — and a manifest naming a genuinely
+             * unknown channel would then throw from an unguarded `sources.map` and take the whole
+             * host down, which is the crash loop this loop exists to prevent, arriving by another
+             * route.
+             *
+             * The cost is one extra `setup()` for an agent that declares plugins.
+             * `agentPluginSupply` returns immediately when `refs` is empty, so an agent with no
+             * `plugins:` block — which is nearly all of them — pays nothing at all. And the load
+             * happening **here** is a strengthening rather than a cost: a plugin that throws on
+             * import used to do it inside `Runtime.create`, where it killed the host, and now makes
+             * one discovered agent broken-and-skipped like any other bad manifest.
+             */
+            const header = readManifestHeader(entry.manifestPath)
+            const supply = await agentPluginSupply({
+                refs: header.plugins ?? [],
+                agentId: header.id ?? entry.manifestPath,
+                paths: {
+                    workspace: dirname(resolve(entry.manifestPath)),
+                    state: dirname(resolve(entry.manifestPath)),
+                    manifest: resolve(entry.manifestPath),
+                },
+                env,
+                // A throwaway bus, like `validate`'s: `Runtime.create` loads these again and emits
+                // the real `plugin.loaded` on the real bus, and a pre-load emitting onto it would
+                // report every plugin twice to anything watching.
+                bus: new EventBus({ runtimeId: "serve-preload" }),
+                builtIn: BUILT_IN_PLUGINS,
+                base: { toolProviders: TOOL_PROVIDERS, channels: CHANNELS },
+            })
+            manifests.push({
+                path: entry.manifestPath,
+                loaded: loadManifest(entry.manifestPath, {
+                    knownProviders: Object.keys(supply.toolProviders),
+                    knownChannels: Object.keys(supply.channels),
+                    env,
+                }),
+            })
+        } catch (error) {
+            if (!discovered) throw error
+            broken.push({
+                path: entry.manifestPath,
+                detail: isHarnessError(error) ? error.message : String(error),
+                ...(isHarnessError(error) && error.hint !== undefined ? { hint: error.hint } : {}),
+            })
+        }
+    }
     /**
      * **Zero agents is a running server, not a failure.**
      *
@@ -426,10 +509,43 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                     agentId: entry.agentId,
                     ...(entry.reason === undefined ? {} : { reason: entry.reason }),
                 })),
+                // A third way an agent can be absent, and the one that reads as a bug rather than
+                // as a choice: its manifest would not load. Named for the same reason as the two
+                // above — a scripted caller has to be able to tell "no agent is broken" from "this
+                // build does not say".
+                broken: broken.map((entry) => ({
+                    path: entry.path,
+                    detail: entry.detail,
+                    ...(entry.hint === undefined ? {} : { hint: entry.hint }),
+                })),
             })}\n`,
         )
     } else {
-        process.stdout.write(`${BRAND.name} serving on ${running.url}\n`)
+        /**
+         * **A bind is not an address.** `running.url` carries whatever was bound, so the container
+         * printed `http://0.0.0.0:7420` — a URL a browser does nothing with, as the first and most
+         * prominent line of the banner. `browsableHost` has existed since Phase 13 for exactly
+         * this and its own docstring notes it had two copies before a third caller arrived; this is
+         * the fourth, and it never got it. A laptop cannot show the defect: `serve` there binds
+         * `127.0.0.1` and the substitution never fires.
+         *
+         * The bind is still named when it differs, because "listening on every interface" is a
+         * security-relevant fact and quietly showing loopback instead would hide it.
+         */
+        const browsable = `http://${browsableHost(host)}:${running.port}`
+        const boundNote = browsable === running.url ? "" : ` (bound ${host} — every interface)`
+        process.stdout.write(`${BRAND.name} serving on ${browsable}${boundNote}\n`)
+
+        /**
+         * The web UI and the reference, named because nothing named them.
+         *
+         * Both have been served unauthenticated since they shipped and neither appeared anywhere a
+         * person looks — the API reference in particular, which is the single thing most worth
+         * knowing about a server you have just started and cannot yet call. A surface nobody is
+         * told about is a surface nobody has, which is the `includeHistory` shape applied to a page
+         * rather than to a field.
+         */
+        process.stdout.write(`  web UI ${browsable}/ · API reference ${browsable}/docs\n`)
         for (const agent of agents) {
             const channels = runtime.channels.statusOf(agent.id)
             const suffix =
@@ -479,6 +595,19 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                     entry.reason === undefined ? "" : ` (${entry.reason})`
                 }, \`${BRAND.slug} start ${entry.agentId}\`\n`,
             )
+        }
+
+        /**
+         * What would not load, with the reason and the file.
+         *
+         * Printed rather than thrown, because throwing is what took the host down — and printed
+         * *loudly*, because "skipped" is the one state a person reads as working. The path is the
+         * actionable half: the fix is almost always a key missing from the `.env` beside it, which
+         * is precisely the state `init` leaves an agent in on purpose.
+         */
+        for (const entry of broken) {
+            process.stdout.write(`  ${entry.path} — NOT served: ${entry.detail}\n`)
+            if (entry.hint !== undefined) process.stdout.write(`    hint: ${entry.hint}\n`)
         }
 
         for (const held of runtime.declined) {
@@ -532,10 +661,23 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             process.stdout.write(
                 `  running as a background service · ${BRAND.slug} daemon status ${agents[0]?.id ?? ""}\n`,
             )
+        } else if (inContainer()) {
+            /**
+             * A container has no terminal to lose and is already supervised.
+             *
+             * The generic line told an operator reading `docker logs` to press ctrl-c — in a
+             * terminal that does not exist — and to run `daemon install <agent>`, which is both the
+             * per-agent form 16.4 retires *and* a second supervisor underneath the one that started
+             * this process. Two pieces of advice, neither actionable, on the last line of the only
+             * output a container deployment has.
+             */
+            process.stdout.write(
+                "  supervised by the container runtime — it stops with the container, and SIGTERM finishes the delivery in flight.\n",
+            )
         } else {
             process.stdout.write(
-                `  ctrl-c to stop — this ends when the terminal does. \`${BRAND.slug} daemon install ${
-                    agents[0]?.id ?? "<agent>"
+                `  ctrl-c to stop — this ends when the terminal does. \`${BRAND.slug} daemon install${
+                    agents[0]?.id === undefined ? "" : ` ${agents[0].id}`
                 }\` keeps it running.\n`,
             )
         }

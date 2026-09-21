@@ -643,3 +643,70 @@ select:focus {
 .blank-secrets p:last-child {
     margin: 0;
 }
+
+/* ─── editing: settings and the schedule form ───────────────────────────────
+ *
+ * A settings row is a block rather than a table row, and that is the one decision here worth
+ * recording. `tools.pinned` is 92 characters in a generated manifest and `channels` is a list of
+ * maps — the first long values anybody opens — so a fixed value column is either too narrow for
+ * them or absurd for `limits.maxSteps`. A block gives each field the full width and lets the
+ * sentence explaining it sit where somebody reads it: under the name, above the box. It is the same
+ * reasoning `FIELD_ROWS` records for the terminal's settings editor, where bounding a field at
+ * three rows made a 140-character value scroll while two-thirds of the screen sat empty.
+ */
+.config-row {
+    border-bottom: 1px solid var(--line);
+    padding: 14px 0;
+    max-width: 72ch;
+}
+.config-row:first-of-type {
+    padding-top: 0;
+}
+.config-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+.config-row .sub {
+    margin: 4px 0 8px;
+    max-width: 68ch;
+}
+.config-row input[type="text"],
+.config-row input:not([type]),
+.config-row textarea {
+    width: 100%;
+    font-family: var(--mono);
+    font-size: 12px;
+}
+.config-row button {
+    margin-top: 8px;
+}
+/* The tick box sits inline with the sentence it acknowledges, not above it: a checkbox on its own
+ * line reads as a separate question from the warning it belongs to. */
+.config-row label input[type="checkbox"] {
+    width: auto;
+    margin-right: 4px;
+    vertical-align: baseline;
+}
+
+/* Label in one column, control in the other, so a five-field form is scannable down its labels. */
+.form-grid {
+    display: grid;
+    grid-template-columns: 6em 1fr;
+    gap: 8px 12px;
+    align-items: start;
+    max-width: 60ch;
+}
+.form-grid label {
+    font-size: 12px;
+    color: var(--dim);
+    padding-top: 9px;
+}
+.form-grid input,
+.form-grid select {
+    width: 100%;
+}
+/* The second input of the delivery pair, and the note under it. */
+.form-grid > div > input + input {
+    margin-top: 6px;
+}
