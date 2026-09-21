@@ -2313,6 +2313,15 @@ Never claim a performance property without a number in `evals/` and a script to 
   literal. `--production` stays because it is also what selects `react/jsx-runtime` over the **dev**
   runtime, and the two cannot be separated by flags. Same family as the `instanceof` failure: a
   bundler's freedom to rewrite code meeting an assumption ordinary TypeScript cannot check.
+- **A packaging step belongs in the lifecycle hook that needs it, not in `build`.** The npm page's
+  readme is copied from the root README — put in `build`, it broke the **image**, whose builder stage
+  copies `packages/`, `scripts/` and the tsconfigs and has no reason to carry a readme: `cp
+  ../../README.md` found nothing and `bun run build` exited 1. `prepack` is the hook npm runs before
+  `pack` and `publish`, which is exactly when a readme is wanted and never during a compile. The
+  general form, and the third release defect from one root: **the working tree is not the environment
+  the artefact is produced in.** Three guards, one per environment — `rsync`-to-`/tmp` for a fresh
+  checkout, `npm publish --dry-run` for the normalised manifest, and `docker build` for the image —
+  and each of the three bugs was invisible to the other two.
 - **A bundled dependency is a `devDependency`, and getting that wrong is invisible in a working
   tree.** The siblings were moved out of `dependencies` because they are bundled into `dist/` —
   correct, a consumer must not install code that is already in the tarball — and not into
