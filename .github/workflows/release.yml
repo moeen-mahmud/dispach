@@ -111,6 +111,20 @@ jobs:
           files: dispach.rb
           fail_on_unmatched_files: true
 
+      # Names the one step this workflow deliberately does not take, on the run page, where the
+      # person who just cut the release is already looking. Without it the formula is attached and
+      # nothing anywhere says the tap is still serving the previous version — which is how
+      # `brew install` stayed broken through the whole of 0.1.0 while the README documented it.
+      - name: the tap is a separate repository
+        run: |
+          echo "dispach.rb is attached to this release. The tap is moeen-mahmud/homebrew-tap:"
+          echo
+          echo "  gh release download ${GITHUB_REF_NAME} --repo ${GITHUB_REPOSITORY} \\"
+          echo "    --pattern dispach.rb --clobber --dir Formula"
+          echo "  brew audit --strict --formula ./Formula/dispach.rb"
+          echo
+          echo "Until that is committed, brew install serves the previous version."
+
   # Attach the assets to the GitHub release. Tag-only: a `workflow_dispatch` run stops after the
   # matrix, so the pipeline can be exercised without publishing anything.
   publish-binaries:

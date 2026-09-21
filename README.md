@@ -96,9 +96,15 @@ boot. Measured on an M-series mac, `validate --json`: **70–90 ms compiled agai
 Node**.
 
 ```bash
-brew tap moeen-mahmud/dispach https://github.com/moeen-mahmud/dispach
-brew install moeen-mahmud/dispach/dispach
+brew install moeen-mahmud/tap/dispach
 ```
+
+The name is fully qualified on purpose. Homebrew taps from it with no separate `brew tap`, and
+naming a formula in full is *itself* what Homebrew accepts as consent to load a third-party tap —
+`brew install dispach` after a plain `brew tap moeen-mahmud/tap` is the same install and refuses
+until `brew trust moeen-mahmud/tap` is run, because a bare name carries no such consent.
+
+`brew services start dispach` then runs the always-on server; `brew info` prints the rest.
 
 Or take the asset straight from a release — `darwin-arm64`, `darwin-x64`, `linux-x64` and
 `linux-arm64`, each with a `.sha256` beside it:
