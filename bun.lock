@@ -24,12 +24,16 @@
       },
     },
     "packages/cli": {
-      "name": "@dispach/cli",
+      "name": "dispach",
       "version": "0.1.0",
       "bin": {
         "dispach": "./dist/index.js",
       },
       "dependencies": {
+        "ink": "7.1.1",
+        "react": "19.2.8",
+      },
+      "devDependencies": {
         "@dispach/channel-telegram": "workspace:*",
         "@dispach/client": "workspace:*",
         "@dispach/core": "workspace:*",
@@ -37,10 +41,6 @@
         "@dispach/tools-composio": "workspace:*",
         "@dispach/tools-system": "workspace:*",
         "@dispach/tools-web": "workspace:*",
-        "ink": "7.1.1",
-        "react": "19.2.8",
-      },
-      "devDependencies": {
         "@types/react": "19.2.18",
         "ink-testing-library": "4.0.0",
         "react-devtools-core": "6.1.5",
@@ -248,8 +248,6 @@
     "@conventional-changelog/git-client": ["@conventional-changelog/git-client@2.7.0", "", { "dependencies": { "@simple-libs/child-process-utils": "^1.0.0", "@simple-libs/stream-utils": "^1.2.0", "semver": "^7.5.2" }, "peerDependencies": { "conventional-commits-filter": "^5.0.0", "conventional-commits-parser": "^6.4.0" }, "optionalPeers": ["conventional-commits-filter", "conventional-commits-parser"] }, "sha512-j7A8/LBEQ+3rugMzPXoKYzyUPpw/0CBQCyvtTR7Lmu4olG4yRC/Tfkq79Mr3yuPs0SUitlO2HwGP3gitMJnRFw=="],
 
     "@dispach/channel-telegram": ["@dispach/channel-telegram@workspace:packages/channel-telegram"],
-
-    "@dispach/cli": ["@dispach/cli@workspace:packages/cli"],
 
     "@dispach/client": ["@dispach/client@workspace:packages/client"],
 
@@ -498,6 +496,8 @@
     "detect-indent": ["detect-indent@6.1.0", "", {}, "sha512-reYkTUJAZb9gUuZ2RvVCNhVHdg62RHnJ7WJl8ftMi4diZ6NWlciOzQN88pUhSELEwflJht4oQDv0F0BMlwaYtA=="],
 
     "dir-glob": ["dir-glob@3.0.1", "", { "dependencies": { "path-type": "^4.0.0" } }, "sha512-WkrWp9GR4KXfKGYzOLmTuGVi1UWFfws377n9cc55/tb6DuqyF6pcQ5AbiHEshaDpY9v6oaSr2XCDidGmMwdzIA=="],
+
+    "dispach": ["dispach@workspace:packages/cli"],
 
     "dot-prop": ["dot-prop@5.3.0", "", { "dependencies": { "is-obj": "^2.0.0" } }, "sha512-QM8q3zDe58hqUqjraQOmzZ1LIH9SWQJTlEKCH4kJ2oQvLZk7RbQXvtDM2XEq3fwkV9CCvvH4LA0AV+ogFsBM2Q=="],
 

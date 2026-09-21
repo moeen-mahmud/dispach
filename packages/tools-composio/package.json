@@ -1,7 +1,7 @@
 {
     "name": "@dispach/tools-composio",
     "version": "0.1.0",
-    "description": "Composio tool provider — direct HTTP, no MCP transport.",
+    "description": "Composio tool provider \u2014 direct HTTP, no MCP transport.",
     "license": "Apache-2.0",
     "author": "Moeen Mahmud",
     "repository": {
@@ -21,13 +21,11 @@
         }
     },
     "scripts": {
-        "build": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
         "typecheck": "tsc -p tsconfig.json"
-    },
-    "publishConfig": {
-        "access": "public"
     },
     "dependencies": {
         "@dispach/core": "workspace:*"
-    }
+    },
+    "private": true
 }

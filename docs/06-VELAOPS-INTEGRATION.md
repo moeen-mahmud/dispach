@@ -44,6 +44,11 @@ never heard of VelaOps, it belongs in the adapter or the engine.
 
 ## Migration strategy — a cutover, not a coexistence
 
+> **Doing the work? Read `12-OPENCLAW-CUTOVER.md` instead.** This section is the argument for the
+> shape; that file is the runbook — the generator change, the client swap, the container, the
+> per-agent sequence, and what breaks if a step is skipped. This one is here for the question "why
+> like this", which is worth asking once and not once per agent.
+
 **There is no compat adapter, and that is a decision rather than a delay.**
 
 The original plan was Phase 12: `packages/compat-openclaw`, a WS RPC server on 18789 reproducing
@@ -168,31 +173,47 @@ environment exactly as it does today.
 real Dispach agent in step 2 — not against an adapter reproducing the old behaviour, which is what
 makes the right-hand column a claim about the runtime rather than about a translation layer.
 
-| VelaOps gotcha | Dispach behaviour to verify |
-| --- | --- |
-| Model field only accepts `openclaw/main` | `model.main.id` is the real model id, written literally — only secrets go behind `${VAR}` |
-| Config silently rolls back on version skew | `apiVersion` mismatch fails loudly at boot |
-| Two bootstrap caps truncate `MEMORY.md` | One budget; `/context` shows `MEMORY.md` present with token count |
-| Channel change needs external gateway restart | Still a restart — but of **this** process, not an external gateway, and boot is ~55 ms. `POST /reload` answers `409` by design. |
-| Plugin crash-loop from install-record trust gate | No runtime install, no trust gate; version mismatch fails by name |
-| `dmPolicy: "open"` boots healthy, drops every DM | Incoherent channel config fails validation, not a warning |
-| OpenAI-compat HTTP drops tool + thinking streams | One transport; thinking blocks replayed per capabilities |
-| Cron in SQLite, CLI writes scope-denied | Cron is a first-class API and CLI resource |
-| `cron.list` hides disabled unless asked | Disabled listed by default |
-| `cron.add` rejects `payload.model: null` | Omitted optional fields are omitted, never null-rejected |
-| Keyless implicit isolated crons hard-refused | Delivery validated at write with a specific error |
-| 7.1 hard-fails boot on legacy memory layouts | Migrations are ours; layout changes are versioned |
-| Reasoning models empty with `stopReason=length` | `maxOutput` from capabilities, never `window/4` |
-| Tool count is a shared budget, writes starved | Explicit `budget.max` + `reserveWrite` |
-| Dead slugs dropped silently | `resolve()` throws naming slug and provider |
-| Composio MCP 405s the GET leg | No MCP in the Composio path — `composio-proxy` deleted |
-| `mcp.update()` doesn't rebind tools | Not applicable; direct SDK |
-| Tools vanish after rotating `COMPOSIO_API_KEY` | Key read from env at call time, not baked at create |
-| Agent → LiteLLM TCP dies after 4–5h idle | Connection re-established per request; no warmup ticker needed |
-| Generation dies on browser refresh | Detached turns + reattach are core |
-| Tokens arrive in ~40ms clumps | Server sets `TCP_NODELAY` |
-| Turn aborts at `stopReason=aborted` | `limits.turnTimeoutMs`, reported as `turn.end.reason=timeout` |
-| `openclaw.json` regeneration must fire on deploy/reload/restart | Single load path, and one writer (`core/manifest/edit.ts`). No reload: a manifest change takes effect at the next boot, which `manifest_changed` says out loud. |
+| VelaOps gotcha | Dispach behaviour | Verified, 2026-09-21, against a real agent in the container |
+| --- | --- | --- |
+| Model field only accepts `openclaw/main` | `model.main.id` is the real model id, written literally — only secrets go behind `${VAR}` | ✓ `validate` prints `main=deepseek-v4-pro`, and `env MODEL_API_KEY — from the environment` |
+| Config silently rolls back on version skew | `apiVersion` mismatch fails loudly at boot | ✓ `manifest_api_version: Unsupported apiVersion "dispach/v2" — expected "dispach/v1"`, `field: apiVersion` |
+| Two bootstrap caps truncate `MEMORY.md` | One budget; `/context` shows `MEMORY.md` present with a token count | ✓ `/v1/agents/probe/context` → `workspace-volatile: 97 tokens`; `validate` → `volatile=USER.md,MEMORY.md (27/3500)` |
+| Channel change needs external gateway restart | A restart of **this** process, not an external gateway. `POST /reload` re-creates the agent; `409` is the in-flight case only | ✓ `POST /reload` → `200` on an idle agent. The 409 path is `server.test.ts`, which can hold a turn open |
+| Plugin crash-loop from install-record trust gate | No runtime install, no trust gate; a version mismatch fails by name | ✓ `dispach plugins` lists what this binary can resolve by name and nothing else; there is no install path to crash-loop |
+| `dmPolicy: "open"` boots healthy, drops every DM | An incoherent channel config fails validation, not a warning | ✓ `channels[0] declares type "nosuchtransport", which is not registered here. Available: telegram`, `field: channels[0].type` |
+| OpenAI-compat HTTP drops tool + thinking streams | One transport; thinking blocks replayed per capabilities | ✓ `validate` → `capabilities thinking=deepseek`; a live turn streamed 108 chunks over the one transport |
+| Cron in SQLite, CLI writes scope-denied | Cron is a first-class API and CLI resource | ✓ `POST /v1/agents/:id/schedules` → `201`, and `dispach schedules` reads the same rows |
+| `cron.list` hides disabled unless asked | Disabled listed by default | ✓ created with `enabled: false`, and `GET …/schedules` returned it without a flag |
+| `cron.add` rejects `payload.model: null` | An omitted optional field is omitted | ✓ omitting `timezone`, `role`, `sessionMode` and `enabled` → `201`. ⚠ **An explicit `null` is refused** — see the deviation below |
+| Keyless implicit isolated crons hard-refused | Delivery validated at write with a specific error | ✓ `schedule_delivery_channel_unknown` for a channel the agent does not declare |
+| 7.1 hard-fails boot on legacy memory layouts | Migrations are ours; layout changes are versioned | ✓ `PRAGMA user_version = 17`, applied on open with no config change |
+| Reasoning models empty with `stopReason=length` | `maxOutput` from capabilities, never `window/4` | ✓ `window 393216 registry deepseek-v4-pro* (reserveOutput 8192, maxOutput 393216)` — `window/4` would be 98,304 |
+| Tool count is a shared budget, writes starved | Explicit `budget.max` + `reserveWrite` | ✓ both are manifest fields (`02-SPEC-MANIFEST.md`); the probe agent resolved 8 tools with the system provider |
+| Dead slugs dropped silently | The slug **and its provider** are named | ✓ `dispach tools` → `A pinned Composio tool is not in the resolution cache: NO_SUCH_TOOL_SLUG`. ⚠ `validate` is silent about it — see below |
+| Composio MCP 405s the GET leg | No MCP in the Composio path — `composio-proxy` deleted | ✓ structural: nothing in the tree speaks MCP to Composio |
+| `mcp.update()` doesn't rebind tools | Not applicable; direct SDK | ✓ structural |
+| Tools vanish after rotating `COMPOSIO_API_KEY` | Key read from env at call time, not baked at create | code + `tools-composio` tests. **Not exercised here** — no Composio key in this container |
+| Agent → LiteLLM TCP dies after 4–5h idle | Connection re-established per request; no warmup ticker | code: one `fetch` per request, no pooled socket held across turns. **Not exercised** — it needs a four-hour idle |
+| Generation dies on browser refresh | Detached turns + reattach are core | ✓ live: `POST /messages` returned `t_mua5is7eitfp7brg`, the connection was dropped, and `GET …/turns/:id` four seconds later reported `status=final` |
+| Tokens arrive in ~40ms clumps | Server sets `TCP_NODELAY` | ✓ measured on a live turn: **108 chunks, p50 0.0 ms between them**, max 787 ms (the first-token wait) |
+| Turn aborts at `stopReason=aborted` | `limits.turnTimeoutMs`, reported as `turn.end.reason=timeout` | ✓ `validate` → `limits maxSteps=40 turnTimeoutMs=1800000`; the reason mapping is covered in `core`'s turn tests |
+| `openclaw.json` regeneration must fire on deploy/reload/restart | Single load path, and one writer (`core/manifest/edit.ts`). A manifest change takes effect at the next boot, which `manifest_changed` says out loud | ✓ `dispach config list <manifest>` reads through the same loader the runtime uses |
+
+**Two deviations, recorded rather than quietly carried.**
+
+**An explicit `null` for an optional schedule field is refused.** Omitting it is fine; sending
+`{"timezone": null, "role": null}` answers `400 schedule_invalid — role Invalid input: expected
+string, received null`. That is *the same shape* as the OpenClaw gotcha this row claims to have
+fixed, and it matters because a client that serialises its whole payload will send nulls by default.
+The schema is deliberately not loosened: making `null` mean "absent" would make `{"timezone": null}`
+and `{}` the same request, and then a caller who meant to *clear* a field has no way to say so. The
+cost is one line in the engine — strip null-valued keys before the POST — and it is in the runbook.
+
+**`validate` does not report an unresolved pinned slug; `tools` does.** This is the *"a check that
+only `run` performs is a check `validate` disagrees with"* shape, and it is left as-is on purpose:
+`resolve()` deliberately no longer throws, because a **cold** provider cache cannot resolve anything
+and a `validate` that failed there would refuse a correct manifest. The warning belongs at load and
+at `tools`, where the cache state is known. Carried in `05-PLAN.md` rather than fixed in a release.
 
 Step 2 is not done until each of these has been checked against a real agent, or has a recorded
 and justified deviation. Several already have automated coverage in this repo — detached turns and

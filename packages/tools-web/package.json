@@ -1,7 +1,7 @@
 {
     "name": "@dispach/tools-web",
     "version": "0.1.0",
-    "description": "Web search and page fetching — read-only, untrusted by construction.",
+    "description": "Web search and page fetching \u2014 read-only, untrusted by construction.",
     "license": "Apache-2.0",
     "author": "Moeen Mahmud",
     "repository": {
@@ -21,13 +21,11 @@
         }
     },
     "scripts": {
-        "build": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
         "typecheck": "tsc -p tsconfig.json"
-    },
-    "publishConfig": {
-        "access": "public"
     },
     "dependencies": {
         "@dispach/core": "workspace:*"
-    }
+    },
+    "private": true
 }

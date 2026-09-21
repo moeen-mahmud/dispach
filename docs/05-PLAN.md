@@ -4743,6 +4743,83 @@ to an admin-scoped key: provisioning writes files and starts a process, and open
 token on a public bind deserves its own stage with its own threat model. The `admin` capability
 exists and gates credentials, start/stop and reload.
 
+# Phase 19 — the VelaOps cutover — **built** (2026-09-21)
+
+The last phase of the 0.1.0 line. No redesign: doc 06 already held the sequence and the call map.
+What this phase owed was **evidence** and a **runbook**.
+
+### The 24 gotcha rows, walked
+
+Doc 06's own bar: *"Step 2 is not done until each of these has been checked against a real agent, or
+has a recorded and justified deviation."* Every row now carries what the check actually was, against
+`dispach 0.1.0` in the shipped container. The ones worth naming:
+
+- **Detached turns**, live: `POST /messages` returned a turn id, the connection was dropped, and
+  `GET …/turns/:id` four seconds later reported `status=final`. That is the fix for "generation dies
+  on browser refresh", measured rather than claimed.
+- **Streaming**, live: 108 chunks at **p50 0.0 ms** between them. The gotcha was ~40 ms clumps.
+- **`MEMORY.md` actually lands**: `workspace-volatile: 97 tokens` in `/context`. OpenClaw's two
+  bootstrap caps silently truncated it.
+- **`maxOutput` from capabilities**: 393,216 where `window/4` would have been 98,304.
+- **An unresolved pinned slug** is named *with its provider* by `dispach tools`.
+
+**Two deviations, recorded rather than carried quietly.** An explicit `null` for an optional field is
+refused where omitting it is fine — the same shape as the OpenClaw gotcha this row claims to fix, and
+deliberately not loosened, because `null` meaning "absent" would leave a caller who wants to *clear*
+a field with no way to say so. And `validate` does not report an unresolved pinned slug while `tools`
+does, which is the *"a check only one surface performs"* shape — left as-is because `resolve()`
+deliberately no longer throws, since a cold provider cache cannot resolve anything and a `validate`
+that failed there would refuse a correct manifest.
+
+### `docs/12-OPENCLAW-CUTOVER.md`
+
+The runbook, written for whoever does the work rather than for whoever asks why. Step 0 is *get a
+Dispach agent answering before touching engine code*, because every later failure is otherwise
+ambiguous between two systems. Then the generator, the client swap, the container, scoped
+credentials, and the per-agent sequence — with a table of what breaks if a step is skipped. Every
+API shape it shows a reader was checked against the **published tarball**, not against the source.
+
+---
+
+# 0.1.0 — released (2026-09-21)
+
+**One npm package.** `dispach` carries the CLI at its `bin` and the client at `dispach/client`; the
+other eight workspace packages are `private`. No `@dispach/*` scope exists or will: one name to own,
+one to version, one to transfer.
+
+**Three defects found by preparing the release, none visible from the source tree.**
+
+1. **`npm publish` would have uploaded 2,693 files, 201 MB unpacked.** No build cleaned `dist/`,
+   `files: ["dist"]` ships whatever is there, and `dist/` is gitignored so no diff ever showed it.
+   A hundred of those files still imported `@castellan/core` — a package that had not existed for a
+   month. Now 345 files and 9.0 MB, with `rm -rf dist` in every build script.
+2. **`import "dispach"` ran the CLI.** `exports["."]` pointed at the entry with the shebang, so an
+   application importing the package got the banner and an exit. The default import is the library
+   now; `bin` is not governed by `exports`, so there was never a conflict to resolve.
+3. **Minification renamed the error classes.** `this.name = new.target.name` became `"f"`, so an
+   uncaught throw printed `f: Unsupported apiVersion` — a message that reads as a corrupted build.
+   Each class declares its own `ERROR_NAME` now. The general rule: **a user-visible string must not
+   be derived from a name a minifier is free to change.**
+
+**`bun run verify:package`** is the gate that would have caught all three: it packs, installs into an
+empty directory, and uses the package the three documented ways. Reading the bundle instead is not an
+option — it is minified, and a regex for `from "x"` matches the word *from* inside a help string.
+
+**A fourth defect, found by CI rather than by me.** `bun install --frozen-lockfile` refused a
+lockfile that had not been regenerated after the package rename — and underneath that, a worse one:
+the bundled siblings were moved out of `dependencies` and not into `devDependencies`, so a **fresh
+checkout could not build at all** (`Could not resolve: "@dispach/tools-web"`). Locally it kept
+working, because the symlinks were already in `node_modules` from before the edit. That is the
+recorded *"verify a workflow change against a fresh clone"* hazard, and the whole of CI now passes
+on a tree with no `node_modules` and no `dist`: frozen install, lint, build, typecheck, 3510 tests,
+node 1438, `check:deps`, `bench:boot`, `verify:package`. A boundaries test asserts the declaration
+so it cannot recur.
+
+**What the tag ships.** `v0.1.0` builds four signed binaries, a GitHub release, a Homebrew formula, a
+multi-arch GHCR image, and — when `NPM_TOKEN` is set — the npm package. The npm step is **skipped
+rather than failed** without the token, because a release should not go red over a credential that
+has not been created yet.
+
 ---
 
 ## Carried backlog

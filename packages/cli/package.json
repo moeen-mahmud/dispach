@@ -1,7 +1,7 @@
 {
-    "name": "@dispach/cli",
+    "name": "dispach",
     "version": "0.1.0",
-    "description": "Command line interface for the agent runtime.",
+    "description": "A lightweight, model-agnostic AI agent runtime \u2014 the CLI, the server, and a typed client.",
     "license": "Apache-2.0",
     "author": "Moeen Mahmud",
     "repository": {
@@ -19,9 +19,18 @@
     ],
     "exports": {
         ".": {
-            "types": "./dist/index.d.ts",
-            "default": "./dist/index.js"
-        }
+            "types": "./dist/client.d.ts",
+            "default": "./dist/client.js"
+        },
+        "./client": {
+            "types": "./dist/client.d.ts",
+            "default": "./dist/client.js"
+        },
+        "./wire": {
+            "types": "./dist/wire.d.ts",
+            "default": "./dist/wire.js"
+        },
+        "./package.json": "./package.json"
     },
     "imports": {
         "#*": "./src/*.ts",
@@ -30,17 +39,10 @@
     },
     "scripts": {
         "dev": "bun run ./src/index.ts",
-        "build": "bun build ./src/index.ts --outdir dist --target node --format esm --splitting --sourcemap=linked --external '@dispach/core' --external ink --external react --external 'react/*' --banner '#!/usr/bin/env node' && tsc -p tsconfig.build.json",
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --splitting --production --sourcemap=linked --external ink --external react --external 'react/*' --banner '#!/usr/bin/env node' && bun build ./src/client.ts ./src/wire.ts --outdir dist --target node --format esm --production --sourcemap=linked && tsc -p tsconfig.build.json",
         "typecheck": "tsc -p tsconfig.json"
     },
     "dependencies": {
-        "@dispach/channel-telegram": "workspace:*",
-        "@dispach/client": "workspace:*",
-        "@dispach/core": "workspace:*",
-        "@dispach/server": "workspace:*",
-        "@dispach/tools-composio": "workspace:*",
-        "@dispach/tools-system": "workspace:*",
-        "@dispach/tools-web": "workspace:*",
         "ink": "7.1.1",
         "react": "19.2.8"
     },
@@ -48,8 +50,28 @@
         "access": "public"
     },
     "devDependencies": {
+        "@dispach/channel-telegram": "workspace:*",
+        "@dispach/client": "workspace:*",
+        "@dispach/core": "workspace:*",
+        "@dispach/server": "workspace:*",
+        "@dispach/tools-composio": "workspace:*",
+        "@dispach/tools-system": "workspace:*",
+        "@dispach/tools-web": "workspace:*",
         "@types/react": "19.2.18",
         "ink-testing-library": "4.0.0",
         "react-devtools-core": "6.1.5"
+    },
+    "keywords": [
+        "ai",
+        "agent",
+        "runtime",
+        "llm",
+        "cli",
+        "openai-compatible",
+        "telegram"
+    ],
+    "homepage": "https://github.com/moeen-mahmud/dispach",
+    "bugs": {
+        "url": "https://github.com/moeen-mahmud/dispach/issues"
     }
 }

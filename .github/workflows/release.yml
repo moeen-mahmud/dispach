@@ -134,6 +134,63 @@ jobs:
           fail_on_unmatched_files: true
 
   # ─────────────────────────────────────────────────────────────────────────────────────────
+  # The npm package — one name, `dispach`, carrying the CLI and the client.
+  #
+  # **Skipped rather than failed when `NPM_TOKEN` is absent.** A release that ships four signed
+  # binaries and a container image should not go red because a registry credential has not been set
+  # up yet; the tag is the same tag either way, and the package can be published by hand afterwards
+  # with `npm publish` from `packages/cli`. A hard failure here would also make the *first* tag of
+  # any fork red for a reason that has nothing to do with the code.
+  #
+  # `verify:package` runs before publishing and is the real gate: it packs the tarball, installs it
+  # into an empty directory and uses it the three documented ways — the bin, `import "dispach"`, and
+  # `dispach/client`. Reading the bundle instead is not an option, because it is minified and a
+  # regex for `from "x"` matches the word *from* inside a help string.
+  npm:
+    needs: binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: bun install --frozen-lockfile
+
+      # Packs, installs into a clean directory, and runs it. Also the thing that would have caught
+      # the 2,693-file tarball: nothing used to clean `dist/`, and `dist/` is gitignored.
+      - name: verify the package
+        run: bun run verify:package
+
+      - name: the tag and the version agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./packages/cli/package.json').version")
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag v$tag does not match package version $pkg" >&2
+            exit 1
+          fi
+          echo "v$tag"
+
+      - name: publish
+        if: env.NODE_AUTH_TOKEN != ''
+        working-directory: packages/cli
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: skipped
+        if: env.NODE_AUTH_TOKEN == ''
+        run: echo "NPM_TOKEN is not set — nothing published. The release is otherwise complete."
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ─────────────────────────────────────────────────────────────────────────────────────────
   # The image, to GHCR.
   #
   # Two architectures, because the agent container is as likely to land on an arm64 host as an

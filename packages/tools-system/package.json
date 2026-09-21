@@ -1,7 +1,7 @@
 {
     "name": "@dispach/tools-system",
     "version": "0.1.0",
-    "description": "Shell execution and file tools — the agent acting on the machine it runs on.",
+    "description": "Shell execution and file tools \u2014 the agent acting on the machine it runs on.",
     "license": "Apache-2.0",
     "author": "Moeen Mahmud",
     "repository": {
@@ -21,14 +21,12 @@
         }
     },
     "scripts": {
-        "build": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
         "typecheck": "tsc -p tsconfig.json"
-    },
-    "publishConfig": {
-        "access": "public"
     },
     "dependencies": {
         "@dispach/core": "workspace:*",
         "yaml": "^2.8.1"
-    }
+    },
+    "private": true
 }
