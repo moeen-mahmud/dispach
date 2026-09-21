@@ -22,7 +22,9 @@ import { COMMANDS, commandsAccepting, findCommand, flagsFor, GLOBAL_FLAGS } from
 import type { FlagSpec, FlagValue, FlagValues, ParseResult } from "#lib/schema"
 
 /** Anything wrong with the command line itself. Distinct from anything wrong with a manifest. */
-export class UsageError extends HarnessError {}
+export class UsageError extends HarnessError {
+    static override readonly ERROR_NAME = "UsageError"
+}
 
 // ─── nearest match ───────────────────────────────────────────────────────────────────────
 

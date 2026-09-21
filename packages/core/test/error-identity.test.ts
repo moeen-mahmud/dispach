@@ -23,7 +23,7 @@
 import { existsSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { ConfigError, HarnessError, isHarnessError } from "../src/errors.ts"
+import { ConfigError, HarnessError, isHarnessError, ToolError } from "../src/errors.ts"
 import { describe, expect, test } from "./_harness.ts"
 
 const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js")
@@ -66,6 +66,25 @@ describe("isHarnessError", () => {
         expect(isHarnessError(undefined)).toBe(false)
         expect(isHarnessError(null)).toBe(false)
         expect(isHarnessError("HarnessError")).toBe(false)
+    })
+
+    test("each class reports its own name, which a minifier cannot take away", () => {
+        /**
+         * `this.name = new.target.name` read better and does not survive the published build:
+         * `--production` mangles identifiers, so `ConfigError` became `class f` and an uncaught
+         * throw printed `f: Unsupported apiVersion "nope"` — a failure message that looks like a
+         * corrupted build.
+         *
+         * This test cannot see minification (the suite runs source), so what it holds is the
+         * *mechanism*: the name comes from a declared static rather than from an identifier, which
+         * is the thing a bundler is free to rename. A subclass that forgets it gets `HarnessError`
+         * — wrong, but legibly wrong.
+         */
+        expect(new HarnessError({ code: "c", message: "m", hint: "h" }).name).toBe("HarnessError")
+        expect(new ConfigError({ code: "c", message: "m", hint: "h" }).name).toBe("ConfigError")
+        expect(new ToolError({ code: "c", message: "m", hint: "h" }).name).toBe("ToolError")
+        // Declared, not derived: the static is what a `--production` build preserves.
+        expect(ConfigError.ERROR_NAME).toBe("ConfigError")
     })
 
     test("the mark never reaches a serialisation", () => {

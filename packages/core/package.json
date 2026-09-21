@@ -31,14 +31,12 @@
         }
     },
     "scripts": {
-        "build": "bun build ./src/index.ts ./src/testing/index.ts ./src/wire/index.ts --outdir dist --target node --format esm --splitting --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "build": "rm -rf dist && bun build ./src/index.ts ./src/testing/index.ts ./src/wire/index.ts --outdir dist --target node --format esm --splitting --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
         "typecheck": "tsc -p tsconfig.json"
-    },
-    "publishConfig": {
-        "access": "public"
     },
     "dependencies": {
         "yaml": "^2.8.1",
         "zod": "^4.1.12"
-    }
+    },
+    "private": true
 }

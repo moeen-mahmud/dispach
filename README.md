@@ -63,7 +63,32 @@ Full rationale for every decision, including the negative ones, is in `docs/00-D
 
 ## Getting set up
 
-### Install the binary
+### Install
+
+**From npm**, which is one package carrying the command and the client:
+
+```bash
+npm i -g dispach          # the `dispach` command
+dispach --version         # 0.1.0
+```
+
+and in an application that talks to a running server:
+
+```bash
+npm i dispach
+```
+
+```ts
+import { createClient } from "dispach/client"
+import type { AnyEvent } from "dispach/wire"
+```
+
+There is no `@dispach/*` scope, deliberately: the runtime is nine workspace packages and one name,
+so there is one thing to install, one thing to version and one thing to trust. `dispach/client`
+pulls in no terminal UI — asserted by the package's own tests, because an HTTP client has no
+business paying the ~170-210 ms that importing Ink and React costs.
+
+### Or the standalone binary
 
 One file, no Node and no `node_modules`. `bun build --compile` embeds the runtime, which is also
 why it starts *faster* than a `node_modules` install — there is no module resolution left to do at

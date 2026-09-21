@@ -2297,6 +2297,29 @@ Never claim a performance property without a number in `evals/` and a script to 
   "expired" would date a leaked credential and "revoked" would confirm it had once been real. A scope
   naming an agent this server does not hold is **refused at mint**, because a credential that
   authenticates and reaches nothing is indistinguishable from a working one until it is used.
+- **The published artefact is assembled from a directory nobody reviews.** `npm pack --dry-run` on
+  this repo offered **2,693 files and 201 MB** for a CLI whose bundle is 246 KB — because no build
+  cleaned `dist/`, `files: ["dist"]` ships whatever is in it, and `dist/` is gitignored so no diff
+  ever showed it. A hundred of those files still imported `@castellan/core`, gone a month earlier.
+  `rm -rf dist &&` prefixes every build script now. The guard is **not** a test that reads the
+  tarball: the bundle is minified, and scanning it for `from "x"` matched the word *from* inside a
+  help string and reported ten "undeclared dependencies" that were fragments of a UI. `bun run
+  verify:package` packs, installs into an empty directory and *uses* it — the only tool that answers
+  the question correctly, which makes it a release gate rather than a unit test.
+- **A user-visible string must not be derived from a name a minifier is free to change.**
+  `this.name = new.target.name` reads better and does not survive `--production`: `ConfigError`
+  became `class f`, so an uncaught throw printed `f: Unsupported apiVersion` — a message that reads
+  as a corrupted build. Each error class declares a static `ERROR_NAME`, which survives as a string
+  literal. `--production` stays because it is also what selects `react/jsx-runtime` over the **dev**
+  runtime, and the two cannot be separated by flags. Same family as the `instanceof` failure: a
+  bundler's freedom to rewrite code meeting an assumption ordinary TypeScript cannot check.
+- **One npm name, and `exports["."]` is the library rather than the CLI.** Nine workspace packages
+  publish as one — `dispach`, with the command at `bin` and the client at `dispach/client` — so there
+  is one thing to own, version and transfer. `"."` pointed at the entry carrying the shebang, so
+  `import "dispach"` printed the banner and exited; `bin` is not governed by `exports`, so there was
+  never a conflict, only a wrong default. `ink` and `react` stay external while everything else is
+  bundled, because the lazy `import("ink")` is what keeps ~170-210 ms off every non-interactive
+  command and inlining them defeats it.
 - **A wall-clock assertion in the unit suite fails under load, and load is what CI is.** `index cold in
   under 50 ms and cached in under 5 ms` passes on an idle machine and fails 2 runs in 3 with four
   builds running beside it — which is a shared 2-core runner every time. Its own comment says the

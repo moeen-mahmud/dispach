@@ -69,6 +69,8 @@ export function isHarnessError(value: unknown): value is HarnessError {
 
 /** Base for every error this runtime raises deliberately. */
 export class HarnessError extends Error {
+    /** What `.name` reports. Declared per class; see the constructor. */
+    static readonly ERROR_NAME: string = "HarnessError"
     readonly code: string
     readonly hint: string
     readonly field: string | undefined
@@ -76,7 +78,22 @@ export class HarnessError extends Error {
 
     constructor(init: HarnessErrorInit) {
         super(init.message, init.cause === undefined ? undefined : { cause: init.cause })
-        this.name = new.target.name
+        /**
+         * The class's **own** name, declared — never `new.target.name`.
+         *
+         * That derivation read better and does not survive a bundler: the published package is
+         * built with `--production`, which mangles identifiers, so `ConfigError` became `class f`
+         * and every uncaught throw printed `f: Unsupported apiVersion "nope"`. Nothing in this repo
+         * branches on `.name`, so the cost was never a wrong decision — it was a failure message
+         * that looks like a corrupted build, which is the one thing this project is least willing to
+         * ship.
+         *
+         * `ERROR_NAME` is a static on each subclass rather than a constructor argument, so a new
+         * subclass that forgets it inherits `HarnessError` instead of a mangled letter — wrong, but
+         * legibly wrong. The general rule: **a user-visible string must not be derived from a name
+         * a minifier is free to change.**
+         */
+        this.name = (new.target as typeof HarnessError).ERROR_NAME ?? "HarnessError"
         /**
          * The cross-bundle mark, set here and **not declared as a field**.
          *
@@ -124,7 +141,9 @@ export class HarnessError extends Error {
 }
 
 /** Anything wrong with a manifest, its referenced files, or the environment it needs. */
-export class ConfigError extends HarnessError {}
+export class ConfigError extends HarnessError {
+    static override readonly ERROR_NAME = "ConfigError"
+}
 
 /**
  * Anything wrong between us and a model endpoint.
@@ -137,6 +156,8 @@ export class ConfigError extends HarnessError {}
  * on every real failure and quietly never retried.
  */
 export class ModelError extends HarnessError {
+    static override readonly ERROR_NAME = "ModelError"
+
     /** HTTP status, when the failure was a response rather than a transport error. */
     readonly status: number | undefined
     /** From `Retry-After`, when the endpoint sent one. The endpoint's own instruction outranks any backoff. */
@@ -150,7 +171,9 @@ export class ModelError extends HarnessError {
 }
 
 /** A turn ended because something asked it to, not because it failed. */
-export class AbortedError extends HarnessError {}
+export class AbortedError extends HarnessError {
+    static override readonly ERROR_NAME = "AbortedError"
+}
 
 // ─── Config ──────────────────────────────────────────────────────────────────────────────
 
@@ -330,7 +353,9 @@ export function turnTimeout(turnId: string, ms: number): AbortedError {
 // ─── Tools ───────────────────────────────────────────────────────────────────────────────
 
 /** Anything wrong with resolving, coercing, or running a tool. */
-export class ToolError extends HarnessError {}
+export class ToolError extends HarnessError {
+    static override readonly ERROR_NAME = "ToolError"
+}
 
 export interface UnknownToolInit {
     slug: string

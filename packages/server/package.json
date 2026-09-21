@@ -21,11 +21,8 @@
         }
     },
     "scripts": {
-        "build": "bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
         "typecheck": "tsc -p tsconfig.json"
-    },
-    "publishConfig": {
-        "access": "public"
     },
     "dependencies": {
         "@dispach/core": "workspace:*",
@@ -33,5 +30,6 @@
     },
     "devDependencies": {
         "@dispach/web": "workspace:*"
-    }
+    },
+    "private": true
 }
