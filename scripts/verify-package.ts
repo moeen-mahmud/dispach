@@ -19,7 +19,7 @@
  *     bun run verify:package
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -69,6 +69,32 @@ try {
         `${(tarball.unpackedSize / 1e6).toFixed(1)} MB`,
     )
 
+    /**
+     * **`npm publish --dry-run`, because `npm pack` does not normalise the manifest.**
+     *
+     * This is the check that was missing, and the bug it would have caught is the worst kind. `bin`
+     * was `{"dispach": "./dist/index.js"}`; npm rejects a leading `./` on a bin target and strips
+     * **the whole entry**, so the published package would have installed no command at all —
+     * `npm i -g dispach` and then `dispach: command not found`. Every local check passed, because
+     * `npm install <tarball>` tolerates the `./` that `npm publish` removes.
+     *
+     * So the assertion is not about any one field: it is that npm had **nothing to correct**. Any
+     * "auto-corrected some errors in your package.json" is npm telling us the thing it publishes is
+     * not the thing we wrote, and that difference is exactly where a defect hides.
+     */
+    process.stdout.write("asking npm what it would change\n")
+    const dry = Bun.spawnSync(["npm", "publish", "--dry-run", "--access", "public"], {
+        cwd: CLI,
+        stdout: "pipe",
+        stderr: "pipe",
+    })
+    const dryText = `${new TextDecoder().decode(dry.stdout)}${new TextDecoder().decode(dry.stderr)}`
+    const corrected = dryText
+        .split("\n")
+        .filter((line) => /auto-corrected|errors corrected|was invalid/.test(line))
+    check("npm has nothing to correct in package.json", corrected.length === 0)
+    for (const line of corrected) process.stdout.write(`        ${line.trim()}\n`)
+
     process.stdout.write("installing into a clean directory\n")
     writeFileSync(join(work, "package.json"), JSON.stringify({ name: "consumer", type: "module" }))
     run("npm", ["install", "--no-audit", "--no-fund", join(work, tarball.filename)], work)
@@ -76,6 +102,18 @@ try {
     process.stdout.write("using it\n")
     const cli = run(join(work, "node_modules", ".bin", "dispach"), ["--version"], work).trim()
     check("the bin runs", /^\d+\.\d+\.\d+$/.test(cli), cli)
+
+    /**
+     * A readme, and a non-empty one.
+     *
+     * `files` listed `README.md` and the directory had none. npm ignores a missing entry **in
+     * silence**, so the package would have gone out with a blank page on the registry — the front
+     * door of the whole project, empty, with nothing anywhere reporting it. It is copied from the
+     * root README at build time rather than maintained twice.
+     */
+    const readme = join(work, "node_modules", "dispach", "README.md")
+    const readmeBytes = existsSync(readme) ? statSync(readme).size : 0
+    check("it ships a readme", readmeBytes > 1000, `${readmeBytes} bytes`)
 
     writeFileSync(
         join(work, "probe.mjs"),

@@ -41,3 +41,6 @@ local_test/
 # docs
 10-*.md
 11-*.md
+# Generated at build time from the root README — it is the npm page, and a second
+# hand-maintained copy is drift waiting to happen.
+packages/cli/README.md
