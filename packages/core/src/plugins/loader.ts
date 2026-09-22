@@ -3,9 +3,22 @@
  *
  * ## Resolution order, and why a built-in registry exists at all
  *
- * A bare specifier is looked up in a **built-in registry** first and only then imported; a relative
- * path is only ever a path. The registry is not a shortcut — it is what lets `@dispach/channel-telegram`
- * appear in a manifest and resolve to the copy the binary already bundles.
+ * A bare specifier is looked up in a **built-in registry** first, then in the host's plugin root, and
+ * only then imported; a relative path is only ever a path. The registry is not a shortcut — it is what
+ * lets `@dispach/channel-telegram` appear in a manifest and resolve to the copy the binary already
+ * bundles.
+ *
+ * The middle lookup is what `plugins add` installs into: `<pluginRoot>/<name>/` and the `main` its
+ * package.json names. It sits between the two because a host's own bundled copy must always win — a
+ * vendored directory shadowing `@dispach/channel-telegram` would load a second copy of a package that
+ * is already in the binary — and because `import()` has to stay last, since it is the only lookup that
+ * can reach a `node_modules` the operator installed themselves. `LoadedPlugin.lookup` records which
+ * one answered, so "which code is loaded" has an answer that is not a guess.
+ *
+ * A plugin installed there is **one self-contained bundle**: nothing installs dependencies, ever, so
+ * the compiled binary and the container — neither of which has a `node_modules` — resolve a plugin
+ * exactly as a checkout does. `plugins add` is what refuses a tree that would need an install; by the
+ * time this runs, a directory is either enterable or a refusal.
  *
  * The alternative was importing everything dynamically, and it is unavailable for a structural
  * reason rather than a preference: a module imported both statically and dynamically makes
@@ -15,8 +28,8 @@
  * and `bun test` walks straight past it, because tests import source and the failure is in the
  * bundle. The registry keeps each module imported exactly one way.
  *
- * What an embedder supplies as built-ins is therefore the same list the binary bundles. A spec that
- * is in neither the registry nor `node_modules` is refused, never fetched: hard rule 5.
+ * What an embedder supplies as built-ins is therefore the same list the binary bundles. A spec in none
+ * of the three lookups is refused, never fetched: hard rule 5.
  *
  * ## Per agent
  *
@@ -32,10 +45,13 @@
  * is a new seam in `turn.ts` and belongs in its own reviewable change.
  */
 
+import { existsSync, readFileSync } from "node:fs"
+import { join, resolve as resolvePath, sep } from "node:path"
 import {
     pluginApiMismatch,
     pluginApiRangeUnreadable,
     pluginConfigInvalid,
+    pluginEntryMissing,
     pluginMalformed,
     pluginNameCollision,
     pluginNotFound,
@@ -63,9 +79,20 @@ export const SETUP_BUDGET_MS = 200
  */
 export type BuiltInPlugins = Readonly<Record<string, Plugin>>
 
+/** Which of the three lookups answered for a spec. Reported by `plugins`. */
+export type PluginLookup = "registry" | "installed" | "import"
+
 export interface LoadPluginsOptions {
     readonly refs: readonly PluginRef[]
     readonly builtIn?: BuiltInPlugins
+    /**
+     * Directory holding installed plugins, one per subdirectory, or absent to skip that lookup.
+     *
+     * Supplied by the host rather than derived here, for the reason every sandbox path in this project
+     * is: one module owns them (`cli/src/lib/sandbox.ts`) so a test can redirect them, and a second
+     * derivation is how one command writes where another does not look.
+     */
+    readonly pluginRoot?: string
     readonly agentId: string
     readonly paths: PluginPaths
     readonly env: EnvSource
@@ -97,6 +124,8 @@ export interface LoadedPlugin {
     readonly permissions: readonly Permission[]
     /** What this plugin registered, so `plugins` can say what naming it actually bought. */
     readonly registered: readonly string[]
+    /** Which lookup answered — the registry, the plugin root, or a module import. */
+    readonly lookup: PluginLookup
 }
 
 /** Normalises the two spellings a `plugins:` entry may take. */
@@ -138,27 +167,80 @@ function raiseMalformed(spec: string, problem: string): never {
     throw pluginMalformed(spec, problem)
 }
 
-async function resolve(spec: string, options: LoadPluginsOptions): Promise<Plugin> {
+/**
+ * The entry file of an installed plugin, or `undefined` when there is no directory to enter.
+ *
+ * Bare names only, and the `/` test is the guard rather than a tidiness rule: a spec is a string
+ * from a manifest, and `../../anything` under `join` would walk straight out of the root. A scoped
+ * name contains a separator too, which is correct — `@dispach/channel-telegram` belongs to the
+ * registry above or to `import()` below, never to a vendored directory shadowing the binary's own copy.
+ *
+ * A directory that exists and cannot be entered throws instead of falling through. `import()` would
+ * then report "cannot find module dispach-whatsapp", which sends a reader to a package registry when
+ * the problem is a half-fetched directory.
+ */
+function installedEntry(spec: string, root: string): string | undefined {
+    if (spec.startsWith(".") || spec.includes("/") || spec.includes("\\")) return undefined
+    const dir = join(root, spec)
+    if (!existsSync(dir)) return undefined
+
+    let main = "index.js"
+    const packageFile = join(dir, "package.json")
+    if (existsSync(packageFile)) {
+        let parsed: unknown
+        try {
+            parsed = JSON.parse(readFileSync(packageFile, "utf8"))
+        } catch (cause) {
+            throw pluginEntryMissing(
+                spec,
+                dir,
+                `its package.json is not valid JSON (${cause instanceof Error ? cause.message : String(cause)})`,
+            )
+        }
+        const field = (parsed as { main?: unknown } | null)?.main
+        if (typeof field === "string" && field !== "") main = field
+    }
+
+    // Resolved before the containment test, for the reason `root.ts` already records: an unresolved
+    // `<dir>/../../evil.js` passes a prefix test while landing nowhere near the directory.
+    const entry = resolvePath(dir, main)
+    const base = resolvePath(dir)
+    if (entry !== base && !entry.startsWith(base + sep)) {
+        throw pluginEntryMissing(spec, dir, `its \`main\` points outside the plugin directory`)
+    }
+    if (!existsSync(entry)) throw pluginEntryMissing(spec, dir, `${main} is not there`)
+    return entry
+}
+
+async function resolve(
+    spec: string,
+    options: LoadPluginsOptions,
+): Promise<{ plugin: Plugin; lookup: PluginLookup }> {
     const builtIn = options.builtIn ?? {}
     const direct = builtIn[spec]
-    if (direct !== undefined) return direct
+    if (direct !== undefined) return { plugin: direct, lookup: "registry" }
 
     const importModule =
         options.importModule ?? ((specifier: string) => import(/* @vite-ignore */ specifier))
     // A relative path is resolved against the *manifest's* directory, never `process.cwd()` — the
     // same rule every other path in this runtime follows, and for the same reason: the working
     // directory belongs to whoever launched the process and moves depending on how they did it.
-    const specifier = spec.startsWith(".")
-        ? new URL(spec, `file://${options.paths.manifest}`).pathname
-        : spec
+    const installed =
+        options.pluginRoot === undefined ? undefined : installedEntry(spec, options.pluginRoot)
+    const specifier =
+        installed ??
+        (spec.startsWith(".") ? new URL(spec, `file://${options.paths.manifest}`).pathname : spec)
 
     try {
-        return pluginFrom(spec, await importModule(specifier))
+        return {
+            plugin: pluginFrom(spec, await importModule(specifier)),
+            lookup: installed === undefined ? "import" : "installed",
+        }
     } catch (error) {
         // A malformed plugin already carries its own explanation; re-wrapping it as "not found"
         // would replace a precise message with a vague one.
         if (error instanceof Error && error.name === "ConfigError") throw error
-        throw pluginNotFound(spec, Object.keys(builtIn), error)
+        throw pluginNotFound(spec, Object.keys(builtIn), error, options.pluginRoot)
     }
 }
 
@@ -195,7 +277,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
 
     for (const ref of options.refs) {
         const { spec, config } = refParts(ref)
-        const plugin = await resolve(spec, options)
+        const { plugin, lookup } = await resolve(spec, options)
 
         const previous = bySpec.get(plugin.name)
         if (previous !== undefined) throw pluginNameCollision(plugin.name, [previous, spec])
@@ -246,6 +328,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
             setupMs,
             permissions: plugin.permissions ?? [],
             registered,
+            lookup,
         }
         loaded.push(entry)
 
@@ -305,6 +388,8 @@ export interface AgentPluginSupplyOptions {
     readonly env: EnvSource
     readonly bus: EventBus
     readonly builtIn?: BuiltInPlugins
+    /** Where installed plugins live. See `LoadPluginsOptions.pluginRoot`. */
+    readonly pluginRoot?: string
     readonly importModule?: (specifier: string) => Promise<unknown>
     /** What the host registered directly. Plugin registrations layer over these. */
     readonly base?: {
@@ -337,6 +422,7 @@ export async function agentPluginSupply(
         env: options.env,
         bus: options.bus,
         ...(options.builtIn === undefined ? {} : { builtIn: options.builtIn }),
+        ...(options.pluginRoot === undefined ? {} : { pluginRoot: options.pluginRoot }),
         ...(options.importModule === undefined ? {} : { importModule: options.importModule }),
     })
 

@@ -7,7 +7,7 @@ import type { BrowseRow, InstallReport } from "#lib/browse"
 import type { Slice } from "#lib/scroll"
 import type { SessionRowSource } from "#lib/sessions-view"
 import type { AgentSource } from "#lib/source"
-import type { CatalogueEntry } from "#lib/source-cache"
+import type { CatalogueEntry, Git } from "#lib/source-cache"
 import type { TextSelection } from "#lib/text-selection"
 import type {
     EditorState,
@@ -312,8 +312,18 @@ export interface AgentsOptions {
 }
 
 export interface PluginsOptions {
+    readonly action: string
     readonly manifestPath: string
+    /** A repository for add, a plugin name for remove. Unused by list. */
+    readonly rest?: readonly string[]
+    /** Branch, tag or commit to pin (add). Beats a branch read out of the URL. */
+    readonly ref?: string
+    /** The directory to install into (add), overriding the one derived from the URL. */
+    readonly name?: string
     readonly json?: boolean
+    /** Injected by the tests, which never reach a network. */
+    readonly git?: Git
+    readonly env?: Readonly<Record<string, string | undefined>>
 }
 
 // ─── component props ─────────────────────────────────────────────────────────────────────

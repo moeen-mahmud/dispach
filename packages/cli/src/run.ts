@@ -59,7 +59,7 @@ import { resolveModeFromProcess } from "#lib/output"
 import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { keyValue } from "#lib/render"
 import { priorMessages, reopenNote, resumeNotice } from "#lib/resume"
-import { listAgents, storePath } from "#lib/sandbox"
+import { listAgents, pluginRoot, storePath } from "#lib/sandbox"
 import type { RunOptions } from "#lib/schema"
 import { screenColumns } from "#lib/screen"
 import {
@@ -289,6 +289,7 @@ export async function runCommand(options: RunOptions): Promise<number> {
             agents: [options.manifestPath],
             toolProviders: TOOL_PROVIDERS,
             builtInPlugins: BUILT_IN_PLUGINS,
+            pluginRoot: pluginRoot(),
             scriptRunner: scriptRunner(),
             channels: CHANNELS,
             // A `.env` in the directory this was launched from loses to the agent's own. See

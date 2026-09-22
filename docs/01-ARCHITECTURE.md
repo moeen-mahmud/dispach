@@ -759,7 +759,8 @@ packages/cli/src/
     theme.ts          the RICH path's: colour tokens and glyphs (pure)
     env.ts            every environment read
     ambient.ts        which .env wins
-    sandbox.ts        ~/<stateDir>: discovery, ref resolution, the store path
+    sandbox.ts        ~/<stateDir>: discovery, ref resolution, the store and plugin paths
+    plugin-install.ts fetching a plugin, and what "self-contained" refuses
     exit.ts           the single teardown, and who owns SIGTERM
     providers.ts      which tool providers and channels this binary can supply
     launchd.ts        plist rendering and launchctl parsing (pure)

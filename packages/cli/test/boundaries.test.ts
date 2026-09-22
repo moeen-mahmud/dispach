@@ -354,6 +354,52 @@ describe("exactly one module may spawn a subprocess", () => {
     })
 })
 
+describe("every host that loads plugins names the plugin root", () => {
+    /**
+     * The plugin root is the middle of the loader's three lookups, and it is the **host's** to supply:
+     * core must not derive a sandbox path, because one module owning them is what lets a test redirect
+     * them (`provisionAgent` computed one itself once and wrote three agents into the author's real
+     * home directory).
+     *
+     * Which means ten object literals have to name it, and this project has paid six separate rounds
+     * for exactly that shape — `apiKeyEnv`, `ChatMessage.toolCalls`, `TurnInput.skills`,
+     * `ToolContext.readArtifact`, `ToolContext.memoryDir`, `init --schedules daily` — a field declared
+     * on a type, dropped by one conditional spread, and invisible to `tsc`. Here the symptom would be
+     * the recorded asymmetry with the polarity reversed: `validate` reporting a manifest broken that
+     * `run` boots perfectly well, because only one of the two looked in the directory the plugin is in.
+     *
+     * So it is asserted structurally rather than once per command. A new host is covered with nothing
+     * to remember, which is the same reason `CommandSpec.inSession` is required and the flag walk below
+     * reads `index.ts`.
+     */
+    const HOSTS = FILES.filter(
+        (file) =>
+            file.text.includes("Runtime.create({") || file.text.includes("agentPluginSupply({"),
+    )
+
+    test("there are hosts to check — otherwise this test proves nothing", () => {
+        expect(HOSTS.length).toBeGreaterThan(5)
+    })
+
+    test("each one passes pluginRoot()", () => {
+        // Matched as a *call* rather than as the literal `pluginRoot()`: a command with a test seam
+        // passes `pluginRoot(options.env)`, which is the same fact about the same module.
+        const offenders = HOSTS.filter((file) => !/\bpluginRoot\(/.test(file.text)).map(
+            (file) => file.path,
+        )
+        expect(offenders).toEqual([])
+    })
+
+    test("and only lib/sandbox.ts derives it", () => {
+        const offenders = FILES.filter(
+            (file) =>
+                file.path !== "lib/sandbox.ts" &&
+                /join\(\s*sandboxRoot\([^)]*\),\s*"plugins"/.test(file.text),
+        ).map((file) => file.path)
+        expect(offenders).toEqual([])
+    })
+})
+
 describe("a generated session key has one derivation", () => {
     /**
      * `sessionKeyFrom` turns bytes into `local:xxxxxx`. `resolveSession` called it inline, and `/new`

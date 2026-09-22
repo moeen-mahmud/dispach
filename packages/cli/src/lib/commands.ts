@@ -617,13 +617,56 @@ export const COMMANDS: readonly CommandSpec[] = [
         ],
     },
     {
+        // Action first, manifest second — the shape `config` and `memory` already use. `plugins <agent>`
+        // was the whole command until there was something to install, and a bare positional cannot stay
+        // the agent once `add` and `remove` exist: an agent may legitimately be named `add`.
         name: "plugins",
 
         inSession: "output",
         needsServer: false,
-        summary: "list the plugins this agent loaded, and what each one registered",
-        args: [MANIFEST],
-        flags: [JSON_FLAG],
+        summary: "install a plugin, list what an agent loaded, or remove one",
+        args: [
+            {
+                name: "action",
+                required: true,
+                help: "what to do",
+                choices: [
+                    {
+                        value: "list",
+                        help: "what this agent loaded, from where, and what it asked for",
+                    },
+                    { value: "add", help: "fetch a plugin from git and name it in this agent" },
+                    {
+                        value: "remove",
+                        help: "drop the entry, and the directory when no agent needs it",
+                    },
+                ],
+            },
+            MANIFEST,
+            {
+                name: "rest",
+                required: false,
+                variadic: true,
+                help: "a repository for add — owner/repo, a clone URL, or a page URL — or a name for remove",
+            },
+        ],
+        flags: [
+            {
+                name: "ref",
+                kind: "string",
+                placeholder: "tag",
+                help: "branch, tag or commit to fetch (add) — the only thing that pins the code",
+                defaultHelp: "the remote's default branch",
+            },
+            {
+                name: "name",
+                kind: "string",
+                placeholder: "name",
+                help: "install under this name (add), which is what the `plugins:` entry will say",
+                defaultHelp: "the repository or subdirectory name",
+            },
+            JSON_FLAG,
+        ],
     },
     {
         name: "agents",

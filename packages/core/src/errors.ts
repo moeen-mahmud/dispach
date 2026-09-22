@@ -558,6 +558,40 @@ export function channelTypeUnknown(type: string, known: readonly string[]): Conf
     })
 }
 
+/**
+ * A factory that returned a transport disagreeing with the entry that asked for it.
+ *
+ * TypeScript makes this unreachable for a first-party channel and says nothing about a third-party
+ * one: a plugin is plain JavaScript by the time it is imported, and `defineChannel` hands over a
+ * function this runtime then trusts. Both fields are load-bearing rather than cosmetic. `id` becomes
+ * the channel segment of every session key, so a transport that ignores the id it was handed
+ * silently files a conversation under a name nothing else uses; `type` is what `GET /v1/agents/:id`
+ * and the `serve` banner report, and an absent one printed the literal text `undefined` beside a
+ * running channel — a documented wire field reading as missing, which is the failure shape this
+ * project keeps finding rather than a rendering slip.
+ *
+ * Refused rather than corrected. Overwriting the transport's own fields would make the runtime and
+ * the plugin disagree about what the plugin is called, which is worse than not starting.
+ */
+export function channelTransportMismatch(
+    field: "id" | "type",
+    expected: string,
+    got: unknown,
+    channelId: string,
+): ConfigError {
+    return new ConfigError({
+        code: "channel_transport_mismatch",
+        message: `The factory for channel "${channelId}" returned a transport whose \`${field}\` is ${
+            got === undefined ? "missing" : JSON.stringify(got)
+        }, and the manifest entry says ${JSON.stringify(expected)}.`,
+        hint:
+            field === "id"
+                ? "A factory is handed the entry's `id` and must report it back: it is the channel segment of every session key this channel produces, so a transport that hardcodes its own files conversations under a name nothing else looks for."
+                : `A transport's \`type\` must be the name it was registered under — the same string the manifest's \`type\` names. It is what \`GET /v1/agents/:id\` and the ${BRAND.slug} banner report, and an absent one prints as "undefined" beside a running channel.`,
+        field: `channels[${channelId}].${field}`,
+    })
+}
+
 // ─── Workspace ───────────────────────────────────────────────────────────────────────────
 
 export function workspaceFileMissing(name: string, path: string, field: string): ConfigError {
@@ -1105,6 +1139,7 @@ export function pluginNotFound(
     spec: string,
     builtIn: readonly string[],
     cause?: unknown,
+    pluginRoot?: string,
 ): ConfigError {
     const isPath = spec.startsWith(".") || spec.startsWith("/")
     return new ConfigError({
@@ -1112,9 +1147,25 @@ export function pluginNotFound(
         message: `plugins names "${spec}", which could not be loaded.`,
         hint: isPath
             ? `Resolved relative to the manifest's own directory, not the working directory. Check the path exists and exports a plugin as its default export.`
-            : `Built in: ${builtIn.length === 0 ? "none" : builtIn.join(", ")}. Anything else has to be installed beside the agent before it starts — nothing is installed while the process runs (hard rule 5), so a missing package is a refusal rather than a fetch.`,
+            : `Built in: ${builtIn.length === 0 ? "none" : builtIn.join(", ")}.${pluginRoot === undefined ? "" : ` Installed plugins live in ${pluginRoot} — \`plugins add <agent> <repo>\` puts one there.`} Nothing is installed while the process runs (hard rule 5), so a missing plugin is a refusal rather than a fetch.`,
         field: "plugins",
         ...(cause === undefined ? {} : { cause }),
+    })
+}
+
+/**
+ * A plugin directory that exists and cannot be entered.
+ *
+ * Separate from `plugin_not_found`, and the separation is the point: falling through to `import()`
+ * here would report "cannot find module dispach-whatsapp", which sends a reader to a package
+ * registry when the actual problem is a half-fetched directory two paths away.
+ */
+export function pluginEntryMissing(spec: string, dir: string, problem: string): ConfigError {
+    return new ConfigError({
+        code: "plugin_entry_missing",
+        message: `"${spec}" is installed at ${dir}, but ${problem}.`,
+        hint: `A plugin directory is entered through the \`main\` its package.json names, defaulting to index.js. Re-fetch it with \`plugins add\`, or \`plugins remove\` it and drop the \`plugins:\` entry.`,
+        field: "plugins",
     })
 }
 

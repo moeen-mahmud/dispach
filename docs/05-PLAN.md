@@ -5011,6 +5011,78 @@ the severance detector, which is what forced the orphan-`END` discriminator.
 
 ---
 
+## 0.1.3 — a plugin ecosystem, small enough to be worth having
+
+`defineChannel` started working in 0.1.1 and there was **nothing to load with it**: `resolve()` had
+two lookups — the built-in registry and `import()` — so a third-party plugin had to already be in a
+`node_modules`, which the compiled binary and the container do not have. Documented public API,
+conformance-tested, and unreachable in the two environments this ships as.
+
+### 3a — `plugins add | list | remove` — **shipped** (2026-09-22)
+
+**A third lookup, in the middle.** Registry → `<pluginRoot>/<name>/` → `import()`, with the order
+forced at both ends: the registry stays first because a host's bundled copy must win (a vendored
+directory shadowing `@dispach/channel-telegram` is decision 11.238's `instanceof` failure one layer
+up), and `import()` stays last because it is the only lookup that can reach an operator's own
+`node_modules`. `LoadedPlugin.lookup` records which answered; with three lookups, "which code is
+loaded" stops being derivable from the manifest. Decision 11.250.
+
+**One self-contained bundle** is the rule everything else follows from. Nothing installs
+dependencies, ever, so a plugin directory resolves identically in a checkout, in the binary and in
+the image — verified in all three — and `plugins add` refuses a tree that declares runtime
+dependencies with no committed `node_modules`, by name, before anything is renamed or written.
+npm specs are the named follow-up and deliberately out of scope. Decision 11.249.
+
+**Verify before writing.** A manifest naming a plugin that will not load does not load, so the order
+is fetch to `<dir>.partial`, refuse there, rename, then write the entry through the one manifest
+writer — the recorded `skills install` failure, where the command that undid the mistake sat behind
+the load the mistake broke. The verification is `conformance()` from `@dispach/core/testing`, the
+same suite the author ran, with two of its warnings promoted to refusals at install time. Decision
+11.251.
+
+**`pluginRoot` is the host's**, never derived in core, because one module owns every sandbox path so
+a test can redirect it. That costs ten object literals naming it — the shape this repo has lost a
+field to six times — so `boundaries.test.ts` asserts every `Runtime.create` and `agentPluginSupply`
+call site does, and the guard was revert-checked by deleting one.
+
+**A local repository is a first-class spec.** It is the only way an author can test the bundle they
+are about to publish: `plugins:` can already name a relative path, but that is not what runs in the
+container — a vendored copy in the plugin root is. Filesystem-first, so a path is never read as
+`owner/repo`.
+
+**Found by using it**, which is the half worth recording. A third-party channel whose transport had
+no `type` put the literal text `echo (undefined)` on the `serve` banner and left `type` — a
+documented field of `GET /v1/agents/:id` — absent from the wire. `buildChannels` now refuses a
+transport whose `id` or `type` disagrees with the entry that asked for it; `id` is the sharper of the
+two, since it is the channel segment of every session key. Decision 11.252.
+
+**`docs/03-SPEC-PLUGIN-API.md`'s Channel section described an interface that does not exist** — a
+`ChannelSpec`/`Channel` pair with `capabilities.maxMessageLength` and `ctx.inbound(event)`, none of
+it in `channels/channel.ts`, for as long as the page has existed. Rewritten against the real
+`ChannelTransport`, because it is what the second channel gets written from.
+
+**Verification, all of it run.** 3,631 tests and 1,459 under Node, nine packages typechecking, lint
+at baseline, `bench:boot` ok, `verify:package` ok. End to end from source, from the **compiled
+binary** and **inside the container**: `add` a tagged plugin, `list` reporting `installed <commit>`,
+a plugin-supplied channel type accepted by `validate` and started by `serve` with the channel on the
+agent resource, `remove` dropping the entry and the directory. `--ref` pinning checked in both
+directions — the branch was moved and a pinned re-add stayed on the old commit while an unpinned one
+followed. Refusals checked for exit status and for leaving nothing behind.
+
+### Not done in 3a, and why it is written down
+
+- **`config_set channels` writes a type nothing supplies, reports success, and the next boot
+  fails.** Measured: `config set <agent> channels '[{"id":"s","type":"signal"}]'` succeeded and
+  `validate` then refused with `channels[0] declares type "signal", which is not registered here`.
+  The recorded shape — *a check only one surface performs is a check the two disagree about* —
+  whose named precedent is `validateSchedules` being called from `prepareManifestEdit` for exactly
+  this reason. It was hard to reach while `telegram` was the only type; with plugin channels it is
+  the ordinary case. The fix is not CLI-local: core's `config_set` tool and the server's config
+  route write the same field, and repairing one surface would replace one asymmetry with another.
+  Its own change.
+
+---
+
 ## Carried backlog
 
 Three findings that belong to no phase, recorded here so a session with no context still finds

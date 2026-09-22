@@ -105,12 +105,39 @@ capability that exists.
 
 ## Resolution
 
-A `plugins:` entry resolves in one of two ways, and never by installing anything (hard rule 5).
+A `plugins:` entry resolves in one of three ways, and never by installing anything (hard rule 5).
 
 1. **A built-in registry, keyed by the specifier a manifest writes.** `@dispach/channel-telegram`
    resolves to the copy the host already bundles, with no import at all.
-2. **A module import** for anything else — a relative path, resolved against the *manifest's*
+2. **The host's plugin root** — `~/.dispach/plugins/<name>/`, where `plugins add` puts one. A bare
+   name (no separator) resolves to that directory and the entry its `package.json` names in `main`,
+   defaulting to `index.js`.
+3. **A module import** for anything else — a relative path, resolved against the *manifest's*
    directory rather than the working directory, or a package name resolved from beside the agent.
+
+The order is not arbitrary and neither end can move. The registry is first because a host's own
+bundled copy must always win: a vendored directory shadowing `@dispach/channel-telegram` would load
+a second copy of a package already inside the binary, which is `instanceof`'s failure one layer up.
+The import is last because it is the only lookup that can reach a `node_modules` an operator
+installed themselves.
+
+`LoadedPlugin.lookup` records which one answered — `registry`, `installed` or `import` — and
+`plugins list` prints it beside the commit an installed plugin was fetched at. With one lookup
+"which code is loaded" was derivable from the manifest; with three it is not, and a plugin shadowed
+by a same-named bundled one would otherwise be invisible.
+
+A directory that exists and cannot be entered is a **refusal** (`plugin_entry_missing`), never a
+fall-through to the import. The import would report `cannot find module <name>`, which sends a
+reader to a package registry when the problem is a half-fetched directory two paths away. A `main`
+pointing outside its own directory is refused for the same reason `root.ts` resolves before
+comparing.
+
+The plugin root is supplied by the **host** (`RuntimeOptions.pluginRoot`) and never derived in core.
+One module owns every sandbox path — `cli/src/lib/sandbox.ts` — precisely so a test can redirect it;
+a caller that computed its own once wrote three agents into the author's real home directory. Ten
+object literals have to pass it, which is the shape this project has lost a field to six times, so
+`packages/cli/test/boundaries.test.ts` asserts that every `Runtime.create` and `agentPluginSupply`
+call site names it. Absent, the lookup simply does not happen and behaviour is what it was before.
 
 The registry is not an optimisation. A module imported both statically and dynamically makes
 `bun build --splitting` emit its exports twice and the bundle stops parsing — `SyntaxError:
@@ -134,6 +161,76 @@ CLI's own table and never through the plugin path, so this page's central regist
 defining one channel, loaded by the real binary. A public API with no caller is a public API that is
 wrong for as long as it has none.
 
+### One self-contained bundle
+
+**An installed plugin is one directory with a runnable entry and nothing to resolve.** That is the
+rule the whole install mechanism is built on, and it is what makes it small enough to be worth
+having: nothing installs dependencies, ever, so the compiled binary and the container — neither of
+which has a `node_modules` — load a plugin exactly as a checkout does.
+
+`plugins add` is what keeps it true. A fetched tree that declares runtime `dependencies` and ships no
+`node_modules` is refused by name (`plugin_not_self_contained`) before anything is renamed into place
+or written to a manifest. A committed `node_modules` clears the check: vendoring the dependencies is
+a perfectly good way of being self-contained, and refusing a tree that already has what it declares
+would be refusing the thing being asked for.
+
+The corollary for an author: **publish the built entry file.** A source checkout whose `main` points
+at a `dist/` that is not committed is the commonest failure, and `plugins add` names it as itself
+rather than as a missing module.
+
+### `plugins add | list | remove`
+
+```
+dispach plugins add <agent> <owner/repo | url | local path> [--ref <tag>] [--name <name>]
+dispach plugins list <agent>
+dispach plugins remove <agent> <name>
+```
+
+`add` fetches with git into `<pluginRoot>/<name>.partial`, verifies it there, renames it into place,
+and only then writes the `plugins:` entry through `manifest/edit.ts` — the one manifest writer. That
+order is the point: a manifest naming a plugin that will not load **does not load**, so an `add`
+that wrote the entry first would brick the agent and report success, with the command that undoes it
+reachable only by hand-editing YAML. This is the recorded `skills install` failure exactly.
+
+The verification is `conformance()` from `@dispach/core/testing` — the same suite the plugin's own
+author runs, rather than a second definition of "well-formed" living in the CLI. It calls `setup`
+once into a void, so nothing is constructed and no credential is read. Two things it warns about are
+**refusals** at install time, because the loader refuses them at boot: a `dispachApi` range that does
+not admit this host, and anything the suite reports as an error.
+
+Reading the declarations runs the plugin's module scope, and `add` says so out loud. There is no way
+around it — what a plugin declares *is* its default export — and a second place to declare it would
+be a second thing to keep in step. The disclosure names the plugin, its version, the resolved commit,
+the host range, everything `setup` registered, and every permission declared, with the sentence that
+`permissions` is advisory in v1. A plugin declaring nothing gets that said too, because "declares no
+access" read as a boundary is worse than no list at all.
+
+**What git costs, stated rather than discovered.** No version resolution and no integrity check: a
+bare spec is whatever that branch points at today. `--ref` pins a tag or a commit and the resolved
+commit is recorded in `.origin.json` beside the code, so `plugins list` can answer "which code is
+loaded". The `dispachApi` gate is a **compatibility** check and not an authenticity one — nothing
+here verifies who published what. npm specs are what would buy real integrity, and they are out of
+scope: a registry fetch plus a tar extractor, and a change to decision 11.237's one npm name that is
+worth its own decision rather than a side effect.
+
+`.git` is dropped from an installed plugin. A skills source is a working copy that `sources update`
+re-clones; a plugin directory is a vendored artefact that `.origin.json` describes, and leaving a
+checkout there invites a `git pull` that moves the code out from under the recorded commit with
+nothing reporting it.
+
+**There is no plugin registry file**, and that is deliberate. `sources` needs `sources.json` because
+a source is machine-level and nothing else records it; a plugin is selected by each agent's own
+`plugins:` block, so the manifest *is* the registry and a second list would be the drift this
+project keeps paying for. What lives beside the code is provenance, not selection.
+
+`remove` drops the manifest entry always, and deletes the directory only when no other sandbox agent
+names it. The directory is machine-level: deleting it while another agent named it would break that
+agent at its next start, with the damage done by a command somebody ran about a *different* agent —
+so it is named rather than deleted, the same call `remove` makes about two directories sharing one
+manifest id.
+
+### Loading
+
 Loading happens **once per agent**, before that agent's manifest is validated. That ordering is
 forced: `loadManifest` checks `tools.provider` and a channel `type` against the ids the host can
 supply, and once plugins exist half of those ids come from the manifest itself. The refs are read
@@ -146,54 +243,101 @@ is a package name, never a secret.
 
 ### Channel
 
+**This section described an interface that does not exist** for as long as it has been here — a
+`ChannelSpec`/`Channel` pair with `capabilities.maxMessageLength` and `ctx.inbound(event)`, none of
+which is in `packages/core/src/channels/channel.ts`. Rewritten against the real one in 0.1.3,
+because it is what the second channel gets written from. `channels/channel.ts` is the authority; the
+shapes below are copied from it.
+
 ```ts
-interface ChannelSpec {
-  type: string
-  configSchema?: ZodSchema
-  create(config: unknown, ctx: ChannelContext): Channel
+type ChannelFactory = (context: ChannelFactoryContext) => ChannelTransport
+
+interface ChannelFactoryContext {
+  readonly agentId: string
+  readonly dir: string                              // the agent's directory
+  readonly env: EnvSource                           // the manifest's .env over the ambient one
+  readonly config: Readonly<Record<string, unknown>> // the entry minus id/type/enabled/allowFrom
+  readonly id: string                               // the entry's id — report it back verbatim
 }
 
-interface Channel {
-  readonly id: string
-  readonly capabilities: ChannelCapabilities
-  start(): Promise<void>
+interface ChannelTransport {
+  readonly id: string        // === context.id
+  readonly type: string      // === the name passed to defineChannel
+  readonly limits: ChannelLimits
+  start(host: ChannelHost): Promise<void>
   stop(): Promise<void>
-  send(msg: OutboundMessage): Promise<{ providerMessageId: string }>
-  setTyping?(peerId: string, on: boolean): Promise<void>
+  send(message: OutboundMessage, signal?: AbortSignal): Promise<SendResult>
+  typing?(recipient: string, thread?: string): Promise<void>
+  webhook?(delivery: WebhookDelivery): Promise<WebhookOutcome>
 }
 
-interface ChannelCapabilities {
-  typingIndicator: boolean
-  markdown: "none" | "basic" | "full"
-  attachments: boolean
-  maxMessageLength: number
-  edits: boolean
+interface ChannelLimits {
+  readonly maxMessageChars: number
+  readonly idempotentSend: boolean
+  readonly minSendIntervalMs?: number
 }
+
+interface ChannelHost {
+  receive(message: RawInbound): void
+  status(status: "starting" | "connected" | "disconnected" | "error", detail?: string): void
+  status(status: "needs_input", detail: string | undefined, input: ChannelInput): void
+  error(detail: ErrorDetail): void
+}
+
+type SendResult =
+  | { readonly ok: true; readonly providerMessageId?: string }
+  | {
+      readonly ok: false
+      readonly retryable: boolean
+      readonly error: ErrorDetail
+      readonly retryAfterMs?: number
+    }
 ```
 
-Inbound arrives by calling `ctx.inbound(event)`:
-
-```ts
-interface InboundEvent {
-  channelId: string
-  peerId: string          // stable per-user identifier
-  threadId?: string
-  text: string
-  attachments?: Attachment[]
-  providerMessageId: string
-  raw: unknown            // preserved for debugging; never enters context
-}
-```
+Inbound arrives by calling `host.receive(raw)` with a `RawInbound` — `peerId`, `text`,
+`receivedAt`, and optionally `providerMessageId`, `senderHandle`, `senderName`, `thread`. Core adds
+the `channelId`, `channelType` and `sessionKey`.
 
 **Rules for channel authors:**
 
-- `start()` may take as long as it needs. It runs after readiness, and failure is reported
-  as `agent.channel.error` rather than blocking boot.
-- `send()` must be idempotent given the same `idempotencyKey` — the outbox retries.
-- Chunk long messages against `maxMessageLength` yourself and return the last message id.
-- Never throw from an inbound handler. Report and drop.
-- `allowFrom` filtering is applied by core before your handler is invoked. It is
-  **inbound-only** and confers nothing on outbound delivery.
+- **`id` and `type` must be the ones you were given.** `id` is `context.id` and `type` is the name
+  passed to `defineChannel`; a transport that disagrees is refused at load
+  (`channel_transport_mismatch`). Both are read elsewhere as facts: `id` becomes the channel segment
+  of every session key this channel produces, and `type` is what `GET /v1/agents/:id` and the
+  `serve` banner report. TypeScript cannot make this check for a plugin — by the time a factory runs
+  it is plain JavaScript — and the first third-party channel to run put the literal text
+  `echo (undefined)` on the banner and left the documented `type` absent from the wire.
+- **`start(host)` returns once *running*, not once connected.** Awaiting a first successful poll or
+  a completed pairing makes a provider outage an unbootable runtime, and an orchestrator watching
+  `/v1/ready` would restart the process into the same outage. Report progress through
+  `host.status()`; `/ready` deliberately flips before channels connect.
+- **A polling or reconnecting loop must never exit on its own.** Catch everything, back off, report
+  on the first failure and periodically after that, and let only `stop()` end it. A loop that throws
+  and returns leaves a process that is running, reports nothing and receives nothing forever.
+- **`limits.idempotentSend` is `false` unless the provider deduplicates on a key you supply.**
+  `false` is the honest default: the outbox reports a recovered in-flight delivery as `uncertain`
+  rather than claiming exactly-once it cannot deliver. `true` without provider support converts a
+  visible ambiguity into a silent duplicate, which is strictly worse.
+- **`send` classifies its own failures.** Only the transport knows the provider's taxonomy — a 429
+  and a 503 are `retryable`, "chat not found" and "blocked by the user" are not. Wrong in the safe
+  direction costs a few attempts; wrong the other way abandons a message that would have gone
+  through. Return `retryAfterMs` when the provider names a wait.
+- **Do not chunk in `send`.** The outbox chunks at *enqueue* against `maxMessageChars`, because a
+  delivery's identity is derived from its content and re-splitting later would produce different
+  keys for the same reply and stop the deduplication working.
+- **Never throw from an inbound handler.** Report through `host.error` and drop.
+- **`allowFrom` is applied by core before your handler is invoked, and is inbound-only.** It confers
+  nothing on outbound delivery; conflating the two produces a confusing "chat not found" class of
+  failure. Validate the identifier against the system that issues it — a handle that cannot exist
+  matches nobody, and everything downstream is then correct behaviour applied to a wrong fact.
+- **`needs_input` carries its payload or it is refused.** `status("needs_input", detail, input)` is
+  a separate overload for that reason, and the hub refuses a payload-free one from a JavaScript
+  plugin too — keeping the previous state, because recording it would turn a channel that is waiting
+  into one that looks broken. `issuedAt` is the runtime's and is always present, since a rotating QR
+  nobody can tell is expired reads as a broken scanner rather than an old picture.
+- **`enabled: false` means your factory is never called.** Reading a token in the factory is
+  therefore fine; doing work there is not. A factory that refused for a missing token would make
+  switching a broken channel off impossible, which is the one thing `enabled: false` is for.
 
 ### Tool provider
 
@@ -461,11 +605,20 @@ scramble. That trade is stated in the README.
 - [ ] `configSchema` covers every field, secrets referenced by env var name
 - [ ] Every tool declares `whenNotToUse`
 - [ ] `resolve()` throws on unknown slugs
+- [ ] A channel transport reports the `id` and `type` it was given
 - [ ] `send()` is idempotent
 - [ ] Middleware calls `next()` and respects `ctx.signal`
 - [ ] `onEvent` never throws and never blocks
 - [ ] Permissions declared honestly
 - [ ] `bun test` passes against `@dispach/core`'s plugin conformance suite
+
+**For distribution** — what `plugins add` checks, so checking it yourself is cheaper:
+
+- [ ] The published tree has a runnable entry: `main` (or `index.js`) is **committed**, not built
+      from a `dist/` that is gitignored
+- [ ] No runtime `dependencies`, or a committed `node_modules` that satisfies them
+- [ ] One ES module — no bare `require`, no unresolved import, nothing to install
+- [ ] A tag per release, so `--ref` can pin it
 
 Core ships `@dispach/core/testing` with `conformance(plugin)`. It returns findings and throws
 nothing, because a plugin author's test runner is theirs — a suite that assumed one would be
@@ -482,3 +635,11 @@ belief that passing means the plugin is bounded by what it declared.
 Every first-party plugin runs it: `packages/cli/test/plugin-conformance.test.ts`, which lives there
 because the CLI is the package that imports all four — `packages/core` may not (hard rule 2), and a
 package asserting against itself would only ever check itself.
+
+**`plugins add` runs it too**, which is the useful half of it being assertions rather than a test
+file: an install verifies with exactly the suite the author ran, and there is no second definition
+of "well-formed" in the CLI to drift from this one. Two of its *warnings* become refusals there, and
+only there — a `dispachApi` range that does not admit this host, and any error-level finding —
+because installing is not the same as testing. Running the suite against a newer host than you
+support is a normal thing for an author to do; writing a `plugins:` entry the loader will refuse at
+boot is an agent that will not start, reported as a success.

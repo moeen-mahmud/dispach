@@ -37,6 +37,30 @@ export function storePath(env?: Readonly<Record<string, string | undefined>>): s
 }
 
 /**
+ * Where installed plugins live — one directory per plugin, machine-level.
+ *
+ * The same shape and the same reasoning as the skills cache (`sources`) beside it: a plugin is code
+ * the *person* trusts, fetched once and shared by every agent on the machine, and which agents
+ * actually load it is decided by each manifest's own `plugins:` block. That is why there is no
+ * registry file here — the manifest is the registry, and a second list of "installed plugins" would be
+ * exactly the drift this project keeps paying for. `plugins list` reads the loader's own provenance
+ * instead.
+ *
+ * Here rather than computed by a caller, because that is what makes `<ENVPREFIX>HOME` redirect it: a
+ * caller that derived its own path wrote three agents into the author's real home directory once.
+ */
+export function pluginRoot(env?: Readonly<Record<string, string | undefined>>): string {
+    return join(sandboxRoot(env), "plugins")
+}
+
+export function pluginDir(
+    name: string,
+    env?: Readonly<Record<string, string | undefined>>,
+): string {
+    return join(pluginRoot(env), name)
+}
+
+/**
  * Where a service writes its output, keyed by the agent's **manifest id**.
  *
  * Not by the directory name, which is what `run <ref>` takes — the same split as the store's

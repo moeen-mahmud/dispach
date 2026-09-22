@@ -28,6 +28,7 @@ import { ambientEnv } from "#lib/ambient"
 import { describeOrigin, envProvenance } from "#lib/config-env"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { BUILT_IN_PLUGINS, CHANNELS, TOOL_PROVIDERS } from "#lib/providers"
+import { pluginRoot } from "#lib/sandbox"
 import type { ValidateOptions } from "#lib/schema"
 
 /**
@@ -57,6 +58,7 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
             // and nothing is subscribed to this one.
             bus: new EventBus({ runtimeId: "validate" }),
             builtIn: BUILT_IN_PLUGINS,
+            pluginRoot: pluginRoot(),
             base: { toolProviders: TOOL_PROVIDERS, channels: CHANNELS },
         })
 

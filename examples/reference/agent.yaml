@@ -546,9 +546,14 @@ schedules:
 # recorded and surfaced by `dispach plugins`, and enforced by nothing. Install plugins you trust,
 # the same way you treat any npm dependency.
 #
-# Resolved at boot: a name in this list is looked up in the binary's built-in registry first and
-# imported only if it is not there; a relative path is resolved against *this file's* directory.
-# Nothing is ever installed while the process runs.
+# Resolved at boot, in three places and in this order: the binary's built-in registry, then
+# `~/.dispach/plugins/<name>/` where `dispach plugins add` puts one, then an ordinary module import.
+# A relative path is resolved against *this file's* directory and is only ever a path. Nothing is
+# ever installed while the process runs — a plugin is one self-contained bundle, which is why the
+# same entry works in a checkout, in the compiled binary and in the container.
+#
+# `dispach plugins list <agent>` says which of the three answered for each entry, and the commit an
+# installed one was fetched at.
 #
 # Naming a plugin makes a capability reachable; it does not grant it. `@dispach/tools-system` here
 # and nothing in `tools.pinned` gives the agent no shell — what it gives is a runtime that can

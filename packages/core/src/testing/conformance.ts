@@ -41,6 +41,22 @@ export interface ConformanceResult {
     /** What `setup` registered, so a caller can assert a plugin registers what it claims to. */
     readonly registered: readonly string[]
     readonly setupMs: number
+    /**
+     * The plugin's own declarations, normalised.
+     *
+     * Here so a caller reporting them — `plugins add` discloses all four before it writes anything —
+     * reads a checked shape rather than the raw export: `permissions` is optional on `Plugin` and an
+     * entry may not be a permission at all, both of which this run has already decided about. One
+     * more reason, narrow and real: the range's field name contains the product name, and hard rule 3
+     * keeps that literal out of every package but this one.
+     */
+    readonly declared: {
+        readonly name: string
+        readonly version: string
+        /** The semver range of host versions the plugin says it supports. */
+        readonly apiRange: string
+        readonly permissions: readonly Permission[]
+    }
 }
 
 export interface ConformanceOptions {
@@ -193,6 +209,12 @@ export async function conformance(
         findings,
         registered,
         setupMs,
+        declared: {
+            name: plugin.name,
+            version: plugin.version,
+            apiRange: plugin.dispachApi,
+            permissions: (plugin.permissions ?? []).filter(isPermission),
+        },
     }
 }
 

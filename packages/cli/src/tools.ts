@@ -25,6 +25,7 @@ import {
     scriptRunner,
     TOOL_PROVIDERS,
 } from "#lib/providers"
+import { pluginRoot } from "#lib/sandbox"
 import { toolsReport, toolsView } from "#lib/session-commands"
 
 export interface ToolsOptions {
@@ -149,6 +150,7 @@ async function show(options: ToolsOptions): Promise<number> {
         agents: [options.manifestPath],
         toolProviders: TOOL_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
+        pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),
         channels: CHANNELS,
         env: ambientEnv([options.manifestPath]),

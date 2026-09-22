@@ -11,7 +11,7 @@ import { EXIT_OK } from "#lib/const"
 import { onExit } from "#lib/exit"
 import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { duration, keyValue, type Row } from "#lib/render"
-import { storePath } from "#lib/sandbox"
+import { pluginRoot, storePath } from "#lib/sandbox"
 import type { AgentsOptions } from "#lib/schema"
 
 export async function agentsCommand(options: AgentsOptions): Promise<number> {
@@ -19,6 +19,7 @@ export async function agentsCommand(options: AgentsOptions): Promise<number> {
         agents: [...options.manifestPaths],
         toolProviders: TOOL_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
+        pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),
         channels: CHANNELS,
         env: ambientEnv(options.manifestPaths),

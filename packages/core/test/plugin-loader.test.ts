@@ -7,6 +7,9 @@
  * what to change is the debugging nightmare it was built to replace.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { EventBus } from "../src/events/bus.ts"
 import type { AnyEvent } from "../src/events/types.ts"
 import { loadPlugins } from "../src/plugins/loader.ts"
@@ -39,6 +42,7 @@ async function load(
         builtIn?: Record<string, Plugin>
         importModule?: (specifier: string) => Promise<unknown>
         bus?: EventBus
+        pluginRoot?: string
     } = {},
 ) {
     return loadPlugins({
@@ -49,6 +53,7 @@ async function load(
         bus: options.bus ?? new EventBus({ runtimeId: "test" }),
         ...(options.builtIn === undefined ? {} : { builtIn: options.builtIn }),
         ...(options.importModule === undefined ? {} : { importModule: options.importModule }),
+        ...(options.pluginRoot === undefined ? {} : { pluginRoot: options.pluginRoot }),
     })
 }
 
@@ -329,5 +334,168 @@ describe("what the bus is told", () => {
         const { bus, events } = harness()
         await load(["p"], { bus, builtIn: { p: plugin() } })
         expect(events.some((event) => event.type === "plugin.slow")).toBe(false)
+    })
+})
+
+describe("the plugin root — the middle of the three lookups", () => {
+    /**
+     * `plugins add` vendors a self-contained bundle into `<pluginRoot>/<name>/`, and this is the lookup
+     * that finds it. Three things have to hold and each is a different failure:
+     *
+     * - the registry still wins, or a vendored directory could shadow a package already bundled into
+     *   the binary and load a second copy of it — the `instanceof` failure's shape, one layer over;
+     * - a directory that exists and cannot be entered is a **refusal**, because falling through to
+     *   `import()` reports "cannot find module <name>", which sends a reader to a package registry
+     *   when the problem is a half-fetched directory;
+     * - `main` cannot leave the directory, for the reason `root.ts` records: resolve before comparing.
+     */
+    const root = join(tmpdir(), `plugin-root-${process.pid}-${Math.random().toString(36).slice(2)}`)
+
+    function install(name: string, files: Readonly<Record<string, string>>): string {
+        const dir = join(root, name)
+        mkdirSync(dir, { recursive: true })
+        for (const [file, text] of Object.entries(files)) {
+            writeFileSync(join(dir, file), text)
+        }
+        return dir
+    }
+
+    test("a bare name resolves to the directory's entry, and says which lookup answered", async () => {
+        install("vendored", {
+            "package.json": JSON.stringify({ main: "entry.js" }),
+            "entry.js": "",
+        })
+        const seen: string[] = []
+        const result = await load(["vendored"], {
+            pluginRoot: root,
+            importModule: async (specifier) => {
+                seen.push(specifier)
+                return { default: plugin({ name: "vendored" }) }
+            },
+        })
+        expect(seen).toEqual([join(root, "vendored", "entry.js")])
+        expect(result.loaded[0]?.lookup).toBe("installed")
+    })
+
+    test("no package.json means index.js, which is the distribution shape", async () => {
+        install("plain", { "index.js": "" })
+        const seen: string[] = []
+        await load(["plain"], {
+            pluginRoot: root,
+            importModule: async (specifier) => {
+                seen.push(specifier)
+                return { default: plugin({ name: "plain" }) }
+            },
+        })
+        expect(seen).toEqual([join(root, "plain", "index.js")])
+    })
+
+    test("the built-in registry still wins over a directory of the same name", async () => {
+        install("shadow", { "index.js": "" })
+        let imported = false
+        const result = await load(["shadow"], {
+            pluginRoot: root,
+            builtIn: { shadow: plugin({ name: "built-in" }) },
+            importModule: async () => {
+                imported = true
+                return {}
+            },
+        })
+        expect(result.loaded[0]?.name).toBe("built-in")
+        expect(result.loaded[0]?.lookup).toBe("registry")
+        expect(imported).toBe(false)
+    })
+
+    test("a name with no directory falls through to the import, and reports it", async () => {
+        const result = await load(["absent"], {
+            pluginRoot: root,
+            importModule: async () => ({ default: plugin({ name: "absent" }) }),
+        })
+        expect(result.loaded[0]?.lookup).toBe("import")
+    })
+
+    test("a directory whose entry is missing is refused by name, not left to the import", async () => {
+        install("gutted", { "package.json": JSON.stringify({ main: "dist/index.js" }) })
+        const found = await refusal(
+            load(["gutted"], { pluginRoot: root, importModule: async () => ({}) }),
+        )
+        expect(found.code).toBe("plugin_entry_missing")
+        expect(found.message).toContain("dist/index.js is not there")
+        expect(found.message).toContain(join(root, "gutted"))
+    })
+
+    test("a corrupt package.json is refused where it is, not at the next import", async () => {
+        install("broken", { "package.json": "{not json" })
+        const found = await refusal(
+            load(["broken"], { pluginRoot: root, importModule: async () => ({}) }),
+        )
+        expect(found.code).toBe("plugin_entry_missing")
+        expect(found.message).toContain("package.json is not valid JSON")
+    })
+
+    test("a main that points outside the plugin directory is refused", async () => {
+        install("escape", { "package.json": JSON.stringify({ main: "../../../etc/passwd" }) })
+        const found = await refusal(
+            load(["escape"], { pluginRoot: root, importModule: async () => ({}) }),
+        )
+        expect(found.code).toBe("plugin_entry_missing")
+        expect(found.message).toContain("outside the plugin directory")
+    })
+
+    test("a relative spec is still a path, never a name in the root", async () => {
+        install(".", {})
+        const seen: string[] = []
+        await load(["./local-plugin.js"], {
+            pluginRoot: root,
+            importModule: async (specifier) => {
+                seen.push(specifier)
+                return { default: plugin() }
+            },
+        })
+        // Resolved against the manifest's own directory, which is the rule every path here follows.
+        expect(seen[0]).toBe("/tmp/ws/local-plugin.js")
+    })
+
+    test("a spec with a separator is never joined onto the root", async () => {
+        const seen: string[] = []
+        for (const spec of ["../../escape", "sneaky/../../escape", "@scope/package"]) {
+            await load([spec], {
+                pluginRoot: root,
+                importModule: async (specifier) => {
+                    seen.push(specifier)
+                    return { default: plugin() }
+                },
+            })
+        }
+        // Each reached the import by the route it already had — a leading dot is a path relative to
+        // the manifest, anything else is handed over verbatim. What none of them is, is a directory
+        // name: `join(root, "../../escape")` would land outside the sandbox with nothing saying so.
+        expect(seen).toEqual(["/escape", "sneaky/../../escape", "@scope/package"])
+        expect(seen.some((specifier) => specifier.startsWith(root))).toBe(false)
+    })
+
+    test("with no root configured the lookup does not happen at all", async () => {
+        install("ignored", { "index.js": "" })
+        const seen: string[] = []
+        await load(["ignored"], {
+            importModule: async (specifier) => {
+                seen.push(specifier)
+                return { default: plugin({ name: "ignored" }) }
+            },
+        })
+        expect(seen).toEqual(["ignored"])
+    })
+
+    test("the refusal for an unknown name names the root, so there is somewhere to look", async () => {
+        const found = await refusal(
+            load(["nowhere"], {
+                pluginRoot: root,
+                importModule: async () => {
+                    throw new Error("Cannot find module 'nowhere'")
+                },
+            }),
+        )
+        expect(found.code).toBe("plugin_not_found")
+        expect(found.hint).toContain(root)
     })
 })

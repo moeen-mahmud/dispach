@@ -351,11 +351,18 @@ async function dispatch(argv: readonly string[]): Promise<number> {
             })
         }
 
-        case "plugins":
+        case "plugins": {
+            const ref = flags.str("ref")
+            const name = flags.str("name")
             return await pluginsCommand({
-                manifestPath: resolveAgentRef(positionals[0] ?? ""),
+                action: manifestPath,
+                manifestPath: resolveAgentRef(positionals[1] ?? ""),
+                rest: positionals.slice(2),
+                ...(ref === undefined ? {} : { ref }),
+                ...(name === undefined ? {} : { name }),
                 json: flags.bool("json"),
             })
+        }
 
         case "agents":
             return await agentsCommand({

@@ -2093,7 +2093,17 @@ function manifestFor(answers: InitAnswers): string {
         `  #                      # Matching is whole-word and case-insensitive against the input`,
         ``,
         ...schedulesBlock(answers),
-        `# Phase 9 — plugins`,
+        // Not a phase heading any more — plugins ship, and a `# Phase 9` line above a live block
+        // reads as a phase that has not arrived. `uncommentInSource` drops a `# Phase <n>` line and
+        // keeps prose, which is the behaviour wanted either way: this explanation belongs above the
+        // block whether or not it is commented.
+        `# Plugins — extra channels, tool providers and script runners, resolved at boot.`,
+        `# Looked up in three places, in order: this binary's built-in registry, then`,
+        `# ~/${BRAND.stateDir}/plugins/<name>/ where \`${BRAND.slug} plugins add\` puts one, then a module`,
+        `# import. A relative path is only ever a path, resolved against this file's directory.`,
+        `# Nothing is installed while the process runs, so a plugin is one self-contained bundle.`,
+        `# Trusted in-process code: \`permissions\` is advisory in v1 — recorded, surfaced by`,
+        `# \`${BRAND.slug} plugins list\`, enforced by nothing. Install plugins you trust.`,
         `# plugins:`,
         `#   - "${BRAND.packageScope}/channel-telegram"`,
         ``,

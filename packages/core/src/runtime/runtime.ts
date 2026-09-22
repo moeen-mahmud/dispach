@@ -15,7 +15,12 @@ import { mkdirSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 import { BRAND } from "../brand.ts"
 import type { ChannelBinding } from "../channels/channel.ts"
-import { channelTypeUnknown, HarnessError, toolProviderUnknown } from "../errors.ts"
+import {
+    channelTransportMismatch,
+    channelTypeUnknown,
+    HarnessError,
+    toolProviderUnknown,
+} from "../errors.ts"
 import { EventBus } from "../events/bus.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import { type ManifestHeader, readManifestHeader } from "../manifest/header.ts"
@@ -144,6 +149,13 @@ export interface RuntimeOptions {
      * Anything not here is imported from beside the agent. Nothing is ever installed (hard rule 5).
      */
     readonly builtInPlugins?: BuiltInPlugins
+    /**
+     * Directory holding installed plugins, one per subdirectory — the middle of the loader's three
+     * lookups, and absent to skip it.
+     *
+     * The host's, never derived here: the CLI owns every sandbox path so a test can redirect them.
+     */
+    readonly pluginRoot?: string
     /**
      * Start channels as part of `create`, after `runtime.ready` has fired.
      *
@@ -1397,6 +1409,7 @@ async function prepareAgents(input: {
                 ...(options.builtInPlugins === undefined
                     ? {}
                     : { builtIn: options.builtInPlugins }),
+                ...(options.pluginRoot === undefined ? {} : { pluginRoot: options.pluginRoot }),
                 base: {
                     ...(options.toolProviders === undefined
                         ? {}
@@ -1810,6 +1823,16 @@ export function buildChannels(
             config,
             id: channel.id,
         })
+        // Checked because a plugin-supplied factory is plain JavaScript by the time it runs here, and
+        // both fields are read elsewhere as facts. Found by running a third-party channel for the
+        // first time: a transport with no `type` put `echo (undefined)` on the serve banner and left
+        // the documented `type` absent from `GET /v1/agents/:id`.
+        if (transport.id !== channel.id) {
+            throw channelTransportMismatch("id", channel.id, transport.id, channel.id)
+        }
+        if (transport.type !== channel.type) {
+            throw channelTransportMismatch("type", channel.type, transport.type, channel.id)
+        }
 
         bindings.push({
             transport,

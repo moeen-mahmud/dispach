@@ -26,7 +26,7 @@ import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { keyValue } from "#lib/render"
-import { storePath } from "#lib/sandbox"
+import { pluginRoot, storePath } from "#lib/sandbox"
 import type { MemoryOptions } from "#lib/schema"
 
 /** Enough of a passage to recognize it, on one line. */
@@ -39,6 +39,7 @@ export async function memoryCommand(options: MemoryOptions): Promise<number> {
         store: options.store ?? storePath(),
         toolProviders: TOOL_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
+        pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),
         channels: CHANNELS,
         env: ambientEnv([options.manifestPath]),

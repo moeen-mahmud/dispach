@@ -541,3 +541,117 @@ describe("a partial conflict across several agents", () => {
         await store.close()
     })
 })
+
+/**
+ * A transport must report the entry it was built from — the check TypeScript cannot make.
+ *
+ * Every first-party channel gets this right because `tsc` sees the factory. A plugin does not: by
+ * the time `defineChannel` hands a factory over it is plain JavaScript, and the runtime then trusts
+ * whatever object comes back. Found by running a third-party channel for the first time, where the
+ * symptoms were a `serve` banner reading `echo (undefined)` and a documented wire field —
+ * `channels[].type` on `GET /v1/agents/:id` — silently absent.
+ *
+ * Both fields matter for a different reason, which is why the refusal names which one is wrong:
+ * `id` is the channel segment of every session key, so a transport that ignores the id it was
+ * handed files conversations under a name nothing else looks for.
+ */
+describe("a channel factory cannot disagree with the entry that asked for it", () => {
+    function manifestWith(type: string): string {
+        const dir = mkdtempSync(join(tmpdir(), "chan-shape-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: test
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: MODEL_API_KEY
+channels:
+  - type: ${type}
+    id: sc
+`,
+            "utf8",
+        )
+        return dir
+    }
+
+    async function refusedBy(factory: ChannelFactory): Promise<{ code: string; message: string }> {
+        const dir = manifestWith("loose")
+        try {
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: ENV,
+                channels: { loose: factory },
+            })
+            await runtime.stop()
+            return { code: "no refusal", message: "" }
+        } catch (error) {
+            const detail = error as { code?: string; message?: string }
+            return { code: detail.code ?? "?", message: detail.message ?? "" }
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    }
+
+    const shape = {
+        limits: { maxMessageChars: 4096, idempotentSend: false },
+        start: async () => {},
+        stop: async () => {},
+        send: async () => ({ ok: true as const, providerMessageId: "1" }),
+    }
+
+    test("a missing type is refused rather than printed as undefined", async () => {
+        // `as unknown as` rather than `as`, and the cast is the finding: TypeScript **refuses** this
+        // shape, which is exactly why the runtime has to check it — a plugin's factory is plain
+        // JavaScript by the time `defineChannel` hands it over, and nothing typed it.
+        const found = await refusedBy(((context: { id: string }) => ({
+            id: context.id,
+            ...shape,
+        })) as unknown as ChannelFactory)
+        expect(found.code).toBe("channel_transport_mismatch")
+        expect(found.message).toContain("`type` is missing")
+    })
+
+    test("a type that is not the one registered is refused", async () => {
+        const found = await refusedBy(((context: { id: string }) => ({
+            id: context.id,
+            type: "something-else",
+            ...shape,
+        })) as ChannelFactory)
+        expect(found.code).toBe("channel_transport_mismatch")
+        expect(found.message).toContain('"something-else"')
+    })
+
+    test("an id the factory invented for itself is refused, because session keys carry it", async () => {
+        const found = await refusedBy((() => ({
+            id: "mine",
+            type: "loose",
+            ...shape,
+        })) as ChannelFactory)
+        expect(found.code).toBe("channel_transport_mismatch")
+        expect(found.message).toContain('"mine"')
+        expect(found.message).toContain('"sc"')
+    })
+
+    test("and a correct factory still loads — otherwise this proves nothing", async () => {
+        const dir = manifestWith("loose")
+        try {
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: ENV,
+                channels: {
+                    loose: ((context: { id: string }) => ({
+                        id: context.id,
+                        type: "loose",
+                        ...shape,
+                    })) as ChannelFactory,
+                },
+            })
+            expect(runtime.channels.statusOf("test")[0]?.type).toBe("loose")
+            await runtime.stop()
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+})

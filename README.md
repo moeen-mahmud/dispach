@@ -634,9 +634,33 @@ Stated plainly, because the alternative is someone assuming otherwise:
 > the startup time and simplicity this project exists to preserve. If you need to run
 > untrusted plugin code, run the whole agent in a container and treat that as the boundary.
 
-`dispach plugins <manifest>` prints what each plugin registered and what it declared, with that
+`dispach plugins list <agent>` prints what each plugin registered and what it declared, with that
 last sentence repeated above the list. Declaring accurately costs nothing today and is the only
 thing that will distinguish a plugin from a scramble when enforcement lands.
+
+### Installing one
+
+```bash
+dispach plugins add <agent> moeen-mahmud/some-plugin --ref v1.0.0
+dispach plugins list <agent>
+dispach plugins remove <agent> some-plugin
+```
+
+`add` clones with git into `~/.dispach/plugins/<name>/`, loads it there to read its declarations,
+prints them, and only then writes the `plugins:` entry — because a manifest naming a plugin that
+will not load *does not load*, so writing the entry first would brick the agent and report success.
+The verification is the same `conformance()` suite the plugin's own author runs.
+
+**A plugin is one self-contained bundle.** Nothing is installed while this runtime runs (hard rule
+5), so a tree that declares runtime dependencies and ships no `node_modules` is refused by name
+rather than half-loading at your next boot. That rule is what makes the compiled binary and the
+container — neither of which has a `node_modules` — resolve a plugin exactly as a checkout does.
+
+What git costs, said rather than discovered: no version resolution and no integrity check. `--ref`
+pins a tag or a commit, the resolved commit is recorded beside the code and printed by `plugins
+list`, and the `dispachApi` gate checks **compatibility, not authenticity** — nothing here verifies
+who published what. A local path is accepted too, which is how you test a bundle before publishing
+it.
 
 ## Commands
 
@@ -662,7 +686,7 @@ authority; read this as a map. `dispach <command> --help` has the flags.
 | `skills` | browse the catalogues and install, or check one agent's skills |
 | `sources` | the repositories skills come from: list, add, search |
 | `tools` | the resolved tool catalogue, or warm a remote provider's cache |
-| `plugins` | what each plugin this agent loaded registered, and what it declared |
+| `plugins` | install a plugin from git, list what an agent loaded, or remove one |
 | `credential` | mint, list and revoke operator keys for the API, optionally scoped |
 | `validate` | load a manifest and report what it resolved to |
 | `workspace` | check the workspace files against the authoring rules |

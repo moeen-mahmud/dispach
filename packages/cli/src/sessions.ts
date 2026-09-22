@@ -15,7 +15,7 @@ import { DEFAULT_ROW_LIMIT, EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { onExit } from "#lib/exit"
 import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { ago } from "#lib/render"
-import { storePath } from "#lib/sandbox"
+import { pluginRoot, storePath } from "#lib/sandbox"
 import type { SessionsOptions } from "#lib/schema"
 
 function pad(value: string, width: number): string {
@@ -155,6 +155,7 @@ export async function sessionsCommand(options: SessionsOptions): Promise<number>
         store: options.store ?? storePath(),
         toolProviders: TOOL_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
+        pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),
         channels: CHANNELS,
         env: ambientEnv([options.manifestPath]),

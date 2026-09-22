@@ -42,7 +42,7 @@ import { claimSignals, onExit } from "#lib/exit"
 import { hostableAgents, manifestForId } from "#lib/lifecycle"
 import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { provisionAgent, provisionSteps } from "#lib/provision"
-import { agentsDir, storePath } from "#lib/sandbox"
+import { agentsDir, pluginRoot, storePath } from "#lib/sandbox"
 
 export interface ServeOptions {
     /**
@@ -171,6 +171,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                 // report every plugin twice to anything watching.
                 bus: new EventBus({ runtimeId: "serve-preload" }),
                 builtIn: BUILT_IN_PLUGINS,
+                pluginRoot: pluginRoot(),
                 base: { toolProviders: TOOL_PROVIDERS, channels: CHANNELS },
             })
             manifests.push({
@@ -332,6 +333,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         bus,
         toolProviders: TOOL_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
+        pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),
         channels: CHANNELS,
         // The one call site that passes this. See the file comment.
