@@ -249,11 +249,36 @@ textarea:focus {
     margin-bottom: 4px;
 }
 
+/* The QR is drawn at a fixed, generous size rather than filling its column: a code scaled to a wide
+   panel is a code somebody holds a phone up to from too far away, and one scaled to a narrow phone
+   viewport stops resolving. 240px is comfortably above the ~2px-per-module a camera needs for the
+   61-module matrix WhatsApp issues. White background is not decoration — the quiet zone and the
+   light modules have to be light whatever the page theme is, or nothing reads it. */
+.payload-qr {
+    display: block;
+    width: 240px;
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+    margin: 8px 0;
+}
+
+/* A stale code still shows, because hiding it leaves nothing on screen at the moment the next one
+   arrives. Dimmed rather than removed, so it is obvious which state it is in. */
+.channel-input.stale .payload-qr {
+    opacity: 0.35;
+}
+
 .note {
     font-size: 12px;
     color: var(--dim);
     border-left: 2px solid var(--line);
     padding-left: 11px;
+    /* A note is written with its own line breaks — an error is `code: message` and then `hint: …`
+       on a line of its own, the way the CLI prints it. Without this the newline collapses to a
+       space and the remedy runs on into the sentence that caused it, which is the one part a
+       reader is scanning for. `pre-wrap` keeps the breaks and still wraps a long line. */
+    white-space: pre-wrap;
 }
 .note.bad {
     color: var(--bad);
@@ -709,4 +734,52 @@ select:focus {
 /* The second input of the delivery pair, and the note under it. */
 .form-grid > div > input + input {
     margin-top: 6px;
+}
+
+/* Boot findings — capabilities the agent could not set up. Every one of these was a refusal
+   before 0.1.3, so they are loud by design: the case for degrading a failure rests entirely on
+   the failure being visible. */
+.warnings {
+    border: 1px solid var(--warn);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+}
+.warnings h3 {
+    margin: 0;
+    color: var(--warn);
+}
+.warnings .sub {
+    margin: 0.25rem 0 0.75rem;
+    opacity: 0.8;
+}
+.warning {
+    margin-top: 0.5rem;
+}
+.warning-message {
+    margin: 0;
+}
+.warning .hint {
+    margin: 0.15rem 0 0;
+    opacity: 0.75;
+}
+
+/* The four things a person does to a channel. Inline rather than behind a menu: each is one click
+   and the whole point is that none of them needed knowing a field name. */
+.channel-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.5rem;
+}
+.channel-actions form {
+    display: flex;
+    gap: 0.35rem;
+}
+.channel-actions input {
+    min-width: 14rem;
+}
+.status-off {
+    opacity: 0.7;
 }

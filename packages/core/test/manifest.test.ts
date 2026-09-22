@@ -604,11 +604,19 @@ model:
 })
 
 describe("sections this build does not implement", () => {
-    test("a channel type nobody registered is refused, naming the field", () => {
-        // Phase 4 replaced the blanket refusal with a registration check, for the same reason
-        // `tools.provider` has one: a channel that constructs nothing never receives, and the only
-        // symptom is a bot that does not answer — indistinguishable from a wrong token.
-        const error = expectFailure({
+    test("a channel type nobody registered LOADS — the check belongs to buildChannels", () => {
+        /**
+         * It used to be refused here, and that made two checks for one fact: this one refused the
+         * whole manifest, while `buildChannels` constructs the transport a few lines later and now
+         * degrades a channel it cannot build to a warning. Two checks meant the stricter one
+         * decided, so no amount of care in `buildChannels` could stop a manifest naming a
+         * plugin-supplied channel being unloadable.
+         *
+         * The old argument was that a channel constructing nothing never receives with no symptom.
+         * The symptom is now on four surfaces, and refusing the whole agent over an optional
+         * capability was the cost. `lease.test.ts` is where the refusal is asserted.
+         */
+        const loaded = load({
             "agent.yaml": manifestYaml(`id: t
 model:
   main:
@@ -621,8 +629,30 @@ channels:
     tokenEnv: TELEGRAM_BOT_TOKEN
 `),
         })
-        expect(codes(error)).toContain("channel_type_unknown")
-        expect(allDetails(error)[0]?.field).toBe("channels[0].type")
+        expect(loaded.manifest.channels[0]?.type).toBe("telegram")
+    })
+
+    test("two channels sharing an id is still fatal, because neither is addressable", () => {
+        // A manifest **coherence** error rather than a capability failure, which is the line the
+        // degradation draws: a channel id is the channel segment of a session key, so two entries
+        // with one id means a stored conversation cannot say which it came from.
+        const error = expectFailure({
+            "agent.yaml": manifestYaml(`id: t
+model:
+  main:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+channels:
+  - type: telegram
+    id: tg
+    tokenEnv: TELEGRAM_BOT_TOKEN
+  - type: telegram
+    id: tg
+    tokenEnv: OTHER_TOKEN
+`),
+        })
+        expect(codes(error)).toContain("channel_id_duplicate")
     })
 
     test("a registered channel type loads, keeping its type-specific fields", () => {
@@ -766,11 +796,19 @@ delivery:
         expect(allDetails(error)[0]?.hint).toContain("names a channel's id, not its type")
     })
 
-    test("naming a provider nobody registered is refused, naming the field", () => {
-        // Not "not implemented" any more — providers work. What fails is naming one this runtime was
-        // never given, and failing here beats failing at resolution, where the report would blame every
-        // pinned slug for one missing registration.
-        const error = expectFailure({
+    test("naming a provider nobody registered LOADS — the check belongs to buildProviders", () => {
+        /**
+         * It was refused here, and the reason given was that failing at load beats failing at
+         * resolution, "where the report would blame every pinned slug for one missing
+         * registration". Both halves are still true and neither needs a refusal: `buildProviders`
+         * warns about the unregistered id **by name**, and the pinned slugs it would have supplied
+         * warn separately as unresolved — so the report names the cause *and* the cost.
+         *
+         * What the refusal cost was an agent that could not start over an optional capability: a
+         * provider is most often one a plugin registers, and a plugin that failed to load is
+         * already a warning of its own.
+         */
+        const loaded = load({
             "agent.yaml": manifestYaml(`id: t
 model:
   main:
@@ -781,8 +819,7 @@ tools:
   provider: composio
 `),
         })
-        expect(codes(error)).toContain("tool_provider_unknown")
-        expect(allDetails(error)[0]?.field).toBe("tools.provider")
+        expect(loaded.manifest.tools.provider).toBe("composio")
     })
 
     test("a registered provider loads, and the refusal names the ones that are available", () => {
@@ -796,25 +833,12 @@ tools:
   provider: composio
 `)
         const dir = workspace({ "agent.yaml": yaml })
-        const loaded = loadManifest(join(dir, "agent.yaml"), {
-            env: ENV,
-            skipEnvFile: true,
-            knownProviders: ["composio"],
-        })
+        const loaded = loadManifest(join(dir, "agent.yaml"), { env: ENV, skipEnvFile: true })
         expect(loaded.manifest.tools.provider).toBe("composio")
-
-        // A typo against a registered set names what is available rather than only what is wrong.
-        let hint = ""
-        try {
-            loadManifest(join(workspace({ "agent.yaml": yaml }), "agent.yaml"), {
-                env: ENV,
-                skipEnvFile: true,
-                knownProviders: ["mcp"],
-            })
-        } catch (error) {
-            hint = error instanceof HarnessError ? (error.details[0]?.message ?? "") : ""
-        }
-        expect(hint.includes("Available: mcp")).toBe(true)
+        // Whether that id is *registered* is no longer asked here. It was, and that made two
+        // checks for one fact — this one refusing the manifest while `buildProviders` constructs
+        // the provider and now degrades an unregistered one to a warning. `tools.test.ts` and
+        // `lease.test.ts` are where the degradation is asserted.
     })
 
     test("enabling runtime tool search is refused, and says why it is off by design", () => {
@@ -1078,8 +1102,6 @@ describe("the shipped example manifests load", () => {
                     MODEL_ID: "deepseek-v4-pro",
                     MODEL_BASE_URL: "https://api.deepseek.com/v1",
                 },
-                knownProviders: ["system", "web", "composio"],
-                knownChannels: ["telegram", "whatsapp"],
             })
             expect(loaded.manifest.apiVersion).toBe(`${BRAND.slug}/v1`)
         },

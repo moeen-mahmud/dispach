@@ -170,29 +170,45 @@ export class ToolRegistry {
 
         const missing = requested.filter((slug) => !found.has(normalise(slug)))
         if (missing.length > 0) {
-            // A provider that knows *why* it came up empty gets to say so before the generic
-            // message does. Asked here rather than thrown from `resolve` because the question only
-            // makes sense once every provider has answered: each one is handed the whole pinned
-            // list, so a cold Composio is asked about `config_read` and cannot know that the system
-            // provider is about to resolve it. Throwing at that point refused an agent whose every
-            // pinned tool was resolvable — which is how a generated `--composio connected` manifest
-            // failed to boot with nothing wrong in it.
-            for (const provider of providers) {
-                const explained = provider.explainUnresolved?.(missing)
-                if (explained !== undefined) throw explained
+            /**
+             * **Warned and omitted, never fatal.** A pinned slug nothing can resolve is almost
+             * always a *credential* rather than a typo: a Composio account with no key resolves
+             * nothing, and refusing to boot meant `init --composio connected` produced an agent that
+             * could not start — while `validate` said `ok`, because it does not build a registry.
+             * That is the recorded asymmetry in its worst direction, and the same complaint as a
+             * channel with no token: an optional capability made the whole agent unstartable.
+             *
+             * It is not silent, which is the whole reason this is defensible. The finding lands on
+             * `agent.tools.warnings`, which `Runtime` emits and the banner prints; the tool is absent
+             * from the catalogue; and `available()` is what tells the *model* it was not given
+             * something its manifest asks for — the seam that already exists for exactly this.
+             *
+             * A provider that knows *why* it came up empty still gets to say so first. Asked here
+             * rather than thrown from `resolve` because the question only makes sense once every
+             * provider has answered: each is handed the whole pinned list, so a cold Composio is
+             * asked about `config_read` and cannot know the system provider is about to resolve it.
+             */
+            const explained = providers
+                .map((provider) => provider.explainUnresolved?.(missing))
+                .find((detail) => detail !== undefined)
+            if (explained !== undefined) {
+                warnings.push(explained.toDetail())
+            } else {
+                const first = missing[0] ?? ""
+                const pinnedIndex = pinned.indexOf(first)
+                warnings.push(
+                    unknownTool({
+                        slug: first,
+                        providers: consulted,
+                        available: await listAll(providers),
+                        field:
+                            pinnedIndex >= 0
+                                ? `tools.pinned[${pinnedIndex}]`
+                                : `tools.local[${local.indexOf(first)}]`,
+                        alsoMissing: missing.slice(1),
+                    }).toDetail(),
+                )
             }
-            const first = missing[0] ?? ""
-            const pinnedIndex = pinned.indexOf(first)
-            throw unknownTool({
-                slug: first,
-                providers: consulted,
-                available: await listAll(providers),
-                field:
-                    pinnedIndex >= 0
-                        ? `tools.pinned[${pinnedIndex}]`
-                        : `tools.local[${local.indexOf(first)}]`,
-                alsoMissing: missing.slice(1),
-            })
         }
 
         // Manifest order is priority order: what the author listed first is what survives a trim.

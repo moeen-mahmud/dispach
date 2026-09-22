@@ -262,6 +262,26 @@ export const ConfigBody = z.object({
     ),
 })
 
+/**
+ * `PATCH /v1/agents/:id/channels/:channelId` — connect, disconnect, or set the credential.
+ *
+ * Both fields optional and at least one required, which the route checks rather than the schema:
+ * "send something" is a sentence, and Zod's version of it is a union whose error names neither
+ * field. The credential is **write-only** — nothing reads one back, so there is no `GET` that could.
+ */
+export const ChannelPatchBody = z.object({
+    enabled: annotate(
+        z.boolean().optional(),
+        "Switch the channel on or off. It takes effect at the agent's next start, because a channel is constructed at boot.",
+    ),
+    credential: refuse(z.string().min(1).optional(), {
+        code: "channel_credential_unreadable",
+        hint: "The value goes into the .env beside the manifest at 0600, under the variable that channel's own entry names. Send a non-empty string; an empty one fails the load exactly as a missing variable does.",
+        description:
+            "The channel's credential — a Telegram bot token. Never returned by any route; only whether it is set.",
+    }),
+})
+
 /** `POST /v1/agents` — see the module comment for why the answers are not enumerated here. */
 export const ProvisionBody = z.object({
     answers: refuse(

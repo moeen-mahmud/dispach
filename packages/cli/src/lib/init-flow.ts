@@ -230,6 +230,17 @@ export interface InitAnswers {
      */
     readonly telegram: string
     /**
+     * WhatsApp, asked separately from Telegram rather than as one multi-select.
+     *
+     * Two independent single-selects is the cheapest correct shape and satisfies "both at once"
+     * naturally. The alternative — one `none | telegram | whatsapp | both` answer — would need the
+     * pure wizard reducer to store more than one value per question, and would need
+     * `ProvisionStep.requires` to name two values so a browser form kept the follow-up fields
+     * visible under `both`: a breaking wire change for nothing. It also matches how `system`, `web`
+     * and `composio` already work — one capability, one question.
+     */
+    readonly whatsapp: string
+    /**
      * The bot token, written to the gitignored `.env`. Same rule as every other secret: the
      * manifest names the variable, no flag accepts the value.
      */
@@ -242,6 +253,8 @@ export interface InitAnswers {
      * into the file, because a wrong handle fails the same way an empty list does and says less.
      */
     readonly telegramAllow?: string
+    /** A WhatsApp number in digits. There is no token: pairing is a QR, not a credential. */
+    readonly whatsappAllow?: string
     /**
      * Whether to serve the HTTP API: `none` or `local`.
      *
@@ -541,6 +554,38 @@ export function telegramChoice(value: string): (typeof TELEGRAM_CHOICES)[number]
 }
 
 /**
+ * WhatsApp, and the label carries the warning because this is where the choice is made.
+ *
+ * Baileys reverse-engineers WhatsApp Web with no appeal path when a number is banned, so the one
+ * sentence that matters — pair a spare number — belongs at the moment somebody says yes, not three
+ * files away in a README they will read afterwards if at all.
+ */
+/**
+ * Where the plugin is published, and the name it installs under.
+ *
+ * Derived from the brand rather than written, because hard rule 3 puts the product name in exactly
+ * one file — and a rename that left a literal here would print an install command for a repository
+ * that does not exist. The owner is a person's GitHub handle, which a rename does not move.
+ */
+export const WHATSAPP_PLUGIN_NAME = `${BRAND.slug}-whatsapp`
+export const WHATSAPP_PLUGIN_REPO = `moeen-mahmud/${WHATSAPP_PLUGIN_NAME}`
+
+export const WHATSAPP_CHOICES: readonly {
+    readonly value: string
+    readonly label: string
+}[] = [
+    { value: "none", label: "No" },
+    {
+        value: "connected",
+        label: "Yes — unofficial, and it can get a number banned. Use a spare one.",
+    },
+]
+
+export function whatsappChoice(value: string): (typeof WHATSAPP_CHOICES)[number] | undefined {
+    return WHATSAPP_CHOICES.find((choice) => choice.value === value)
+}
+
+/**
  * Whether to serve the HTTP surface.
  *
  * Loopback only. Binding a public host is a deliberate edit, and it refuses to start without a
@@ -722,6 +767,8 @@ export const STEP_ORDER: readonly InitStep[] = [
     "telegram",
     "telegramAllow",
     "telegramToken",
+    "whatsapp",
+    "whatsappAllow",
     "skills",
     "daemon",
     "dirChoice",
@@ -851,6 +898,9 @@ export function nextQuestion(
         ) {
             continue
         }
+        // And nobody who said no to WhatsApp is asked whose number may message it. There is no
+        // token step to skip: WhatsApp is paired by scanning a QR, not by pasting a credential.
+        if (step === "whatsappAllow" && partial.whatsapp !== "connected") continue
         // `daemon` is asked of everyone, and used to be gated on
         // `telegram === "connected" || server === "local"`. `server` stopped being a question in
         // 0.1.2 and defaults to `local` at the funnel, so that half was true for every agent — and a
@@ -979,6 +1029,28 @@ export function nextQuestion(
                     prompt: "Telegram bot token (from @BotFather)",
                     // Empty is a real answer, as everywhere else a secret is asked for, and there
                     // is no flag — a token on a command line lands in shell history.
+                    fallback: "",
+                    optional: true,
+                }
+            case "whatsapp":
+                return {
+                    step,
+                    prompt: "Can people message it on WhatsApp?",
+                    fallback: "1",
+                    options: WHATSAPP_CHOICES.map((choice) => ({
+                        value: choice.value,
+                        label: choice.label,
+                    })),
+                }
+            case "whatsappAllow":
+                return {
+                    step,
+                    // Digits, and the prompt says so. `allowFrom` is compared literally against the
+                    // number WhatsApp reports, so `+8801…` matches nobody — the Telegram
+                    // `@handle`-against-a-numeric-chat-id trap in another provider's clothes.
+                    prompt: "Your WhatsApp number in digits, no + — who may message it",
+                    // Empty permits nobody, which is the safe default and a workable first run: the
+                    // first message from anyone is refused with the exact line to paste.
                     fallback: "",
                     optional: true,
                 }
@@ -1147,6 +1219,37 @@ export function validateAnswer(step: InitStep, raw: string): Answered {
                       reason: `pick 1-${TELEGRAM_CHOICES.length}, or a name: ${TELEGRAM_CHOICES.map((c) => c.value).join(", ")}.`,
                   }
                 : { ok: true, value: chosen.value }
+        }
+
+        case "whatsapp": {
+            const byNumber = WHATSAPP_CHOICES[Number(value) - 1]
+            const chosen = byNumber ?? whatsappChoice(value.toLowerCase())
+            return chosen === undefined
+                ? {
+                      ok: false,
+                      reason: `pick 1-${WHATSAPP_CHOICES.length}, or a name: ${WHATSAPP_CHOICES.map((c) => c.value).join(", ")}.`,
+                  }
+                : { ok: true, value: chosen.value }
+        }
+
+        case "whatsappAllow": {
+            // Empty permits nobody, which is a real and safe answer. Anything else has to be the
+            // digits WhatsApp reports: the entry is compared literally, so `+8801…` connects
+            // perfectly and refuses the one person it was set up for. Refused *here*, where the
+            // value is typed, because that is the only moment somebody can still fix it cheaply.
+            const raw = value.trim()
+            if (raw === "") return { ok: true, value: "" }
+            const digits = raw.replace(/[^0-9]/g, "")
+            if (!/^[0-9]{6,20}$/.test(digits)) {
+                return {
+                    ok: false,
+                    reason: "that is not a WhatsApp number — use the digits including the country code, with no + and no spaces.",
+                }
+            }
+            // Normalised rather than refused when only the punctuation is wrong: somebody who
+            // pasted `+880 171 122 3344` meant the right person, and telling them to retype it
+            // would be a rule for its own sake.
+            return { ok: true, value: digits }
         }
 
         case "server": {
@@ -1589,7 +1692,13 @@ export function planFiles(answers: InitAnswers): readonly GeneratedFile[] {
         // The generated .env carries real endpoint values and eventually a key; a repo-ready
         // directory that would commit it by default is a trap. Kept even in the sandbox —
         // people run `git init` there too.
-        { relPath: ".gitignore", contents: ".env\n" },
+        {
+            relPath: ".gitignore",
+            // `.whatsapp/` only when there is one. The session directory holds credentials that
+            // **are** the linked device — committing it hands somebody the agent's WhatsApp — and
+            // the manifest comment beside it says "gitignored for you", which has to be true.
+            contents: answers.whatsapp === "connected" ? ".env\n.whatsapp/\n" : ".env\n",
+        },
     ]
 }
 
@@ -1721,7 +1830,57 @@ const rule = (title: string): string =>
  * uncommented the block, which is how `Unrecognized key: "Phase 4 — channels, delivery, and the
  * HTTP server"` happened to the first person who tried it.
  */
+/**
+ * The WhatsApp entry, or nothing.
+ *
+ * Separate from `channelsBlock` because the two channels are independent answers and either, both
+ * or neither can be on — which is the whole reason they are two questions rather than one
+ * multi-select.
+ */
+function whatsappEntry(answers: InitAnswers): readonly string[] {
+    if (answers.whatsapp !== "connected") return []
+    const number = answers.whatsappAllow ?? ""
+    return [
+        `  # Unofficial: this runs Baileys, which reverse-engineers WhatsApp Web. The number can be`,
+        `  # banned and there is no appeal — use a spare one. It is an opt-in plugin and is NOT in`,
+        `  # this binary: install it with \`${BRAND.slug} plugins add <agent> ${WHATSAPP_PLUGIN_REPO}\`.`,
+        `  # Until you do, the agent starts and reports this channel broken, which is the truth.`,
+        `  - type: whatsapp`,
+        `    id: wa                     # the channel segment of every session key it produces`,
+        `    authDir: ./.whatsapp       # the paired session — 0600, and gitignored for you`,
+        ...(number === ""
+            ? [
+                  `    # INBOUND ONLY, and an empty list permits nobody — which is the safe default.`,
+                  `    # DIGITS, no + — the entry is compared literally, so "+8801..." matches nobody.`,
+                  `    # Message it and the log prints the exact line to paste here.`,
+                  `    allowFrom: []`,
+              ]
+            : [
+                  `    # INBOUND ONLY, digits with no + — the entry is compared literally.`,
+                  `    allowFrom: ["${number}"]`,
+              ]),
+    ]
+}
+
 function channelsBlock(answers: InitAnswers): readonly string[] {
+    if (answers.telegram !== "connected" && answers.whatsapp === "connected") {
+        // WhatsApp alone. The heading and the delivery default are the same shape Telegram's are;
+        // what differs is that there is no token to fill in, because pairing is a QR.
+        return [
+            rule("channels"),
+            `# The channel connects AFTER the runtime is ready and never blocks it. Only`,
+            `# \`${BRAND.slug} serve\` starts it; \`${BRAND.slug} run\` builds the same agent with`,
+            `# channels switched off. Pairing is a QR: start it and the channel reports needs_input,`,
+            `# which the web UI draws and \`GET /v1/agents/<id>\` carries.`,
+            `channels:`,
+            ...whatsappEntry(answers),
+            ``,
+            `# Where a turn with no origin goes — a scheduled run, or an API call asking for delivery.`,
+            `delivery:`,
+            `  default: wa`,
+            ``,
+        ]
+    }
     if (answers.telegram !== "connected") {
         return [
             rule("channels — not configured"),
@@ -1772,6 +1931,7 @@ function channelsBlock(answers: InitAnswers): readonly string[] {
                   `    # INBOUND ONLY. It grants nothing on delivery, and omitting it permits nobody.`,
                   `    allowFrom: ["${handle}"]`,
               ]),
+        ...whatsappEntry(answers),
         ``,
         `# Where a turn with no origin goes — a scheduled run, or an API call asking for delivery.`,
         `delivery:`,
@@ -2104,8 +2264,15 @@ function manifestFor(answers: InitAnswers): string {
         `# Nothing is installed while the process runs, so a plugin is one self-contained bundle.`,
         `# Trusted in-process code: \`permissions\` is advisory in v1 — recorded, surfaced by`,
         `# \`${BRAND.slug} plugins list\`, enforced by nothing. Install plugins you trust.`,
-        `# plugins:`,
-        `#   - "${BRAND.packageScope}/channel-telegram"`,
+        ...(answers.whatsapp === "connected"
+            ? [
+                  `plugins:`,
+                  `  # NOT in this binary — install it before the channel above can work:`,
+                  `  #   ${BRAND.slug} plugins add ${slugify(answers.name)} ${WHATSAPP_PLUGIN_REPO}`,
+                  `  # The agent starts either way; until then the channel is reported broken.`,
+                  `  - "${WHATSAPP_PLUGIN_NAME}"`,
+              ]
+            : [`# plugins:`, `#   - "${BRAND.packageScope}/channel-telegram"`]),
         ``,
     )
     return lines.join("\n")

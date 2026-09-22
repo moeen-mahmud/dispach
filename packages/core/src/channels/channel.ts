@@ -233,6 +233,22 @@ export interface ChannelTransport {
      * inside an unverified body are exactly the ones an attacker chose.
      */
     webhook?(delivery: WebhookDelivery): Promise<WebhookOutcome>
+    /**
+     * Forget any stored pairing and start over. Optional, because most channels have none.
+     *
+     * A **credential a person pasted** — Telegram's bot token — is edited where it lives, in the
+     * `.env` beside the manifest, and this method has nothing to do with it. What it is for is a
+     * credential the *channel itself* obtained: WhatsApp's linked-device session, which exists only
+     * because somebody scanned a QR and which no `.env` can express.
+     *
+     * The only way to relink such a channel to a different phone was finding its directory and
+     * deleting it by hand — a filesystem operation nobody should have to discover, and exactly the
+     * shape this project keeps finding, where the remedy exists and is reachable from no surface.
+     *
+     * Implementations must be safe to call while running and while stopped, and must leave the
+     * channel in the state a first start produces: no session, and pairing offered again.
+     */
+    reset?(): Promise<void>
 }
 
 export interface WebhookDelivery {
@@ -261,4 +277,50 @@ export interface ChannelBinding {
     /** Inbound allowlist. Absent or `["*"]` permits anyone. **Inbound only.** */
     readonly allowFrom?: readonly string[]
     readonly enabled: boolean
+    /**
+     * Why this channel could not be built, when it could not be.
+     *
+     * Present means `transport` is `brokenTransport`'s placeholder and this channel will never
+     * receive or send. It is a *binding* rather than an omission so that every surface already
+     * reading `statusOf` reports it — the `serve` banner, `GET /v1/agents/:id`, `/status` and the
+     * web panel — because a channel that is silently absent is the failure this replaced.
+     */
+    readonly broken?: ErrorDetail
+}
+
+/**
+ * Stands in for a channel that could not be constructed, so one missing credential cannot stop an
+ * agent from starting.
+ *
+ * A channel is **optional**: nothing about taking a turn depends on one. `init --telegram connected`
+ * generated a manifest whose factory threw `telegram_token_missing` at load, so a token nobody had
+ * pasted yet made `run`, `serve` *and* `validate` all refuse — the wizard produced an agent that
+ * could not start and printed nine next steps under it. The same shape as a skill whose size failed
+ * the load, where the command that undid it sat behind the load it broke.
+ *
+ * It is a placeholder rather than a dropped entry for three reasons. `statusOf` reports it, so every
+ * existing surface says which channel is broken and why with nothing new to remember. The outbox
+ * keeps a transport for that channel id, so a delivery already queued for it fails **permanently and
+ * visibly** instead of sitting in a queue nothing can drain. And `id`/`type` are the entry's, so a
+ * reader sees the channel the manifest declares rather than a gap where it was.
+ *
+ * `retryable: false` is the point of the send arm: this cannot be fixed by trying again, only by
+ * fixing the manifest or the environment and restarting.
+ */
+export function brokenTransport(id: string, type: string, detail: ErrorDetail): ChannelTransport {
+    return {
+        id,
+        type,
+        limits: { maxMessageChars: 4096, idempotentSend: false },
+        // Reported again on start, because a warning read at boot has usually scrolled away by the
+        // time somebody wonders why the bot is quiet.
+        async start(host: ChannelHost): Promise<void> {
+            host.status("error", detail.message)
+            host.error(detail)
+        },
+        async stop(): Promise<void> {},
+        async send(): Promise<SendResult> {
+            return { ok: false, retryable: false, error: detail }
+        },
+    }
 }

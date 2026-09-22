@@ -115,7 +115,19 @@ export class ChannelHub {
 
         const inboxes = new Map<string, Inbox>()
         const transports = new Map<string, ChannelTransport>()
+        const status = new Map<string, ChannelState>()
         for (const binding of enabled) {
+            // A broken channel is `error` from the moment it registers, not from the moment
+            // something starts it. `run` starts no channels, so the default `starting` would have
+            // told every read-only surface that a channel with a missing credential was on its way
+            // up — and "starting" for something that will never start is the shape slot 2's own
+            // rule exists to prevent.
+            if (binding.broken !== undefined) {
+                status.set(binding.transport.id, {
+                    status: "error",
+                    detail: binding.broken.message,
+                })
+            }
             transports.set(binding.transport.id, binding.transport)
             inboxes.set(
                 binding.transport.id,
@@ -139,12 +151,32 @@ export class ChannelHub {
                     ? {}
                     : { pollIntervalMs: this.#pollIntervalMs }),
             }),
-            status: new Map(),
+            // A broken channel is `error` from the moment it registers, not from the moment
+            // something starts it. `run` starts no channels, so the default `starting` would have
+            // told every read-only surface that a channel with a missing credential was on its way
+            // up — and "starting" for something that will never start is the shape slot 2's own
+            // rule exists to prevent.
+            status,
         })
     }
 
     get size(): number {
         return this.#agents.size
+    }
+
+    /**
+     * Channel ids that could not be constructed — the ones whose transport is a placeholder.
+     *
+     * Distinct from "status is error", which a working channel reaches on a network failure and
+     * recovers from. This is permanent for the lifetime of the agent, which is why slot 2 needs
+     * exactly this list and not that one.
+     */
+    brokenOf(agentId: string): readonly string[] {
+        const bound = this.#agents.get(agentId)
+        if (bound === undefined) return []
+        return bound.bindings
+            .filter((binding) => binding.broken !== undefined)
+            .map((binding) => binding.transport.id)
     }
 
     /**
@@ -221,7 +253,12 @@ export class ChannelHub {
         for (const binding of bound.bindings) {
             const transport = binding.transport
             const host = this.#hostFor(agentId, transport)
-            host.status("starting")
+            // `starting` is skipped for a broken channel and its placeholder still started: the
+            // state already says why, and overwriting it with "coming up" would be a lie for one
+            // frame — but the *announcement* is what `serve` prints, and a broken channel nobody
+            // announced is the seeded-but-silent half of this. The placeholder's `start` reports
+            // `error` with the detail and the hint, on the path every channel already uses.
+            if (binding.broken === undefined) host.status("starting")
             // Not awaited as a group: one transport failing to start must not prevent the
             // others, and `start` is specified to return once running rather than connected.
             try {
@@ -253,6 +290,29 @@ export class ChannelHub {
      * agent's outbox recovers them on `startAgent`; dropping them would lose a reply somebody is
      * waiting for in order to make a teardown look tidy.
      */
+    /**
+     * Forget one channel's stored pairing, if it has one.
+     *
+     * Returns what happened rather than throwing on a channel that cannot be reset: "this channel
+     * has nothing to forget" is an ordinary answer for Telegram, not a fault, and a caller offering
+     * the action for every channel would otherwise have to know which kinds have a pairing.
+     *
+     * The transport is **not restarted** here. A reset leaves it running with no session, which is
+     * the state a first start produces — so the reconnect loop offers pairing again on its own, and
+     * this method does not need to know how any particular channel gets back to that point.
+     */
+    async reset(
+        agentId: string,
+        channelId: string,
+    ): Promise<"reset" | "unsupported" | "no-such-channel"> {
+        const bound = this.#agents.get(agentId)
+        const binding = bound?.bindings.find((entry) => entry.transport.id === channelId)
+        if (binding === undefined) return "no-such-channel"
+        if (binding.transport.reset === undefined) return "unsupported"
+        await binding.transport.reset()
+        return "reset"
+    }
+
     async unregister(agentId: string): Promise<void> {
         const bound = this.#agents.get(agentId)
         if (bound === undefined) return

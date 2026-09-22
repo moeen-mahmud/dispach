@@ -289,12 +289,12 @@ case-insensitive and whole-word against the current input. See `07-SPEC-WORKSPAC
 | Field | Default | Notes |
 | --- | --- | --- |
 | `dialect` | `nlt` | `nlt` or `native`. Config only — never auto-detected. `native` is refused at load when the resolved model has `capabilities.nativeTools: false`, and when any resolved slug falls outside a native function name's `[A-Za-z0-9_-]{1,64}`. |
-| `providers` | `{}` | Map of provider id → that provider's own config: `system`, `web`, `composio`, or anything the embedder registered. Several at once. Each block is validated by its provider, which **refuses an unknown key** rather than ignoring it. Secrets are env var *names*. **Naming an unregistered id fails the load** — resolving nothing instead would blame every pinned slug for one missing registration. |
+| `providers` | `{}` | Map of provider id → that provider's own config: `system`, `web`, `composio`, or anything the embedder registered. Several at once. Each block is validated by its provider, which **refuses an unknown key** rather than ignoring it. Secrets are env var *names*. **Naming an unregistered id is a warning, not a load failure** (0.1.3): a provider is an optional capability and is most often one a plugin registers, so refusing here turned one broken plugin into an agent that could not start. It is named by `agent.warnings`, and the pinned slugs it would have supplied are named separately as unresolved — so a reader gets the cause *and* the cost, which is what the old refusal was protecting. |
 | `provider` | none | **Deprecated alias** for a single `providers` entry. Still loads, with a `tools_provider_deprecated` warning naming the rewrite. Setting it *and* `providers` is a load failure, not a merge. |
 | `providerConfig` | `{}` | Goes with `provider`. Non-empty with no `provider` to apply it to earns `tools_provider_config_orphaned`. |
 | `budget.max` | 24 | Hard cap on catalogue size. |
 | `budget.reserveWrite` | 6 | Slots held for mutating tools so reads cannot starve writes. |
-| `pinned` | `[]` | Slugs resolved at load. **An unknown slug fails the load** with the slug and provider named — unless a provider claims it with `explainUnresolved()`, which is consulted only once a slug is missing after *every* provider has answered. A cold Composio cache reports itself and names the warm command; the generic nearest-match message would blame correct slugs. |
+| `pinned` | `[]` | Slugs resolved at load. **An unknown slug is a warning and the tool is absent** (0.1.3), with the slug and provider named — unless a provider claims it with `explainUnresolved()`, which is consulted only once a slug is missing after *every* provider has answered. Warned rather than refused because the commonest cause is a missing *credential*, not a typo; `available()` is what tells the model it was not given a tool its manifest asks for. A cold Composio cache reports itself and names the warm command; the generic nearest-match message would blame correct slugs. |
 | `search.enabled` | false | Exposes a provider search meta-tool as an escape hatch. Off by default: search-then-execute is two-hop reasoning and small models fail it. |
 | `local` | `[]` | Built-in tools: `artifact_read`, `memory_write`, `phase_set`, `handoff`, `now`. `artifact_read` follows the pointer compaction leaves behind, so an agent with compaction enabled and this tool unpinned can see that detail was removed and cannot retrieve it. |
 | `policy.mode` | `allow` | What happens to a call no rule mentions. `allow` because **pinning is the primary authorization** — an agent has only the tools its manifest pinned. `ask` on an unattended run means `onNoApprover` answers it, so a schedule would do nothing. |
@@ -661,7 +661,7 @@ Common fields; type-specific fields are validated by the channel's own schema.
 
 | Field | Notes |
 | --- | --- |
-| `type` | Registered channel type. |
+| `type` | Registered channel type. **A type nothing supplies is a warning, not a load failure** (0.1.3): the channel is reported broken on every surface and the agent starts, because nothing about taking a turn depends on a channel. The same is true of a factory that refuses — a `tokenEnv` naming an unset variable — which used to make the whole agent unstartable. |
 | `id` | Unique within the agent. Used in session keys and delivery targets. |
 | `allowFrom` | Inbound allowlist. `["*"]` permits anyone. **Inbound only** — it has no effect on outbound delivery. |
 | `enabled` | Default true. |
@@ -673,10 +673,27 @@ Telegram: `tokenEnv`, `mode` (`longpoll` \| `webhook`), `webhookPath`, `secretTo
 whatever that plugin registered, with the entry carrying whatever fields it reads. Nothing installs
 at runtime, so a plugin is resolved from `plugins:` at boot.
 
-This table used to list a `whatsapp` type with `authDir` and `printQr` fields. **No such package
-has ever been committed on any branch**, and those two fields were read by nothing — a spec
-describing a channel that does not exist is worse than an absent one, because a manifest written
-against it fails to load with a message about the type rather than about the documentation.
+#### `whatsapp` — an opt-in plugin, not in this binary
+
+This table listed a `whatsapp` type with `authDir` and `printQr` fields before any such package
+existed, and the entry was removed in 0.1.1 because a spec describing a channel that does not exist
+is worse than an absent one. `packages/channel-whatsapp` exists as of 0.1.3, it reads `authDir` and
+it does **not** read `printQr` — the QR is carried through `needs_input`, never printed.
+
+| field | meaning |
+| --- | --- |
+| `authDir` | Where the paired session is kept. Relative to the agent; default `./.whatsapp`. Every file is written `0600` and the directory `0700`, re-applied each time a new signal key is written rather than once at creation — these credentials **are** the linked device. Gitignore it; `init` does. |
+| `allowFrom` | **Digits, no `+`** — `["8801711223344"]`. Compared literally against what WhatsApp reports, so `+8801711223344` matches nobody. Inbound only, and empty permits nobody; the first refused message prints the exact line to paste. |
+
+There is no token and nothing to fill into `.env`: pairing is a QR somebody scans, reported as
+`needs_input` with the code as its payload. It is **not in this binary** — install it with
+`dispach plugins add <agent> <repo>` and name it in `plugins:`. Until you do, the agent starts with
+the channel reported broken, which is 0.1.3's rule for every optional capability.
+
+**It pairs under Node and not under Bun** (decision 11.256), measured: the npm-installed `dispach`
+works, the compiled binary and the container image do not, and the channel says so at start.
+Baileys reverse-engineers WhatsApp Web with no appeal path when a number is banned — use a spare
+number.
 
 Channel connection failures never block readiness; they surface as `agent.channel.error`.
 

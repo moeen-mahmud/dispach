@@ -1055,7 +1055,7 @@ export function App({
                     palette={palette}
                     index={paletteIndex}
                     width={columns}
-                    maxRows={listRows}
+                    maxRows={frame.paletteRows}
                 />
             )}
             <HistorySearch editor={editor} width={columns} maxRows={listRows} />

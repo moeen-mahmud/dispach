@@ -428,16 +428,15 @@ function validateBaseUrls(manifest: AgentManifest): ErrorDetail[] {
  * an author's intent, and so a malformed entry is reported here rather than throwing on a property
  * access. Three checks, each of which was otherwise a runtime mystery:
  *
- * - a `type` no factory is registered for — a channel that constructs nothing and never receives,
- *   which looks exactly like a wrong token or a network fault
- * - a duplicate `id` — ids are the channel segment of a session key and a webhook path segment
+ * - a duplicate `id` — ids are the channel segment of a session key and a webhook path segment.
+ *   Fatal, unlike everything else about a channel, because it is a manifest **coherence** error
+ *   rather than a capability failure: two entries with one id means neither is addressable, and a
+ *   session key cannot say which one it came from
+ * - an unknown `type` is **not** checked here — see the comment below
  * - `delivery` naming a channel that does not exist, which is rule 9 in `02-SPEC-MANIFEST.md` and
  *   fails at the first scheduled run rather than at load
  */
-function validateChannels(
-    raw: Record<string, unknown>,
-    knownChannels: readonly string[],
-): ErrorDetail[] {
+function validateChannels(raw: Record<string, unknown>): ErrorDetail[] {
     const found: ErrorDetail[] = []
     const entries = Array.isArray(raw.channels) ? raw.channels : []
     const ids = new Set<string>()
@@ -445,7 +444,6 @@ function validateChannels(
     for (const [index, entry] of entries.entries()) {
         if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue
         const channel = entry as Record<string, unknown>
-        const type = typeof channel.type === "string" ? channel.type : undefined
         const id = typeof channel.id === "string" ? channel.id : undefined
 
         if (id !== undefined) {
@@ -460,19 +458,14 @@ function validateChannels(
             ids.add(id)
         }
 
-        if (type !== undefined && !knownChannels.includes(type)) {
-            found.push({
-                code: "channel_type_unknown",
-                message: `channels[${index}] declares type "${type}", which is not registered here.${
-                    knownChannels.length === 0 ? "" : ` Available: ${knownChannels.join(", ")}.`
-                }`,
-                hint:
-                    knownChannels.length === 0
-                        ? `A channel is supplied by the embedder — nothing installs at runtime. Pass it as Runtime.create({ channels: { ${type}: … } }). ${BRAND.slug} validate reports this whenever it runs without one, since it cannot know what an embedder would register.`
-                        : "Check the spelling against the available types.",
-                field: `channels[${index}].type`,
-            })
-        }
+        // **An unknown `type` is deliberately not checked here.** It was, and that made two checks
+        // for one fact: this one refused the *whole manifest* while `buildChannels` constructs the
+        // transport a few lines later and now degrades a channel it cannot build to a warning. Two
+        // checks meant the stricter one decided, so a manifest naming a plugin-supplied channel was
+        // unloadable however well `buildChannels` handled it — the recorded rule applied to itself,
+        // since anything load-bearing belongs in one function every caller reaches. `buildChannels`
+        // is that function: `Runtime.create` and `validate` both call it, and it reports the channel
+        // as broken on four surfaces instead of refusing the agent.
     }
 
     const delivery = raw.delivery
@@ -702,13 +695,9 @@ export function validateSchedules(
     return found
 }
 
-function validateSupportedSections(
-    raw: Record<string, unknown>,
-    knownProviders: readonly string[],
-    knownChannels: readonly string[],
-): ErrorDetail[] {
+function validateSupportedSections(raw: Record<string, unknown>): ErrorDetail[] {
     const found: ErrorDetail[] = []
-    found.push(...validateChannels(raw, knownChannels))
+    found.push(...validateChannels(raw))
 
     for (const { key, feature, phase } of UNSUPPORTED_SECTIONS) {
         const value = raw[key]
@@ -756,18 +745,13 @@ function validateSupportedSections(
                 ? [[toolKeys.provider, "tools.provider"] as const]
                 : []),
         ]
-        for (const [declared, field] of declaredIds) {
-            if (knownProviders.includes(declared)) continue
-            found.push({
-                code: "tool_provider_unknown",
-                message: `${field} names "${declared}", which is not registered here.${knownProviders.length === 0 ? "" : ` Available: ${knownProviders.join(", ")}.`}`,
-                hint:
-                    knownProviders.length === 0
-                        ? `A provider is supplied by the embedder — nothing installs at runtime. Pass it as Runtime.create({ toolProviders: { ${declared}: (ctx) => new … } }). ${BRAND.slug} validate reports this whenever it is run without one, since it cannot know what an embedder would register.`
-                        : "Check the spelling against the available ids.",
-                field,
-            })
-        }
+        // **An unregistered provider id is deliberately not checked here**, for the reason the
+        // channel `type` above is not: it was two checks for one fact, and the stricter one decided.
+        // `buildProviders` constructs the provider and now degrades one it cannot build to a
+        // warning — the tools it would have supplied then fall out of `tools.pinned` as unresolved,
+        // which is a warning of its own, and `available()` tells the model what it was not given.
+        // Refusing the whole manifest here made one failed plugin an agent that could not start.
+        void declaredIds
 
         const search = toolKeys.search
         if (
@@ -825,23 +809,6 @@ export interface ValidateOptions {
     /** The document as written, for checks that must not see schema defaults. */
     raw: Record<string, unknown>
     /**
-     * Provider ids the caller can actually supply, from `Runtime.create({ toolProviders })`.
-     *
-     * `tools.provider` is checked against this rather than against a hardcoded list, because a
-     * provider is registered by the embedder and core may not import one. Omitted means none — which
-     * is why `validate` on its own still refuses a manifest naming a provider: the CLI knows what it
-     * registers, and a bare validation cannot know what an embedder would.
-     */
-    knownProviders?: readonly string[]
-    /**
-     * Channel types the caller can supply, from `Runtime.create({ channels })`.
-     *
-     * Same shape and same reasoning as `knownProviders`. Omitted means none, so a bare `validate`
-     * refuses a manifest declaring a channel — the CLI knows what it registers and passes it, and a
-     * library caller that registers nothing genuinely cannot serve that manifest.
-     */
-    knownChannels?: readonly string[]
-    /**
      * The clock the schedule checks read.
      *
      * Injected so a test is not a function of the day it runs on, defaulted so no caller has to know
@@ -865,10 +832,6 @@ export function validateManifest(manifest: AgentManifest, options: ValidateOptio
         ...validateApiKeyEnv(manifest, options.env),
         ...validateDialectSupport(manifest, options.capabilities),
         ...validateSchedules(options.raw, manifest, options.now ?? Date.now()),
-        ...validateSupportedSections(
-            options.raw,
-            options.knownProviders ?? [],
-            options.knownChannels ?? [],
-        ),
+        ...validateSupportedSections(options.raw),
     ]
 }

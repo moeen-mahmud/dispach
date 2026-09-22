@@ -15,17 +15,14 @@
  * in a log file.
  */
 
-import { dirname, resolve } from "node:path"
 import {
     AgentManifestSchema,
-    agentPluginSupply,
     BRAND,
     EventBus,
     HarnessError,
     isHarnessError,
     loadManifest,
     Runtime,
-    readManifestHeader,
 } from "@dispach/core"
 import {
     browsableHost,
@@ -37,6 +34,7 @@ import {
 } from "@dispach/server"
 import { ambientEnv } from "#lib/ambient"
 import { inContainer } from "#lib/bootstrap"
+import { setChannelCredential, setChannelEnabled, unpairChannel } from "#lib/channel-actions"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
 import { hostableAgents, manifestForId } from "#lib/lifecycle"
@@ -127,58 +125,27 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     for (const entry of wanted) {
         try {
             /**
-             * **Two passes, because `serve` is what hosts channels and a plugin may supply one.**
+             * **One pass again, because the check that needed two is gone.**
              *
-             * This used to be one `loadManifest` against the static `CHANNEL_IDS` and
-             * `PROVIDER_IDS` tables, and that made `PluginContext.defineChannel` — documented
-             * public API — **not work through this binary at all**: a manifest naming a
-             * plugin-supplied channel was refused with `channel_type_unknown` here, before the
-             * plugin that would have satisfied it was ever imported. `Runtime.create` had always
-             * been right, passing `Object.keys(supply.channels)`; it simply never got the chance.
+             * This was a plugin load followed by a `loadManifest` against
+             * `Object.keys(supply.channels)` — the 0.1.1 fix for `defineChannel` not working
+             * through this binary, where a manifest naming a plugin-supplied channel was refused
+             * with `channel_type_unknown` before the plugin that would satisfy it was imported.
              *
-             * The recorded hazard with its polarity reversed — *a check only one surface performs
-             * is a check the two disagree about*, refusing a correct manifest rather than admitting
-             * a broken one — and invisible because `telegram` arrives from the CLI's own table and
-             * never through the plugin path, so the public API had no in-tree consumer.
+             * The whole pass existed to feed `knownChannels`/`knownProviders` into the loader, and
+             * neither exists any more: a channel type and a provider id are now checked where the
+             * thing is *constructed* — `buildChannels` and `buildProviders` — which degrade what
+             * they cannot build to a warning rather than refusing the agent. One owner each, so
+             * there is nothing left for a second pass to disagree with, and an agent declaring
+             * plugins no longer pays a duplicate `setup()` here.
              *
-             * `validate.ts` is the surface that already does this and the two now agree, which is
-             * the argument for this shape over moving the check into `Runtime.create`: that would
-             * need core to know whether the caller *named* these manifests or discovered them —
-             * the asymmetry below, which belongs to the caller — and a manifest naming a genuinely
-             * unknown channel would then throw from an unguarded `sources.map` and take the whole
-             * host down, which is the crash loop this loop exists to prevent, arriving by another
-             * route.
-             *
-             * The cost is one extra `setup()` for an agent that declares plugins.
-             * `agentPluginSupply` returns immediately when `refs` is empty, so an agent with no
-             * `plugins:` block — which is nearly all of them — pays nothing at all. And the load
-             * happening **here** is a strengthening rather than a cost: a plugin that throws on
-             * import used to do it inside `Runtime.create`, where it killed the host, and now makes
-             * one discovered agent broken-and-skipped like any other bad manifest.
+             * The try/catch stays. A manifest can still fail to load for its own reasons — a schema
+             * error, a workspace file disk does not have — and a *discovered* one is skipped and
+             * reported rather than taking the host down with it.
              */
-            const header = readManifestHeader(entry.manifestPath)
-            const supply = await agentPluginSupply({
-                refs: header.plugins ?? [],
-                agentId: header.id ?? entry.manifestPath,
-                paths: {
-                    workspace: dirname(resolve(entry.manifestPath)),
-                    state: dirname(resolve(entry.manifestPath)),
-                    manifest: resolve(entry.manifestPath),
-                },
-                env,
-                // A throwaway bus, like `validate`'s: `Runtime.create` loads these again and emits
-                // the real `plugin.loaded` on the real bus, and a pre-load emitting onto it would
-                // report every plugin twice to anything watching.
-                bus: new EventBus({ runtimeId: "serve-preload" }),
-                builtIn: BUILT_IN_PLUGINS,
-                pluginRoot: pluginRoot(),
-                base: { toolProviders: TOOL_PROVIDERS, channels: CHANNELS },
-            })
             manifests.push({
                 path: entry.manifestPath,
                 loaded: loadManifest(entry.manifestPath, {
-                    knownProviders: Object.keys(supply.toolProviders),
-                    knownChannels: Object.keys(supply.channels),
                     env,
                 }),
             })
@@ -299,6 +266,27 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         bus.on("agent.channel.error", (event) => {
             const data = event.data as { channelId: string; message: string; hint: string }
             process.stderr.write(`  ${data.channelId}: ${data.message}\n    hint: ${data.hint}\n`)
+        })
+        /**
+         * A turn that failed, in the only log a container has.
+         *
+         * `error` is where every uncaught turn failure lands, and **nothing here subscribed to it**
+         * — the same empty room `delivery.failed` sat in, one event over. Measured live: a 401 from
+         * the model endpoint ended a turn in 258 ms, `POST /messages` had already answered 200 with
+         * a turn id, `GET /sessions/<key>/messages` returned `[]`, and `docker logs` held not one
+         * word about it. Every surface a person could reach said nothing while the runtime had a
+         * sentence naming the cause and the field to fix.
+         *
+         * stderr, and the session key with it: under a service manager this is the file somebody
+         * greps after the fact, and a failure with no conversation attached cannot be matched to
+         * the message that provoked it.
+         */
+        bus.on("error", (event) => {
+            const data = event.data as { code: string; message: string; hint: string }
+            const where = event.sessionKey === undefined ? "" : ` [${event.sessionKey}]`
+            process.stderr.write(
+                `  turn failed${where}: ${data.code}: ${data.message}\n    hint: ${data.hint}\n`,
+            )
         })
         // The one thing a person watching a bot most wants to see, and it is otherwise only in the
         // event stream: who was refused, and the line that would let them in.
@@ -429,6 +417,18 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                 create: (answers) =>
                     provisionAgent({ answers, defaults: { agentDirBase: agentsDir(env) } }),
             },
+            /**
+             * The same functions the `channels` command calls, injected for the same reason the
+             * provisioner is: *how* a channel is switched off or re-credentialled is the CLI's —
+             * `editManifest` for one, `applySecret` at `0600` for the other — and a second
+             * implementation inside the server is how the browser and the terminal come to disagree
+             * about what "disconnect" means.
+             */
+            channels: {
+                setEnabled: setChannelEnabled,
+                setCredential: setChannelCredential,
+                unpair: unpairChannel,
+            },
             ...(claim === undefined ? {} : { claim }),
             ...(token === undefined || token === "" ? {} : { token }),
         })
@@ -553,7 +553,15 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             const suffix =
                 channels.length === 0
                     ? "no channels"
-                    : channels.map((c) => `${c.id} (${c.type})`).join(", ")
+                    : channels
+                          // A broken channel is marked here as well as announced, because the
+                          // announcement scrolls and this line is the summary somebody reads before
+                          // walking away. `opt — tg (telegram)` on a channel that will never connect
+                          // is the "running and not working" failure `status` exists to answer.
+                          .map(
+                              (c) => `${c.id} (${c.type}${c.status === "error" ? ", BROKEN" : ""})`,
+                          )
+                          .join(", ")
             // Schedules named on the banner for the reason the 57 MB log taught: this is the last
             // place a person looks before walking away, and "it is set up" is exactly the belief a
             // schedule that never fires depends on going unchecked.

@@ -42,6 +42,24 @@ export interface ManifestHeader {
      * spellings survive — the bare string and the `{ spec, config }` form.
      */
     readonly plugins?: readonly (string | { spec: string; config?: Record<string, unknown> })[]
+    /**
+     * Raw `channels:` entries, unvalidated, and here for the same reason `plugins` is.
+     *
+     * A channel is not identity either, and reading one **must not need credentials** — which is
+     * exactly why a full load will not do: `loadManifest` checks that named variables are set, so a
+     * surface built on it fails on the one agent somebody is trying to fix. Listing a channel whose
+     * token is missing, and offering to fill it in, is the case this exists for.
+     *
+     * Shapes are checked by the schema at load; a malformed entry is passed through and refused
+     * later, where the error can name the field.
+     */
+    readonly channels?: readonly {
+        readonly id: string
+        readonly type: string
+        readonly enabled?: boolean
+        readonly allowFrom?: readonly string[]
+        readonly [field: string]: unknown
+    }[]
 }
 
 export function readManifestHeader(
@@ -84,6 +102,20 @@ export function readManifestHeader(
         ...(typeof mainId === "string" ? { modelId: mainId } : {}),
         ...(Array.isArray(record.plugins)
             ? { plugins: record.plugins as NonNullable<ManifestHeader["plugins"]> }
+            : {}),
+        // Filtered to entries that at least have the two fields everything keys on. A half-written
+        // entry is the schema's to refuse at load; what would be wrong here is handing a surface a
+        // channel with no id, which it would then render as a row nothing can act on.
+        ...(Array.isArray(record.channels)
+            ? {
+                  channels: (record.channels as Record<string, unknown>[]).filter(
+                      (entry) =>
+                          entry !== null &&
+                          typeof entry === "object" &&
+                          typeof entry.id === "string" &&
+                          typeof entry.type === "string",
+                  ) as unknown as NonNullable<ManifestHeader["channels"]>,
+              }
             : {}),
     }
 }

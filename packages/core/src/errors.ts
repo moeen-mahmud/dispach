@@ -538,9 +538,12 @@ export function toolRepairFailed(errors: readonly ErrorDetail[]): ToolError {
 /**
  * A `channels[].type` no factory is registered for.
  *
- * Refused at boot rather than skipped. A channel entry that constructs nothing is a channel that
- * never receives, and the only symptom is a bot that does not answer — indistinguishable from a
- * network problem, a wrong token, or an `allowFrom` refusal.
+ * **Degraded rather than fatal, and the old argument is what changed.** This used to refuse the
+ * whole load, because a channel entry that constructs nothing is a channel that never receives with
+ * no symptom — indistinguishable from a network problem, a wrong token or an `allowFrom` refusal.
+ * The symptom is now on four surfaces: `agent.warnings`, `statusOf` as `error` with this message,
+ * slot 2 telling the agent its own channel is misconfigured, and `validate`. Silence was the whole
+ * objection; making one agent unstartable over a typo in an optional capability was the cost.
  */
 export function channelTypeUnknown(type: string, known: readonly string[]): ConfigError {
     return new ConfigError({
@@ -553,9 +556,28 @@ export function channelTypeUnknown(type: string, known: readonly string[]): Conf
         hint:
             known.length === 0
                 ? `A channel is supplied by the embedder, not resolved by name at runtime. Pass it as Runtime.create({ channels: { telegram: telegramChannel } }). The ${BRAND.slug} binary registers the shipped channels for you — a library caller registers the ones it wants.`
-                : `Check the spelling against the registered types, or register a factory for "${type}" in Runtime.create({ channels }).`,
+                : `Check the spelling against the registered types, or register a factory for "${type}" in Runtime.create({ channels }) — a plugin that supplies it has to be named in \`plugins:\` and installed. The agent starts without this channel; it will neither receive nor send.`,
         field: `channels.${type}`,
     })
+}
+
+/**
+ * A channel factory that threw something that is not a `HarnessError`.
+ *
+ * A first-party factory raises a `ConfigError` naming the variable and where to put it, and that
+ * sentence is kept. This covers the rest — a plugin's factory throwing a bare `Error`, or a
+ * `TypeError` from reading a config field it assumed — and it has to name the channel, because the
+ * thrown message alone says nothing about which entry produced it.
+ */
+export function channelFactoryFailed(channelId: string, type: string, cause: unknown): ErrorDetail {
+    return {
+        code: "channel_factory_failed",
+        message: `Channel "${channelId}" (type ${type}) could not be built: ${
+            cause instanceof Error ? cause.message : String(cause)
+        }`,
+        hint: `The agent starts without it — a channel is optional, and nothing about taking a turn depends on one. This channel will neither receive nor send until the cause is fixed and the agent restarts. Check the entry's own fields in \`channels[${channelId}]\`; a plugin-supplied type is the plugin's to fix.`,
+        field: `channels[${channelId}]`,
+    }
 }
 
 /**

@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { readdirSync, readFileSync, statSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join, relative, resolve } from "node:path"
 import { BRAND } from "@dispach/core"
 import { DAEMON_ACTIONS } from "#daemon"
@@ -397,6 +397,47 @@ describe("every host that loads plugins names the plugin root", () => {
                 /join\(\s*sandboxRoot\([^)]*\),\s*"plugins"/.test(file.text),
         ).map((file) => file.path)
         expect(offenders).toEqual([])
+    })
+})
+
+describe("the WhatsApp channel stays out of the binary", () => {
+    /**
+     * Baileys reverse-engineers WhatsApp Web, which WhatsApp's terms do not permit and for which
+     * there is no appeal when a number is banned. That is a risk an operator takes deliberately for
+     * an account they chose; it is not one this runtime takes on behalf of everybody who installs
+     * it. So the package is built, typechecked, linted and tested with everything else — contract
+     * drift against `ChannelTransport` is caught by our own suite rather than by somebody else's CI
+     * — and reaches an agent only through `plugins add`.
+     *
+     * What actually pulls a package into the binary is a static import in `providers.ts` plus the
+     * workspace devDependency. Neither is a thing anybody would notice adding, and adding either
+     * would put 7 MB of unofficial protocol code into the tarball, the four compiled binaries and
+     * the image. So both are asserted, and against `package.json` rather than against the built
+     * bundle: a `dist` scan would go green on a stale build.
+     */
+    const WHATSAPP = "channel-whatsapp"
+
+    test("no CLI source imports it", () => {
+        // An *import*, not a mention: `lib/plugin-install.ts` names the package in a comment as the
+        // example of a monorepo subdirectory, which is exactly the thing this rule is about and not
+        // a violation of it.
+        const offenders = FILES.filter((file) =>
+            new RegExp(`from ["'][^"']*${WHATSAPP}`).test(file.text),
+        ).map((file) => file.path)
+        expect(offenders).toEqual([])
+    })
+
+    test("and it is not a dependency of the published package", () => {
+        const manifest = JSON.parse(
+            readFileSync(join(SRC, "..", "package.json"), "utf8"),
+        ) as Record<string, Record<string, string> | undefined>
+        for (const section of ["dependencies", "devDependencies", "peerDependencies"]) {
+            expect(Object.keys(manifest[section] ?? {}).join(" ")).not.toContain(WHATSAPP)
+        }
+    })
+
+    test("the package really is there — otherwise this test proves nothing", () => {
+        expect(existsSync(join(SRC, "..", "..", WHATSAPP, "package.json"))).toBe(true)
     })
 })
 

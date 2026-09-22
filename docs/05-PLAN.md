@@ -5069,6 +5069,99 @@ agent resource, `remove` dropping the entry and the directory. `--ref` pinning c
 directions — the branch was moved and a pinned re-add stayed on the old commit while an unpinned one
 followed. Refusals checked for exit status and for leaving nothing behind.
 
+### 3b — an optional capability cannot stop the agent starting — **shipped** (2026-09-22)
+
+Reported mid-phase, and it changed how the second channel has to behave, so it landed first.
+
+**`init --telegram connected` generated an agent that could not start.** An empty
+`TELEGRAM_BOT_TOKEN=` in the `.env` it wrote, a factory that threw at load, and `run`, `serve` *and*
+`validate` all refusing — under nine printed next steps. Four capabilities were fatal and are now
+warnings: a channel whose factory refuses or whose type nothing supplies, a plugin that will not
+load, a tool provider nobody registered, and a pinned slug nothing resolves — the ordinary state of
+a Composio account with no key. Decision 11.253.
+
+**Degraded is not silent**, which is the whole argument. `agent.warnings` and
+`agent.tools.warnings` carry every finding, the `serve` banner prints it and marks the channel
+`BROKEN`, `GET /v1/agents/:id` carries both, the browser grew a `WarningsPanel` — it rendered
+`warnings` nowhere at all — and slot 2 tells the agent its channel is `MISCONFIGURED` rather than
+"not running in this session", which would have sent its owner to run `serve`.
+
+**Two checks became one.** Each of the four was checked in `loadManifest` *and* at construction, so
+the stricter one decided and the constructor's care was unreachable. Both loader checks are gone
+along with `knownChannels` and `knownProviders`; `serve`'s two-pass preload went with them, since
+what it existed to pre-empt no longer exists. Decision 11.254.
+
+**A measured disagreement closed on the way.** `validate` built no tool registry, so an agent with a
+pinned `GMAIL_FETCH_EMAILS` and a cold cache reported `ok` here and `composio_cache_miss` at boot.
+It builds the registry the way `run` does now — the same function, so the two cannot disagree.
+
+Verified end to end with **every** optional capability broken at once — a missing plugin, an
+unresolvable Composio slug, no Telegram token, a blank Tavily key: `validate` exits 0 and names all
+four, `run` takes a turn, `serve` hosts the agent, and the API carries the lot.
+
+### 3c — WhatsApp, as an opt-in plugin — **shipped** (2026-09-22)
+
+`packages/channel-whatsapp`, in this monorepo and **imported by nothing**: absent from the tarball,
+the four binaries and the image (542 MB, unchanged), while still built, typechecked, linted and
+tested here. A boundaries test asserts both halves. Decision 11.255.
+
+**`needs_input` has its first producer.** The state, the payload, `issuedAt`, the hub's storage, the
+agent resource, the banner and the web panel were all built against a shape nothing produced.
+Decision 11.257.
+
+**Two findings from running it, and the second decides where it works.** Baileys 6.7.18 does not
+connect at all — `Connection Failure`, both runtimes, an unofficial client whose protocol version
+WhatsApp stopped accepting. `7.0.0-rc14` pairs, so the pin is a release candidate. And the same
+bundle gets a QR under **Node** in about two seconds and **never under Bun** — so the npm-installed
+`dispach` pairs and the compiled binary and container do not. Reported at start with the remedy
+rather than left to a README. Decision 11.256.
+
+Built to the existing contract: `start()` returns once running; the loop never exits on its own;
+`loggedOut` wipes the session and re-pairs, because keeping revoked credentials is the stuck-with-no-QR
+state worth all the care; every credential file is `0600` re-applied on each write, not once at
+creation; groups and history-replay are excluded. `idempotentSend` is **false**, honestly.
+
+Two bugs the tests found before a person could: `stop()` parked forever waiting for a
+`connection: "close"` the provider may never send — a process that will not exit — and the
+"did you mean" branch suggested the empty string for an entry with no digits in it.
+
+### 3d — the `whatsapp` init question — **shipped** (2026-09-22)
+
+Two independent single-selects rather than one multi-select, which satisfies "both at once"
+naturally and needs no change to the pure reducer or to `ProvisionStep.requires`. `--whatsapp` and
+`--whatsapp-allow` are flags — a phone number is not a secret, unlike the Telegram token.
+
+`allowFrom` takes **digits**: the entry is compared literally, so `+8801…` matches nobody. The
+question normalises punctuation rather than refusing it, since somebody who pasted
+`+880 171 122 3344` meant the right person, and `Inbox` already prints the exact line to paste on
+the first refused message.
+
+Answering `connected` writes the channel, the `plugins:` entry and `.whatsapp/` into the generated
+`.gitignore`, and names the install command in the manifest. **It fetches nothing** — which is only
+defensible because of 3b: the agent starts with the channel reported broken until `plugins add` runs,
+rather than refusing to load.
+
+### 3e — a channel is managed from every surface — **shipped** (2026-09-22)
+
+Asked for mid-phase: *"the tui and web ui should have a first class support to connect, disconnect
+them or update the connection credentials as needed"*.
+
+All four actions were possible and reachable from nowhere obvious, and the **browser could do none
+of them** — its channels panel was read-only and no route could write a `.env` after creation.
+Now: `dispach channels [list|connect|disconnect|credential|unpair]`, a controlled panel in the
+browser, and two routes. One module behind both, because two implementations of "disconnect" is how
+two surfaces come to disagree. Decision 11.258.
+
+Four things are decisions rather than plumbing: `enabled` and `status` are different facts and both
+are shown; the credential *variable* is resolved from the manifest and never taken from the caller;
+a credential is write-only, so `Agent.hasEnv` is a question rather than an `env` accessor; and
+`unpair` is its own POST that tries the live transport first.
+
+**Two defects found while building it.** `serve()` dropped the new option exactly as its own four
+comments predicted, so there is a test now rather than a fifth comment (11.259). And the landing
+palette had no clamp — the 23rd command pushed the frame one row past a 30-row terminal and the
+first command scrolled off the top with no counter (11.260).
+
 ### Not done in 3a, and why it is written down
 
 - **`config_set channels` writes a type nothing supplies, reports success, and the next boot

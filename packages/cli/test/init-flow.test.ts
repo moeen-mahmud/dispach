@@ -41,6 +41,7 @@ const ANSWERS: InitAnswers = {
     web: "none",
     composio: "none",
     telegram: "none",
+    whatsapp: "none",
     schedules: "none",
     server: "none",
     skills: "starter",
@@ -72,8 +73,12 @@ describe("nextQuestion", () => {
                 question.step === "preset" ? "deepseek" : question.fallback || "x"
         }
         // No webBackend or webKey: the fallback answer to the web question is "1" — none — and a
-        // backend nobody will use is a question that lies. No composioKey, no telegramAllow and no
-        // telegramToken, for the same reason.
+        // backend nobody will use is a question that lies. No composioKey, no telegramAllow, no
+        // telegramToken and no whatsappAllow, for the same reason.
+        //
+        // `whatsapp` is a top-level question beside `telegram` rather than a choice inside one:
+        // two independent single-selects is what makes "both at once" fall out, and it needs no
+        // change to a reducer that stores one value per question.
         //
         // No `server` either, as of 0.1.2: the question was withdrawn and `local` is defaulted at
         // `complete()`, because an always-on server is the product and "Serve the HTTP API?"
@@ -92,6 +97,7 @@ describe("nextQuestion", () => {
             "web",
             "composio",
             "telegram",
+            "whatsapp",
             "skills",
             "daemon",
             "dirChoice",

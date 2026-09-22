@@ -174,6 +174,24 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             { code: 400, when: "the path is not settable here, or the result would not validate" },
         ],
     },
+    "PATCH /v1/agents/:id/channels/:channelId": {
+        summary: "Connect or disconnect a channel, and set its credential.",
+        statuses: [
+            {
+                code: 400,
+                when: "neither `enabled` nor `credential` was sent, or the channel is unknown",
+            },
+            { code: 409, when: "the agent came from an object, so there is no manifest to edit" },
+            { code: 501, when: "the host supplied no channel actions" },
+        ],
+    },
+    "POST /v1/agents/:id/channels/:channelId/unpair": {
+        summary: "Forget a channel's stored pairing, so the next start offers a new code.",
+        statuses: [
+            { code: 404, when: "this agent has no such channel" },
+            { code: 409, when: "the channel stores no pairing — a typed credential is a PATCH" },
+        ],
+    },
     "GET /v1/agents/:id/schedules": { summary: "Every schedule, from the store." },
     "POST /v1/agents/:id/schedules": {
         summary: "Create a schedule. Validated by the manifest's own schedule rules.",

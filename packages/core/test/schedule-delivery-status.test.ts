@@ -30,7 +30,6 @@ import { afterEach, describe, expect, test } from "./_harness.ts"
 
 const ENV = { MODEL_API_KEY: "test-key", TELEGRAM_BOT_TOKEN: "test-token" }
 /** Core registers no channel, so the load has to be told which types the caller can supply. */
-const CHANNEL_TYPES = ["telegram", "whatsapp"]
 const dirs: string[] = []
 
 afterEach(() => {
@@ -205,7 +204,6 @@ schedules:
 function warnings(to: string, channelType?: string): readonly string[] {
     const loaded = loadManifest(withDelivery(to, channelType), {
         env: ENV,
-        knownChannels: CHANNEL_TYPES,
     })
     return scheduleDeliveryWarnings(loaded.manifest).map((warning) => warning.code)
 }
@@ -230,7 +228,6 @@ describe("a Telegram handle in deliver.to is warned about, never refused", () =>
         // manifest that will not load is a far worse outcome than a line of advice.
         const loaded = loadManifest(withDelivery("@moeen_mahmud"), {
             env: ENV,
-            knownChannels: CHANNEL_TYPES,
         })
         expect(loaded.manifest.schedules[0]?.deliver).toEqual({
             channel: "tg",

@@ -92,8 +92,12 @@ describe("boot", () => {
             "teams",
             "store",
             "tools",
-            "agents",
+            // Channels before agents, and the order is load-bearing rather than incidental: a
+            // channel that cannot be constructed is a *warning on the agent*, and a boot warning
+            // has to be readable off the agent rather than caught on a bus nothing has subscribed
+            // to yet. So the bindings are built first and their failures handed to `Agent.create`.
             "channels",
+            "agents",
         ])
 
         runtime.bus.on("*", (event) => events.push(event))
@@ -905,27 +909,35 @@ ${tools}
         expect(error?.code).toBe("tools_provider_alias_conflict")
     })
 
-    test("an unregistered id fails at load, naming the field it was written in", async () => {
+    test("an unregistered id warns by name, and the agent starts", async () => {
+        /**
+         * It used to refuse the load. A provider is an optional capability — most often one a
+         * plugin registers, and a plugin that failed to load is already a warning — so refusing
+         * here turned one broken plugin into an agent that could not start.
+         *
+         * **Both halves of the report survive**, which is what made the refusal droppable: the
+         * unregistered id is named, *and* the pinned slug it would have supplied is named as
+         * unresolved. The old comment's argument for failing early was that resolution "would
+         * blame every pinned slug for one missing registration" — with both findings present, a
+         * reader gets the cause and the cost rather than one or the other.
+         */
         const dir = withTools(`tools:
   providers:
     nowhere: {}
   pinned: [a_one]`)
 
-        let error: HarnessError | undefined
-        try {
-            await Runtime.create({
-                agents: [join(dir, "agent.yaml")],
-                env: ENV,
-                fetch: replyFetch,
-                toolProviders: { alpha: stub("alpha", ["a_one"]) },
-            })
-        } catch (thrown) {
-            if (thrown instanceof HarnessError) error = thrown
-        }
-        // Refused by the loader's knownProviders check before construction is even attempted.
-        expect(error?.details?.some((detail) => detail.field === "tools.providers.nowhere")).toBe(
-            true,
-        )
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: ENV,
+            fetch: replyFetch,
+            toolProviders: { alpha: stub("alpha", ["a_one"]) },
+        })
+        const agent = runtime.agent("test")
+        expect(agent?.warnings.some((w) => w.field === "tools.providers.nowhere")).toBe(true)
+        // The cost, named separately: the provider that would have answered for it is absent.
+        expect(agent?.tools.warnings.some((w) => w.code === "unknown_tool")).toBe(true)
+        expect(agent?.tools.specs().map((spec) => spec.slug)).not.toContain("a_one")
+        await runtime.stop()
     })
 })
 

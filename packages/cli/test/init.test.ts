@@ -20,7 +20,7 @@ import {
 } from "@dispach/core"
 import { initCommand } from "#init"
 import { EXIT_OK } from "#lib/const"
-import { PROVIDER_IDS, TOOL_PROVIDERS } from "#lib/providers"
+import { TOOL_PROVIDERS } from "#lib/providers"
 
 function scratch(): string {
     return join(mkdtempSync(join(tmpdir(), "init-test-")), "agent")
@@ -96,7 +96,6 @@ describe("initCommand runs the whole funnel", () => {
 
         const loaded = loadManifest(join(dir, "agent.yaml"), {
             env: STUB_ENV,
-            knownProviders: PROVIDER_IDS,
         })
         expect(loaded.manifest.schedules).toEqual([])
     })
@@ -110,7 +109,6 @@ describe("initCommand", () => {
         // Independent of the command's own validate: load it again from here.
         const loaded = loadManifest(join(dir, "agent.yaml"), {
             env: STUB_ENV,
-            knownProviders: PROVIDER_IDS,
         })
         expect(loaded.manifest.id).toBe("milo")
         expect(loaded.manifest.model.main.id).toBe("deepseek-v4-flash")
@@ -183,7 +181,6 @@ describe("initCommand", () => {
             dir,
         })
         const loaded = loadManifest(join(dir, "agent.yaml"), {
-            knownProviders: PROVIDER_IDS,
             env: { ...STUB_ENV, MODEL_ID: "deepseek-v4-pro" },
         })
         const { workspace, warnings } = resolveWorkspace(loaded, {
@@ -219,7 +216,6 @@ describe("initCommand", () => {
 
         const loaded = loadManifest(join(dir, "agent.yaml"), {
             env: {},
-            knownProviders: PROVIDER_IDS,
         })
         expect(loaded.manifest.model.main.baseUrl).toBe("http://localhost:11434/v1")
         expect(readFileSync(join(dir, ".env"), "utf8").includes("MODEL_API_KEY")).toBe(false)
@@ -284,7 +280,7 @@ describe("initCommand", () => {
             expect(await initCommand({ ...FLAGS })).toBe(EXIT_OK)
             const manifest = join(home, "agents", "milo", "agent.yaml")
             expect(existsSync(manifest)).toBe(true)
-            const loaded = loadManifest(manifest, { env: STUB_ENV, knownProviders: PROVIDER_IDS })
+            const loaded = loadManifest(manifest, { env: STUB_ENV })
             expect(loaded.manifest.id).toBe("milo")
         } finally {
             if (previous === undefined) delete process.env[homeVar]
@@ -310,7 +306,7 @@ describe("initCommand", () => {
         const { writeFileSync } = await import("node:fs")
         writeFileSync(path, yaml, "utf8")
 
-        const loaded = loadManifest(path, { env: STUB_ENV, knownProviders: PROVIDER_IDS })
+        const loaded = loadManifest(path, { env: STUB_ENV })
         expect(Object.keys(loaded.manifest.phases ?? {})).toEqual(["triage", "act"])
         expect(loaded.manifest.phases?.triage?.entry).toBe(true)
     })
@@ -324,7 +320,6 @@ describe("initCommand", () => {
 
         const loaded = loadManifest(join(dir, "agent.yaml"), {
             env: { ...STUB_ENV, COMPOSIO_API_KEY: "(pending)" },
-            knownProviders: PROVIDER_IDS,
         })
         const providers = loaded.manifest.tools?.providers ?? {}
         expect(Object.keys(providers)).toContain("composio")

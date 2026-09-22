@@ -241,6 +241,20 @@ export interface AgentClient {
         value: string,
         options?: { readonly confirm?: boolean },
     ): Promise<ConfigWriteResult>
+    /**
+     * Connect or disconnect a channel, and set its credential.
+     *
+     * One call for three things, because they are one decision — is this channel working — and a
+     * client holding three call sites for one panel is how two of them come to disagree. The
+     * credential is **write-only**: nothing reads one back, which is why there is no getter for it
+     * and why `channels[]` on the agent resource reports only whether it is set.
+     */
+    setChannel(
+        channelId: string,
+        changes: { readonly enabled?: boolean; readonly credential?: string },
+    ): Promise<ChannelWriteResult>
+    /** Forget a channel's stored pairing, so the next start offers a new code to scan. */
+    unpairChannel(channelId: string): Promise<{ readonly channelId: string; readonly note: string }>
     /** One conversation's summary. `sessions()` is the listing. */
     session(sessionKey: string): Promise<SessionSummary>
     /** Move a conversation into a phase the manifest declares. */
@@ -411,6 +425,22 @@ export interface AgentConfig {
     /** Absolute path of the manifest, when there is one. */
     readonly file?: string
     readonly settings: readonly ConfigSetting[]
+}
+
+/**
+ * What a channel write reports.
+ *
+ * `notes` is a list because one request may do two things — set the credential and connect it — and
+ * collapsing them into one sentence would lose whichever half somebody is checking. `applied`
+ * separates the *write* from the agent picking it up: the manifest is written before the agent is
+ * replaced, and `dispose` refuses while a turn is in flight, so `applied: false` with a reason is a
+ * real and correct outcome rather than a failure.
+ */
+export interface ChannelWriteResult {
+    readonly channelId: string
+    readonly notes: readonly string[]
+    readonly applied: boolean
+    readonly pending?: WireError
 }
 
 export interface ConfigWriteResult {
@@ -920,6 +950,19 @@ export function createClient(options: ClientOptions): DispachClient {
                         ...(options?.confirm === undefined ? {} : { confirm: options.confirm }),
                     },
                 }),
+
+            setChannel: (channelId, changes) =>
+                json<ChannelWriteResult>(
+                    "PATCH",
+                    at(`/channels/${encodeURIComponent(channelId)}`),
+                    { body: { ...changes } },
+                ),
+
+            unpairChannel: (channelId) =>
+                json<{ channelId: string; note: string }>(
+                    "POST",
+                    at(`/channels/${encodeURIComponent(channelId)}/unpair`),
+                ),
 
             session: (sessionKey) =>
                 json<SessionSummary>("GET", at(`/sessions/${encodeURIComponent(sessionKey)}`)),

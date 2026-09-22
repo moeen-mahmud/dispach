@@ -87,6 +87,9 @@ export function promptRows(editor: EditorState, columns: number): number {
 }
 
 /** The slash-command list: its matches, its overflow notices, and the line naming its keys. */
+/** The key-hint line the palette always draws, plus the one overflow notice it may. */
+const PALETTE_CHROME = 2
+
 export function paletteRows(palette: Palette | undefined, maxRows: number): number {
     if (palette === undefined) return 0
     // The empty case renders one line saying nothing matched, and no key hint — there is nothing to do.
@@ -124,6 +127,18 @@ export interface ChatFrame {
      * Returned so the split happens once, in the caller that knows the mark's rendered height.
      */
     readonly body: number
+    /**
+     * Rows the palette may actually use — its requested ceiling **clamped by the terminal**.
+     *
+     * `LANDING_LIST_ROWS` is what the landing screen would *like*, and the terminal wins, which is
+     * the rule `SkillBrowser` already follows and the chat frame did not. Twenty-three commands at
+     * 30 rows asked for 24 rows of palette plus every other piece of chrome, so the frame came out
+     * taller than the terminal — and an overflowing frame is corruption rather than a scrollbar:
+     * Ink's own output scrolled the buffer and the *first* command went off the top with no counter
+     * saying so. Returned rather than clamped silently, because the component has to render the
+     * "… N above/below" line against the same number the budget was computed from.
+     */
+    readonly paletteRows: number
     /** Rows the conversation may draw if the mark takes none — its scroll counter already deducted. */
     readonly transcript: number
     /** Rows a pane over the conversation may draw. It replaces the transcript rather than sharing. */
@@ -169,11 +184,33 @@ export function chatFrame(inputs: {
               ? live.reasoning
               : live.text
 
+    /**
+     * Everything the frame owes *besides* the palette, so the palette can be clamped by what is left.
+     *
+     * Computed first and used twice rather than guessed at: the ceiling a caller passes is a wish,
+     * and a frame that grants it whatever the terminal has is one row taller than the screen — which
+     * scrolls Ink's own output and takes the top of the list with it.
+     */
+    const fixedChrome =
+        HEADER_ROWS +
+        STATUS_ROWS +
+        livePane(liveText, inputs.columns - LIVE_LABEL, LIVE_PANE_MAX_ROWS).rows +
+        searchRows(inputs.editor, inputs.searchMaxRows) +
+        promptRows(inputs.editor, inputs.columns) +
+        (inputs.confirming ? 1 : 0) +
+        (inputs.hint ? 1 : 0)
+    // One row of conversation left visible, so the palette never takes the whole screen — a list
+    // with nothing above it reads as a different app rather than as a menu over a conversation.
+    const paletteCeiling = Math.max(
+        1,
+        Math.min(inputs.paletteMaxRows, inputs.rows - fixedChrome - PALETTE_CHROME - 1),
+    )
+
     const chrome =
         HEADER_ROWS +
         STATUS_ROWS +
         livePane(liveText, inputs.columns - LIVE_LABEL, LIVE_PANE_MAX_ROWS).rows +
-        paletteRows(inputs.palette, inputs.paletteMaxRows) +
+        paletteRows(inputs.palette, paletteCeiling) +
         searchRows(inputs.editor, inputs.searchMaxRows) +
         promptRows(inputs.editor, inputs.columns) +
         (inputs.confirming ? 1 : 0) +
@@ -190,6 +227,7 @@ export function chatFrame(inputs: {
     // The pane draws its own two "… n lines above/below" notices and a key-hint line, which is why it
     // reports fewer rows than it is given rather than being handed the whole body.
     return {
+        paletteRows: paletteCeiling,
         brand,
         body,
         transcript: Math.max(1, body - SCROLL_HINT_ROWS),

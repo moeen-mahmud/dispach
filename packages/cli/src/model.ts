@@ -57,7 +57,6 @@ import {
     searchCost,
     type WindowFinding,
 } from "#lib/probe"
-import { CHANNEL_IDS, PROVIDER_IDS } from "#lib/providers"
 import { keyValue, section } from "#lib/render"
 
 /**
@@ -402,8 +401,6 @@ export async function modelCommand(options: ModelOptions): Promise<number> {
     const doFetch = options.fetch ?? globalThis.fetch
     try {
         const loaded = loadManifest(options.manifestPath, {
-            knownProviders: PROVIDER_IDS,
-            knownChannels: CHANNEL_IDS,
             env: ambientEnv([options.manifestPath]),
         })
         const { manifest } = loaded

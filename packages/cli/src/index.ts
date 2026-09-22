@@ -28,6 +28,7 @@ import { initCommand } from "#init"
 import { keysCommand } from "#keys"
 import { parse } from "#lib/args"
 import { announce, type BootstrapResult, ensureServer } from "#lib/bootstrap"
+import { actionOrRef } from "#lib/commands"
 import { askExactly, askYesNo } from "#lib/confirm"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { readEnv } from "#lib/env"
@@ -176,6 +177,8 @@ async function dispatch(argv: readonly string[]): Promise<number> {
             const composio = flags.str("composio")
             const telegram = flags.str("telegram")
             const telegramAllow = flags.str("telegram-allow")
+            const whatsapp = flags.str("whatsapp")
+            const whatsappAllow = flags.str("whatsapp-allow")
             const server = flags.str("server")
             const schedules = flags.str("schedules")
             const skills = flags.str("skills")
@@ -196,6 +199,8 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 ...(telegram === undefined ? {} : { telegram }),
                 ...(schedules === undefined ? {} : { schedules }),
                 ...(telegramAllow === undefined ? {} : { telegramAllow }),
+                ...(whatsapp === undefined ? {} : { whatsapp }),
+                ...(whatsappAllow === undefined ? {} : { whatsappAllow }),
                 ...(server === undefined ? {} : { server }),
                 ...(skills === undefined ? {} : { skills }),
                 ...(daemon === undefined ? {} : { daemon }),
@@ -347,6 +352,21 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 rest: positionals.slice(1),
                 ...(path === undefined ? {} : { path }),
                 ...(ref === undefined ? {} : { ref }),
+                json: flags.bool("json"),
+            })
+        }
+
+        case "channels": {
+            // The action is optional, so positional 0 is either an action word or the agent — the
+            // same split `config` makes, resolved from the command's own spec rather than a second
+            // copy of the action list.
+            const split = actionOrRef("channels", manifestPath)
+            const ref = split.ref ?? positionals[1] ?? ""
+            const { channelsCommand } = await import("#channels")
+            return await channelsCommand({
+                ...(split.action === undefined ? {} : { action: split.action }),
+                manifestPath: resolveAgentRef(ref),
+                ...(positionals[2] === undefined ? {} : { channelId: positionals[2] }),
                 json: flags.bool("json"),
             })
         }

@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BRAND } from "../src/brand.ts"
+import { HarnessError } from "../src/errors.ts"
 import type { ChannelFactory } from "../src/runtime/channels.ts"
 import {
     claimLeases,
@@ -576,7 +577,16 @@ channels:
         return dir
     }
 
-    async function refusedBy(factory: ChannelFactory): Promise<{ code: string; message: string }> {
+    /**
+     * The refusal is of the **channel**, not of the agent — so this asserts on what the agent was
+     * told rather than on a throw. A channel is optional and a broken one degrades, which is what
+     * stops one missing credential making an agent unstartable; what must not happen is a broken
+     * channel that nobody is told about, so the detail is read back off `agent.warnings` and the
+     * hub's status at the far end.
+     */
+    async function refusedBy(
+        factory: ChannelFactory,
+    ): Promise<{ code: string; message: string; status: string }> {
         const dir = manifestWith("loose")
         try {
             const runtime = await Runtime.create({
@@ -584,11 +594,16 @@ channels:
                 env: ENV,
                 channels: { loose: factory },
             })
+            const warning = runtime
+                .agent("test")
+                ?.warnings.find((w) => w.code === "channel_transport_mismatch")
+            const status = runtime.channels.statusOf("test")[0]?.status ?? "absent"
             await runtime.stop()
-            return { code: "no refusal", message: "" }
-        } catch (error) {
-            const detail = error as { code?: string; message?: string }
-            return { code: detail.code ?? "?", message: detail.message ?? "" }
+            return {
+                code: warning?.code ?? "no refusal",
+                message: warning?.message ?? "",
+                status,
+            }
         } finally {
             rmSync(dir, { recursive: true, force: true })
         }
@@ -611,6 +626,9 @@ channels:
         })) as unknown as ChannelFactory)
         expect(found.code).toBe("channel_transport_mismatch")
         expect(found.message).toContain("`type` is missing")
+        // Registered and reported broken, rather than dropped: a channel that is silently absent
+        // is the failure this degradation would otherwise introduce.
+        expect(found.status).toBe("error")
     })
 
     test("a type that is not the one registered is refused", async () => {
@@ -621,6 +639,7 @@ channels:
         })) as ChannelFactory)
         expect(found.code).toBe("channel_transport_mismatch")
         expect(found.message).toContain('"something-else"')
+        expect(found.status).toBe("error")
     })
 
     test("an id the factory invented for itself is refused, because session keys carry it", async () => {
@@ -632,6 +651,7 @@ channels:
         expect(found.code).toBe("channel_transport_mismatch")
         expect(found.message).toContain('"mine"')
         expect(found.message).toContain('"sc"')
+        expect(found.status).toBe("error")
     })
 
     test("and a correct factory still loads — otherwise this proves nothing", async () => {
@@ -649,6 +669,175 @@ channels:
                 },
             })
             expect(runtime.channels.statusOf("test")[0]?.type).toBe("loose")
+            await runtime.stop()
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+})
+
+/**
+ * An optional capability that is misconfigured must not stop the agent starting.
+ *
+ * Reported from use: *"if I don't add telegram bot token it doesn't let me start my agent"*. It was
+ * worse than that — `init --telegram connected` **generated** the manifest, wrote an empty
+ * `TELEGRAM_BOT_TOKEN=` into the `.env`, printed nine next steps, and the agent could not start at
+ * all: not `run`, not `serve`, not `validate`, over a token nobody had pasted yet. The same shape as
+ * the skill whose size failed the load, where the command that undid the mistake sat behind the load
+ * the mistake broke.
+ *
+ * The rule this establishes: **an agent starts if it can take a turn.** A channel is not part of
+ * that. What is not allowed is silence, so every assertion here is about a surface saying so — and
+ * they are read at the far end, off the agent and off the hub, rather than off the value that was
+ * threaded, because a conditional spread has swallowed a field in this repo six separate times.
+ */
+describe("a broken optional capability is reported, never fatal", () => {
+    function agentWithChannel(): string {
+        const dir = mkdtempSync(join(tmpdir(), "chan-optional-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: test
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: MODEL_API_KEY
+channels:
+  - type: refuses
+    id: sc
+  - type: fine
+    id: ok
+`,
+            "utf8",
+        )
+        return dir
+    }
+
+    const working: ChannelFactory = (context) => ({
+        id: context.id,
+        type: "fine",
+        limits: { maxMessageChars: 4096, idempotentSend: false },
+        start: async () => {},
+        stop: async () => {},
+        send: async () => ({ ok: true as const, providerMessageId: "1" }),
+    })
+
+    const refuses: ChannelFactory = () => {
+        throw new HarnessError({
+            code: "some_token_missing",
+            message: "Channel needs SOME_TOKEN, which is not set.",
+            hint: "Put it in the .env beside the manifest.",
+        })
+    }
+
+    test("the agent starts, and the factory's own sentence reaches agent.warnings", async () => {
+        const dir = agentWithChannel()
+        try {
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: ENV,
+                channels: { refuses, fine: working },
+            })
+            const agent = runtime.agent("test")
+            expect(agent).toBeDefined()
+            // The factory's own error is kept rather than wrapped: it knows which variable and
+            // where to put it, and a generic "could not be built" would replace that with less.
+            const warning = agent?.warnings.find((w) => w.code === "some_token_missing")
+            expect(warning?.message).toContain("SOME_TOKEN")
+            await runtime.stop()
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
+    test("it is registered and reported error, not dropped — a silent absence is the worse bug", async () => {
+        const dir = agentWithChannel()
+        try {
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: ENV,
+                channels: { refuses, fine: working },
+            })
+            const statuses = runtime.channels.statusOf("test")
+            expect(statuses.map((s) => s.id).sort()).toEqual(["ok", "sc"])
+            const broken = statuses.find((s) => s.id === "sc")
+            expect(broken?.status).toBe("error")
+            expect(broken?.detail).toContain("SOME_TOKEN")
+            // `error` from registration, not from a start that never happens: `run` starts no
+            // channels, so a default of `starting` would say a dead channel was on its way up.
+            expect(runtime.channels.started).toBe(false)
+            expect(runtime.channels.brokenOf("test")).toEqual(["sc"])
+            await runtime.stop()
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
+    test("the working channel beside it is unaffected", async () => {
+        const dir = agentWithChannel()
+        try {
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: ENV,
+                channels: { refuses, fine: working },
+            })
+            expect(runtime.channels.statusOf("test").find((s) => s.id === "ok")?.status).toBe(
+                "starting",
+            )
+            expect(runtime.channels.brokenOf("test")).not.toContain("ok")
+            await runtime.stop()
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
+    test("the runtime hands the broken ids to slot 2, which is where the agent learns it", async () => {
+        /**
+         * Decision 5.17 at its sharpest. "configured but NOT running in this session" is true of a
+         * REPL and sends the reader to run `serve` — which fixes nothing here, because this channel
+         * will never connect in any process, and an agent that believes its channel works will tell
+         * somebody it sent a message.
+         *
+         * Asserted through the **rendered block**, not through the ids: `renderConfigSummary` has
+         * its own wording test, and what could silently break here is the wiring between them.
+         */
+        const dir = agentWithChannel()
+        try {
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: ENV,
+                channels: { refuses, fine: working },
+            })
+            // Read out of the assembled prompt rather than off the ids, because the ids being
+            // right and the block not saying so is the shape that has cost six rounds here.
+            const block = runtime.agent("test")?.configurationBlock() ?? ""
+            expect(block).toContain("MISCONFIGURED")
+            expect(block).toContain("sc (refuses)")
+            // And the working one is still described as working, rather than tarred with it.
+            expect(block).toContain("ok (fine)")
+            await runtime.stop()
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
+    test("a delivery already queued for it fails permanently rather than waiting forever", async () => {
+        /**
+         * The reason it is a placeholder transport rather than a dropped binding. The outbox keys
+         * its transports by channel id; with no binding there is nothing to send through and a
+         * queued row sits in a queue nothing can drain. `retryable: false` is the honest answer —
+         * this cannot be fixed by trying again, only by fixing the config and restarting.
+         */
+        const dir = agentWithChannel()
+        try {
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: ENV,
+                channels: { refuses, fine: working },
+            })
+            const transport = runtime.channels.statusOf("test").find((s) => s.id === "sc")
+            expect(transport).toBeDefined()
             await runtime.stop()
         } finally {
             rmSync(dir, { recursive: true, force: true })

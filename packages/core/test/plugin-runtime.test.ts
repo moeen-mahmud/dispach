@@ -105,41 +105,48 @@ describe("a manifest that names a plugin", () => {
         await runtime.stop()
     })
 
-    test("is refused for the same manifest with the plugins: line removed", async () => {
+    test("and warns for the same manifest with the plugins: line removed", async () => {
         // The negative half, and it has to remove the *plugins* line rather than the built-in
-        // registry. Dropping only the registry fails at `plugin_not_found` — before provider
-        // validation is ever reached — which would prove the loader can miss a module and nothing
-        // about where the ids come from. Written the wrong way first, and caught by reading the
-        // code the refusal actually carried.
+        // registry. Dropping only the registry fails at `plugin_not_found` — a different finding —
+        // which would prove the loader can miss a module and nothing about where the ids come from.
+        // Written the wrong way first, and caught by reading the code the refusal actually carried.
         const dir = workspace(USES_PLUGIN.replace('plugins:\n  - "@fixture/tools"\n', ""))
-        let code: string | undefined
-        try {
-            await Runtime.create({
-                agents: [join(dir, "agent.yaml")],
-                env: ENV,
-                fetch: async () => new Response("{}"),
-            })
-        } catch (error) {
-            code = (error as { code?: string }).code
-        }
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: ENV,
+            fetch: async () => new Response("{}"),
+        })
         // The id is unknown because nothing supplied it — which is exactly what the plugin supplies
-        // in the test above, through a check that runs *after* the plugin phase.
-        expect(code).toBe("manifest_validation_failed")
+        // in the test above. A warning rather than a refusal since 0.1.3: an agent starts if it can
+        // take a turn, and a tool provider is not part of that.
+        const agent = runtime.agent("test")
+        expect(agent?.warnings.some((w) => w.field === "tools.providers.fixture")).toBe(true)
+        expect(agent?.tools.specs().map((spec) => spec.slug)).not.toContain("ping")
+        await runtime.stop()
     })
 
-    test("a plugin spec that resolves to nothing is its own, earlier failure", async () => {
+    test("a plugin spec that resolves to nothing is its own warning, and the agent starts", async () => {
+        /**
+         * A plugin is optional, so this is a warning rather than a refusal — the agent starts
+         * without whatever it would have registered, which is what stops a deleted plugin
+         * directory from making an agent unstartable.
+         *
+         * Three findings rather than one, and the chain is the point: `plugin_not_found` is the
+         * *cause*, `tool_provider_unknown` is what it cost, and the pinned slug that provider would
+         * have answered for is reported unresolved. Collapsing them would leave a reader with a
+         * plugin failure and no idea what it cost, or a missing tool with no idea why.
+         */
         const dir = workspace(USES_PLUGIN)
-        let code: string | undefined
-        try {
-            await Runtime.create({
-                agents: [join(dir, "agent.yaml")],
-                env: ENV,
-                fetch: async () => new Response("{}"),
-            })
-        } catch (error) {
-            code = (error as { code?: string }).code
-        }
-        expect(code).toBe("plugin_not_found")
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: ENV,
+            fetch: async () => new Response("{}"),
+        })
+        const codes = runtime.agent("test")?.warnings.map((warning) => warning.code) ?? []
+        expect(codes).toContain("plugin_not_found")
+        expect(codes).toContain("tool_provider_unknown")
+        expect(runtime.agent("test")?.tools.warnings.map((w) => w.code)).toContain("unknown_tool")
+        await runtime.stop()
     })
 
     test("emits plugin.loaded on the bus that was passed in", async () => {

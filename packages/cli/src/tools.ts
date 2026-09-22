@@ -17,14 +17,7 @@
 import { loadManifest, Runtime, resolveProviders } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import {
-    BUILT_IN_PLUGINS,
-    CHANNEL_IDS,
-    CHANNELS,
-    PROVIDER_IDS,
-    scriptRunner,
-    TOOL_PROVIDERS,
-} from "#lib/providers"
+import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { pluginRoot } from "#lib/sandbox"
 import { toolsReport, toolsView } from "#lib/session-commands"
 
@@ -48,8 +41,6 @@ export async function toolsCommand(options: ToolsOptions): Promise<number> {
 
 async function warm(options: ToolsOptions): Promise<number> {
     const loaded = loadManifest(options.manifestPath, {
-        knownProviders: PROVIDER_IDS,
-        knownChannels: CHANNEL_IDS,
         env: ambientEnv([options.manifestPath]),
     })
     const selections = resolveProviders(loaded.manifest.tools).selections

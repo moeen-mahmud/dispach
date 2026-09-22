@@ -37,6 +37,7 @@ export type {
     WebhookDelivery,
     WebhookOutcome,
 } from "./channels/channel.ts"
+export { brokenTransport } from "./channels/channel.ts"
 export { type InboundDecision, Inbox, type InboxOptions, isAllowed } from "./channels/inbox.ts"
 export {
     type DeliveryGroupParts,
@@ -312,7 +313,9 @@ export {
 export {
     type AgentSource,
     type BootReport,
+    brokenChannels,
     buildChannels,
+    buildRegistry,
     type DisposeReason,
     defaultStorePath,
     Runtime,

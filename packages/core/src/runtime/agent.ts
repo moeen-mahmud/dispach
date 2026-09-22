@@ -35,6 +35,7 @@ import { entryPhase, isPhased, unmatchedAllows } from "../loop/phases.ts"
 import type { TurnSender } from "../loop/sender.ts"
 import { runStep } from "../loop/step.ts"
 import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from "../loop/turn.ts"
+import type { EnvSource } from "../manifest/env.ts"
 import type { LoadedManifest } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
 import type { AgentManifest } from "../manifest/schema.ts"
@@ -182,6 +183,17 @@ export interface AgentCreateOptions extends ResolveRolesOptions {
      * allows. An agent may have both.
      */
     readonly approve?: (request: ApprovalRequest) => Promise<boolean>
+    /**
+     * Findings the host made before this agent existed, folded onto `agent.warnings`.
+     *
+     * One caller: a channel that could not be built. `buildChannels` runs outside `Agent.create`
+     * because it needs only the loaded manifest, and a broken channel has to land *here* rather
+     * than on the bus — `Runtime.create` finishes before anything can subscribe, which is the
+     * empty-room trap boot warnings have already been lost to twice. Every surface that reports a
+     * warning reads this array, so a broken channel reaches the banner, the TUI and
+     * `GET /v1/agents/:id` with nothing new to remember.
+     */
+    readonly warnings?: readonly ErrorDetail[]
 }
 
 export interface AgentSendOptions {
@@ -357,6 +369,8 @@ export class Agent {
      */
     #configSummary: string | undefined
     #channelsStarted = false
+    readonly #env: EnvSource
+    #brokenChannels: readonly string[] = []
     #schedulerStarted = false
     #servedElsewhere = false
     #serverListening = false
@@ -383,6 +397,10 @@ export class Agent {
         this.id = init.loaded.manifest.id
         this.manifest = init.loaded.manifest
         this.dir = init.loaded.dir
+        // The **live** view, not a snapshot: a `.env` written a second ago is visible without a
+        // reload, which is what lets "set the credential, then connect it" report the truth in one
+        // request. Private, and read only through `hasEnv` — see there.
+        this.#env = init.loaded.env
         this.window = init.loaded.window
         this.roles = init.roles
         this.workspace = init.workspace
@@ -614,6 +632,7 @@ export class Agent {
             workspace,
             warnings: [
                 ...warnings,
+                ...(options.warnings ?? []),
                 ...providerWarnings,
                 ...overrides,
                 // Same function `validate` calls. A deliverability check only one of them performs
@@ -1092,6 +1111,16 @@ export class Agent {
          * a REPL says while a `serve` in the next terminal is running the lot.
          */
         readonly servedElsewhere?: boolean
+        /**
+         * Channel ids that could not be constructed, so slot 2 does not describe one as merely
+         * unstarted.
+         *
+         * Decision 5.17's rule at its sharpest: told "tg (telegram) — configured but NOT running in
+         * this session", an agent whose token is missing would conclude a `serve` fixes it and send
+         * its owner to run one. It will never connect in any session, and the block is the only
+         * place the agent learns that.
+         */
+        readonly brokenChannels?: readonly string[]
     }): void {
         if (this.#configSummary !== undefined) {
             throw new Error(
@@ -1103,6 +1132,7 @@ export class Agent {
         if (state.schedulerStarted !== undefined) this.#schedulerStarted = state.schedulerStarted
         if (state.serverListening !== undefined) this.#serverListening = state.serverListening
         if (state.servedElsewhere !== undefined) this.#servedElsewhere = state.servedElsewhere
+        if (state.brokenChannels !== undefined) this.#brokenChannels = state.brokenChannels
     }
 
     /** Slot 2's text. Rendered on first use, then frozen — see `#configSummary`. */
@@ -1430,6 +1460,30 @@ export class Agent {
         }
     }
 
+    /**
+     * Slot 2's text — what this agent has been told about its own configuration.
+     *
+     * Public because it is the only way to check, from outside, that a runtime fact reached the one
+     * block whose job is to stop the runtime lying about itself. **Calling it renders and therefore
+     * freezes the block**, exactly as the first turn does, so nothing may call it during startup
+     * before `reportRuntimeState` has finished.
+     */
+    /**
+     * Whether an environment variable this agent resolves has a non-empty value.
+     *
+     * **A question, not an accessor.** A public `env` would put every credential this agent can see
+     * on a field, and every surface wanting "is the token filled in" would be one typo from serving
+     * the token — `GET /v1/agents/:id` reports exactly this and a browser polls it. The name and the
+     * answer are all anybody needs, and neither is a secret.
+     */
+    hasEnv(name: string): boolean {
+        return (this.#env[name] ?? "") !== ""
+    }
+
+    configurationBlock(): string {
+        return this.#configBlock()
+    }
+
     #configBlock(): string {
         if (this.#configSummary === undefined) {
             this.#configSummary = renderConfigSummary({
@@ -1439,6 +1493,7 @@ export class Agent {
                 tools: this.tools.specs().map((spec) => spec.slug),
                 providers: resolveProviders(this.manifest.tools).selections.map((s) => s.id),
                 channelsStarted: this.#channelsStarted,
+                brokenChannels: this.#brokenChannels,
                 schedulerStarted: this.#schedulerStarted,
                 serverListening: this.#serverListening,
                 servedElsewhere: this.#servedElsewhere,

@@ -424,6 +424,9 @@ describe("WizardApp", () => {
                         web: "none",
                         composio: "none",
                         telegram: "none",
+                        // Both channels answered, or the wizard opens on the WhatsApp question and
+                        // this test is about the *location* menu.
+                        whatsapp: "none",
                         server: "none",
                         skills: "none",
                         daemon: "none",
@@ -483,6 +486,7 @@ describe("WizardApp", () => {
                     web: "none",
                     composio: "none",
                     telegram: "none",
+                    whatsapp: "none",
                     server: "none",
                     skills: "none",
                     daemon: "none",
@@ -1242,7 +1246,36 @@ describe("App, the landing state", () => {
         expect(frame.text).toContain("press y to confirm")
     })
 
-    test("the palette shows every command while landing", async () => {
+    test("the palette shows every command while landing, given the rows for it", async () => {
+        // Every command rather than six behind a counter: there is no conversation to hide behind
+        // the list. `LANDING_LIST_ROWS` tracks the table's size for exactly that reason, and
+        // `palette.test.ts` asserts the relationship so the next command added fails there.
+        const harness = mount(h(App, { ...stubAppProps(), freshSession: true }), {
+            columns: 100,
+            rows: 40,
+        })
+        await harness.press("/")
+        const frame = harness.frame()
+        harness.unmount()
+        expect(frame.text).toContain("/help")
+        expect(frame.text).toContain("/memory")
+        expect(frame.text).toContain("/daemon")
+        expect(frame.text).not.toContain("below")
+    })
+
+    test("and on a terminal too short for them it clamps and says how many are hidden", async () => {
+        /**
+         * **The ceiling is a wish; the terminal wins.** `LANDING_LIST_ROWS` is what the landing
+         * screen would like, and the 23rd command took the request past what 30 rows can hold — at
+         * which point the frame was one row taller than the screen, Ink's own output scrolled the
+         * buffer, and the **first** command went off the top with nothing saying so. An overflowing
+         * frame is corruption rather than a scrollbar, which is the rule `SkillBrowser` already
+         * follows and the chat frame did not.
+         *
+         * So: the head is kept, the cursor is on it, and the count of what is hidden is drawn. This
+         * is the assertion that would have failed at 30 rows *before* the clamp existed, which is
+         * what makes it a guard rather than a restatement.
+         */
         const harness = mount(h(App, { ...stubAppProps(), freshSession: true }), {
             columns: 100,
             rows: 30,
@@ -1250,13 +1283,11 @@ describe("App, the landing state", () => {
         await harness.press("/")
         const frame = harness.frame()
         harness.unmount()
-        // Every command rather than six behind a counter: there is no conversation to hide behind the list.
-        // `LANDING_LIST_ROWS` tracks the table's size for exactly this reason, and `commands.test.ts`
-        // asserts the relationship so the next command added fails there rather than here.
         expect(frame.text).toContain("/help")
-        expect(frame.text).toContain("/memory")
-        expect(frame.text).toContain("/daemon")
-        expect(frame.text).not.toContain("below")
+        expect(frame.text).toMatch(/\d+ below/)
+        // And the frame still fits: every row of it is inside the terminal, which is the property
+        // the clamp exists for and the one a missing string would not have caught.
+        expect(frame.text.split("\n").length).toBeLessThanOrEqual(30)
     })
 
     test("option+r says why nothing happened when there is nothing to expand", async () => {

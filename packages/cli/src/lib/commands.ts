@@ -148,6 +148,22 @@ export const COMMANDS: readonly CommandSpec[] = [
                 help: "who may message it — empty permits nobody, which is the safe default",
             },
             {
+                name: "whatsapp",
+                kind: "string",
+                placeholder: "level",
+                help: "reachable on WhatsApp: none | connected — unofficial, and an opt-in plugin",
+                defaultHelp: "none",
+            },
+            {
+                // A number, not a secret: unlike a bot token there is nothing here worth keeping out
+                // of shell history, so this one gets a flag and `--telegram-allow`'s twin does not
+                // need explaining twice.
+                name: "whatsapp-allow",
+                kind: "string",
+                placeholder: "digits",
+                help: "whose number may message it — digits with no +, empty permits nobody",
+            },
+            {
                 name: "server",
                 kind: "string",
                 placeholder: "level",
@@ -615,6 +631,54 @@ export const COMMANDS: readonly CommandSpec[] = [
             },
             JSON_FLAG,
         ],
+    },
+    {
+        // Action first, manifest second, like `config`, `memory` and `plugins`. The action is
+        // *optional* here because bare `channels <agent>` is the question people actually have —
+        // "what is this reachable on, and is it set up" — and making them type `list` for it would
+        // be ceremony. That is `skills`'s shape rather than `plugins`'s, and the difference is real:
+        // `plugins` has no useful bare form, since a plugin is named in one place.
+        name: "channels",
+
+        inSession: "output",
+        needsServer: false,
+        summary: "what an agent is reachable on: connect, disconnect, set a credential, unpair",
+        args: [
+            {
+                name: "action",
+                required: false,
+                help: "what to do — omit for the listing",
+                choices: [
+                    {
+                        value: "list",
+                        help: "every channel, whether it is on, and whether its credential is filled in",
+                    },
+                    {
+                        value: "connect",
+                        help: "switch a channel on; it starts at the agent's next start",
+                    },
+                    {
+                        value: "disconnect",
+                        help: "switch it off — a disabled channel is never constructed",
+                    },
+                    {
+                        value: "credential",
+                        help: "set the channel's token in the .env, prompted and not echoed",
+                    },
+                    {
+                        value: "unpair",
+                        help: "forget a scanned pairing, so the next start offers a new code",
+                    },
+                ],
+            },
+            { ...MANIFEST, required: false, help: "path or sandbox agent name" },
+            {
+                name: "channel",
+                required: false,
+                help: "which channel — its id, not its type. Optional when the agent has exactly one",
+            },
+        ],
+        flags: [JSON_FLAG],
     },
     {
         // Action first, manifest second — the shape `config` and `memory` already use. `plugins <agent>`
@@ -1125,4 +1189,27 @@ export function commandsAccepting(flag: string, exclude: string): readonly strin
     return COMMANDS.filter(
         (command) => command.name !== exclude && command.flags.some((f) => f.name === flag),
     ).map((command) => command.name)
+}
+
+/**
+ * Split "an action word, or an agent" for a command whose action is optional.
+ *
+ * `channels <agent>` and `channels list <agent>` are both meant, so the first positional is one or
+ * the other and only its *value* says which. The action words win, exactly as a slash command
+ * resolves and as `config`'s own reader does — the difference being that this one reads the
+ * **command's spec** for the words rather than holding a second copy of them, so an action added to
+ * the table is covered with nothing to remember.
+ */
+export function actionOrRef(
+    command: string,
+    first: string | undefined,
+): { readonly action: string | undefined; readonly ref: string | undefined } {
+    const given = (first ?? "").trim()
+    if (given === "") return { action: undefined, ref: undefined }
+    const actions = (findCommand(command)?.args ?? [])
+        .find((arg) => arg.name === "action")
+        ?.choices?.map((choice) => choice.value)
+    return actions?.includes(given) === true
+        ? { action: given, ref: undefined }
+        : { action: undefined, ref: given }
 }

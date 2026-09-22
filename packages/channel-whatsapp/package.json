@@ -1,0 +1,35 @@
+{
+    "name": "@dispach/channel-whatsapp",
+    "version": "0.1.0",
+    "description": "WhatsApp channel — Baileys over the WhatsApp Web protocol. Opt-in, distributed outside the bundle.",
+    "license": "Apache-2.0",
+    "author": "Moeen Mahmud",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/moeen-mahmud/dispach.git",
+        "directory": "packages/channel-whatsapp"
+    },
+    "type": "module",
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "main": "./dist/index.js",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --external sharp --external jimp --external link-preview-js && tsc -p tsconfig.build.json",
+        "typecheck": "tsc -p tsconfig.json"
+    },
+    "dependencies": {
+        "baileys": "7.0.0-rc14"
+    },
+    "devDependencies": {
+        "@dispach/core": "workspace:*"
+    },
+    "private": true
+}

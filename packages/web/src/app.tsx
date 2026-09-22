@@ -53,6 +53,8 @@ import {
     SchedulesPanel,
     SERVER_PANELS,
     ToolsPanel,
+    WarningsPanel,
+    type WireError,
 } from "./panels.tsx"
 
 /** Where a live turn id is parked so a refresh can reattach. Per tab, not per browser. */
@@ -536,8 +538,13 @@ function Workspace(props: {
         readonly tools: readonly ToolSummary[]
         readonly schedules: readonly ScheduleRecord[]
         readonly channels: readonly ChannelRow[]
+        /** Boot findings: capabilities this agent could not set up. See `WarningsPanel`. */
+        readonly warnings: readonly WireError[]
         readonly config?: AgentConfig
-    }>({ tools: [], schedules: [], channels: [] })
+    }>({ tools: [], schedules: [], channels: [], warnings: [] })
+
+    const [channelBusy, setChannelBusy] = useState<string | undefined>(undefined)
+    const [channelNote, setChannelNote] = useState<string | undefined>(undefined)
 
     /**
      * Re-read the panels' data.
@@ -558,8 +565,73 @@ function Workspace(props: {
             // leaves two panels stale is how a surface comes to disagree with itself.
             target.config(),
         ])
-        setReport({ tools, schedules, channels: described.channels ?? [], config })
+        setReport({
+            tools,
+            schedules,
+            channels: described.channels ?? [],
+            warnings: described.warnings ?? [],
+            config,
+        })
     }, [])
+
+    /**
+     * Connect, disconnect, or set a channel's credential — then **re-read**.
+     *
+     * The re-read is the part worth stating: `enabled` and `credentialSet` both come off the agent
+     * resource, and a panel that flipped its own local copy would show a state the server may not
+     * have reached — `applied: false` is a real outcome, since the file is written before the agent
+     * is replaced and a turn in flight refuses the replace. Reading it back is the only way the
+     * page says what is actually true.
+     */
+    const writeChannel = useCallback(
+        async (
+            channelId: string,
+            changes: { readonly enabled?: boolean; readonly credential?: string },
+        ) => {
+            if (agent === undefined) return
+            setChannelBusy(channelId)
+            setChannelNote(undefined)
+            try {
+                const result = await agent.setChannel(channelId, changes)
+                setChannelNote(
+                    [
+                        ...result.notes,
+                        // Said rather than implied: a write that landed and has not taken effect is
+                        // the normal case while a turn is running, and silence about it reads as a
+                        // change that did nothing.
+                        ...(result.applied
+                            ? []
+                            : [
+                                  `Not in force yet: ${result.pending?.message ?? "restart to apply"}`,
+                              ]),
+                    ].join(" "),
+                )
+                await refreshReport(agent)
+            } catch (failure) {
+                setChannelNote(failure instanceof Error ? failure.message : String(failure))
+            } finally {
+                setChannelBusy(undefined)
+            }
+        },
+        [agent, refreshReport],
+    )
+
+    const unpair = useCallback(
+        async (channelId: string) => {
+            if (agent === undefined) return
+            setChannelBusy(channelId)
+            setChannelNote(undefined)
+            try {
+                setChannelNote((await agent.unpairChannel(channelId)).note)
+                await refreshReport(agent)
+            } catch (failure) {
+                setChannelNote(failure instanceof Error ? failure.message : String(failure))
+            } finally {
+                setChannelBusy(undefined)
+            }
+        },
+        [agent, refreshReport],
+    )
 
     useEffect(() => {
         if (agent === undefined) return
@@ -894,6 +966,17 @@ function Workspace(props: {
                     <div className="scroll">
                         <div className="pad">
                             {error === undefined ? null : <p className="row note bad">{error}</p>}
+                            {/*
+                             * Above every panel and outside the tabs, because each of these was a
+                             * *refusal* until 0.1.3: a channel with no token, a plugin that would
+                             * not import, a provider nobody registered, a pinned tool nothing could
+                             * resolve. The agent starts now, and these are the capabilities it does
+                             * not have — so the whole argument for degrading rests on them being
+                             * seen, and a warning behind a tab is one this project has watched go
+                             * unread for weeks. Not on the chat panel, which is a conversation
+                             * rather than a report.
+                             */}
+                            <WarningsPanel warnings={report.warnings} />
                             {panel === "new" ? (
                                 offer === undefined ? (
                                     <p className="empty">reading this server's questions…</p>
@@ -988,12 +1071,30 @@ function Workspace(props: {
                                     />
                                 )
                             ) : null}
+                            {/*
+                             * Above the panels and outside the tabs, because every one of these
+                             * was a refusal a moment ago: the agent starts now, and these are the
+                             * capabilities it does not have. A warning behind a tab is one nobody
+                             * reads, which is the whole objection to degrading a failure.
+                             */}
                             {panel === "channels" ? (
                                 // `now` is passed rather than read inside the component, so a stale
                                 // payload is judged against one clock and the rendering stays
                                 // deterministic — a component reading the clock is one whose test
                                 // passes or fails depending on the time of day.
-                                <ChannelsPanel channels={report.channels} now={Date.now()} />
+                                <ChannelsPanel
+                                    channels={report.channels}
+                                    now={Date.now()}
+                                    actions={{
+                                        onConnect: (channelId, enabled) =>
+                                            void writeChannel(channelId, { enabled }),
+                                        onCredential: (channelId, credential) =>
+                                            void writeChannel(channelId, { credential }),
+                                        onUnpair: (channelId) => void unpair(channelId),
+                                        ...(channelBusy === undefined ? {} : { busy: channelBusy }),
+                                        ...(channelNote === undefined ? {} : { note: channelNote }),
+                                    }}
+                                />
                             ) : null}
                         </div>
                     </div>

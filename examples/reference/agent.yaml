@@ -469,11 +469,21 @@ channels:
     # secretTokenEnv: TELEGRAM_WEBHOOK_SECRET   # naming it and leaving it unset is refused
   # `telegram` is the only type this binary registers. A second one comes from a plugin — see
   # `plugins:` above and docs/03-SPEC-PLUGIN-API.md — and `type` then names whatever that plugin
-  # registered with `defineChannel(id, factory)`, carrying whatever fields it reads. Commented
-  # because this file must validate with no plugin installed, and an unregistered type is refused
-  # at load rather than ignored.
-  # - type: smoke
-  #   id: sm
+  # registered with `defineChannel(id, factory)`, carrying whatever fields it reads.
+  #
+  # Since 0.1.3 an unregistered type is a **warning** rather than a load failure: a channel is
+  # optional and the agent starts with it reported broken, which is what stops one missing plugin
+  # or one unset token making an agent unstartable. Left commented anyway, so this file stays a
+  # description of a working agent rather than one with a known-broken channel in it.
+  #
+  # WhatsApp, the real second channel. It is an opt-in plugin and is NOT in this binary — Baileys
+  # reverse-engineers WhatsApp Web, the number can be banned and there is no appeal, so use a
+  # spare one. `dispach plugins add <agent> moeen-mahmud/dispach-whatsapp` installs it.
+  # - type: whatsapp
+  #   id: wa
+  #   authDir: ./.whatsapp           # the paired session. 0600, and gitignore it
+  #   allowFrom: ["8801711223344"]   # DIGITS, no + — the entry is compared literally
+  # There is no tokenEnv: pairing is a QR reported through `needs_input`, not a credential.
 
 # A delivery target names a channel's **id**, not its type. Checked at load rather than at the
 # first scheduled run, which is otherwise where it surfaces.

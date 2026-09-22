@@ -48,6 +48,8 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join, resolve as resolvePath, sep } from "node:path"
 import {
+    type ErrorDetail,
+    isHarnessError,
     pluginApiMismatch,
     pluginApiRangeUnreadable,
     pluginConfigInvalid,
@@ -114,6 +116,20 @@ export interface LoadedPlugins {
     readonly middleware: readonly Middleware[]
     /** What loaded, in manifest order — for `plugins` output and for the boot report. */
     readonly loaded: readonly LoadedPlugin[]
+    /**
+     * What did not load, and why.
+     *
+     * **A plugin is optional and a broken one is a warning, not a dead agent.** This used to throw,
+     * so a plugin directory somebody deleted, a version skew, or a `setup` that threw made the whole
+     * agent unstartable — and the capability it would have supplied is by definition one the agent
+     * did not have a minute earlier either. Whatever *selected* that capability still reports: a
+     * `channels[].type` it would have registered degrades to a broken channel, and a tool provider
+     * it would have registered is named as unregistered.
+     *
+     * Not silent: each detail reaches `agent.warnings`, `validate` prints it, and `plugins list`
+     * names it. Silence was the objection to skipping; refusing to start was the cost.
+     */
+    readonly failed: readonly ErrorDetail[]
 }
 
 export interface LoadedPlugin {
@@ -273,71 +289,113 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
     const loaded: LoadedPlugin[] = []
     const middleware: Middleware[] = []
     const bySpec = new Map<string, string>()
+    const failed: ErrorDetail[] = []
     let scriptRunner: ScriptRunner | undefined
 
     for (const ref of options.refs) {
         const { spec, config } = refParts(ref)
-        const { plugin, lookup } = await resolve(spec, options)
 
-        const previous = bySpec.get(plugin.name)
-        if (previous !== undefined) throw pluginNameCollision(plugin.name, [previous, spec])
-        bySpec.set(plugin.name, spec)
-
-        const ok = satisfies(VERSION, plugin.dispachApi)
-        if (ok === undefined) throw pluginApiRangeUnreadable(plugin.name, plugin.dispachApi)
-        if (!ok) throw pluginApiMismatch(plugin.name, plugin.dispachApi, VERSION)
-
-        const registered: string[] = []
-        const context: PluginContext = {
-            defineChannel: (id, factory) => {
-                channels[id] = factory
-                registered.push(`channel:${id}`)
-            },
-            defineToolProvider: (id, factory) => {
-                toolProviders[id] = factory
-                registered.push(`toolProvider:${id}`)
-            },
-            defineScriptRunner: (runner) => {
-                scriptRunner = runner
-                registered.push("scriptRunner")
-            },
-            use: (entry) => {
-                middleware.push(entry)
-                registered.push(`middleware:${entry.name}`)
-            },
-            config: validateConfig(plugin, config),
-            agentId: options.agentId,
-            paths: options.paths,
-            env: options.env,
-            logger: options.logger ?? SILENT_LOGGER,
-            events: options.bus,
+        // **Staged, and merged only once `setup` has returned.** A plugin whose setup throws
+        // half-way would otherwise leave whatever it registered before the throw in place — a
+        // partially loaded plugin, which is a worse state than an absent one and is invisible from
+        // the outside. Nothing here is shared until the whole plugin has worked.
+        const staged: {
+            channels: Record<string, ChannelFactory>
+            toolProviders: Record<string, ToolProviderFactory>
+            middleware: Middleware[]
+            scriptRunner: ScriptRunner | undefined
+            registered: string[]
+        } = {
+            channels: {},
+            toolProviders: {},
+            middleware: [],
+            scriptRunner: undefined,
+            registered: [],
         }
 
-        const started = performance.now()
+        let entry: LoadedPlugin
         try {
-            await plugin.setup(context)
-        } catch (error) {
-            throw pluginSetupFailed(plugin.name, error)
-        }
-        const setupMs = Math.round((performance.now() - started) * 100) / 100
+            const { plugin, lookup } = await resolve(spec, options)
 
-        const entry: LoadedPlugin = {
-            name: plugin.name,
-            version: plugin.version,
-            spec,
-            setupMs,
-            permissions: plugin.permissions ?? [],
-            registered,
-            lookup,
+            const previous = bySpec.get(plugin.name)
+            if (previous !== undefined) throw pluginNameCollision(plugin.name, [previous, spec])
+
+            const ok = satisfies(VERSION, plugin.dispachApi)
+            if (ok === undefined) throw pluginApiRangeUnreadable(plugin.name, plugin.dispachApi)
+            if (!ok) throw pluginApiMismatch(plugin.name, plugin.dispachApi, VERSION)
+
+            const registered = staged.registered
+            const context: PluginContext = {
+                defineChannel: (id, factory) => {
+                    staged.channels[id] = factory
+                    registered.push(`channel:${id}`)
+                },
+                defineToolProvider: (id, factory) => {
+                    staged.toolProviders[id] = factory
+                    registered.push(`toolProvider:${id}`)
+                },
+                defineScriptRunner: (runner) => {
+                    staged.scriptRunner = runner
+                    registered.push("scriptRunner")
+                },
+                use: (item) => {
+                    staged.middleware.push(item)
+                    registered.push(`middleware:${item.name}`)
+                },
+                config: validateConfig(plugin, config),
+                agentId: options.agentId,
+                paths: options.paths,
+                env: options.env,
+                logger: options.logger ?? SILENT_LOGGER,
+                events: options.bus,
+            }
+
+            const started = performance.now()
+            try {
+                await plugin.setup(context)
+            } catch (error) {
+                throw pluginSetupFailed(plugin.name, error)
+            }
+            const setupMs = Math.round((performance.now() - started) * 100) / 100
+
+            bySpec.set(plugin.name, spec)
+            Object.assign(channels, staged.channels)
+            Object.assign(toolProviders, staged.toolProviders)
+            middleware.push(...staged.middleware)
+            if (staged.scriptRunner !== undefined) scriptRunner = staged.scriptRunner
+
+            entry = {
+                name: plugin.name,
+                version: plugin.version,
+                spec,
+                setupMs,
+                permissions: plugin.permissions ?? [],
+                registered,
+                lookup,
+            }
+        } catch (error) {
+            failed.push(
+                isHarnessError(error)
+                    ? error.toDetail()
+                    : {
+                          code: "plugin_load_failed",
+                          message: `plugins names "${spec}", which did not load: ${
+                              error instanceof Error ? error.message : String(error)
+                          }`,
+                          hint: "The agent starts without it. Anything selecting a capability it would have supplied — a `channels[].type`, a `tools.providers` entry — reports separately. `plugins list` names this, and `plugins add` re-fetches one that is installed.",
+                          field: "plugins",
+                      },
+            )
+            continue
         }
         loaded.push(entry)
 
         options.bus.emit(
             "plugin.loaded",
             {
-                name: plugin.name,
-                version: plugin.version,
-                setupMs,
+                name: entry.name,
+                version: entry.version,
+                setupMs: entry.setupMs,
                 permissions: entry.permissions.map((permission) => permission.kind),
             },
             { agentId: options.agentId },
@@ -345,16 +403,16 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
         // Reported rather than refused. A slow `setup` is usually one doing work it should have left
         // to a factory, and naming it is what makes that visible — a refusal would turn a
         // performance smell into an agent that will not start.
-        if (setupMs > SETUP_BUDGET_MS) {
+        if (entry.setupMs > SETUP_BUDGET_MS) {
             options.bus.emit(
                 "plugin.slow",
-                { name: plugin.name, setupMs },
+                { name: entry.name, setupMs: entry.setupMs },
                 { agentId: options.agentId },
             )
         }
     }
 
-    return { toolProviders, channels, scriptRunner, middleware, loaded }
+    return { toolProviders, channels, scriptRunner, middleware, loaded, failed }
 }
 
 /**
@@ -378,6 +436,8 @@ export interface AgentPluginSupply {
     readonly scriptRunner: ScriptRunner | undefined
     readonly middleware: readonly Middleware[]
     readonly loaded: readonly LoadedPlugin[]
+    /** Plugins that did not load. See `LoadedPlugins.failed`. */
+    readonly failed: readonly ErrorDetail[]
 }
 
 export interface AgentPluginSupplyOptions {
@@ -410,6 +470,7 @@ export async function agentPluginSupply(
             scriptRunner: base.scriptRunner,
             middleware: [],
             loaded: [],
+            failed: [],
         }
     }
 
@@ -435,5 +496,6 @@ export async function agentPluginSupply(
         scriptRunner: result.scriptRunner ?? base.scriptRunner,
         middleware: result.middleware,
         loaded: result.loaded,
+        failed: result.failed,
     }
 }

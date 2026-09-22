@@ -41,6 +41,27 @@ function answer(state: WizardState, text: string): WizardState {
     return commit(type(state, text))
 }
 
+/**
+ * Take the default for every remaining question until the wizard leaves `asking`.
+ *
+ * **Derived rather than counted, and that is the point.** These walks used to be a run of
+ * `commit(state)` calls with a comment naming the step each answered — a positional fixture over a
+ * list that grows. Withdrawing `server` in 0.1.2 left those comments naming the wrong steps while
+ * the count still happened to land, and adding `whatsapp` broke five tests at once with a failure
+ * that says only "expected confirm, received asking".
+ *
+ * The bound keeps this a test rather than a hang: `nextQuestion` is a pure walk over a fixed order,
+ * so a bug there would loop, and a test that loops is worse than one that fails.
+ */
+function commitRest(state: WizardState): WizardState {
+    let current = state
+    for (let guard = 0; guard < 40 && current.phase === "asking"; guard += 1) {
+        current = commit(current)
+    }
+    expect(current.phase).not.toBe("asking")
+    return current
+}
+
 describe("the happy path", () => {
     test("answers every step, reaches confirm, and yields the collected answers", () => {
         let state = startWizard({}, DEFAULTS)
@@ -57,13 +78,9 @@ describe("the happy path", () => {
         state = commit(state) // model: preset default
         state = commit(state) // baseUrl: preset default
         state = commit(state) // apiKey: empty is a real answer — supply it later
-        state = commit(state) // system: select step, default "no system access"
-        state = commit(state) // web: select step, default "no internet"
-        state = commit(state) // composio: select step, default "no other apps"
-        state = commit(state) // telegram: select step, default "not on Telegram"
-        state = commit(state) // server: select step, default "no HTTP API"
-        state = commit(state) // skills: select step, index 0 opens the catalogue picker after the wizard
-        state = commit(state) // dir: derived from name
+        // system, web, composio, telegram, whatsapp, skills and the directory all take their
+        // defaults — each a select step whose first choice is "no".
+        state = commitRest(state)
         expect(state.phase).toBe("confirm")
 
         const partial = partialOf(state)
@@ -96,13 +113,9 @@ describe("the happy path", () => {
         expect(stepCounts(state).total).toBe(totalBefore - 1)
         state = commit(state) // model default
         state = commit(state) // baseUrl default
-        state = commit(state) // system default
-        state = commit(state) // web default
-        state = commit(state) // composio default
-        state = commit(state) // telegram default
-        state = commit(state) // server default
-        state = commit(state) // skills — index 0 opens the catalogue picker after the wizard
-        state = commit(state) // dir — apiKeyEnv was skipped
+        // Everything after the endpoint takes its default. apiKeyEnv is skipped by the keyless
+        // preset, which is what this test is about.
+        state = commitRest(state)
         expect(state.phase).toBe("confirm")
         expect(partialOf(state).apiKeyEnv).toBe(undefined)
     })
@@ -155,15 +168,7 @@ describe("back navigation", () => {
             { user: "M", name: "Pip", purpose: "x", preset: "ollama" },
             DEFAULTS,
         )
-        state = commit(state) // model
-        state = commit(state) // baseUrl
-        state = commit(state) // system
-        state = commit(state) // web
-        state = commit(state) // composio
-        state = commit(state) // telegram
-        state = commit(state) // server
-        state = commit(state) // skills — index 0 opens the catalogue picker after the wizard
-        state = commit(state) // dir
+        state = commitRest(state)
         expect(state.phase).toBe("confirm")
         state = reduceWizard(state, {
             kind: "list",
@@ -205,6 +210,9 @@ describe("flags answering everything", () => {
         daemon: "none",
         schedules: "none",
         skills: "starter",
+        // Both channels, for the reason stated two lines up: a fixture called ALL_FLAGS that stops
+        // answering everything is a fixture that lies, and `whatsapp` is a top-level question.
+        whatsapp: "none",
         dir: "./milo",
     }
 
@@ -252,13 +260,12 @@ describe("the skills question never becomes a text box", () => {
             { user: "M", name: "Pip", purpose: "x", preset: "ollama" },
             DEFAULTS,
         )
-        state = commit(state) // model
-        state = commit(state) // baseUrl
-        state = commit(state) // system
-        state = commit(state) // web
-        state = commit(state) // composio
-        state = commit(state) // telegram
-        // No `server` commit: the question was withdrawn in 0.1.2 and defaults to `local`.
+        // Walked by *name* rather than by count: this test is about what follows the skills
+        // question, and counting commits to reach it is what made five tests break at once when a
+        // step was inserted above.
+        for (let guard = 0; guard < 40 && currentQuestion(state)?.step !== "skills"; guard += 1) {
+            state = commit(state)
+        }
         expect(currentQuestion(state)?.step).toBe("skills")
         state = commit(state) // index 0 is `find`
         expect(partialOf(state).skills).toBe("find")

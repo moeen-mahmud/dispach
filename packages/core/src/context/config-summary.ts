@@ -27,6 +27,7 @@
  * is what lets it sit ahead of the cache breakpoint at no cost.
  */
 
+import { BRAND } from "../brand.ts"
 import type { AgentManifest } from "../manifest/schema.ts"
 
 /**
@@ -59,6 +60,8 @@ export interface ConfigSummaryInput {
      * needs state is its own kind of lie.
      */
     readonly channelsStarted: boolean
+    /** Channel ids that could not be constructed. See `Agent.reportRuntimeState`. */
+    readonly brokenChannels?: readonly string[]
     /**
      * Whether the *scheduler* is running in this process, not whether schedules are configured.
      *
@@ -134,7 +137,15 @@ export function renderConfigSummary(input: ConfigSummaryInput): string {
         ["tools", describeTools(input)],
         ["skills", describeSkills(manifest, input.skillNames)],
         ["memory", describeMemory(manifest)],
-        ["channels", describeChannels(manifest, input.channelsStarted, input.servedElsewhere)],
+        [
+            "channels",
+            describeChannels(
+                manifest,
+                input.channelsStarted,
+                input.servedElsewhere,
+                input.brokenChannels ?? [],
+            ),
+        ],
         ["schedules", describeSchedules(manifest, input.schedulerStarted, input.servedElsewhere)],
         ["http api", describeServer(manifest, input.serverListening, input.servedElsewhere)],
         ["permissions", describePermissions(manifest)],
@@ -292,7 +303,12 @@ function describeSchedules(manifest: AgentManifest, started: boolean, elsewhere:
     return `${named}${rest}${off} — configured but NOT running in this session; only \`serve\` starts the scheduler, \`run\` does not`
 }
 
-function describeChannels(manifest: AgentManifest, started: boolean, elsewhere: boolean): string {
+function describeChannels(
+    manifest: AgentManifest,
+    started: boolean,
+    elsewhere: boolean,
+    broken: readonly string[],
+): string {
     const enabled = manifest.channels.filter((channel) => channel.enabled)
     if (enabled.length === 0) {
         // Named as absent rather than omitted. A missing row reads as "this agent has no such
@@ -300,13 +316,30 @@ function describeChannels(manifest: AgentManifest, started: boolean, elsewhere: 
         // switch that is off.
         return "none — I am reached through the CLI and the HTTP API only"
     }
-    const list = enabled.map((channel) => `${channel.id} (${channel.type})`).join(", ")
+    const working = enabled.filter((channel) => !broken.includes(channel.id))
+    // A broken channel is named as broken, ahead of everything else, because the three clauses
+    // below are all about *this process* and none of them is true of a channel that will never
+    // connect in any process. Told only "NOT running in this session", an agent with a missing
+    // token would send its owner to run `serve` — which is 5.17's failure with a new cause.
+    const brokenPart =
+        broken.length === 0
+            ? ""
+            : `${enabled
+                  .filter((channel) => broken.includes(channel.id))
+                  .map((channel) => `${channel.id} (${channel.type})`)
+                  .join(
+                      ", ",
+                  )} — MISCONFIGURED and will never connect until an operator fixes it and restarts; \`${BRAND.slug} validate\` says why`
+    if (working.length === 0) return brokenPart
+    const list = working.map((channel) => `${channel.id} (${channel.type})`).join(", ")
+    const also = brokenPart === "" ? "" : `. Also ${brokenPart}`
     // State, not configuration. Told only the configuration, an agent under `run` reported that the
     // Telegram runtime was not up — from inside the running process — and offered to write a
     // LaunchAgent. The clause is what stops that: it is not broken, it is not started here.
-    if (started) return `${list} — connected in this session`
-    if (elsewhere) return `${list} — connected in another process serving me, not in this one`
-    return `${list} — configured but NOT running in this session; only \`serve\` starts channels, \`run\` does not`
+    if (started) return `${list} — connected in this session${also}`
+    if (elsewhere)
+        return `${list} — connected in another process serving me, not in this one${also}`
+    return `${list} — configured but NOT running in this session; only \`serve\` starts channels, \`run\` does not${also}`
 }
 
 function describeServer(manifest: AgentManifest, listening: boolean, elsewhere: boolean): string {

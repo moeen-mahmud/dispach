@@ -22,7 +22,6 @@ import {
 } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import { CHANNEL_IDS, PROVIDER_IDS } from "#lib/providers"
 
 export interface WorkspaceOptions {
     readonly manifestPath: string
@@ -33,8 +32,6 @@ export interface WorkspaceOptions {
 export function workspaceCommand(options: WorkspaceOptions): number {
     try {
         const loaded = loadManifest(options.manifestPath, {
-            knownProviders: PROVIDER_IDS,
-            knownChannels: CHANNEL_IDS,
             // The same environment `run` will use, or this validates a different agent — the
             // failure that rule exists for is a validator that disagrees with the runtime.
             env: ambientEnv([options.manifestPath]),

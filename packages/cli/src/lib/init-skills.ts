@@ -45,7 +45,7 @@ import {
 import { EXIT_OK } from "#lib/const"
 import type { InitAnswers } from "#lib/init-flow"
 import { forgetOrigin } from "#lib/origins"
-import { CHANNEL_IDS, PROVIDER_IDS, scriptRunner } from "#lib/providers"
+import { scriptRunner } from "#lib/providers"
 import { bullet, indent } from "#lib/render"
 import {
     type CatalogueEntry,
@@ -208,8 +208,6 @@ function brokenBy(
 ): string | undefined {
     try {
         const loaded = loadManifest(manifestPath, {
-            knownProviders: PROVIDER_IDS,
-            knownChannels: CHANNEL_IDS,
             // Or an unfilled key is reported as the freshly-installed skill's fault, and the skill is
             // rolled back for something that has nothing to do with it.
             ...(envOverlay === undefined ? {} : { env: { ...process.env, ...envOverlay } }),
@@ -241,8 +239,6 @@ function rollback(
 ): void {
     try {
         const loaded = loadManifest(manifestPath, {
-            knownProviders: PROVIDER_IDS,
-            knownChannels: CHANNEL_IDS,
             ...(envOverlay === undefined ? {} : { env: { ...process.env, ...envOverlay } }),
         })
         const configured = loaded.manifest.skills

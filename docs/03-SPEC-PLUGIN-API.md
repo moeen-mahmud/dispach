@@ -231,6 +231,21 @@ manifest id.
 
 ### Loading
 
+**A plugin that will not load is a warning, and the agent starts without it** (0.1.3). Whatever it
+would have supplied is, by definition, something the agent did not have a minute earlier either, so
+refusing to start turned one deleted directory or one version skew into a dead agent. The detail
+lands on `agent.warnings`, `validate` prints it, and `plugins list` names it — and whatever
+*selected* the capability reports separately: a `channels[].type` it would have registered degrades
+to a broken channel, a `tools.providers` entry is named as unregistered, and the pinned slugs that
+provider would have answered for are named as unresolved. Cause and cost, rather than one or the
+other.
+
+Registrations are **staged and merged only once `setup` returns**. A plugin that registered a
+channel and then threw would otherwise leave that channel behind — a partially loaded plugin, which
+is a worse state than an absent one because nothing outside can tell the difference. A failed
+plugin also does not reserve its `name`, so a working plugin is never refused for colliding with one
+that is not there.
+
 Loading happens **once per agent**, before that agent's manifest is validated. That ordering is
 forced: `loadManifest` checks `tools.provider` and a channel `type` against the ids the host can
 supply, and once plugins exist half of those ids come from the manifest itself. The refs are read

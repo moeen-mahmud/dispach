@@ -45,7 +45,7 @@ import {
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { forgetOrigin, type Origin, readOrigins, recordOrigins } from "#lib/origins"
-import { CHANNEL_IDS, PROVIDER_IDS, scriptRunner } from "#lib/providers"
+import { scriptRunner } from "#lib/providers"
 import { bullet, indent, keyValue, section } from "#lib/render"
 import {
     type CatalogueEntry,
@@ -133,8 +133,6 @@ export interface InstallOutcome {
 export function skillsCommand(options: SkillsOptions): number {
     try {
         const loaded = loadManifest(options.manifestPath, {
-            knownProviders: PROVIDER_IDS,
-            knownChannels: CHANNEL_IDS,
             // The same environment `run` uses, or this reports on a different agent — the asymmetry
             // every command that loads a manifest exists to avoid.
             env: { ...ambientEnv([options.manifestPath]), ...options.envOverlay },

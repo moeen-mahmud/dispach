@@ -59,6 +59,10 @@ COPY packages/cli/package.json ./packages/cli/
 COPY packages/server/package.json ./packages/server/
 COPY packages/web/package.json ./packages/web/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/
+# Copied so `bun install --frozen-lockfile` sees every workspace member — and for no other reason.
+# Nothing imports this package, so none of it reaches the compiled binary, and the runtime stage
+# copies only that binary. Baileys is installed in the builder and thrown away with it.
+COPY packages/channel-whatsapp/package.json ./packages/channel-whatsapp/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
 COPY packages/tools-web/package.json ./packages/tools-web/

@@ -44,7 +44,6 @@ import {
 import { findAndInstallSkill } from "#lib/init-skills"
 import { negotiateKeyboard } from "#lib/keyboard"
 import { resolveModeFromProcess } from "#lib/output"
-import { CHANNEL_IDS, PROVIDER_IDS } from "#lib/providers"
 import { complete, FLAG_FOR, fillDefaults, writeAgentFiles } from "#lib/provision"
 import { agentsDir, outsideSandboxNote } from "#lib/sandbox"
 import type { InitOptions } from "#lib/schema"
@@ -148,8 +147,6 @@ async function runInit(options: InitOptions): Promise<InitResult> {
     let distilled = false
     try {
         const loaded = loadManifest(join(targetDir, "agent.yaml"), {
-            knownProviders: PROVIDER_IDS,
-            knownChannels: CHANNEL_IDS,
             ...(needsStub ? { env: { ...process.env, [keyVar]: "(pending)" } } : {}),
         })
         const capabilities = resolveCapabilities(
@@ -271,6 +268,8 @@ function fromFlags(options: InitOptions): Partial<Record<InitStep, string>> {
         ["composio", options.composio],
         ["telegram", options.telegram],
         ["telegramAllow", options.telegramAllow],
+        ["whatsapp", options.whatsapp],
+        ["whatsappAllow", options.whatsappAllow],
         ["server", options.server],
         ["schedules", options.schedules],
         // `--skills` takes a choice name *or* the words to search for, and the sugar is here rather than

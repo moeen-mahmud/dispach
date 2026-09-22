@@ -1,7 +1,7 @@
 {
     "name": "dispach",
     "version": "0.1.2",
-    "description": "A lightweight, model-agnostic AI agent runtime — the CLI, the server, and a typed client.",
+    "description": "A lightweight, model-agnostic AI agent runtime \u2014 the CLI, the server, and a typed client.",
     "license": "Apache-2.0",
     "author": "Moeen Mahmud",
     "repository": {
@@ -35,7 +35,8 @@
     "imports": {
         "#*": "./src/*.ts",
         "#components/*": "./src/components/*.tsx",
-        "#plugins": "./src/plugins.ts"
+        "#plugins": "./src/plugins.ts",
+        "#channels": "./src/channels.ts"
     },
     "scripts": {
         "dev": "bun run ./src/index.ts",

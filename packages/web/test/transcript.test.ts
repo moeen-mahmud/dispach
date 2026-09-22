@@ -487,3 +487,63 @@ describe("the user's own message", () => {
         expect(state.running).toBe(true)
     })
 })
+
+describe("a turn that failed says so", () => {
+    /**
+     * The defect this exists for, measured in the container on 2026-09-22.
+     *
+     * A DeepSeek key pasted without its `sk-` prefix made every turn 401. `POST /messages` answered
+     * **200** with a turn id, the turn ended 258 ms later with `reason: "error"`, and the browser
+     * showed the message going out and **nothing coming back** — no reply, no note, no error. The
+     * runtime had the whole sentence (`model_http_error`, the endpoint's own words, and a hint
+     * naming `model.main.apiKeyEnv`); this reducer dropped the event on `default` and `endNote`
+     * returns `undefined` for `"error"` by design, on the reasoning that the two CLI paths render it.
+     *
+     * So the assertion is on the **text**, not on a row appearing: a bad note that does not carry
+     * the code and the hint sends a reader nowhere, which is the failure with better manners.
+     */
+    test("the error event becomes a bad note carrying code, message and hint", () => {
+        const state = run([
+            event("turn.start", { source: "api", inputTokens: 12, trust: "trusted" }),
+            event("error", {
+                code: "model_http_error",
+                message:
+                    "Model endpoint returned 401 for https://api.deepseek.com/v1/chat/completions",
+                hint: "Check the API key named by model.main.apiKeyEnv, and that baseUrl points at the right provider.",
+            }),
+            event("turn.end", {
+                reason: "error",
+                steps: 1,
+                tokens: { prompt: 0, output: 0 },
+                durationMs: 258,
+            }),
+        ])
+
+        const notes = state.rows.filter((row) => row.kind === "note")
+        expect(notes).toHaveLength(1)
+        const note = notes[0]
+        if (note?.kind !== "note") throw new Error("expected a note row")
+        expect(note.bad).toBe(true)
+        expect(note.text).toContain("model_http_error")
+        expect(note.text).toContain("401")
+        expect(note.text).toContain("model.main.apiKeyEnv")
+        expect(state.running).toBe(false)
+    })
+
+    /**
+     * Prose already streamed is kept, not thrown away.
+     *
+     * A turn can fail on its *second* model call, and the first call's answer is the only part of
+     * the work that survives. Committing before appending the note is what keeps it; returning a
+     * fresh state would delete a reply the reader had already watched arrive.
+     */
+    test("text streamed before the failure survives it", () => {
+        const state = run([
+            event("turn.start", { source: "api", inputTokens: 12, trust: "trusted" }),
+            event("model.chunk", { delta: "Looking that up.", kind: "text" }),
+            event("error", { code: "model_http_error", message: "boom", hint: "check the key" }),
+        ])
+
+        expect(kinds(state)).toEqual(["reply", "note"])
+    })
+})

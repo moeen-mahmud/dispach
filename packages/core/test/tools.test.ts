@@ -110,32 +110,36 @@ describe("resolution", () => {
         expect(registry.specs().map((entry) => entry.slug)).toEqual(["memory_write", "now"])
     })
 
-    test("an unknown slug fails the load, naming the field and the nearest match", async () => {
-        await expect(ToolRegistry.create({ local: ["noww"] })).rejects.toThrow(
-            /No provider resolved the tool "noww"/,
-        )
-
-        try {
-            await ToolRegistry.create({ local: ["noww"] })
-        } catch (error) {
-            const detail = error as { field?: string; hint?: string; code?: string }
-            expect(detail.code).toBe("unknown_tool")
-            expect(detail.field).toBe("tools.local[0]")
-            expect(detail.hint).toContain('Did you mean "now"')
-        }
+    test("an unknown slug is a warning naming the field and the nearest match, and the tool is absent", async () => {
+        /**
+         * **Warned and omitted rather than fatal**, because the overwhelmingly common cause is a
+         * *credential*, not a typo: a Composio account with no key resolves nothing, so a pinned
+         * slug refusing the load meant `init --composio connected` produced an agent that could not
+         * start — while `validate` reported `ok`, because it builds no registry. An optional
+         * capability made the agent unstartable and the two surfaces disagreed about it.
+         *
+         * The message is unchanged, and that is the point: it still names the field and the nearest
+         * match, it lands on `agent.tools.warnings` which the runtime emits and the banner prints,
+         * and the tool is genuinely absent from the catalogue so `available()` tells the model it
+         * was not given something its manifest asks for. Silence was the objection to dropping a
+         * slug; nothing here is silent.
+         */
+        const registry = await ToolRegistry.create({ local: ["noww"] })
+        expect(registry.specs().map((entry) => entry.slug)).toEqual([])
+        const detail = registry.warnings.find((warning) => warning.code === "unknown_tool")
+        expect(detail?.message).toContain('No provider resolved the tool "noww"')
+        expect(detail?.field).toBe("tools.local[0]")
+        expect(detail?.hint).toContain('Did you mean "now"')
     })
 
     test("an unknown pinned slug names the providers actually consulted", async () => {
-        try {
-            await ToolRegistry.create({
-                pinned: ["gmail_send"],
-                providers: [provider("fake", [tool({ slug: "gmail_read" })])],
-            })
-        } catch (error) {
-            const detail = error as { message: string; field?: string }
-            expect(detail.message).toContain("fake")
-            expect(detail.field).toBe("tools.pinned[0]")
-        }
+        const registry = await ToolRegistry.create({
+            pinned: ["gmail_send"],
+            providers: [provider("fake", [tool({ slug: "gmail_read" })])],
+        })
+        const detail = registry.warnings.find((warning) => warning.code === "unknown_tool")
+        expect(detail?.message).toContain("fake")
+        expect(detail?.field).toBe("tools.pinned[0]")
     })
 
     test("a provider that knows why it came up empty gets to say so", async () => {
@@ -152,12 +156,11 @@ describe("resolution", () => {
                     hint: "warm it first",
                 }),
         }
-        try {
-            await ToolRegistry.create({ pinned: ["GMAIL_SEND"], providers: [cold] })
-            throw new Error("expected a failure")
-        } catch (error) {
-            expect((error as { code?: string }).code).toBe("cache_cold")
-        }
+        const registry = await ToolRegistry.create({ pinned: ["GMAIL_SEND"], providers: [cold] })
+        // The provider's own sentence wins over the generic one, exactly as before — it is only
+        // reported rather than thrown.
+        expect(registry.warnings[0]?.code).toBe("cache_cold")
+        expect(registry.specs()).toEqual([])
     })
 
     test("it is asked only once a slug is missing everywhere, never per provider", async () => {
@@ -194,21 +197,14 @@ describe("resolution", () => {
             explainUnresolved: () => undefined,
             list: () => Promise.resolve(["gmail_read"]),
         }
-        try {
-            await ToolRegistry.create({ pinned: ["gmail_reed"], providers: [quiet] })
-            throw new Error("expected a failure")
-        } catch (error) {
-            expect((error as { code?: string }).code).toBe("unknown_tool")
-            expect((error as { hint?: string }).hint).toContain('Did you mean "gmail_read"')
-        }
+        const registry = await ToolRegistry.create({ pinned: ["gmail_reed"], providers: [quiet] })
+        expect(registry.warnings[0]?.code).toBe("unknown_tool")
+        expect(registry.warnings[0]?.hint).toContain('Did you mean "gmail_read"')
     })
 
     test("every unresolved slug is named, not just the first", async () => {
-        try {
-            await ToolRegistry.create({ local: ["nope_one", "nope_two"] })
-        } catch (error) {
-            expect((error as Error).message).toContain("nope_two")
-        }
+        const registry = await ToolRegistry.create({ local: ["nope_one", "nope_two"] })
+        expect(registry.warnings[0]?.message).toContain("nope_two")
     })
 
     test("pinning more tools than the cap is refused before any provider is asked", async () => {

@@ -11,7 +11,9 @@
 import { dirname, isAbsolute, resolve } from "node:path"
 import {
     agentPluginSupply,
+    brokenChannels,
     buildChannels,
+    buildRegistry,
     describeWindowSource,
     EventBus,
     HarnessError,
@@ -63,8 +65,6 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
         })
 
         const loaded = loadManifest(options.manifestPath, {
-            knownProviders: Object.keys(supply.toolProviders),
-            knownChannels: Object.keys(supply.channels),
             // The same environment `run` will use, or this validates a different agent — the
             // failure that rule exists for is a validator that disagrees with the runtime.
             env: ambientEnv([options.manifestPath]),
@@ -89,7 +89,33 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
         // and those are configuration mistakes knowable without a packet. Skipping this reported
         // ok on a manifest `serve` refused at boot. Constructing a transport opens no socket, so
         // this is the same function `Runtime.create` calls and costs nothing.
-        buildChannels(loaded, { channels: supply.channels })
+        //
+        // It no longer *refuses*, and that is the same function again rather than a second policy:
+        // a channel is optional, so `buildChannels` degrades a broken one to a warning and `run`
+        // boots. Reporting it as a failure here would put this command back to disagreeing with the
+        // runtime — in the direction that tells somebody their working agent is misconfigured.
+        const channelFindings = brokenChannels(buildChannels(loaded, { channels: supply.channels }))
+
+        /**
+         * The tool catalogue, built the way `run` builds it — which this command did **not** do, and
+         * the gap was the recorded asymmetry in its worst direction. Measured: an agent with
+         * `composio` named and a pinned `GMAIL_FETCH_EMAILS` reported `ok` here and refused to boot
+         * with `composio_cache_miss`, because a cold cache resolves nothing and the registry is
+         * built by `Runtime.create` alone. A validator that approves a manifest the runtime refuses
+         * is worse than no validator.
+         *
+         * Same function, so the two cannot disagree — and it opens no socket: a provider resolves
+         * from its cache at boot and refreshes only after readiness (hard rule 4). What it reports
+         * is a warning, because an unresolved slug is a warning at boot too: the tool is absent from
+         * the catalogue and `available()` tells the model, rather than the agent refusing to start.
+         */
+        const built = await buildRegistry(loaded, {
+            toolProviders: supply.toolProviders,
+            channels: supply.channels,
+            scriptRunner: supply.scriptRunner,
+            middleware: supply.middleware,
+        })
+        for (const provider of built.providers) await provider.stop?.()
 
         // The same check `run` applies, applied here for the same reason it exists at all: a
         // validator that accepts a manifest the runtime refuses is worse than no validator.
@@ -105,6 +131,10 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
         // for the standing reason that a check only one of them performs is one they disagree about.
         const findings = [
             ...workspaceWarnings,
+            ...supply.failed,
+            ...built.warnings,
+            ...built.registry.warnings,
+            ...channelFindings,
             ...scheduleDeliveryWarnings(manifest),
             ...(ruleFailure === undefined ? [] : [ruleFailure.toDetail()]),
         ]

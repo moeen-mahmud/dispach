@@ -67,6 +67,7 @@ import { sseResponse } from "./sse.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
 import {
     ApprovalBody,
+    ChannelPatchBody,
     ConfigBody,
     KeyBody,
     MessageBody,
@@ -199,6 +200,47 @@ export interface HandlerOptions {
      * and should say so rather than accept a request and write nothing.
      */
     readonly provision?: Provisioner
+    /**
+     * What the CLI injects for the channel actions. Absent answers `501`.
+     *
+     * Injected for the same reason `provision` is: these write the manifest and the `.env` beside
+     * it, and *how* is the CLI's — `editManifest` for one, `applySecret` at `0600` for the other,
+     * both already reached by `dispach channels`. A second implementation here is how two surfaces
+     * come to disagree about what "disconnect" means, which is the failure this project keeps
+     * finding rather than a hypothetical.
+     */
+    readonly channels?: ChannelAdmin
+}
+
+/** What the CLI injects for the channel routes. See `HandlerOptions.channels`. */
+export interface ChannelAdmin {
+    /**
+     * Switch a channel on or off in the manifest.
+     *
+     * Read-modify-write, so a caller sends a flag rather than the whole `channels` list. Sending the
+     * list is right for a person editing YAML and wrong for a button: the browser would be
+     * reconstructing an array it did not author, and two clients racing on that lose an entry rather
+     * than a flag.
+     */
+    setEnabled(
+        manifestPath: string,
+        channelId: string,
+        enabled: boolean,
+    ): Promise<{ readonly note: string; readonly changed: boolean }>
+    /**
+     * Write the channel's credential into the `.env` beside the manifest.
+     *
+     * The **variable is resolved from the manifest**, never taken from the caller. A route that let
+     * a client name the variable would let it write any variable at all, including the token this
+     * server authenticates with.
+     */
+    setCredential(
+        manifestPath: string,
+        channelId: string,
+        value: string,
+    ): { readonly note: string; readonly variable: string }
+    /** Delete a stored pairing on disk, for an agent that is not running. */
+    unpair(manifestPath: string, channelId: string): { readonly note: string }
 }
 
 /** What the CLI injects for `POST /v1/agents`. See `HandlerOptions.provision`. */
@@ -1965,6 +2007,157 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         { capability: "admin" },
     )
 
+    /**
+     * Connect, disconnect, or set a channel's credential.
+     *
+     * One route for three things a person does to one channel, because they are one decision — "is
+     * this channel working" — and splitting them would make the browser hold three call sites for
+     * one panel. The implementation is the CLI's, injected, so `dispach channels` and this cannot
+     * disagree about what any of them means.
+     *
+     * `admin`, like the config routes and for the same reason: it rewrites the file an agent boots
+     * from, and it writes a credential.
+     */
+    router.add(
+        "PATCH",
+        "/v1/agents/:id/channels/:channelId",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const admin = options.channels
+                if (admin === undefined) {
+                    return fail(
+                        {
+                            code: "channels_not_supported",
+                            message: "This server cannot change a channel.",
+                            hint: "The host did not supply the channel actions — a library caller embedding this handler has to pass them. `dispach serve` does.",
+                        },
+                        501,
+                    )
+                }
+                const source = runtime.sourceOf(agent.id)
+                if (typeof source !== "string") {
+                    return fail(
+                        {
+                            code: "config_not_editable",
+                            message: `Agent "${agent.id}" was loaded from an object, so it has no manifest to edit.`,
+                            hint: "Only an agent loaded from a file can be changed here.",
+                        },
+                        409,
+                    )
+                }
+
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(ChannelPatchBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const { enabled, credential } = parsed.value
+                if (enabled === undefined && credential === undefined) {
+                    return fail(
+                        {
+                            code: "channel_patch_empty",
+                            message: "Nothing to change.",
+                            hint: 'Send { "enabled": true | false } to connect or disconnect it, { "credential": "…" } to set its token, or both.',
+                        },
+                        400,
+                    )
+                }
+
+                const channelId = context.params.channelId ?? ""
+                const notes: string[] = []
+                try {
+                    // Credential first, deliberately: connecting a channel whose token is being set
+                    // in the same request should find it already there, and the reverse order would
+                    // start a channel that reads a variable one statement from being written.
+                    if (credential !== undefined) {
+                        notes.push(admin.setCredential(source, channelId, credential).note)
+                    }
+                    if (enabled !== undefined) {
+                        notes.push((await admin.setEnabled(source, channelId, enabled)).note)
+                    }
+                } catch (error) {
+                    if (!isHarnessError(error)) throw error
+                    // The implementation knows why far better than this route does — which channel,
+                    // which variable, and what to do — so its detail is passed through unchanged.
+                    return fail(error.toDetail(), 400)
+                }
+
+                let applied: ErrorDetail | undefined
+                try {
+                    await runtime.replace(agent.id)
+                } catch (error) {
+                    if (!isHarnessError(error)) throw error
+                    applied = error.toDetail()
+                }
+
+                return json({
+                    channelId,
+                    notes,
+                    ...(applied === undefined
+                        ? { applied: true }
+                        : { applied: false, pending: applied }),
+                })
+            }),
+        { capability: "admin" },
+    )
+
+    /**
+     * Forget a channel's stored pairing.
+     *
+     * Separate from the PATCH because it is not a *setting* — nothing about the manifest changes,
+     * and it is destructive in a way a flag is not: the session is gone and somebody has to scan a
+     * code again. A POST to its own path is what makes that legible, and what stops a client
+     * sending it by accident while toggling a flag.
+     *
+     * Tries the **live** transport first, which is what makes this work on a running agent without
+     * a restart: `ChannelHub.reset` drops the session and the reconnect loop offers a new QR within
+     * seconds. Falling back to the on-disk delete covers a channel that is registered but not
+     * started, and an agent that is loaded but whose channels a `run`-mode host never started.
+     */
+    router.add(
+        "POST",
+        "/v1/agents/:id/channels/:channelId/unpair",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const channelId = context.params.channelId ?? ""
+                const live = await runtime.channels.reset(agent.id, channelId)
+                if (live === "reset") {
+                    return json({
+                        channelId,
+                        note: "Pairing forgotten. The channel offers a new code to scan; the old device may still be listed on the phone, which is the only place it can be removed.",
+                        restarted: false,
+                    })
+                }
+
+                const admin = options.channels
+                const source = runtime.sourceOf(agent.id)
+                if (admin === undefined || typeof source !== "string") {
+                    return fail(
+                        {
+                            code:
+                                live === "unsupported"
+                                    ? "channel_has_no_pairing"
+                                    : "channel_unknown",
+                            message:
+                                live === "unsupported"
+                                    ? `Channel "${channelId}" stores no pairing.`
+                                    : `Agent "${agent.id}" has no channel "${channelId}" registered.`,
+                            hint: "Only a channel linked by scanning a code has one to forget. A credential somebody typed is changed with PATCH on this channel, and a channel is switched off with { enabled: false }.",
+                            field: "channelId",
+                        },
+                        live === "unsupported" ? 409 : 404,
+                    )
+                }
+
+                try {
+                    return json({ channelId, ...admin.unpair(source, channelId), restarted: false })
+                } catch (error) {
+                    if (!isHarnessError(error)) throw error
+                    return fail(error.toDetail(), error.code === "channel_unknown" ? 404 : 409)
+                }
+            }),
+        { capability: "admin" },
+    )
+
     router.add(
         "GET",
         "/v1/agents/:id/tools",
@@ -2711,7 +2904,37 @@ function summary(runtime: Runtime, agent: Agent) {
         name: agent.manifest.name ?? agent.id,
         status: "loaded",
         model: agent.manifest.model.main.id,
-        channels: runtime.channels.statusOf(agent.id),
+        // Runtime status **layered over the manifest**, because a panel that offers "connect" needs
+        // both halves and neither alone is the answer. `statusOf` knows what is running and nothing
+        // about a channel that is switched off — a disabled channel is never constructed, so it has
+        // no status at all, and a listing built from it would omit exactly the channel somebody
+        // opened the page to switch back on.
+        channels: agent.manifest.channels.map((channel) => {
+            const running = runtime.channels
+                .statusOf(agent.id)
+                .find((entry) => entry.id === channel.id)
+            const variable =
+                typeof (channel as Record<string, unknown>).tokenEnv === "string"
+                    ? ((channel as Record<string, unknown>).tokenEnv as string)
+                    : undefined
+            return {
+                ...(running ?? {}),
+                // After the spread, so the manifest's own id and type win. They are equal to the
+                // transport's by construction since 0.1.3, and the manifest is what was asked about.
+                id: channel.id,
+                type: channel.type,
+                enabled: channel.enabled,
+                ...(variable === undefined
+                    ? {}
+                    : {
+                          credentialEnv: variable,
+                          // The **name and whether it has a value**, never the value. A surface that
+                          // could read a credential back is one a leaked operator key turns into a
+                          // credential dump, and nothing needs it.
+                          credentialSet: agent.hasEnv(variable),
+                      }),
+            }
+        }),
         entryPhase: phased ? (entryPhase(phases) ?? null) : null,
         ...(phased ? { phases: Object.keys(phases) } : {}),
     }

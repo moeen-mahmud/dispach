@@ -294,6 +294,10 @@ export interface InitOptions {
     readonly telegram?: string
     /** One Telegram handle, or empty for an allowlist that permits nobody. */
     readonly telegramAllow?: string
+    /** `none` or `connected` — reachable on WhatsApp, through the opt-in plugin. */
+    readonly whatsapp?: string
+    /** One WhatsApp number in digits, or empty for an allowlist that permits nobody. */
+    readonly whatsappAllow?: string
     /** `none` or `local` — whether to serve the HTTP API on loopback. */
     readonly server?: string
     /** `none`, `daily` or `hourly` — what the agent runs on a schedule. */
@@ -308,6 +312,15 @@ export interface InitOptions {
 
 export interface AgentsOptions {
     readonly manifestPaths: readonly string[]
+    readonly json?: boolean
+}
+
+export interface ChannelsOptions {
+    /** `list` (the default), `connect`, `disconnect`, `credential` or `unpair`. */
+    readonly action?: string
+    readonly manifestPath: string
+    /** Which channel. Optional when the agent declares exactly one. */
+    readonly channelId?: string
     readonly json?: boolean
 }
 

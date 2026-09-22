@@ -17,7 +17,14 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { AgentList, ChannelsPanel, SchedulesPanel, ToolsPanel } from "../src/panels.tsx"
+import {
+    AgentList,
+    type ChannelRow,
+    ChannelsPanel,
+    SchedulesPanel,
+    ToolsPanel,
+    WarningsPanel,
+} from "../src/panels.tsx"
 
 const NOW = Date.parse("2026-09-20T12:00:00.000Z")
 
@@ -199,8 +206,12 @@ describe("the channels panel", () => {
         )
         expect(html).toContain("needs_input")
         expect(html).toContain("scan to link WhatsApp")
-        expect(html).toContain("2@Lr9KpQvXyZ00TESTQR")
         expect(html).toContain('data-kind="qr"')
+        // **Drawn, not printed.** A QR payload is 277 characters of base64 whose only purpose is to
+        // be scanned; showing the string is true and useless, and is what made somebody who had
+        // just added a WhatsApp number report that they were never shown a code.
+        expect(html).toContain('class="payload-qr"')
+        expect(html).not.toContain("2@Lr9KpQvXyZ00TESTQR")
         // Fresh: 10 seconds left at `now`. The class is what the stylesheet dims.
         expect(html).toContain("fresh")
         expect(html).not.toContain("this expired")
@@ -221,7 +232,8 @@ describe("the channels panel", () => {
         )
         expect(html).toContain("this expired")
         expect(html).toContain("stale")
-        expect(html).toContain("2@Lr9KpQvXyZ00TESTQR")
+        // Still drawn. The stylesheet dims it rather than removing it, for the reason above.
+        expect(html).toContain('class="payload-qr"')
     })
 
     test("an unknown kind still renders its payload", () => {
@@ -241,6 +253,54 @@ describe("the channels panel", () => {
         )
         expect(html).toContain("417-208")
         expect(html).toContain('data-kind="pairing-code"')
+    })
+
+    /**
+     * The payload reaches the encoder, asserted without a decoder.
+     *
+     * "An `<svg>` is present" would pass against a constant image, which is the shape of guard this
+     * repo keeps finding green against broken code. Two properties together rule that out: the
+     * module count is whatever *this* payload needs, and two different payloads draw different
+     * paths. Neither is satisfiable by a fixed picture.
+     */
+    test("the code encodes the payload it was given", () => {
+        const render = (payload: string): string =>
+            renderToStaticMarkup(
+                createElement(ChannelsPanel, {
+                    channels: [{ ...waiting, input: { ...waiting.input, payload } }],
+                    now: NOW,
+                }),
+            )
+
+        const short = render("2@SHORT")
+        const long = render(`2@${"K".repeat(200)}`)
+
+        const modulesOf = (html: string): string => /data-modules="(\d+)"/.exec(html)?.[1] ?? "none"
+        const pathOf = (html: string): string => /<path d="([^"]+)"/.exec(html)?.[1] ?? "none"
+
+        // A longer payload needs a bigger matrix. A constant image cannot do this.
+        expect(Number(modulesOf(long))).toBeGreaterThan(Number(modulesOf(short)))
+        expect(pathOf(short)).not.toBe(pathOf(long))
+        expect(pathOf(short)).not.toBe("none")
+    })
+
+    /**
+     * A payload the encoder cannot take falls back to text rather than taking the panel down.
+     *
+     * A throw inside a component unmounts the tree — `app.tsx` went **entirely black** that way
+     * while its accessibility snapshot still showed a correct-looking DOM. The QR format has a hard
+     * capacity, so this is reachable with real data rather than hypothetical.
+     */
+    test("a payload past the format's capacity falls back to the text", () => {
+        const huge = `2@${"Z".repeat(8000)}`
+        const html = renderToStaticMarkup(
+            createElement(ChannelsPanel, {
+                channels: [{ ...waiting, input: { ...waiting.input, payload: huge } }],
+                now: NOW,
+            }),
+        )
+        expect(html).not.toContain('class="payload-qr"')
+        expect(html).toContain("ZZZZ")
     })
 
     test("no expiry reported is not the same as never expires", () => {
@@ -297,5 +357,168 @@ describe("the 404 loop, guarded at the source", () => {
         expect(source.match(/isGone\(caught\)/g)?.length).toBe(4)
         // And the handler clears the selection, or the page keeps a current agent that is gone.
         expect(source).toContain("setAgentId(undefined)")
+    })
+})
+
+describe("the warnings panel", () => {
+    /**
+     * Every finding it renders was a **refusal** until 0.1.3: a channel with no token, a plugin that
+     * would not import, a provider nobody registered, a pinned tool nothing could resolve. They
+     * became warnings because an agent should start if it can take a turn.
+     *
+     * That trade is only defensible if the failure is visible, and this page showed `agent.warnings`
+     * **nowhere at all** — so degrading without this panel would have handed the objection back its
+     * point. Which is why the empty case renders nothing and the populated case renders the hint:
+     * the hint is the half that says what to do.
+     */
+    const render = (warnings: Parameters<typeof WarningsPanel>[0]["warnings"]) =>
+        renderToStaticMarkup(createElement(WarningsPanel, { warnings }))
+
+    test("nothing wrong renders nothing — no empty box above every panel", () => {
+        expect(render([])).toBe("")
+    })
+
+    test("a finding shows its field, its message and its hint", () => {
+        const html = render([
+            {
+                code: "telegram_token_missing",
+                message: 'Channel "tg" needs TELEGRAM_BOT_TOKEN, which is not set.',
+                hint: "Export it, or add it to the .env beside the manifest — then restart.",
+                field: "channels[tg].tokenEnv",
+            },
+        ])
+        expect(html).toContain("TELEGRAM_BOT_TOKEN")
+        expect(html).toContain("channels[tg].tokenEnv")
+        // The hint is the actionable half. A message with no remedy is the 57 MB log in one line.
+        expect(html).toContain(".env beside the manifest")
+        // And it says the agent is running, so nobody reads this as a failed start.
+        expect(html).toContain("It is running")
+    })
+
+    test("it counts them, singular and plural", () => {
+        const one = render([{ code: "a", message: "one" }])
+        expect(one).toContain("1 thing")
+        expect(one).not.toContain("1 things")
+        expect(
+            render([
+                { code: "a", message: "x" },
+                { code: "b", message: "y" },
+            ]),
+        ).toContain("2 things")
+    })
+
+    test("a finding with no hint and no field still renders", () => {
+        // Every `ErrorDetail` this project writes carries a hint, and a plugin's may not.
+        expect(render([{ code: "plugin_load_failed", message: "it threw" }])).toContain("it threw")
+    })
+})
+
+describe("the channel panel's controls", () => {
+    /**
+     * The panel was **read-only** until 0.1.3, so every one of these was reachable only by knowing a
+     * field name: disconnecting meant sending the whole `channels` list back through the config
+     * route, changing a token meant knowing that `tokenEnv` names a variable, and relinking WhatsApp
+     * meant finding a directory and deleting it. That is the standing rule about `init` — a
+     * capability reachable only by somebody who already knows the field names is one the surface is
+     * hiding — applied to the thing a person touches most after creating an agent.
+     */
+    const render = (
+        channel: ChannelRow,
+        actions?: Parameters<typeof ChannelsPanel>[0]["actions"],
+    ) =>
+        renderToStaticMarkup(
+            createElement(ChannelsPanel, {
+                channels: [channel],
+                now: Date.parse("2026-09-22T12:00:00Z"),
+                ...(actions === undefined ? {} : { actions }),
+            }),
+        )
+
+    const noop = {
+        onConnect: () => {},
+        onCredential: () => {},
+        onUnpair: () => {},
+    }
+
+    test("a disconnected channel still appears, and offers to connect", () => {
+        // The reason the listing is keyed by the **manifest**: a disabled channel is never
+        // constructed, so it has no runtime status — and a list built from the runtime would omit
+        // exactly the row somebody opened the page to switch back on.
+        const html = render({ id: "tg", type: "telegram", enabled: false }, noop)
+        expect(html).toContain("tg")
+        expect(html).toContain("disconnected")
+        expect(html).toContain(">connect<")
+    })
+
+    test("a connected one offers to disconnect", () => {
+        const html = render(
+            { id: "tg", type: "telegram", enabled: true, status: "connected" },
+            noop,
+        )
+        expect(html).toContain(">disconnect<")
+    })
+
+    test("a missing credential is named and marked, and the box is a password box", () => {
+        const html = render(
+            {
+                id: "tg",
+                type: "telegram",
+                enabled: true,
+                credentialEnv: "TELEGRAM_BOT_TOKEN",
+                credentialSet: false,
+            },
+            noop,
+        )
+        expect(html).toContain("TELEGRAM_BOT_TOKEN")
+        expect(html).toContain("is NOT set")
+        // A secret typed here lives in component state and nowhere else — so the browser is told
+        // not to offer to remember it, and the field never shows it back.
+        expect(html).toContain('type="password"')
+        expect(html).toContain('autoComplete="new-password"')
+        expect(html).toContain(">set<")
+    })
+
+    test("a credential already set offers to replace it, and is never shown back", () => {
+        const html = render(
+            {
+                id: "tg",
+                type: "telegram",
+                enabled: true,
+                credentialEnv: "TELEGRAM_BOT_TOKEN",
+                credentialSet: true,
+            },
+            noop,
+        )
+        expect(html).toContain("is set")
+        expect(html).toContain(">replace<")
+        // The box is empty, and no route returns a credential — so there is nothing here that
+        // *could* render one. Asserted as the empty value rather than as the attribute's absence,
+        // which a controlled input always has.
+        expect(html).toContain('value=""')
+    })
+
+    test("unpair is offered to a channel that pairs, and to no other", () => {
+        // A button whose only outcome is a refusal is worse than no button — the same call the
+        // schedules panel makes about a manifest-owned row.
+        expect(render({ id: "wa", type: "whatsapp", enabled: true }, noop)).toContain(">unpair<")
+        expect(render({ id: "tg", type: "telegram", enabled: true }, noop)).not.toContain(
+            ">unpair<",
+        )
+    })
+
+    test("no actions means the panel is exactly what it was before", () => {
+        const html = render({ id: "tg", type: "telegram", enabled: true, status: "connected" })
+        expect(html).not.toContain("button")
+        expect(html).toContain("connected")
+    })
+
+    test("a request in flight disables the controls rather than looking dead", () => {
+        const html = render(
+            { id: "tg", type: "telegram", enabled: true },
+            { ...noop, busy: "tg", note: "working on it" },
+        )
+        expect(html).toContain("disabled")
+        expect(html).toContain("working…")
+        expect(html).toContain("working on it")
     })
 })

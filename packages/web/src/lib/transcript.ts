@@ -313,6 +313,38 @@ function onEvent(state: Transcript, event: AnyEvent): Transcript {
             return { ...state, rows }
         }
 
+        /**
+         * The turn failed, and this is the only event that says why.
+         *
+         * `endNote("error")` deliberately returns `undefined` — its comment reads "the `error` event
+         * carries code, message and hint, and both paths render it in full". That was true of the two
+         * CLI paths and **this is the third consumer**, which had no case for it at all: a turn that
+         * died on the model call fell to `default`, `turn.end` added no note, `running` went false,
+         * and the page showed a message going out and nothing coming back. Measured live in the
+         * container — a 401 from the model endpoint, with a hint naming `model.main.apiKeyEnv`,
+         * reaching a reader who could only conclude the product was broken.
+         *
+         * Same three lines the CLI renders, in the same order, so the two surfaces cannot describe
+         * one failure differently.
+         */
+        case "error": {
+            const data = event.data as EventDataMap["error"]
+            const committed = commit({ ...state, live: state.live + state.filter.end() })
+            return {
+                ...committed,
+                running: false,
+                rows: [
+                    ...committed.rows,
+                    {
+                        kind: "note",
+                        id: nextId(),
+                        text: `${data.code}: ${data.message}\nhint: ${data.hint}`,
+                        bad: true,
+                    },
+                ],
+            }
+        }
+
         case "agent.warning": {
             const data = event.data as { message?: string }
             return {

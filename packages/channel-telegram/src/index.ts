@@ -36,11 +36,16 @@ export { TelegramTransport, toInbound } from "./transport.ts"
 /**
  * Construct a Telegram transport from a manifest entry.
  *
- * **The token is read here, at boot, and a missing one is a hard failure.** That is deliberately
- * different from a *wrong* token, which is a network fact and must not block readiness (decision
- * 8.9's neighbour): an unset environment variable is a configuration mistake, knowable without a
- * packet, and hard rule 10's whole point is that the manifest names the variable so the failure can
- * name it too.
+ * **The token is read here, at boot, and a missing one refuses the channel** — which is deliberately
+ * different from a *wrong* token, a network fact that must not block readiness (decision 8.9's
+ * neighbour): an unset environment variable is a configuration mistake, knowable without a packet,
+ * and hard rule 10's whole point is that the manifest names the variable so the failure can name it
+ * too.
+ *
+ * It refuses *this channel* and not the agent. `buildChannels` catches it and substitutes a
+ * placeholder, so the agent starts with the channel reported broken on four surfaces. Throwing used
+ * to make the whole agent unstartable, which meant `init --telegram connected` generated a manifest
+ * that `run`, `serve` and `validate` all refused over a token nobody had pasted yet.
  */
 export const telegramChannel: ChannelFactory = (context) => {
     const config = context.config
@@ -51,7 +56,7 @@ export const telegramChannel: ChannelFactory = (context) => {
         throw new ConfigError({
             code: "telegram_token_missing",
             message: `Channel "${context.id}" needs ${tokenEnv}, which is not set.`,
-            hint: `Export ${tokenEnv}, or add it to the .env beside the manifest. Get a token from @BotFather with /newbot. This fails at load rather than at the first poll, because an unset variable is a configuration mistake and does not need a network round trip to discover.`,
+            hint: `Export ${tokenEnv}, or add it to the .env beside the manifest — then restart the agent. Get a token from @BotFather with /newbot. The agent starts either way: a channel is optional, so this channel is reported broken rather than blocking the load. It is refused here rather than at the first poll because an unset variable is a configuration mistake and needs no network round trip to discover.`,
             field: `channels[${context.id}].tokenEnv`,
         })
     }
@@ -61,7 +66,7 @@ export const telegramChannel: ChannelFactory = (context) => {
         throw new ConfigError({
             code: "telegram_mode_invalid",
             message: `Channel "${context.id}" declares mode "${mode}".`,
-            hint: "mode is longpoll or webhook. Long-poll needs no inbound connectivity and is the right default for a laptop or a private network; webhook needs a public HTTPS URL and is lower latency.",
+            hint: "mode is longpoll or webhook, and the agent starts either way with this channel reported broken. Long-poll needs no inbound connectivity and is the right default for a laptop or a private network; webhook needs a public HTTPS URL and is lower latency.",
             field: `channels[${context.id}].mode`,
         })
     }

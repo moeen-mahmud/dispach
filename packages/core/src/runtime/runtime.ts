@@ -14,11 +14,14 @@
 import { mkdirSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 import { BRAND } from "../brand.ts"
-import type { ChannelBinding } from "../channels/channel.ts"
+import { brokenTransport, type ChannelBinding } from "../channels/channel.ts"
 import {
+    channelFactoryFailed,
     channelTransportMismatch,
     channelTypeUnknown,
+    type ErrorDetail,
     HarnessError,
+    isHarnessError,
     toolProviderUnknown,
 } from "../errors.ts"
 import { EventBus } from "../events/bus.ts"
@@ -206,6 +209,8 @@ export interface AgentSupply {
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     readonly middleware: readonly Middleware[]
+    /** Plugins this agent named that did not load, carried so they reach `agent.warnings`. */
+    readonly failedPlugins?: readonly ErrorDetail[]
 }
 
 export interface BootReport {
@@ -502,7 +507,21 @@ export class Runtime {
             if (providers.length > 0) providersByAgent.set(entry.manifest.id, providers)
         }
 
-        // 4. Agents: identity files, capability resolution, provider construction. Still no network
+        // 4. Channels: construct transports. Allocating one opens no socket — `start()` does, and
+        //    that is called after readiness, below.
+        //
+        //    **Before the agents, and that ordering is what makes a broken channel reportable.** A
+        //    channel that cannot be built is a warning rather than a refusal, and a boot warning has
+        //    to be *readable off the agent* — `Runtime.create` finishes before anything can
+        //    subscribe to the bus, which is the empty room this repo has lost boot warnings to
+        //    twice. So the bindings are built first and their failures handed to `Agent.create`.
+        const channelBindings = mark("channels", () =>
+            hosted.map((entry: LoadedManifest) =>
+                buildChannels(entry, prepared.supplyFor(entry.manifest.id)),
+            ),
+        )
+
+        // 5. Agents: identity files, capability resolution, provider construction. Still no network
         //    — constructing a provider allocates no socket.
         const agents = mark("agents", () =>
             hosted.map((entry: LoadedManifest, index) =>
@@ -514,6 +533,13 @@ export class Runtime {
                     // Resolved per call. `runtime` is assigned below this block, so this
                     // closure cannot be evaluated eagerly either.
                     resolveMember: (id) => runtime.agent(id),
+                    // Channels and plugins together: both are optional capabilities whose failure
+                    // is a warning, and `agent.warnings` is the one array every surface reads.
+                    warnings: [
+                        ...(prepared.supplyFor(entry.manifest.id).failedPlugins ?? []),
+                        ...(built[index]?.warnings ?? []),
+                        ...brokenChannels(channelBindings[index] ?? []),
+                    ],
                     options,
                     bus,
                     store,
@@ -521,8 +547,6 @@ export class Runtime {
             ),
         )
 
-        // 5. Channels: construct transports. Allocating one opens no socket — `start()` does, and
-        //    that is called after readiness, below.
         const hub = new ChannelHub({ bus, outboxStore: store.outbox })
 
         /**
@@ -568,14 +592,12 @@ export class Runtime {
         runtime.#providersByAgent = providersByAgent
         runtime.#sources = sources
 
-        mark("channels", () => {
-            for (const [index, entry] of hosted.entries()) {
-                const agent = agents[index]
-                if (agent === undefined) continue
-                const bindings = buildChannels(entry, prepared.supplyFor(entry.manifest.id))
-                if (bindings.length > 0) hub.register(agent, bindings)
-            }
-        })
+        for (const [index] of hosted.entries()) {
+            const agent = agents[index]
+            const bindings = channelBindings[index]
+            if (agent === undefined || bindings === undefined) continue
+            if (bindings.length > 0) hub.register(agent, bindings)
+        }
 
         // Before the registration loop, so `list()` is already correct the first time anything reads
         // it — including the `agent.loaded` events emitted inside that loop.
@@ -668,6 +690,7 @@ export class Runtime {
             // `run` that its channel was connected in this session, which is exactly the sentence
             // decision 5.17 was written to stop it saying.
             agent.reportRuntimeState({
+                brokenChannels: hub.brokenOf(agent.id),
                 channelsStarted: hub.started && hub.statusOf(agent.id).length > 0,
                 // The third state, and the reason the other two read as a lie without it.
                 //
@@ -931,8 +954,17 @@ export class Runtime {
             if (built.providers.length > 0) {
                 this.#providersByAgent.set(entry.manifest.id, built.providers)
             }
+            // Built before the agent for the reason the boot path records: a broken channel is a
+            // warning, and a warning has to be readable off the agent rather than caught on a bus
+            // nothing was subscribed to yet.
+            const bindings = buildChannels(entry, supply)
             const agent = instantiateAgent({
                 entry,
+                warnings: [
+                    ...(supply.failedPlugins ?? []),
+                    ...built.warnings,
+                    ...brokenChannels(bindings),
+                ],
                 supply,
                 registry: built.registry,
                 team: prepared.teams.get(entry.manifest.id),
@@ -942,7 +974,6 @@ export class Runtime {
                 store: this.store,
             })
 
-            const bindings = buildChannels(entry, supply)
             if (bindings.length > 0) this.channels.register(agent, bindings)
             admitted.push(agent)
         }
@@ -973,6 +1004,7 @@ export class Runtime {
             // writable — and it must be written here rather than left to default, or an adopted
             // agent is told it has no channels in a process that has just started them.
             agent.reportRuntimeState({
+                brokenChannels: this.channels.brokenOf(agent.id),
                 channelsStarted:
                     this.channels.started && this.channels.statusOf(agent.id).length > 0,
                 servedElsewhere: leases.declined.some((held) => held.agentId === agent.id),
@@ -1425,6 +1457,7 @@ async function prepareAgents(input: {
                 channels: supply.channels,
                 scriptRunner: supply.scriptRunner,
                 middleware: supply.middleware,
+                failedPlugins: supply.failed,
             })
             pluginsByAgent.set(agentId, supply.loaded)
 
@@ -1472,6 +1505,7 @@ async function prepareAgents(input: {
             channels: options.channels ?? {},
             scriptRunner: options.scriptRunner,
             middleware: [],
+            failedPlugins: [],
         }
 
     // 1. Manifests: file reads, env expansion, schema, rules. No network.
@@ -1479,7 +1513,6 @@ async function prepareAgents(input: {
         sources.map((source, index) => {
             const supply = supplyFor(agentIdAt(index))
             const known = {
-                knownProviders: Object.keys(supply.toolProviders),
                 knownChannels: Object.keys(supply.channels),
             }
             return typeof source === "string"
@@ -1544,18 +1577,22 @@ interface PreparedAgents {
  *
  * Shared by `create` and `adopt` so a slug refused on one path is refused on the other.
  */
-async function buildRegistry(
+export async function buildRegistry(
     entry: LoadedManifest,
     supply: AgentSupply,
-): Promise<{ readonly registry: ToolRegistry; readonly providers: readonly ToolProvider[] }> {
-    const providers = buildProviders(entry, supply)
+): Promise<{
+    readonly registry: ToolRegistry
+    readonly providers: readonly ToolProvider[]
+    readonly warnings: readonly ErrorDetail[]
+}> {
+    const { providers, warnings } = buildProviders(entry, supply)
     const registry = await ToolRegistry.create({
         pinned: entry.manifest.tools.pinned,
         local: entry.manifest.tools.local,
         budget: entry.manifest.tools.budget,
         ...(providers.length === 0 ? {} : { providers }),
     })
-    return { registry, providers }
+    return { registry, providers, warnings }
 }
 
 /**
@@ -1573,6 +1610,8 @@ async function buildRegistry(
  * adopted into a live process reaches members adopted in the same call.
  */
 function instantiateAgent(input: {
+    /** Findings made before the agent existed — a channel that could not be built. */
+    readonly warnings?: readonly ErrorDetail[]
     readonly entry: LoadedManifest
     readonly supply: AgentSupply
     readonly registry: ToolRegistry | undefined
@@ -1624,6 +1663,12 @@ function instantiateAgent(input: {
             : input.registry.withTools(teamTools)
 
     return Agent.create(entry, bus, store, {
+        // Conditionally spread, like every other optional here — and this field is exactly the
+        // shape this project has lost a value to six times, so `runtime.test.ts` reads it back off
+        // `agent.warnings` rather than trusting the thread.
+        ...(input.warnings === undefined || input.warnings.length === 0
+            ? {}
+            : { warnings: input.warnings }),
         ...(withTeam === undefined ? {} : { tools: withTeam }),
         // Threaded rather than defaulted: `Agent.create` reads `approve === undefined`
         // to decide whether to warn about an unreachable `onMutate: "confirm"`, so a
@@ -1749,23 +1794,57 @@ function envOptions(options: RuntimeOptions): {
  * slug two of them both resolve is a collision it refuses — so the order decides which one is named
  * first in that failure, and nothing here may sort it into something tidier than what was written.
  */
-function buildProviders(entry: LoadedManifest, supply: AgentSupply): readonly ToolProvider[] {
+function buildProviders(
+    entry: LoadedManifest,
+    supply: AgentSupply,
+): { readonly providers: readonly ToolProvider[]; readonly warnings: readonly ErrorDetail[] } {
     const factories = supply.toolProviders
+    const providers: ToolProvider[] = []
+    const warnings: ErrorDetail[] = []
 
     // The plan's warnings are deliberately not collected here. `Agent.create` reads them from the
     // same function, so they arrive on `agent.warnings` where a front end still finds them after
     // boot — the lesson from the trimmed-catalogue warning, which was emitted during boot into an
     // empty room for weeks.
-    return resolveProviders(entry.manifest.tools).selections.map((selection) => {
+    for (const selection of resolveProviders(entry.manifest.tools).selections) {
         const factory = factories[selection.id]
-        if (factory === undefined) throw toolProviderUnknown(selection.id, Object.keys(factories))
-        return factory({
-            dir: entry.dir,
-            env: entry.env,
-            config: selection.config,
-            agentId: entry.manifest.id,
-        })
-    })
+        // **Warned and skipped, never fatal.** A provider is an optional capability — most often
+        // one a plugin would have registered, and a plugin that failed to load is already a warning
+        // — so refusing the agent here would turn one broken plugin into an agent that cannot
+        // start. The tools it would have supplied then fall out of `tools.pinned` as unresolved,
+        // which is a warning of its own, and `available()` tells the model what it was not given.
+        if (factory === undefined) {
+            warnings.push(toolProviderUnknown(selection.id, Object.keys(factories)).toDetail())
+            continue
+        }
+        try {
+            providers.push(
+                factory({
+                    dir: entry.dir,
+                    env: entry.env,
+                    config: selection.config,
+                    agentId: entry.manifest.id,
+                }),
+            )
+        } catch (cause) {
+            // A provider factory reads its own config and may refuse it. Same reasoning as a
+            // channel factory: the sentence it wrote is better than anything here, and the agent
+            // starts without the provider rather than not at all.
+            warnings.push(
+                isHarnessError(cause)
+                    ? cause.toDetail()
+                    : {
+                          code: "tool_provider_failed",
+                          message: `tools.providers.${selection.id} could not be built: ${
+                              cause instanceof Error ? cause.message : String(cause)
+                          }`,
+                          hint: "The agent starts without it, and any pinned tool it would have supplied is reported as unresolved. Check that provider's own fields under `tools.providers`.",
+                          field: `tools.providers.${selection.id}`,
+                      },
+            )
+        }
+    }
+    return { providers, warnings }
 }
 
 /**
@@ -1803,10 +1882,7 @@ export function buildChannels(
 
         // A disabled channel is not constructed. Its factory would read config it will never use,
         // and a factory that refuses — a `tokenEnv` naming an unset variable — would make it
-        // impossible to switch a broken channel off, which is the one thing `enabled: false` is
-        // for. Its `type` is still checked above, because a typo there is a typo either way.
-        const factory = factories[channel.type]
-        if (factory === undefined) throw channelTypeUnknown(channel.type, Object.keys(factories))
+        // impossible to switch a broken channel off, which is the one thing `enabled: false` is for.
         if (!channel.enabled) continue
 
         const {
@@ -1816,32 +1892,84 @@ export function buildChannels(
             enabled: _enabled,
             ...config
         } = channel
-        const transport = factory({
-            agentId: entry.manifest.id,
-            dir: entry.dir,
-            env: entry.env,
-            config,
-            id: channel.id,
-        })
-        // Checked because a plugin-supplied factory is plain JavaScript by the time it runs here, and
-        // both fields are read elsewhere as facts. Found by running a third-party channel for the
-        // first time: a transport with no `type` put `echo (undefined)` on the serve banner and left
-        // the documented `type` absent from `GET /v1/agents/:id`.
-        if (transport.id !== channel.id) {
-            throw channelTransportMismatch("id", channel.id, transport.id, channel.id)
-        }
-        if (transport.type !== channel.type) {
-            throw channelTransportMismatch("type", channel.type, transport.type, channel.id)
-        }
 
-        bindings.push({
-            transport,
-            ...(channel.allowFrom === undefined ? {} : { allowFrom: channel.allowFrom }),
-            enabled: channel.enabled,
-        })
+        // **Every way one channel entry can fail is reported and degraded, never fatal.** A channel
+        // is optional — nothing about taking a turn depends on one — and this used to throw, so
+        // `init --telegram connected` generated a manifest whose factory refused at load and the
+        // agent could not start at all: not `run`, not `serve`, not `validate`, over a token nobody
+        // had pasted yet.
+        //
+        // Degraded is not silent, which is the whole reason it is defensible: the detail reaches
+        // `agent.warnings`, `statusOf` reports the channel as `error`, slot 2 tells the agent its
+        // own channel is broken, and `validate` prints it — the same function, so the two cannot
+        // disagree. An unknown `type` degrades with the rest rather than staying fatal: the old
+        // argument for refusing was that a channel constructing nothing is one that never receives
+        // with no symptom, and the symptom is now on four surfaces.
+        const detail = ((): ErrorDetail | undefined => {
+            const factory = factories[channel.type]
+            if (factory === undefined) {
+                return channelTypeUnknown(channel.type, Object.keys(factories)).toDetail()
+            }
+            try {
+                const transport = factory({
+                    agentId: entry.manifest.id,
+                    dir: entry.dir,
+                    env: entry.env,
+                    config,
+                    id: channel.id,
+                })
+                // Checked because a plugin-supplied factory is plain JavaScript by the time it runs
+                // here, and both fields are read elsewhere as facts. Found by running a third-party
+                // channel for the first time: a transport with no `type` put `echo (undefined)` on
+                // the serve banner and left the documented `type` absent from `GET /v1/agents/:id`.
+                if (transport.id !== channel.id) {
+                    return channelTransportMismatch(
+                        "id",
+                        channel.id,
+                        transport.id,
+                        channel.id,
+                    ).toDetail()
+                }
+                if (transport.type !== channel.type) {
+                    return channelTransportMismatch(
+                        "type",
+                        channel.type,
+                        transport.type,
+                        channel.id,
+                    ).toDetail()
+                }
+                bindings.push({
+                    transport,
+                    ...(channel.allowFrom === undefined ? {} : { allowFrom: channel.allowFrom }),
+                    enabled: true,
+                })
+                return undefined
+            } catch (cause) {
+                // A factory's own `ConfigError` carries the better sentence — it knows which
+                // variable and where to put it — so it is kept rather than wrapped.
+                if (isHarnessError(cause)) return cause.toDetail()
+                return channelFactoryFailed(channel.id, channel.type, cause)
+            }
+        })()
+
+        if (detail !== undefined) {
+            bindings.push({
+                transport: brokenTransport(channel.id, channel.type, detail),
+                ...(channel.allowFrom === undefined ? {} : { allowFrom: channel.allowFrom }),
+                enabled: true,
+                broken: detail,
+            })
+        }
     }
 
     return bindings
+}
+
+/** The details of every channel that could not be built — what a caller puts on `agent.warnings`. */
+export function brokenChannels(bindings: readonly ChannelBinding[]): readonly ErrorDetail[] {
+    return bindings
+        .map((binding) => binding.broken)
+        .filter((detail): detail is ErrorDetail => detail !== undefined)
 }
 
 /**

@@ -720,16 +720,19 @@ server:
         rmSync(dir, { recursive: true, force: true })
     }, 30_000)
 
-    test("a genuinely unknown channel type is still refused, and the host still survives it", async () => {
+    test("a genuinely unknown channel type is named and the host serves the agent anyway", async () => {
         /**
-         * The other direction, and the reason the fix is a second pass here rather than moving the
-         * check into `Runtime.create`.
+         * The other direction, and it changed in 0.1.3 rather than being dropped.
          *
-         * Two things have to remain true at once: a plugin channel loads, *and* a nonsense one is
-         * refused where the skip-and-report loop can see it. Moving the check into `Runtime.create`
-         * would satisfy the first and break the second — that refusal would throw from an unguarded
-         * `sources.map` and take every other agent on the host with it, which is the crash loop
-         * that loop exists to prevent, arriving by a different route.
+         * It used to refuse the agent, and the second pass in `serve` existed so that refusal
+         * landed where the skip-and-report loop could see it instead of throwing from an unguarded
+         * `sources.map`. A channel is an **optional** capability, so an unknown type is now a
+         * warning: the agent is served, the channel is reported broken, and the concern that made
+         * the two-pass necessary is gone with the refusal.
+         *
+         * What still has to be true is that the type is **named**. Silence was the whole objection
+         * to skipping a channel that constructs nothing, and it is the only part of the old
+         * behaviour worth keeping.
          */
         const dir = mkdtempSync(join(tmpdir(), "serve-nochan-"))
         writeFileSync(
@@ -750,9 +753,45 @@ server:
             "utf8",
         )
         const { out, exited } = await serveAll([join(dir, "agent.yaml")])
-        // Named, so it refuses — the asymmetry `hostableAgents` draws, unchanged by this work.
-        expect(exited).toBe(true)
+        // Served, and the channel named as broken rather than the agent refused.
+        expect(exited).toBe(false)
         expect(out).toContain("carrier-pigeon")
+        expect(out).toContain("BROKEN")
         rmSync(dir, { recursive: true, force: true })
     }, 30_000)
+})
+
+describe("a failure a person must act on reaches the log", () => {
+    /**
+     * Measured in the container on 2026-09-22, and it is the 57 MB-log lesson inverted.
+     *
+     * A model key pasted without its provider prefix made every turn 401. The runtime did
+     * everything right — `error` carried `model_http_error`, the endpoint's own words, and a hint
+     * naming `model.main.apiKeyEnv` — and **nothing here subscribed to it**, so `docker logs` held
+     * not one word while `POST /messages` answered 200 with a turn id and the stored session
+     * returned `[]`. Under a container or a service manager stderr is the only log there is, which
+     * makes an unsubscribed failure event indistinguishable from a product that does not work.
+     *
+     * Same empty room `delivery.failed` sat in for a release, one event over. Asserted in the
+     * source because the alternative is spawning a server with a deliberately broken key and
+     * waiting on a real endpoint to refuse it — a network round-trip to prove a subscription.
+     */
+    const SOURCE = readFileSync(join(import.meta.dirname, "..", "src", "serve.ts"), "utf8")
+
+    test("serve subscribes to every failure event, not only the channel ones", () => {
+        const subscribed = [...SOURCE.matchAll(/bus\.on\("([\w.]+)"/g)].map((m) => m[1])
+        // The guard only means something if it found the subscriptions at all.
+        expect(subscribed.length).toBeGreaterThan(3)
+        expect(subscribed).toContain("error")
+    })
+
+    test("the line carries the code and the hint, which are what make it actionable", () => {
+        const handler = SOURCE.slice(SOURCE.indexOf('bus.on("error"'))
+        const body = handler.slice(0, handler.indexOf("\n        })"))
+        // A line reading only "turn failed" is the failure with better manners: true, and no route
+        // to acting on it. This is the same trio every other surface prints.
+        expect(body).toContain("data.code")
+        expect(body).toContain("data.message")
+        expect(body).toContain("data.hint")
+    })
 })

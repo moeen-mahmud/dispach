@@ -638,6 +638,23 @@ Stated plainly, because the alternative is someone assuming otherwise:
 last sentence repeated above the list. Declaring accurately costs nothing today and is the only
 thing that will distinguish a plugin from a scramble when enforcement lands.
 
+### WhatsApp
+
+Shipped as a plugin and **not in this binary**, deliberately: Baileys reverse-engineers WhatsApp
+Web, WhatsApp's terms do not permit it, and there is no appeal path when a number is banned —
+including during development. **Pair a spare number.**
+
+```bash
+dispach plugins add <agent> moeen-mahmud/dispach-whatsapp --ref v0.1.0
+```
+
+Then `type: whatsapp` with an `authDir` and an `allowFrom` of **digits, no `+`**. There is no token:
+pairing is a QR reported as `needs_input`, which the browser draws and `GET /v1/agents/<id>` carries.
+
+**It pairs under Node and not under Bun** — measured against the same bundle: the npm-installed
+`dispach` works, the compiled binary and the container image do not, and the channel says so at
+start rather than connecting to nothing in silence.
+
 ### Installing one
 
 ```bash
@@ -686,6 +703,7 @@ authority; read this as a map. `dispach <command> --help` has the flags.
 | `skills` | browse the catalogues and install, or check one agent's skills |
 | `sources` | the repositories skills come from: list, add, search |
 | `tools` | the resolved tool catalogue, or warm a remote provider's cache |
+| `channels` | what an agent is reachable on: connect, disconnect, set a credential, unpair |
 | `plugins` | install a plugin from git, list what an agent loaded, or remove one |
 | `credential` | mint, list and revoke operator keys for the API, optionally scoped |
 | `validate` | load a manifest and report what it resolved to |

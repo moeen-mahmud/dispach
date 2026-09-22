@@ -12,7 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { EventBus } from "../src/events/bus.ts"
 import type { AnyEvent } from "../src/events/types.ts"
-import { loadPlugins } from "../src/plugins/loader.ts"
+import { type LoadedPlugins, loadPlugins } from "../src/plugins/loader.ts"
 import type { Plugin, PluginContext } from "../src/plugins/plugin.ts"
 import { VERSION } from "../src/version.ts"
 import { describe, expect, test } from "./_harness.ts"
@@ -57,21 +57,27 @@ async function load(
     })
 }
 
+/**
+ * The refusal of **one plugin**, read off `failed` rather than caught.
+ *
+ * `loadPlugins` no longer throws: a plugin is an optional capability, so one that cannot be loaded
+ * is a warning and the agent starts without it. Every assertion below is unchanged — these are the
+ * codes and sentences somebody meets when a plugin is broken, and decision 7.6's premise is that
+ * the message names all three numbers. What changed is where the sentence is read from, which is
+ * also what these tests now pin: a refusal that vanished instead of landing in `failed` would be
+ * the silence the degradation is not allowed to introduce.
+ */
 async function refusal(
-    promise: Promise<unknown>,
+    promise: Promise<LoadedPlugins>,
 ): Promise<{ code: string; message: string; hint: string }> {
-    try {
-        await promise
-    } catch (error) {
-        const failure = error as { code?: string; message?: string; hint?: string }
-        expect(failure.code).toBeDefined()
-        return {
-            code: String(failure.code),
-            message: String(failure.message),
-            hint: String(failure.hint),
-        }
+    const result = await promise
+    const failure = result.failed[0]
+    if (failure === undefined) throw new Error("expected a refusal, and nothing failed")
+    return {
+        code: failure.code,
+        message: failure.message,
+        hint: failure.hint,
     }
-    throw new Error("expected a refusal, and the call resolved")
 }
 
 describe("resolution", () => {
@@ -497,5 +503,86 @@ describe("the plugin root — the middle of the three lookups", () => {
         )
         expect(found.code).toBe("plugin_not_found")
         expect(found.hint).toContain(root)
+    })
+})
+
+describe("a plugin that cannot load is a warning, and the agent starts", () => {
+    /**
+     * A plugin is an optional capability: whatever it would have supplied is, by definition,
+     * something the agent did not have a minute earlier either. Refusing to start over one was the
+     * same cost as refusing to start over a missing channel token — and the capability it would have
+     * registered still reports separately, because a `channels[].type` it would have supplied
+     * degrades to a broken channel and a `tools.providers` entry is named as unregistered.
+     */
+    test("the plugins beside it still load, in order", async () => {
+        const result = await load(["good", "broken", "alsogood"], {
+            builtIn: {
+                good: plugin({
+                    name: "good",
+                    setup: (c) => c.defineChannel("a", () => ({}) as never),
+                }),
+                broken: plugin({
+                    name: "broken",
+                    setup: () => {
+                        throw new Error("no credential")
+                    },
+                }),
+                alsogood: plugin({
+                    name: "alsogood",
+                    setup: (c) => c.defineChannel("b", () => ({}) as never),
+                }),
+            },
+        })
+        expect(result.loaded.map((entry) => entry.name)).toEqual(["good", "alsogood"])
+        expect(Object.keys(result.channels).sort()).toEqual(["a", "b"])
+        expect(result.failed.map((detail) => detail.code)).toEqual(["plugin_setup_failed"])
+    })
+
+    test("a plugin whose setup throws part-way registers NOTHING", async () => {
+        /**
+         * The reason registrations are staged and merged only once `setup` returns. A plugin that
+         * registered a channel and then threw would otherwise leave that channel behind — a
+         * partially loaded plugin, which is a worse state than an absent one because nothing from
+         * outside can tell the difference, and the manifest could then select a capability whose
+         * owner is known to be broken.
+         */
+        const result = await load(["half"], {
+            builtIn: {
+                half: plugin({
+                    name: "half",
+                    setup: (c) => {
+                        c.defineChannel("orphan", () => ({}) as never)
+                        c.defineToolProvider("orphan", () => ({}) as never)
+                        throw new Error("threw after registering")
+                    },
+                }),
+            },
+        })
+        expect(result.channels).toEqual({})
+        expect(result.toolProviders).toEqual({})
+        expect(result.middleware).toEqual([])
+        expect(result.loaded).toEqual([])
+        expect(result.failed[0]?.code).toBe("plugin_setup_failed")
+    })
+
+    test("a failed plugin's name does not take the name it would have claimed", async () => {
+        // A collision is decided against what actually loaded. Reserving the name of a plugin that
+        // then failed would refuse a *working* plugin for colliding with an absent one.
+        const result = await load(["broken", "real"], {
+            builtIn: {
+                broken: plugin({
+                    name: "shared",
+                    setup: () => {
+                        throw new Error("nope")
+                    },
+                }),
+                real: plugin({
+                    name: "shared",
+                    setup: (c) => c.defineChannel("x", () => ({}) as never),
+                }),
+            },
+        })
+        expect(result.loaded.map((entry) => entry.name)).toEqual(["shared"])
+        expect(result.failed.length).toBe(1)
     })
 })

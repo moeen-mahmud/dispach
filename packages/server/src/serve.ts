@@ -98,6 +98,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // caller had supplied a provisioner — a route reporting "this server cannot create agents"
         // about a capability it was handed, which reads as a product limit rather than a wiring bug.
         ...(options.provision === undefined ? {} : { provision: options.provision }),
+        // Same trap, eleventh field — and it happened again, which is why there is now a test rather
+        // than a fifth comment. `PATCH /v1/agents/:id/channels/:channelId` answered 501 on a server
+        // whose caller had supplied the actions, and the only symptom was a browser button that did
+        // nothing. `serve.test.ts` walks this literal against `HandlerOptions` now.
+        ...(options.channels === undefined ? {} : { channels: options.channels }),
         // **Derived, not forwarded.** The bind host is already an argument here, so a caller cannot
         // hand over a policy that disagrees with what was actually bound — which is the whole input
         // to how strict the guard is. `origin` is `Omit`ted from `ServeOptions` for the same reason:

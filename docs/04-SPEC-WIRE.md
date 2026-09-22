@@ -76,6 +76,11 @@ and WebSocket surfaces can return:
 | `config_value_unreadable` | 400 | `value` is not a string, or is text no parser can read. It is read exactly as a terminal reads it. |
 | `config_confirm_required` | 409 | One of the two edits whose only purpose is to stop a check running, without `confirm: true`. The message is the reason. Nothing was written. |
 | `config_not_editable` | 409 | The agent was loaded from an object rather than a file, so there is no manifest to change. |
+| `channel_patch_empty` | 400 | Neither `enabled` nor `credential` was sent. "Send something" is a sentence rather than a schema: a union expressing it names neither field in its error. |
+| `channel_credential_unreadable` | 400 | The credential was not a non-empty string. An empty one fails the load exactly as a missing variable does, so it is refused rather than written. |
+| `channels_not_supported` | 501 | The host supplied no channel actions. Honest rather than a 404: a library caller embedding this handler has to pass them, and `dispach serve` does. |
+| `channel_unknown` | 404 | This agent declares no channel with that id. The id is the channel's own, not its type. |
+| `channel_has_no_pairing` | 409 | Asked to unpair a channel that stores none. A credential somebody typed is changed with `PATCH`, not forgotten. |
 | `manifest_edit_invalid` | 400 | The edit would make the manifest invalid — the schema, the schedules or the providers refused the result. Nothing was written. |
 | `manifest_edit_unreadable` | 400 | The manifest could not be read to change it. Nothing was written. |
 | `manifest_value_unreadable` | 400 | `value` parses as neither a scalar, a list nor a map. Guessing is how `tools.pinned: "exec"` becomes a one-character tool list. |
@@ -139,12 +144,17 @@ Each entry of `channels[]` is `{ id, type, status, detail?, input? }`. `status` 
 sixth**: the set can grow inside `v: 1` while a field's type cannot.
 
 `needs_input` means the transport is running and cannot finish connecting until a *person* acts.
-**Nothing in this tree produces it**, and that is worth stating on the page a client reads: the
-state, its payload, the storage, the agent resource, the `serve` banner and the browser panel are
-all built and all exercised by tests, and the first real producer will be a plugin channel — a
-link-device QR being the motivating case, which is where the `kind: "qr"` vocabulary comes from.
-Until 0.1.1 a plugin could not supply a channel through this binary at all, so the producer was not
-merely absent but unreachable; `docs/03-SPEC-PLUGIN-API.md` records what that was. It carries
+**Its first producer arrived in 0.1.3**: `@dispach/channel-whatsapp`, whose pairing is a QR somebody
+scans with a phone. The state, its payload, the storage, the agent resource, the `serve` banner and
+the browser panel were all built and tested against a shape nothing produced — for two releases, and
+until 0.1.1 a plugin could not supply a channel through this binary at all, so the producer was not
+merely absent but unreachable. `docs/03-SPEC-PLUGIN-API.md` records what that was.
+
+The first real producer confirmed the two decisions that looked speculative. The payload is
+**stored** and returned on the resource, so a page that opens a minute after the code was issued
+still has one — a channel that only emitted it would be pairable exclusively by whoever happened to
+be watching. And the payload is the **raw string** rather than a rendering, because a terminal wants
+an ASCII block and a browser wants an `<img>`. It carries
 `input: { kind: "qr", payload, issuedAt, expiresAt? }`: `payload` is the bytes to render, `detail`
 the sentence explaining them, and `issuedAt` what makes staleness visible, because WhatsApp rotates
 its QR roughly every 20 seconds and a code nobody can tell is expired reads as a broken scanner.
@@ -569,6 +579,8 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/stop` | `admin` |
 | `GET /v1/agents/:id/config` | `admin` |
 | `PATCH /v1/agents/:id/config` | `admin` |
+| `PATCH /v1/agents/:id/channels/:channelId` | `admin` |
+| `POST /v1/agents/:id/channels/:channelId/unpair` | `admin` |
 | `GET /v1/keys` | `admin` |
 | `POST /v1/keys` | `admin` |
 | `DELETE /v1/keys/:keyId` | `admin` |
@@ -701,6 +713,34 @@ GET /v1/agents/:id/context   → the assembled context for the next turn, with t
 GET   /v1/agents/:id/config     → every field this surface may set, what it does, and its current value
 PATCH /v1/agents/:id/config     → set one field, then replace the agent so it takes effect
 ```
+
+### Channels (connect, disconnect, re-credential, unpair)
+
+```
+PATCH /v1/agents/:id/channels/:channelId         { enabled?, credential? }
+POST  /v1/agents/:id/channels/:channelId/unpair
+```
+
+**One route for three things**, because they are one decision — is this channel working — and
+splitting them would make a client hold three call sites for one panel. `enabled` is a manifest
+edit and takes effect at the agent's next start, since a channel is constructed at boot.
+`credential` goes into the `.env` beside the manifest at `0600`, **under the variable that
+channel's own entry names**: the variable is resolved from the manifest and never taken from the
+caller, because a route that let a client name it would let it write any variable at all, including
+the token this server authenticates with. When both arrive, the credential is written first — the
+reverse order would start a channel that reads a variable one statement from being written.
+
+A credential is **write-only**. No route returns one; `GET /v1/agents/:id` reports the variable's
+name and whether it is set, which is the only question anybody asks.
+
+`unpair` is separate because it is not a setting: nothing in the manifest changes and somebody has
+to scan a code again. It tries the **live** transport first (`ChannelTransport.reset`), so a running
+agent offers a new QR within seconds and needs no restart, and falls back to deleting the session on
+disk for an agent whose channels are not started. A channel with no pairing answers `409` rather
+than pretending — a typed credential is the PATCH above.
+
+Both are `admin`, like the config routes and for the same reasons: one rewrites the file an agent
+boots from, and one writes a credential.
 
 **Both are `admin`, and neither is `config_set`.** There are two editors of `agent.yaml` and they
 do not have the same authority: `config_set` is the *agent's* and is floored, because an agent that
