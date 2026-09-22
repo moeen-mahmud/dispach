@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { dirFor } from "#lib/init-flow"
+import { dirFor, PRESETS } from "#lib/init-flow"
 import {
     currentQuestion,
     isSelectStep,
@@ -83,10 +83,15 @@ describe("the happy path", () => {
     test("a keyless preset skips the key question and the step total shrinks", () => {
         let state = startWizard({ user: "M", name: "Pip", purpose: "x" }, DEFAULTS)
         const totalBefore = stepCounts(state).total
+        // The index is **derived**, because a literal `3` meant `ollama` until four presets were
+        // inserted above it in 0.1.2 and then meant `openrouter` — which has a key, so the question
+        // was not skipped and this test failed for a reason that had nothing to do with it.
+        const ollamaAt = PRESETS.findIndex((preset) => preset.id === "ollama")
+        expect(ollamaAt).toBeGreaterThan(-1)
         state = reduceWizard(state, {
             kind: "list",
-            intent: { kind: "move", move: { kind: "jump", index: 3 } },
-        }) // ollama
+            intent: { kind: "move", move: { kind: "jump", index: ollamaAt } },
+        })
         state = commit(state)
         expect(stepCounts(state).total).toBe(totalBefore - 1)
         state = commit(state) // model default
@@ -193,6 +198,11 @@ describe("flags answering everything", () => {
         composio: "none",
         telegram: "none",
         server: "none",
+        // Answered here because `daemon` became unconditional in 0.1.2: it used to be gated on
+        // `telegram === "connected" || server === "local"`, and with the `server` question withdrawn
+        // that gate would have hidden it from exactly the agent that has a server and no channel.
+        // A fixture called ALL_FLAGS that stops answering everything is a fixture that lies.
+        daemon: "none",
         schedules: "none",
         skills: "starter",
         dir: "./milo",
@@ -248,12 +258,14 @@ describe("the skills question never becomes a text box", () => {
         state = commit(state) // web
         state = commit(state) // composio
         state = commit(state) // telegram
-        state = commit(state) // server
+        // No `server` commit: the question was withdrawn in 0.1.2 and defaults to `local`.
         expect(currentQuestion(state)?.step).toBe("skills")
         state = commit(state) // index 0 is `find`
         expect(partialOf(state).skills).toBe("find")
-        // Straight to the next real question. A `skillsSearch` step here is the defect.
-        expect(currentQuestion(state)?.step).toBe("dirChoice")
+        // Straight to the next real question. A `skillsSearch` step here is the defect — and the
+        // next real question is `daemon` since 0.1.2, not `dirChoice`, because withdrawing the
+        // `server` question made the daemon gate unconditional.
+        expect(currentQuestion(state)?.step).toBe("daemon")
         expect(partialOf(state).skillsSearch).toBe(undefined)
     })
 

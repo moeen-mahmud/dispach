@@ -328,6 +328,24 @@ function validateKnowledgeDir(manifest: AgentManifest, dir: string): ErrorDetail
 }
 
 /**
+ * Every role a manifest configures, in a fixed order — the three named ones plus any custom.
+ *
+ * Exists because **two validators iterated a hardcoded `["main", "selector", "compactor"]`** and so
+ * skipped custom roles entirely, while `resolveRoles` and `windowReport` both walk
+ * `customRoleNames`. The consequences were silent and different in each: a custom role could name
+ * an unset `apiKeyEnv` and load cleanly, failing with a 401 at the first turn that used it; and its
+ * `baseUrl` was never checked at all, so one ending in `/chat/completions` produced a doubled path
+ * and a 404 — and those three checks are the *only* validation that field gets.
+ *
+ * One derivation rather than two literals, which is the rule this repo applies everywhere: a check
+ * only one surface performs is a check the two disagree about, and here they disagreed with the
+ * loader rather than with each other.
+ */
+function configuredRoles(model: AgentManifest["model"]): readonly string[] {
+    return ["main", "selector", "compactor", ...customRoleNames(model)]
+}
+
+/**
  * The env var named by `apiKeyEnv` must exist at load.
  *
  * The *value* is read fresh on every request, so rotating a key needs no restart. Its
@@ -341,7 +359,7 @@ function validateApiKeyEnv(
 ): ErrorDetail[] {
     const found: ErrorDetail[] = []
 
-    for (const role of ["main", "selector", "compactor"] as const) {
+    for (const role of configuredRoles(manifest.model)) {
         const config = manifest.model[role]
         if (config === undefined) continue
         const name = config.apiKeyEnv
@@ -362,7 +380,7 @@ function validateApiKeyEnv(
 function validateBaseUrls(manifest: AgentManifest): ErrorDetail[] {
     const found: ErrorDetail[] = []
 
-    for (const role of ["main", "selector", "compactor"] as const) {
+    for (const role of configuredRoles(manifest.model)) {
         const config = manifest.model[role]
         if (config === undefined) continue
         const field = `model.${role}.baseUrl`

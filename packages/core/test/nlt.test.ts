@@ -835,6 +835,71 @@ describe("a value damaged on the way in", () => {
         expect(parsed.text).toBe("I'll list the directory first.")
     })
 
+    test("a single-line value cut by a blank line is caught by its orphan END", () => {
+        /**
+         * The residual the first two signals could not reach, and the reason it needed a third.
+         *
+         * `damage()` inspects a finished value, and can see that it spans lines unwrapped or opens a
+         * heredoc it never closes. Neither shows a value cut after **one** line that looks complete:
+         * `./deploy.sh --stage` is a valid command, `coerceArgs` raises nothing, and the shell runs
+         * it while the flags that followed the blank line become the reply.
+         */
+        const parsed = parseNlt(
+            [
+                "ACTION: exec",
+                "command: ./deploy.sh --stage",
+                "",
+                "  --region eu-west-1 --verbose",
+                "END",
+            ].join("\n"),
+        )
+        expect(parsed.malformed?.length).toBe(1)
+        expect(parsed.malformed?.[0]?.field).toBe("command")
+        expect(parsed.malformed?.[0]?.message).toContain("cut short by a blank line")
+        // The truncated value is still carried, because the repair has to name the tool the model
+        // was reaching for — the loop reads `malformed` first and refuses the step either way.
+        expect(parsed.intents[0]?.args).toEqual({ command: "./deploy.sh --stage" })
+    })
+
+    test("the discriminator is the orphan END, and nothing about the prose", () => {
+        /**
+         * These two are **textually identical** in shape: a call, a blank line, then a line that is
+         * not a field. The left is the most ordinary output there is and must stay free; the right is
+         * half a command. What separates them is that the model wrote `END` *after* the prose, which
+         * can only mean it believed it was still inside the block — so the prose was the value.
+         *
+         * Asserted as a pair, in one test, because the risk here is not that the detector misses the
+         * defect. It is that it fires on the ordinary shape and spends a repair on every model that
+         * omits `END`, which would cost far more than the bug it fixes.
+         */
+        const withEnd = parseNlt(
+            ["ACTION: exec", "command: ls -la", "", "--color=always", "END"].join("\n"),
+        )
+        const withoutEnd = parseNlt(
+            ["ACTION: exec", "command: ls -la", "", "--color=always"].join("\n"),
+        )
+        expect(withEnd.malformed?.length).toBe(1)
+        expect(withoutEnd.malformed).toBeUndefined()
+    })
+
+    test("prose between two calls is a reply, not a severance", () => {
+        // A new `ACTION` clears the pending verdict: whatever the prose was, it sat between two
+        // calls rather than inside one.
+        const parsed = parseNlt(
+            ["ACTION: now", "", "Let me also check the time.", "", "ACTION: now", "END"].join("\n"),
+        )
+        expect(parsed.malformed).toBeUndefined()
+        expect(parsed.intents.length).toBe(2)
+    })
+
+    test("a blank line between two fields is formatting, and stays so", () => {
+        // The common case the verdict has to wait a line for. A field arriving after the blank is
+        // what clears the pending severance.
+        const parsed = parseNlt(["ACTION: exec", "command: ls", "", "cwd: /tmp", "END"].join("\n"))
+        expect(parsed.malformed).toBeUndefined()
+        expect(parsed.intents[0]?.args).toEqual({ command: "ls", cwd: "/tmp" })
+    })
+
     test("an arithmetic shift is not a heredoc opener", () => {
         // `<<` anchored to end-of-line is what separates a redirection from `$((1 << n))`. Without
         // the anchor this earns a repair for a terminator called `n`.

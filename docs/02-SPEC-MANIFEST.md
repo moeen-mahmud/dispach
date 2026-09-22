@@ -150,8 +150,8 @@ Three roles. `main` required; `selector` and `compactor` fall back to `main`.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `id` | string | Sent verbatim as the `model` parameter. |
-| `baseUrl` | string | Must end at the version segment, e.g. `.../v1`. Requests go to `{baseUrl}/chat/completions`. |
-| `apiKeyEnv` | string | **Name of the env var**, never the key itself. A literal key in the manifest fails validation. |
+| `baseUrl` | string | Must end at the version segment, e.g. `.../v1`. Requests go to `{baseUrl}/chat/completions`, so a URL pasted from a provider's docs **with** that path is refused — by the wizard, by the loader, and by a comment in the generated file. Any OpenAI-compatible endpoint works and there is no provider branch in the transport; `init --preset` carries the ones worth not typing from memory (OpenAI, Anthropic, DeepSeek, OpenRouter, Groq, NVIDIA NIM, Ollama local and hosted), and `custom` is a first-class answer rather than a fight with the nearest preset. |
+| `apiKeyEnv` | string | **Name of the env var**, never the key itself. A literal key in the manifest fails validation. **Omit it entirely for an endpoint that needs no key** — a local Ollama — and the provider then sends no `authorization` header at all. Absent and empty are different things: absent is a keyless endpoint, and a named variable that is unset fails the load. |
 | `temperature`, `topP` | number | Optional passthrough. |
 | `maxTokens` | number | The cap on what the endpoint may generate. **Omitted from the request entirely when unset** — not derived from `reserveOutput`, which answers a different question. Bounded by `capabilities.maxOutput` and by the window. |
 | `reasoningEffort` | `none \| minimal \| low \| medium \| high` | Sent as OpenAI's `reasoning_effort`; omitted entirely when unset. Worth setting to `none` on a reasoning model doing short, well-specified work — measured on `qwen3.5:9b`, six simultaneous rules with reasoning on burned 2,000 output tokens in 104 s and returned **empty content**, while `none` answered correctly in 2.1 s. It is the other half of the `reserveOutput` lever. Not universally honoured, and an endpoint that ignores it is silent about it. |
@@ -784,7 +784,7 @@ Load order is manifest order; middleware composes outermost-first. A plugin whos
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `enabled` | false | Library use needs no server. |
+| `enabled` | false | Library use needs no server, so the **schema** default is off. **`init` writes `true`** since 0.1.2 — an always-on server is the product and the TUI and web UI are views onto it, so it stopped being a question; `--server none` is the opt-out. The two defaults answer different questions: this one is "what does an embedder get when the block is absent", and that one is "what does a generated agent get". |
 | `port` | 7420 | |
 | `host` | `127.0.0.1` | Binds loopback by default. Public binding is explicit. |
 | `tokenEnv` | `DISPACH_API_TOKEN` | Bearer token env var name. Server refuses to start on a non-loopback host without a token. |

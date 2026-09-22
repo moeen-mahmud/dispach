@@ -43,7 +43,16 @@ export const INIT_LOCAL_TOOLS: readonly { readonly slug: string; readonly note: 
 /** Exported so the drift test can compare against core without re-deriving the mapping. */
 export const INIT_LOCAL_TOOL_SLUGS: readonly string[] = INIT_LOCAL_TOOLS.map((tool) => tool.slug)
 
-export type PresetId = "openai" | "anthropic" | "deepseek" | "ollama" | "custom"
+export type PresetId =
+    | "openai"
+    | "anthropic"
+    | "deepseek"
+    | "openrouter"
+    | "groq"
+    | "nvidia"
+    | "ollama"
+    | "ollama-cloud"
+    | "custom"
 
 export interface Preset {
     readonly id: PresetId
@@ -56,9 +65,22 @@ export interface Preset {
 }
 
 /**
- * The same presets the examples' `.env.example` documents, plus Ollama, which the examples only
- * mention in prose. `custom` exists so an unlisted endpoint is a first-class answer rather than
- * a fight with the nearest preset.
+ * The same presets the examples' `.env.example` documents, plus the aggregators and Ollama.
+ * `custom` exists so an unlisted endpoint is a first-class answer rather than a fight with the
+ * nearest preset.
+ *
+ * **Every one of these is the same transport.** There is no provider branch in
+ * `chat-completions.ts` — one POST, one body builder — so a preset is nothing but three strings,
+ * and adding one is cheap precisely because it buys no special-casing. What a preset *is* for is
+ * that a base URL has to end at the version segment (the runtime appends `/chat/completions`
+ * itself, and a URL pasted from a provider's docs with the full path is refused three times over),
+ * and that is the sort of thing nobody should have to get right from memory.
+ *
+ * **`ollama` and `ollama-cloud` are two rows on purpose.** Local Ollama needs no key, and the
+ * absent `apiKeyEnv` is what makes the manifest omit the field and the provider send no
+ * `authorization` header. Ollama Cloud needs one. With a single row, choosing `ollama` and then
+ * editing the base URL to the hosted endpoint produced a **keyless manifest with no route to a
+ * key** short of hand-editing `apiKeyEnv` back in — a dead end reached by the obvious move.
  */
 export const PRESETS: readonly Preset[] = [
     {
@@ -83,14 +105,44 @@ export const PRESETS: readonly Preset[] = [
         apiKeyEnv: "MODEL_API_KEY",
     },
     {
+        id: "openrouter",
+        label: "OpenRouter (many providers, one key)",
+        modelId: "deepseek/deepseek-chat",
+        baseUrl: "https://openrouter.ai/api/v1",
+        apiKeyEnv: "MODEL_API_KEY",
+    },
+    {
+        id: "groq",
+        label: "Groq",
+        modelId: "llama-3.3-70b-versatile",
+        baseUrl: "https://api.groq.com/openai/v1",
+        apiKeyEnv: "MODEL_API_KEY",
+    },
+    {
+        id: "nvidia",
+        label: "NVIDIA NIM",
+        modelId: "meta/llama-3.3-70b-instruct",
+        baseUrl: "https://integrate.api.nvidia.com/v1",
+        apiKeyEnv: "MODEL_API_KEY",
+    },
+    {
         id: "ollama",
         label: "Ollama (local, no key)",
         modelId: "qwen3.5:9b",
         baseUrl: "http://localhost:11434/v1",
     },
     {
+        // Two rows rather than one — see the block comment above. The hosted endpoint takes a key
+        // and the local one must not, and a single row made the second reachable only by hand.
+        id: "ollama-cloud",
+        label: "Ollama Cloud (hosted, needs a key)",
+        modelId: "gpt-oss:120b",
+        baseUrl: "https://ollama.com/v1",
+        apiKeyEnv: "MODEL_API_KEY",
+    },
+    {
         id: "custom",
-        label: "custom OpenAI-compatible endpoint or OpenRouter",
+        label: "any other OpenAI-compatible endpoint",
         modelId: "",
         baseUrl: "",
         apiKeyEnv: "MODEL_API_KEY",
@@ -670,7 +722,6 @@ export const STEP_ORDER: readonly InitStep[] = [
     "telegram",
     "telegramAllow",
     "telegramToken",
-    "server",
     "skills",
     "daemon",
     "dirChoice",
@@ -800,12 +851,11 @@ export function nextQuestion(
         ) {
             continue
         }
-        // And nobody with neither a channel nor a server is asked about a background service —
-        // there would be nothing for it to keep up, which is the same refusal `daemon install`
-        // makes. An answer the flow discards is a question that lies.
-        if (step === "daemon" && partial.telegram !== "connected" && partial.server !== "local") {
-            continue
-        }
+        // `daemon` is asked of everyone, and used to be gated on
+        // `telegram === "connected" || server === "local"`. `server` stopped being a question in
+        // 0.1.2 and defaults to `local` at the funnel, so that half was true for every agent — and a
+        // gate whose remaining half is "did you connect Telegram" would refuse the question to
+        // exactly the agent that has an always-on server and nothing else, which is the common shape.
 
         switch (step) {
             case "user":
@@ -931,16 +981,6 @@ export function nextQuestion(
                     // is no flag — a token on a command line lands in shell history.
                     fallback: "",
                     optional: true,
-                }
-            case "server":
-                return {
-                    step,
-                    prompt: "Serve the HTTP API?",
-                    fallback: "1",
-                    options: SERVER_CHOICES.map((choice) => ({
-                        value: choice.value,
-                        label: choice.label,
-                    })),
                 }
             case "skills":
                 return {
@@ -1751,7 +1791,18 @@ function serverBlock(answers: InitAnswers): readonly string[] {
     const on = answers.server === "local"
     return [
         rule("http api"),
-        `# ${on ? "Loopback only" : 'Off — ask the agent to "turn on your HTTP API" and it flips this'}.`,
+        // The `on` branch is the default since 0.1.2 — the question was withdrawn, because an
+        // always-on server is the product — so it is the one that has to carry the useful sentence.
+        ...(on
+            ? [
+                  `# On, loopback only — the token is in the .env beside this file. Set`,
+                  `# enabled: false to switch it off.`,
+              ]
+            : [
+                  `# Off — ask the agent to "turn on your HTTP API" and it flips this, or set`,
+                  `# enabled: true here. \`${BRAND.slug} init --server local\` is the default; this`,
+                  `# agent was created with --server none.`,
+              ]),
         `# A non-loopback host REFUSES to start without a token, and host and tokenEnv are the two`,
         `# fields the agent may not change: an agent that runs shell commands, exposed on 0.0.0.0,`,
         `# looks identical to a safe one until someone finds it.`,

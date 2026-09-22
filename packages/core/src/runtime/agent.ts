@@ -23,6 +23,7 @@ import {
     type ErrorDetail,
     envOverridden,
     memoryNotConfigured,
+    modelWindowFamily,
     modelWindowUnknown,
     phaseAllowUnmatched,
     toolGatedAfterFirstUse,
@@ -578,13 +579,33 @@ export class Agent {
         // prints are one derivation. Roles that fall back to main are dropped by the `configuredAs`
         // test: they share main's instance, so an unconfigured pair would report one mistake three
         // times, and three lines about one mistake is how a banner teaches people to skip it.
-        const unknownWindows = windowReport(loaded.manifest)
-            .filter((entry) => entry.role === entry.configuredAs)
+        const configured = windowReport(loaded.manifest).filter(
+            (entry) => entry.role === entry.configuredAs,
+        )
+        const unknownWindows = configured
             .filter((entry) => entry.window.source === "fallback")
             .map((entry) => ({
                 role: entry.role,
                 modelId: entry.modelId,
                 window: entry.window.contextWindow,
+            }))
+        /**
+         * And a role that matched a **family** row, which is its own warning rather than a second
+         * kind of the one above.
+         *
+         * The two were one case until 0.1.2, and that is precisely how `deepseek-v4.1-flash` ran on
+         * 37.5% of its window in silence: the source was `registry`, so nothing here fired, and
+         * `validate` printed `registry deepseek-v4*` — which reads as a successful match. A net under
+         * a measured row is the case where a *better number may already exist one row over*, so the
+         * remedy is different and the sentence has to be too.
+         */
+        const familyWindows = configured
+            .filter((entry) => entry.window.source === "family")
+            .map((entry) => ({
+                role: entry.role,
+                modelId: entry.modelId,
+                window: entry.window.contextWindow,
+                pattern: entry.window.pattern ?? "?",
             }))
 
         return new Agent({
@@ -603,6 +624,7 @@ export class Agent {
                 // is a check the two disagree about, and this one is about a schedule that fires
                 // perfectly and reaches nobody — the surface where nothing else would say so.
                 ...(unknownWindows.length === 0 ? [] : [modelWindowUnknown(unknownWindows)]),
+                ...(familyWindows.length === 0 ? [] : [modelWindowFamily(familyWindows)]),
             ],
             bus,
             store,

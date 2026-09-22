@@ -945,6 +945,41 @@ export function envOverridden(overrides: readonly EnvOverride[]): ErrorDetail {
  * Named per role. An agent can run three models on three endpoints and only main's window has ever
  * been visible anywhere, so a compactor on the fallback had nothing that could report it.
  */
+/**
+ * A role whose model matched a **family** row rather than its own.
+ *
+ * Separate from `modelWindowUnknown` because the two send a reader to different places, and
+ * collapsing them is what hid this for a release. "No row matched" means nobody knows and the number
+ * is a floor. "A family row matched" means the registry knows the *vendor* and is answering for a
+ * model it has never seen — so there may be a measured sibling row one version segment away, which
+ * is exactly the case `deepseek-v4.1-flash` hits: it lands on `deepseek-v4*` at 393,216 while the
+ * measured `deepseek-v4-flash*` beside it says 1,048,576.
+ *
+ * It names the pattern, because the pattern is the actionable half: a reader who sees
+ * `deepseek-v4*` can tell at a glance that one row is standing in for a whole generation.
+ */
+export function modelWindowFamily(
+    roles: readonly {
+        readonly role: string
+        readonly modelId: string
+        readonly window: number
+        readonly pattern: string
+    }[],
+): ErrorDetail {
+    const described = roles
+        .map(
+            (entry) =>
+                `${entry.role} (${entry.modelId} → ${entry.pattern}, budgeting ${entry.window})`,
+        )
+        .join(", ")
+    return {
+        code: "model_window_family",
+        message: `A family row is answering for ${roles.length === 1 ? "a model" : "models"} the registry has not seen: ${described}.`,
+        hint: "That row is a net under the more specific ones, so the window is a guess about the family rather than a measurement of this model — and a sibling row may carry a measured number for a near-identical id. Run `model probe <agent> --window` to measure it, then set model.<role>.capabilities.contextWindow, or add a registry row with the number and the date.",
+        field: "model",
+    }
+}
+
 export function modelWindowUnknown(
     roles: readonly { readonly role: string; readonly modelId: string; readonly window: number }[],
 ): ErrorDetail {

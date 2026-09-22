@@ -26,7 +26,10 @@ over the wire, and a browser UI on the same origin as the API.
 
 And in 0.1.1: settings and schedules are editable from the browser as well as the terminal, and a
 plugin-supplied channel loads under `serve` — `PluginContext.defineChannel` is documented API that
-had never worked through the binary.
+had never worked through the binary. In 0.1.2: creating an agent stopped being quietly wrong — a
+model id that matches only a *family* row says so instead of budgeting against a third of its
+window, four more endpoint presets, and the HTTP API on by default rather than asking a question
+nobody answers no to.
 
 Not built: **WhatsApp**, and **MCP as a tool provider**. Neither is a gap waiting on effort.
 WhatsApp is a legal question rather than an engineering one — decision 8.4 records that Baileys
@@ -84,7 +87,7 @@ Full rationale for every decision, including the negative ones, is in `docs/00-D
 
 ```bash
 npm i -g dispach          # the `dispach` command
-dispach --version         # 0.1.1
+dispach --version         # 0.1.2
 ```
 
 and in an application that talks to a running server:
@@ -158,7 +161,7 @@ bun run build                       # builds every package the binary imports
 cd packages/cli && bun link         # puts `dispach` on your PATH
 cd ../..
 
-dispach --version                   # 0.1.1
+dispach --version                   # 0.1.2
 dispach --help
 ```
 
@@ -202,6 +205,24 @@ before exiting. It asks for your API key at the prompt, masked, and writes it to
 passed on the command line lands in shell history — so a scripted run
 (`init --user Ada --name Scout --preset ollama --yes`) leaves the line blank and says where to fill
 it in.
+
+**`--preset` carries the endpoints worth not typing from memory** — OpenAI, Anthropic, DeepSeek,
+OpenRouter, Groq, NVIDIA NIM, and Ollama both local and hosted — and `custom` is a first-class
+answer for anything else. Any OpenAI-compatible `/chat/completions` endpoint works, because there is
+no provider branch in the transport: one POST, one body builder. What a preset actually buys is
+getting the base URL's *shape* right, which is the part that is easy to get wrong. It must end at
+the version segment; the runtime appends `/chat/completions` itself, so a URL copied from a
+provider's docs with the full path is refused.
+
+Local Ollama and Ollama Cloud are **two presets on purpose.** Local needs no key, and the absent
+`apiKeyEnv` is what makes the manifest omit the field and the provider send no `authorization`
+header at all. The hosted endpoint needs one. With a single preset, choosing it and then editing the
+base URL to the hosted endpoint — the obvious move — produced a keyless manifest with no route to a
+key short of hand-editing the field back in.
+
+**The HTTP API is on by default**, and there is no longer a question about it. It used to ask, and
+default to *No*, which is asking whether you want the product: an always-on server is what this is,
+and `run` and `dispach web run` are views that attach to it. `--server none` is the opt-out.
 
 ## Changing an agent afterwards
 
@@ -517,8 +538,10 @@ deliberately. A Telegram outage must not read as an unhealthy container and get 
 the same outage, so the probe answers "can it serve a turn" rather than "is everything connected".
 Channel state lives on the agent resource instead.
 
-Measured on an arm64 Docker Desktop, 2026-09-17, after the base-image change: the image is
-**570 MB** against a 700 MB ceiling and `docker compose up -d --wait` reaches healthy in **5.7 s** —
+Measured on an arm64 Docker Desktop: the image is **542 MB** against a 700 MB ceiling
+(re-measured 2026-09-22; it was 570 MB on 2026-09-17, and the delta is the base image moving
+underneath rather than anything in this tree — which is why the CI `docker` job re-measures on
+every push instead of trusting the number in this sentence) and `docker compose up -d --wait` reaches healthy in **5.7 s** —
 the same as before, because readiness is tens of milliseconds in-process and almost all of that is
 waiting for the first healthcheck probe. Where the size goes: 109 MB debian-slim, 180 MB of apt
 packages (of which `git` alone is **92 MB**, because Debian's git pulls perl), 47 MB of `uv`, and

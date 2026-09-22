@@ -39,6 +39,89 @@ function defaults(): { agentDirBase: string } {
     return { agentDirBase: sandbox() }
 }
 
+describe("every preset writes an endpoint that works", () => {
+    /**
+     * Read out of the **generated manifest and `.env`**, never off the answers object.
+     *
+     * A preset is three strings and the transport has no provider branch, so the only things that
+     * can be wrong are the strings — and each of them is threaded through `complete`, `planFiles`
+     * and `writeAgentFiles` by a conditional spread, which is not excess-property-checked. This
+     * repo has lost a field to that shape six times; the guard that works every time is one at the
+     * far end that reads the value back out.
+     */
+    const cases = [
+        { preset: "openai", baseUrl: "https://api.openai.com/v1", key: true },
+        { preset: "anthropic", baseUrl: "https://api.anthropic.com/v1", key: true },
+        { preset: "deepseek", baseUrl: "https://api.deepseek.com/v1", key: true },
+        { preset: "openrouter", baseUrl: "https://openrouter.ai/api/v1", key: true },
+        { preset: "groq", baseUrl: "https://api.groq.com/openai/v1", key: true },
+        { preset: "nvidia", baseUrl: "https://integrate.api.nvidia.com/v1", key: true },
+        // The pair that made two rows necessary: local needs no key, hosted does.
+        { preset: "ollama", baseUrl: "http://localhost:11434/v1", key: false },
+        { preset: "ollama-cloud", baseUrl: "https://ollama.com/v1", key: true },
+    ] as const
+
+    for (const { preset, baseUrl, key } of cases) {
+        test(preset, () => {
+            const result = provisionAgent({
+                answers: { user: "Ada", name: `p-${preset}`, preset },
+                defaults: defaults(),
+            })
+            const manifest = readFileSync(join(result.dir, "agent.yaml"), "utf8")
+            // Comments stripped before asserting: the generated file *explains* that the runtime appends
+            // `/chat/completions`, so a naive search finds that sentence and not a defect.
+            const active = manifest
+                .split("\n")
+                .filter((line) => !line.trimStart().startsWith("#"))
+                .join("\n")
+
+            expect(active).toContain(`baseUrl: ${baseUrl}`)
+            // A base URL carrying the endpoint path is refused three times over — wizard, loader and the
+            // generated comment — so a preset shipping one is a preset nobody could use.
+            expect(active).not.toContain("/chat/completions")
+
+            // **The keyless case is the point of the pair.** An absent `apiKeyEnv` is what makes the
+            // provider send no `authorization` header; a present one is what gives a hosted endpoint a
+            // route to a key at all. With one Ollama row, choosing it and editing the URL to the hosted
+            // endpoint left a manifest with no way to supply one.
+            expect(active.includes("apiKeyEnv:")).toBe(key)
+        })
+    }
+})
+
+describe("the server is on by default, and nobody is asked", () => {
+    /**
+     * "Serve the HTTP API?" defaulted to **No**, which is the defect. `fallback: "1"` is a 1-based
+     * menu index and element 0 of `SERVER_CHOICES` is `none`, so `--yes`, `fillDefaults` and
+     * `GET /v1/provision` all produced an agent with its API switched off — while the product *is*
+     * an always-on server and the TUI and web UI are views onto it.
+     *
+     * Asserted on the **generated manifest and `.env`**, not on the answers object. That is this
+     * repo's standing guard for exactly this shape: a value carried correctly by every layer and
+     * dropped on the way out, six times over.
+     */
+    test("the funnel defaults it, and the manifest and .env both show it", () => {
+        const base = defaults()
+        const result = provisionAgent({ answers: { user: "Ada", name: "sentry" }, defaults: base })
+        const manifest = readFileSync(join(result.dir, "agent.yaml"), "utf8")
+        expect(manifest).toContain("enabled: true")
+        // And the token it needs, which only the `local` branch mints.
+        expect(readFileSync(join(result.dir, ".env"), "utf8")).toMatch(/API_TOKEN=.+/)
+    })
+
+    test("`--server none` is still the deliberate opt-out", () => {
+        const result = provisionAgent({
+            answers: { user: "Ada", name: "quiet", server: "none" },
+            defaults: defaults(),
+        })
+        const manifest = readFileSync(join(result.dir, "agent.yaml"), "utf8")
+        // The block is written either way — what changes is the switch, so the field somebody would
+        // go looking for is there to be flipped.
+        expect(manifest).toContain("server:")
+        expect(manifest).toContain("enabled: false")
+    })
+})
+
 describe("the step list a client renders", () => {
     const steps = provisionSteps(defaults())
 
@@ -50,7 +133,11 @@ describe("the step list a client renders", () => {
         expect(names[0]).toBe("user")
         expect(names).toContain("name")
         expect(names).toContain("preset")
-        expect(names).toContain("server")
+        // **Not** `server`, since 0.1.2. The question was withdrawn — an always-on server is the
+        // product, and "Serve the HTTP API?" defaulted to *No* — so the walk no longer produces the
+        // step and a browser form no longer offers a control that should never have existed. The
+        // default moved to `complete()`, which is what `the funnel defaults it` below asserts.
+        expect(names).not.toContain("server")
         // **The directory questions are absent**, because the route refuses them: offering a
         // field that cannot be submitted is worse than not asking. The terminal still asks them.
         expect(names).not.toContain("dirChoice")
@@ -71,7 +158,7 @@ describe("the step list a client renders", () => {
         expect(preset?.choices?.map((choice) => choice.value)).toContain("openai")
         // Every choice question is forwarded, not just the first — `preset` was the only select for
         // three phases and "is this the preset step" ended up written into three places.
-        for (const name of ["system", "web", "server", "skills"]) {
+        for (const name of ["system", "web", "telegram", "skills"]) {
             expect(steps.find((step) => step.step === name)?.choices?.length).toBeGreaterThan(1)
         }
     })
@@ -167,7 +254,9 @@ describe("the branches a single walk cannot reach", () => {
         // order" is what the wire promises. Restored from `STEP_ORDER`, which is the authority.
         const names = steps.map((step) => step.step)
         expect(names.indexOf("telegramToken")).toBeGreaterThan(names.indexOf("telegram"))
-        expect(names.indexOf("telegramToken")).toBeLessThan(names.indexOf("server"))
+        // `skills` rather than `server`, which is no longer served — and it has to be a step that
+        // really is later in `STEP_ORDER`, or this asserts nothing.
+        expect(names.indexOf("telegramToken")).toBeLessThan(names.indexOf("skills"))
         expect(names.indexOf("webBackend")).toBeGreaterThan(names.indexOf("web"))
         expect(names.indexOf("webKey")).toBeLessThan(names.indexOf("composio"))
     })

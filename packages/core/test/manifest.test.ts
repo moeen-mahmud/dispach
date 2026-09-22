@@ -527,6 +527,53 @@ tools:
     })
 })
 
+describe("a custom role is validated like a named one", () => {
+    /**
+     * Both validators iterated a hardcoded `["main", "selector", "compactor"]`, so a **custom**
+     * role's `baseUrl` and `apiKeyEnv` were never checked — while `resolveRoles` and `windowReport`
+     * both walk `customRoleNames`, so the role was fully live. Each gap failed silently and
+     * differently: a doubled path 404s at the first turn that uses the role, and an unset key 401s
+     * there. The three base-URL checks are the *only* validation that field gets, so for a custom
+     * role the validation was not partial, it was absent.
+     */
+    test("a custom role's baseUrl is checked", () => {
+        const error = expectFailure({
+            "agent.yaml": manifestYaml(`id: t
+model:
+  main:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+  cheap:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1/chat/completions
+    apiKeyEnv: MODEL_API_KEY
+`),
+        })
+        expect(codes(error)).toContain("manifest_base_url_includes_path")
+        // Names the role, or a manifest with four of them sends somebody hunting.
+        expect(error.message + JSON.stringify(error.details)).toContain("model.cheap.baseUrl")
+    })
+
+    test("a custom role's apiKeyEnv is checked", () => {
+        const error = expectFailure({
+            "agent.yaml": manifestYaml(`id: t
+model:
+  main:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+  cheap:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: NOBODY_SET_THIS
+`),
+        })
+        expect(codes(error)).toContain("model_api_key_missing")
+        expect(error.message + JSON.stringify(error.details)).toContain("NOBODY_SET_THIS")
+    })
+})
+
 describe("baseUrl", () => {
     test("a baseUrl that already includes /chat/completions is rejected", () => {
         const error = expectFailure({

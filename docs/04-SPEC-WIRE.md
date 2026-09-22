@@ -184,6 +184,13 @@ flags. `GET /v1/provision` lists each step with its prompt, default, choices, a 
 `requires`, and it is generated from the same walk the terminal wizard performs — so a browser form
 cannot go stale against the questions.
 
+**Which is why a withdrawn question disappears from here too, and that is the intended behaviour.**
+`server` stopped being a step in 0.1.2 — "Serve the HTTP API?" defaulted to *No*, which is asking
+whether somebody wants the product — so it is defaulted to on at the funnel and no longer served. A
+client that rendered a control for it will stop; there is nothing to render, and the answer is still
+accepted if one is sent. The same is true of `schedules` and `daemon`, which have never been steps
+for their own reasons.
+
 ```
 { step, prompt, fallback, optional, secret, requires?: {step, value}, choices?: [{value, label, hint?}] }
 ```

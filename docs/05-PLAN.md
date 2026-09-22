@@ -2527,16 +2527,37 @@ not come from the operator.
 
 **Acceptance**
 
-- [ ] `from: { kind: "agent" }` fences the input and gates a mutating call on **step one** — asserted
-      on the assembled request body, not on the handler's arguments
-- [ ] `from: { kind: "user" }` and no `from` at all leave the prompt byte-identical to today
-- [ ] Two POSTs with one `Idempotency-Key` run **one** turn; the second returns the first's `turnId`
-      with `replayed: true` and `200`
+Ticked 2026-09-22, against `packages/server/test/sender.test.ts` — **the code shipped in 10A and
+these boxes stayed unchecked under a `complete` header for a week**, which is a status claim that
+reads as outstanding work and sends the next reader looking for it. Each line names the test.
+
+- [x] `from: { kind: "agent" }` fences the input and gates a mutating call on **step one** — asserted
+      on the assembled request body, not on the handler's arguments.
+      *"a peer's message is fenced in the prompt and marked tainted in history"* and *"…gates a
+      mutating tool on the FIRST step"*, with *"the same turn from a user is NOT gated, or the test
+      above proves nothing"* as its control
+- [x] `from: { kind: "user" }` and no `from` at all leave the prompt byte-identical to today —
+      *"kind: user leaves the prompt exactly as no sender at all does"*
+- [x] Two POSTs with one `Idempotency-Key` run **one** turn; the second returns the first's `turnId`
+      with `replayed: true` and `200` — *"two posts with one key run one turn and return the first
+      turn's id"*, with *"no key at all runs both turns, which is what makes the key mean
+      something"* as its control
 - [ ] The same key under a *different* agent is a different turn — one `store.db` per sandbox root,
-      so this is a property of the query rather than of the file
-- [ ] A key reused with different `text` is refused rather than silently answering the old turn
-- [ ] The sender survives a restart: it is on the turn row, and `GET /turns/:turnId` reports it
-- [ ] `turn.start` carries `from` and `trust`, and the spec table says so
+      so this is a property of the query rather than of the file.
+      **Still open, and narrower than it looks.** *"the same text in a different session is a
+      different logical request"* covers the *session* axis; nothing asserts the *agent* axis, which
+      is the one the claim is about. `store-purge.test.ts` is the precedent for how to write it —
+      populate two agents, because a query missing its `WHERE agent_id = ?` passes every test that
+      only ever puts one in the store
+- [x] A key reused with different `text` is refused rather than silently answering the old turn —
+      *"the same key with different text is a 409 and runs nothing"*, plus *"a malformed key is
+      refused rather than ignored"*
+- [x] The sender survives a restart: it is on the turn row, and `GET /turns/:turnId` reports it —
+      *"the sender is on the turn row, so it survives the process"*, with *"a turn with no sender
+      leaves the row's sender columns absent, not empty"* for the negative case
+- [x] `turn.start` carries `from` and `trust`, and the spec table says so — `events/types.ts:212`
+      declares `trust: Trust` and `from?`, and `04-SPEC-WIRE.md:841` lists exactly those four fields.
+      Both directions are machine-checked by `spec.test.ts`, so this one cannot silently regress
 
 **Non-goals.** A2A agent cards. Peer *discovery*. Outbound agent-to-agent calls — a Dispach agent
 reaching another one is a tool, and a tool is 10B's or a plugin's. Per-sender authorisation beyond
@@ -2834,13 +2855,18 @@ the client: `/v1/ws` is 501 under Node and everything it offers is reachable ove
 
 ## Deferred to v0.2
 
+*(Reviewed 2026-09-22. `confirm` as an `onMutate` policy is struck from the list below: it needed
+the Phase 9 approval middleware, which shipped in 9B — `serve` supplies an approver at `serve.ts:330`
+and the policy works there. What is still missing is narrower and belongs with the TUI: `run.ts`
+supplies none, so `confirm` is unreachable from a terminal session.)*
+
 A2A agent card and server. MCP tool provider. Postgres store. Plugin sandboxing and enforced
 permissions. Hot reload. Remote skill sources. Agent-triggered compaction. Code-execution
 tool mode. Slack and Discord channels. Native tool dialect as default for large models
 (revisit with Phase 3 eval data, not intuition). Web crawling, link-following and JavaScript rendering —
 `web_fetch` reads one page by explicit URL, and a real crawl is a pinned `FIRECRAWL_CRAWL`. Caching
-fetched pages, which would make staleness invisible. `confirm` as an `onMutate` policy, which needs the
-approval middleware from Phase 9.
+fetched pages, which would make staleness invisible. ~~`confirm` as an `onMutate` policy, which needs the
+approval middleware from Phase 9~~ — see the note above.
 
 ---
 
@@ -2849,7 +2875,7 @@ approval middleware from Phase 9.
 1. **Acceptance criteria are the definition of done.** Not "it runs."
 2. **Non-goals are binding.** Scope creep into the next phase makes review impossible.
 3. **Boot budget is checked every phase**, not at the end. Regressions are cheap to fix the day they appear.
-4. **Evals are committed.** Every claim about small-model performance has a number in `evals/` and a script to reproduce it.
+4. **Evals are committed** — every claim about *model* behaviour has a number in `evals/` and a script to reproduce it. **A local latency measurement is the exception and says so in its own README**: `evals/memory` and `evals/skills` both instruct "do not commit it", because what they measure is this machine, and a committed figure from somebody's laptop is a number the next reader cannot reproduce or refute. The rule as written said "every claim" and contradicted two of its own directories.
 5. **Errors get hints.** A new error type without a `hint` fails review.
 6. **No brand strings outside `brand.ts` and `package.json`.**
 7. **Core imports nothing from siblings.** CI enforces it.
@@ -3804,7 +3830,11 @@ with a page to consume it, `serve` prints the **claim URL** (11.195) instead of 
 made "every registered route is documented" red with no way to go green. Widened by naming the three
 paths. And the docs carry **three** image sizes — 47 MB (13.5), 68 MB (11.183), 83 MB (Phase 11,
 arm64) — which cannot all be current; still unreconciled, and worth a re-measure before any of them
-is treated as a budget.
+is treated as a budget. *(**Reconciled later in this phase** — see "The documented image size was
+wrong in all three places" below: the image was actually 287 MB and the gate had been failing
+silently. 15.5 then replaced the base image, so the current figure is **542 MB** against a 700 MB
+ceiling (570 MB when 15.5 measured it; the base moves), with a per-layer breakdown in 15.5 and a CI job that re-measures on every push. None of the
+three numbers above is current; they are kept here because this paragraph is what the phase found.)*
 
 *The prerequisite:* `packages/client`'s browser bundle was **1.18 MB** (11.199).
 
@@ -3950,7 +3980,7 @@ live, and the tooling its own documented features require.
 | apt packages | 180 MB — of which **`git` alone is 92** |
 | `uv` + `uvx` | 47 MB |
 | the compiled binary | 85 MB |
-| **total** | **570 MB** |
+| **total** | **570 MB** (2026-09-17; **542 MB** on 2026-09-22 — the base image moves, so the breakdown above is that afternoon's and the total is whatever CI last measured) |
 
 `git` at 92 MB is the price of glibc: Debian's git pulls perl and git-man. It buys wheels that
 install rather than compile. Start-to-ready is **5.7 s**, unchanged from 13.5's 5.8 s — almost all
@@ -4914,6 +4944,70 @@ revert-checked in both directions.
 rather than `fixed`, the `v*` tag left a human action because a `GITHUB_TOKEN`-pushed tag triggers
 no other workflow, and the version guard repointed at the published manifest — where it went red on
 the bump, which is the guard doing its job for the first time under this shape.
+
+---
+
+## 0.1.2 — creating an agent tells the truth — **shipped** (2026-09-22)
+
+Four defects in the thing a new user touches second, reported from use. Not a phase: the surface was
+declared built and each of these is a way it was quietly wrong.
+
+**The model id was a silent downgrade, not a failed match.** Reported as "deepseek v4.1 flash seems
+not working". Dots are handled fine — the matcher globs `*` and picks by specificity — so
+`deepseek-v4.1-flash` matched `deepseek-v4*` (11 non-`*` characters) rather than the measured
+`deepseek-v4-flash*` (17), because the registry cannot spell "v4.`<anything>`-flash" as a literal
+prefix. It budgeted against **393,216 against a measured 1,048,576** and *nothing said so*:
+`validate` printed `registry deepseek-v4*`, which is what a precise match prints, and the boot
+warning checks for `fallback`. `family` is now a third provenance with its own warning, and
+`registryShadows` asserts that any pattern a longer one extends is marked — which is what adding
+`deepseek-v4-flash*` failed to do to the row beneath it. **No pattern was added for v4.1**: that
+would claim a measured number for an id nobody has probed. Decision 11.246.
+
+**Base URLs already worked; the credential path did not.** `https://ollama.com/v1` and
+`https://integrate.api.nvidia.com/v1` were always fine — there is no provider branch in the
+transport. What was wrong is that `ollama` was one preset, and its absent `apiKeyEnv` is what makes
+the provider send no `authorization` header: choosing it and editing the URL to the hosted endpoint
+left a keyless manifest with no route to a key. Now two rows, plus OpenRouter, Groq and NVIDIA NIM,
+and `--preset`'s help is **derived from `PRESETS`** rather than a hand-written list that had already
+drifted to five names against nine rows.
+
+Found in the same file and fixed with it: `validateApiKeyEnv` and `validateBaseUrls` both iterated a
+hardcoded `["main", "selector", "compactor"]` while `resolveRoles` and `windowReport` walk
+`customRoleNames` — so a **custom role's** key and base URL were never checked at all, and those
+three checks are the entirety of that field's validation. One `configuredRoles` derivation now, for
+the reason this repo applies everywhere.
+
+**"Serve the HTTP API?" defaulted to No**, which is asking whether somebody wants the product.
+Withdrawn as a question; `local` defaulted at the funnel, `--server none` kept. Decision 11.247, and
+it carries two deliberate consequences: `daemon` becomes unconditional, and the resolved value is
+computed once because writing it inline left `serverToken` reading the raw input — the manifest said
+`enabled: true` while the `.env` carried no token, caught by a test that reads the generated file.
+
+**The NLT truncation residual**, closed with an exact discriminator rather than a heuristic. The root
+cause was never fixed and is not fixed now: a blank line still clears `openKey`, deliberately. What
+was missing is that a value cut after a *single* line looks complete, so `damage()`'s two signals
+could not see it — and the obvious detector is unusable, because that shape is **textually identical**
+to a call followed by an ordinary reply. The orphan `END` is the discriminator: a closer with no
+block open means the model believed it was still inside the one the prose interrupted. Decision
+11.248. Evidence stated rather than implied: replaying the committed 16-attempt corpus gives
+**identical flagged counts** before and after — no regression, no false positive, and no attempt in
+that corpus exhibits the shape, because the two `split` cases were already caught. A reachable gap
+rather than an observed one.
+
+**Doc hygiene**, all of it claims that read as current: Phase 10A's seven acceptance boxes ticked
+against `sender.test.ts` with the test named on each line and the **one that is genuinely still open
+left open**; three irreconcilable image sizes marked reconciled and the current figure re-measured
+at **542 MB** (the README said 570, and the base image moves); decision 11.207's ceiling corrected
+from 350 MB to the 700 MB `ci.yml` actually gates on; a second row numbered `7.7` renumbered to
+`7.19`; working rule 4 carved out for local latency evals, which two of its own READMEs contradicted;
+the `Deferred to v0.2` entry for `confirm` struck, since the middleware it waited on shipped in 9B;
+and a `TODO(moeen)` describing messages written immediately below it.
+
+**Verification.** 3564 tests, node 1448, nine packages typechecking, lint at baseline, `bench:boot`
+ok. Every new guard revert-checked in both directions — and two of them caught real defects while
+being written: the preset test found the `serverToken` double-read, and the pre-existing
+"a block with no END followed by a genuine reply is not reported" test rejected the first version of
+the severance detector, which is what forced the orphan-`END` discriminator.
 
 ---
 

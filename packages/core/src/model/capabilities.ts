@@ -81,6 +81,24 @@ export interface CapabilityEntry {
      * explicitly: an unverified row that looks authoritative is how a wrong number survives.
      */
     readonly verified?: string
+    /**
+     * This row exists to catch ids the registry has not seen, so matching it says nothing about
+     * *your* model.
+     *
+     * The distinction is the whole reason it is here. `deepseek-v4-flash*` is a measured model line;
+     * `deepseek-v4*` is a net under it, and a matched net is reported as a **different provenance**
+     * (`family`) so a reader can tell "we know this model" from "we know this vendor". Without it the
+     * two were indistinguishable: `deepseek-v4.1-flash` matched `deepseek-v4*` on specificity,
+     * `validate` printed `registry deepseek-v4*` — which reads as a successful match — and the agent
+     * ran on **393,216 against a measured 1,048,576**, 37.5% of the window, with nothing anywhere
+     * reporting it. That is the failure this very block's comment at `deepseek-v4-flash*` records
+     * having already happened once, arriving a second time through the id rather than the row.
+     *
+     * Set it on any pattern that another pattern extends, and on a lone vendor row that stands in for
+     * a whole family. `registryShadows` asserts the first half, so a narrower row added later cannot
+     * leave its net unmarked.
+     */
+    readonly family?: true
 }
 
 const CONSERVATIVE: RegistryCapabilities = {
@@ -268,6 +286,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
         // The catch-all, deliberately conservative: it matches every Claude model not named above,
         // including the 200K-window generations, and 8192 is a floor every one of them clears.
         pattern: "claude-*",
+        family: true,
         capabilities: { ...CLAUDE_BASE, contextWindow: 200_000, maxOutput: 8192 },
         note: CLAUDE_NOTE,
     },
@@ -275,6 +294,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     // ── Google, via its OpenAI-compatible endpoint ─────────────────────────────────────────
     {
         pattern: "gemini*",
+        family: true,
         capabilities: {
             nativeTools: true,
             strictSchema: false,
@@ -311,6 +331,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
     {
         pattern: "qwen*",
+        family: true,
         capabilities: {
             nativeTools: true,
             strictSchema: false,
@@ -323,6 +344,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
     {
         pattern: "llama*",
+        family: true,
         capabilities: {
             nativeTools: true,
             strictSchema: false,
@@ -335,6 +357,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
     {
         pattern: "mistral*",
+        family: true,
         capabilities: {
             nativeTools: true,
             strictSchema: false,
@@ -347,6 +370,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
     {
         pattern: "mixtral*",
+        family: true,
         capabilities: {
             nativeTools: true,
             strictSchema: false,
@@ -410,6 +434,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
     {
         pattern: "deepseek-v4*",
+        family: true,
         capabilities: {
             nativeTools: true,
             strictSchema: false,
@@ -462,6 +487,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
     {
         pattern: "deepseek*",
+        family: true,
         capabilities: {
             nativeTools: true,
             strictSchema: false,
@@ -474,6 +500,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
     {
         pattern: "gemma*",
+        family: true,
         capabilities: {
             nativeTools: false,
             strictSchema: false,
@@ -486,6 +513,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
     {
         pattern: "phi*",
+        family: true,
         capabilities: {
             nativeTools: false,
             strictSchema: false,
@@ -508,6 +536,36 @@ export function globToRegExp(pattern: string): RegExp {
 }
 
 /** Literal characters in the pattern. More literal characters means more specific. */
+/**
+ * Rows that another row extends — every net the registry contains, derived rather than listed.
+ *
+ * Exists so `family` cannot rot. The flag has to be hand-set, because "a lone vendor row standing in
+ * for a family" is a judgement no derivation makes; but "a pattern some longer pattern extends" is
+ * mechanical, and that is the half that goes wrong when somebody adds a narrower row. Adding
+ * `deepseek-v4-flash*` is exactly what turned `deepseek-v4*` into a net, and nothing would have said
+ * so.
+ *
+ * A pattern shadows another when, with its trailing `*` removed, the other's prefix starts with it —
+ * so `deepseek-v4*` is shadowed by `deepseek-v4-flash*` and `deepseek-v4-pro*`. Compared on the
+ * literal prefix rather than by running the glob, because a glob cannot answer "is this pattern
+ * narrower than that one" and this only ever needs the trailing-star case the registry actually uses.
+ */
+export function registryShadows(
+    registry: readonly CapabilityEntry[] = CAPABILITY_REGISTRY,
+): readonly string[] {
+    const prefixes = registry.map((entry) => entry.pattern.replace(/\*+$/, ""))
+    return registry
+        .map((entry) => entry.pattern)
+        .filter((_pattern, index) => {
+            const prefix = prefixes[index] ?? ""
+            // `*` is the fallback, not a net: it is already its own provenance.
+            if (prefix === "") return false
+            return prefixes.some(
+                (other, at) => at !== index && other !== prefix && other.startsWith(prefix),
+            )
+        })
+}
+
 export function patternSpecificity(pattern: string): number {
     return pattern.replace(/\*/g, "").length
 }
@@ -579,7 +637,7 @@ export function matchCapabilities(modelId: string): CapabilityEntry {
  * probe leaves a dated comment beside it for the person, which nothing parses. A schema field whose
  * only job is to label another field would also be settable by hand, which turns a fact into a claim.
  */
-export type WindowSource = "manifest" | "registry" | "fallback"
+export type WindowSource = "manifest" | "registry" | "family" | "fallback"
 
 export interface WindowProvenance {
     readonly source: WindowSource
@@ -612,9 +670,11 @@ export function windowProvenance(
     }
     const entry = matchCapabilities(modelId)
     return {
-        // The registry ends in `*`, so this is the "nothing matched" case wearing the only pattern
-        // that could have caught it.
-        source: entry.pattern === "*" ? "fallback" : "registry",
+        // Three registry answers, not two, and the middle one is the whole point. `*` is "nothing
+        // matched" wearing the only pattern that could have caught it. A row marked `family` is a net
+        // under a narrower row — matching it means the registry knows the *vendor* and not this
+        // model, which read as an ordinary `registry` hit for as long as there were only two cases.
+        source: entry.pattern === "*" ? "fallback" : entry.family === true ? "family" : "registry",
         pattern: entry.pattern,
         contextWindow: entry.capabilities.contextWindow,
     }
@@ -638,6 +698,10 @@ export function describeWindowSource(provenance: WindowProvenance | undefined): 
             return "manifest"
         case "registry":
             return `registry ${provenance.pattern ?? "?"}`
+        case "family":
+            // Names the pattern *and* says what matching it means, because the pattern alone was the
+            // old output and it read as success.
+            return `family ${provenance.pattern ?? "?"} — not this exact model`
         case "fallback":
             return "fallback (no row matched — a floor, not a measurement)"
     }

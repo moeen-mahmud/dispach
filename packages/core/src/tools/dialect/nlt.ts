@@ -178,12 +178,62 @@ interface Block {
      * reader more than the case is worth.
      */
     readonly wrapped: Set<string>
+    /**
+     * Keys whose continuation was cut by a blank line and then **abandoned to prose**.
+     *
+     * The third damage signal, and the one the finished value cannot carry. `damage()` inspects a
+     * value and can see two things: that it spans lines without `<<<`, and that it opens a shell
+     * heredoc it never closes. What neither shows is a value cut after a *single* line that happens
+     * to look complete — `command: rm -rf ./build` followed by a blank line and then the rest of the
+     * script, where the surviving fragment is a syntactically valid command and the remainder became
+     * the reply. `coerceArgs` raises nothing, no repair is asked for, no event fires, and the shell
+     * runs half of what the model wrote.
+     *
+     * So the evidence has to be collected while parsing, because it is a fact about the *sequence of
+     * lines* rather than about the string. The signature is exact: a blank line cleared an open key,
+     * and the next meaningful line was neither a field, nor an `END`, nor a fence — which is the one
+     * path that reaches `closeBlock(); text.push(line)` with a value left half-written.
+     *
+     * Not a tolerance. The blank line still ends the continuation, because gluing prose onto the last
+     * value is its own bug and the set of shapes a model writes is not enumerable — which is why the
+     * backstop exists at all. This only makes the loss *visible*.
+     */
+    readonly severed: Set<string>
 }
 
 interface ParseState {
     block: Block | undefined
     /** Field whose value a bare continuation line extends. Cleared by a blank line. */
     openKey: string | undefined
+    /**
+     * The key a blank line just cleared, still awaiting a verdict.
+     *
+     * A blank line between two fields is ordinary formatting, so this is cleared by the next field,
+     * `END` or heredoc opener. Holding it for one line is what distinguishes the two, and neither is
+     * visible from the value.
+     */
+    severedKey: string | undefined
+    /**
+     * A value that a blank line cut and prose then followed — **not yet damage**.
+     *
+     * Because those two are *textually identical* to the most ordinary output there is:
+     *
+     *     ACTION: exec          ACTION: exec
+     *     command: ls -la       command: ./deploy.sh --stage
+     *                                                              ← a blank line, either way
+     *     I'll list it first.     --region eu-west-1
+     *                           END
+     *
+     * The left is a reply and must stay free; the right is half a command with the rest in the
+     * reply. Nothing about the prose separates them — which is why the two original signals could
+     * only catch a *multi-line* or heredoc-bearing fragment, and why a detector that fired here
+     * would spend a repair on every model that omits `END`, a far larger cost than the bug.
+     *
+     * The discriminator is the **orphan `END`**. It arrives with no block open, which can only mean
+     * the model believed it was still inside the one this prose interrupted — so everything between
+     * was meant as the value. Exact rather than heuristic, and it needs no guess about the prose.
+     */
+    severedPending: { block: Block; key: string } | undefined
     heredocKey: string | undefined
     heredocLines: string[]
     /** A block just ended, so a fence on the next meaningful line is its closing fence. */
@@ -229,6 +279,8 @@ function newState(): ParseState {
     return {
         block: undefined,
         openKey: undefined,
+        severedKey: undefined,
+        severedPending: undefined,
         heredocKey: undefined,
         heredocLines: [],
         justClosed: false,
@@ -270,7 +322,8 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
             closeBlock(state)
             const match = ACTION_LINE.exec(line)
             const slug = cleanSlug(match?.[1] ?? "")
-            if (slug !== "") state.block = { slug, fields: new Map(), wrapped: new Set() }
+            if (slug !== "")
+                state.block = { slug, fields: new Map(), wrapped: new Set(), severed: new Set() }
             return
         }
         state.heredocLines.push(line)
@@ -282,7 +335,7 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
         const slug = cleanSlug(action[1] ?? "")
         closeBlock(state)
         if (slug === "") return
-        state.block = { slug, fields: new Map(), wrapped: new Set() }
+        state.block = { slug, fields: new Map(), wrapped: new Set(), severed: new Set() }
         return
     }
 
@@ -304,7 +357,8 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
         }
         const slug = cleanSlug(trimmed)
         state.awaitingSlug = false
-        if (slug !== "") state.block = { slug, fields: new Map(), wrapped: new Set() }
+        if (slug !== "")
+            state.block = { slug, fields: new Map(), wrapped: new Set(), severed: new Set() }
         return
     }
 
@@ -330,6 +384,21 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
             state.justClosed = false
             return
         }
+        /**
+         * An **orphan `END`** — a closer with no block open, which settles a pending severance.
+         *
+         * It can only mean the model believed it was still inside the block this prose interrupted,
+         * so the prose was the rest of a value rather than a reply. That is the one fact that
+         * separates the two identical-looking shapes, and it arrives here because the fall-through
+         * already closed the block.
+         */
+        if (END_LINE.test(trimmed) && state.severedPending !== undefined) {
+            state.severedPending.block.severed.add(state.severedPending.key)
+            state.severedPending = undefined
+            return
+        }
+        // A new call means the prose between them really was a reply, so nothing was severed.
+        if (ACTION_LINE.test(line)) state.severedPending = undefined
         state.text.push(line)
         if (trimmed !== "") state.justClosed = false
         return
@@ -338,11 +407,18 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
     if (trimmed === "") {
         // Ends continuation without ending the block: models put blank lines between fields,
         // and gluing whatever follows onto the last value is how prose ends up in an argument.
+        //
+        // Remembered rather than merely dropped. A blank between two fields is formatting; a blank
+        // followed by prose cut a value in half. The two are indistinguishable here and settled one
+        // line later, which is why this is held instead of decided.
+        if (state.openKey !== undefined) state.severedKey = state.openKey
         state.openKey = undefined
         return
     }
 
     if (END_LINE.test(trimmed)) {
+        // A deliberate close, so whatever a blank line cut was the last field and nothing follows it.
+        state.severedKey = undefined
         closeBlock(state)
         state.justClosed = true
         return
@@ -354,6 +430,9 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
     if (keyed !== null) {
         const key = (keyed[1] ?? "").trim()
         const value = (keyed[2] ?? "").trim()
+        // The blank line was formatting between two fields, which is the common case and the whole
+        // reason the verdict waits a line.
+        state.severedKey = undefined
         if (value === HEREDOC_OPEN) {
             state.heredocKey = key
             state.heredocLines = []
@@ -374,7 +453,13 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
         return
     }
 
-    // A block with no END, followed by prose. The prose is the reply.
+    // A block with no END, followed by prose. The prose is the reply — *probably*. If a blank line
+    // just cut an open value, this may instead be the rest of that value, and the two are
+    // indistinguishable here: the verdict waits for an orphan `END`. See `severedPending`.
+    if (state.severedKey !== undefined) {
+        state.severedPending = { block: state.block, key: state.severedKey }
+        state.severedKey = undefined
+    }
     closeBlock(state)
     state.text.push(line)
 }
@@ -415,10 +500,22 @@ const SHELL_HEREDOC = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*$/m
  * evidence that the value was cut is inside the value, which makes this signal exact rather than
  * heuristic. Measured at 2 of 16, and the shape the backlog reproduced by hand.
  *
- * What is deliberately *not* a signal: anything about the prose that follows. A block with no `END`
- * followed by a genuine reply is ordinary and must stay free.
+ * **Severed by a blank line, then abandoned to prose.** The case neither signal above can see, and
+ * the one that was still live after the first two shipped: a value cut after a *single* line that
+ * looks complete on its own. `command: ./deploy.sh --stage` is a valid command, so `coerceArgs`
+ * raises nothing and the shell runs it — while the flags that followed the blank line became the
+ * reply. `Block.severed` carries it, because the evidence is the line sequence rather than the
+ * string. See that field for why it is collected during parsing.
+ *
+ * What is deliberately *not* a signal: anything about the prose that follows a block that was
+ * **not** severed. A block with no `END` followed by a genuine reply is ordinary and must stay free,
+ * which is exactly what `severedKey` being cleared by the next field buys.
  */
-function damage(value: string, wrapped: boolean): "unwrapped" | "unterminated" | undefined {
+function damage(
+    value: string,
+    wrapped: boolean,
+    severed: boolean,
+): "unwrapped" | "unterminated" | "severed" | undefined {
     const opener = SHELL_HEREDOC.exec(value)
     if (opener !== null) {
         const terminator = opener[2] ?? ""
@@ -426,6 +523,9 @@ function damage(value: string, wrapped: boolean): "unwrapped" | "unterminated" |
         if (!closed) return "unterminated"
     }
     if (!wrapped && value.includes("\n")) return "unwrapped"
+    // Last, because the two signals above are facts about the value and this one is a fact about how
+    // it was assembled — so when both apply, the message about the value is the more useful one.
+    if (severed) return "severed"
     return undefined
 }
 
@@ -437,17 +537,23 @@ function damage(value: string, wrapped: boolean): "unwrapped" | "unterminated" |
  * instruction by a small model. `field` is the field name the model wrote, so the message reads as a
  * sentence about that field the way every other `FieldError` in `coerce.ts` does.
  *
- * TODO(moeen): write the two messages. See the request in the conversation — the trade-off is that a
+ * The messages are **three** now, and the trade-off they were written against is worth keeping: a
  * terse hint leaves a small model guessing at the wrapped form, while a long one is billed on every
- * repair and buries the one instruction that matters.
+ * repair and buries the one instruction that matters. So each `message` says what went wrong in one
+ * clause and the shared `hint` carries the form to use — the hint is the part a model has to act on,
+ * and it is identical across all three because the remedy is.
  */
-function damageError(field: string, kind: "unwrapped" | "unterminated"): FieldError {
+function damageError(field: string, kind: "unwrapped" | "unterminated" | "severed"): FieldError {
     return {
         field,
         message:
             kind === "unwrapped"
                 ? "spans several lines but was not wrapped, so its line breaks and indentation could not be kept."
-                : "opens a heredoc whose terminator never arrived, so the value was cut short.",
+                : kind === "unterminated"
+                  ? "opens a heredoc whose terminator never arrived, so the value was cut short."
+                  : // Says what happened to the *rest*, because that is the part the model cannot see:
+                    // from its side the field was written in full.
+                    "was cut short by a blank line, and everything after it was read as the reply rather than as part of the value.",
         hint: `Write a value that spans lines between ${HEREDOC_OPEN} and ${HEREDOC_CLOSE}, each on its own line: \`${field}: ${HEREDOC_OPEN}\`, then the value exactly as it should be, then \`${HEREDOC_CLOSE}\`. Everything between them is kept byte for byte, blank lines and indentation included. Nothing was executed, so writing the call again is safe.`,
     }
 }
@@ -472,7 +578,7 @@ export function parseNlt(output: string): ParsedOutput {
     const intents: ToolIntent[] = state.blocks.map((block, index) => {
         for (const [key, values] of block.fields) {
             for (const value of values) {
-                const kind = damage(value, block.wrapped.has(key))
+                const kind = damage(value, block.wrapped.has(key), block.severed.has(key))
                 if (kind !== undefined) damaged.push(damageError(key, kind))
             }
         }

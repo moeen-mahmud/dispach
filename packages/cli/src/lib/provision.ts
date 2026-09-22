@@ -138,6 +138,7 @@ export function complete(
             | "skillsSearch"
             | "skillsPick"
             | "schedules"
+            | "server"
             | "dir"
             | "dirChoice"
         >,
@@ -148,6 +149,11 @@ export function complete(
          * Defaulted below, at the funnel, for the reason `apiKeyEnv` is.
          */
         schedules?: string
+        /**
+         * Undefined unless `--server` was passed. Same shape as `schedules`, and for the same
+         * reason: the question was withdrawn in 0.1.2 and the flag stayed.
+         */
+        server?: string
         /** Undefined unless the skills answer was `find`; its question is skipped otherwise. */
         skillsSearch?: string
         /** Undefined unless the wizard's catalogue step ran and something was ticked. */
@@ -174,6 +180,16 @@ export function complete(
     // the manifest altogether and generated an agent with no key configuration at all.
     const preset = presetById(answers.preset)
     const keyVar = answers.apiKeyEnv ?? preset?.apiKeyEnv
+    /**
+     * Resolved **once**, above the literal, because two things read it.
+     *
+     * `server` stopped being a wizard step in 0.1.2 and is defaulted here. Written as
+     * `answers.server ?? "local"` inline, the field below got the default and the `serverToken`
+     * line twenty rows down went on reading `answers.server` — which is `undefined` whenever
+     * `--server` was not passed. So the manifest said `enabled: true`, the `.env` carried no token,
+     * and the agent refused to start: one value, two readers, one of them wrong.
+     */
+    const server = answers.server ?? "local"
 
     // `dir` stops being asked the moment the answer is `sandbox` or `here`, so its value has to be
     // derived at this funnel — the same rule `apiKeyEnv` above is a monument to. `dirFor` is the one
@@ -217,7 +233,15 @@ export function complete(
         // both the wizard and `--schedules daily` pass through, which is the lesson `apiKeyEnv` above
         // records from the last time a question was removed and its field silently went missing.
         schedules: answers.schedules ?? "none",
-        server: answers.server,
+        /**
+         * **On by default, and no longer asked.** "Serve the HTTP API?" defaulted to *No* —
+         * `fallback: "1"` is a 1-based menu index and element 0 of `SERVER_CHOICES` is `none` — so
+         * `--yes`, this funnel and `GET /v1/provision` all produced an agent with its API switched
+         * off. Which is asking whether somebody wants the product: an always-on server is what this
+         * is, and the TUI and web UI are *views* onto it. Same argument that withdrew the
+         * `schedules` question one field above. Resolved at `server` near the top of this function.
+         */
+        server,
         skills: answers.skills,
         // Carried explicitly. This funnel is a literal, not a spread, so a step that is collected and not
         // listed here is silently dropped — which is what happened: `--skills "pdf tables"` set the answer
@@ -233,7 +257,12 @@ export function complete(
         // Minted here rather than in the flow, which is a PURE module and must stay deterministic.
         // Only for an agent that asked for a server: an unused 64-hex string in every generated
         // .env is a secret nobody chose and one more thing to wonder about.
-        ...(answers.server === "local" ? { serverToken: randomToken() } : {}),
+        // Reads the **resolved** value, not `answers.server`. It read the raw input, which is now
+        // `undefined` whenever `--server` was not passed — so the manifest said `enabled: true` and
+        // the `.env` carried no token, and the agent would have refused to start. Caught by a test
+        // that reads the generated `.env` rather than this object, which is the guard this repo has
+        // needed for this exact shape six times.
+        ...(server === "local" ? { serverToken: randomToken() } : {}),
         ...(keyVar === undefined ? {} : { apiKeyEnv: keyVar }),
         ...(answers.apiKey === undefined || answers.apiKey === ""
             ? {}

@@ -4,6 +4,7 @@ import {
     globToRegExp,
     matchCapabilities,
     patternSpecificity,
+    registryShadows,
     resolveCapabilities,
     windowProvenance,
 } from "../src/model/capabilities.ts"
@@ -336,5 +337,83 @@ describe("window provenance", () => {
         )
         expect(describeWindowSource(windowProvenance("nothing-matches-this"))).toContain("floor")
         expect(describeWindowSource(windowProvenance("x", { contextWindow: 10 }))).toBe("manifest")
+    })
+})
+
+describe("a family row is its own provenance", () => {
+    /**
+     * The 0.1.2 defect, and the reason `family` exists at all.
+     *
+     * `deepseek-v4.1-flash` matched `deepseek-v4*` on specificity — 11 non-`*` characters against
+     * `deepseek-v4-flash*`'s 17 — and the registry has no way to spell "v4.`<anything>`-flash", so the
+     * id landed on the net. Nothing reported it: `windowProvenance` said `registry`, which is what a
+     * *precise* match says, so `validate` printed `registry deepseek-v4*` and the boot warning did not
+     * fire. The agent budgeted against **393,216 while the measured sibling row says 1,048,576** —
+     * 37.5% of the window, silently. Which is the failure the flash row's own comment records having
+     * already happened once, arriving the second time through the id rather than the row.
+     */
+    test("a version segment drops an id onto the net, and that is now visible", () => {
+        const precise = windowProvenance("deepseek-v4-flash")
+        expect(precise.source).toBe("registry")
+        expect(precise.pattern).toBe("deepseek-v4-flash*")
+        expect(precise.contextWindow).toBe(1_048_576)
+
+        // Both spellings of a version segment. The window is unchanged — that is the registry being
+        // honest about not knowing — but the *provenance* now says so.
+        for (const id of ["deepseek-v4.1-flash", "deepseek-v4-1-flash"]) {
+            const found = windowProvenance(id)
+            expect({ id, source: found.source, pattern: found.pattern }).toEqual({
+                id,
+                source: "family",
+                pattern: "deepseek-v4*",
+            })
+        }
+    })
+
+    test("the three registry provenances are three different sentences", () => {
+        // A precise match, a net, and nothing at all. The middle one is the case that used to be
+        // indistinguishable from the first, so the assertion that matters is that it reads as a
+        // qualification rather than as success.
+        expect(describeWindowSource(windowProvenance("deepseek-v4-flash"))).toBe(
+            "registry deepseek-v4-flash*",
+        )
+        expect(describeWindowSource(windowProvenance("deepseek-v4.1-flash"))).toContain(
+            "not this exact model",
+        )
+        expect(describeWindowSource(windowProvenance("kimi-k2"))).toContain("no row matched")
+    })
+
+    test("a precise row is not downgraded by having a family above it", () => {
+        // `claude-*` is a net and `claude-sonnet-5*` sits under it. The net must not swallow the
+        // rows it exists to catch *for*, or every Claude id would report as a guess.
+        const found = windowProvenance("claude-sonnet-5")
+        expect(found.source).toBe("registry")
+        expect(found.pattern).toBe("claude-sonnet-5*")
+    })
+
+    test("every row another row extends is marked as a family", () => {
+        /**
+         * The guard that keeps the flag from rotting. `family` has to be hand-set, because "a lone
+         * vendor row standing in for a whole family" is a judgement no derivation makes — but "a
+         * pattern some longer pattern extends" is mechanical, and it is the half that goes wrong.
+         * Adding `deepseek-v4-flash*` is exactly what turned `deepseek-v4*` into a net, and nothing
+         * would have said so.
+         */
+        const marked = new Set(
+            CAPABILITY_REGISTRY.filter((entry) => entry.family === true).map(
+                (entry) => entry.pattern,
+            ),
+        )
+        expect(registryShadows().filter((pattern) => !marked.has(pattern))).toEqual([])
+        // And the derivation finds something, or the assertion above passes by having no data —
+        // which is this repo's most-repeated way for a guard to be green and useless.
+        expect(registryShadows().length).toBeGreaterThan(0)
+    })
+
+    test("the fallback row is not a family, because it is already its own provenance", () => {
+        // `*` shadows everything by prefix and must not be reported as a net: "no row matched" is a
+        // stronger statement than "a broad row matched", and collapsing them loses the stronger one.
+        expect(registryShadows()).not.toContain("*")
+        expect(windowProvenance("kimi-k2").source).toBe("fallback")
     })
 })

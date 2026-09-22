@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.1.2 — 2026-09-22
+
+Four defects in creating an agent, all reported from use, and all of them the kind that reads as
+working. Plus a shell command that could run in half.
+
+```bash
+npm i -g dispach@0.1.2
+brew upgrade dispach
+docker pull ghcr.io/moeen-mahmud/dispach:0.1.2
+```
+
+### The model id was a silent 37.5% downgrade
+
+Reported as "deepseek v4.1 flash seems not working" — and it matched a row perfectly well. The
+capability registry globs `*` and picks by **specificity**, so `deepseek-v4.1-flash` matched
+`deepseek-v4*` (11 non-`*` characters) instead of the measured `deepseek-v4-flash*` (17), because
+the registry cannot spell "v4.`<anything>`-flash" as a literal prefix. The agent budgeted against
+**393,216 tokens against a measured 1,048,576**.
+
+The part worth fixing is that *nothing said so*. `validate` printed `registry deepseek-v4*`, which
+is what a precise match prints, and the boot warning only fires when no row matched at all — so a
+family net and a measurement were indistinguishable. There is now a third provenance, `family`, with
+its own warning that says a measured sibling may be one version segment away; and a guard asserts
+that any pattern a longer one extends is marked as a net, which is what adding `deepseek-v4-flash*`
+failed to do to the row beneath it.
+
+**No pattern was added for v4.1 ids.** That would claim a measured number for something nobody has
+probed — the same mistake inverted. `model probe <agent> --window` is the honest route.
+
+### The endpoints people actually use
+
+OpenRouter, Groq, NVIDIA NIM and Ollama Cloud join `init --preset`, and the flag's help text is now
+derived from the table rather than written beside it, where it had drifted to five names against
+nine rows. Any OpenAI-compatible endpoint always worked — there is no provider branch in the
+transport — so what a preset buys is the base URL's *shape*: it ends at the version segment, and the
+runtime appends `/chat/completions` itself.
+
+Local Ollama and Ollama Cloud are **two presets on purpose**. Local needs no key, and the absent
+`apiKeyEnv` is what makes the provider send no `authorization` header at all; the hosted endpoint
+needs one. With a single preset, choosing it and editing the URL to the hosted endpoint — the obvious
+move — left a keyless manifest with no route to a key.
+
+Found in the same file: two validators iterated a hardcoded list of three roles while the loader
+walks custom ones too, so a **custom role's** key and base URL were never checked — and those three
+checks are the entirety of that field's validation.
+
+### "Serve the HTTP API?" is not a question
+
+It defaulted to **No**, so `--yes` and the provisioning route both produced an agent with its API
+switched off. Which is asking whether you want the product: an always-on server is what this is, and
+`run` and `web run` are views that attach to a live host and start nothing. The question is gone,
+`--server none` is the opt-out, and the default moved to the funnel both paths pass through — because
+a question removed without moving its default is how `init` once shipped agents with no key
+configuration at all.
+
+### A shell command cut in half is refused, not run
+
+The NLT parser clears an open field on a blank line, deliberately, so prose cannot glue onto the
+last value. It already caught a value spanning lines unwrapped, and a heredoc whose terminator never
+arrived. What it could not catch is a value cut after a *single* line that looks complete:
+`command: ./deploy.sh --stage` is valid, so nothing raised, the shell ran it, and the flags after
+the blank line were delivered as the reply.
+
+The obvious detector is unusable — that shape is **textually identical** to a call followed by an
+ordinary reply, so firing on it would spend a repair on every model that omits `END`. The
+discriminator is the **orphan `END`**: a closer with no block open can only mean the model believed
+it was still inside the block the prose interrupted. Exact, and it needs no guess about the prose.
+Replaying the committed corpus gives identical counts before and after: no regression, no false
+positive, and a gap closed that no recorded attempt had exhibited.
+
+### Under the hood
+
+Phase 10A's seven acceptance boxes, unchecked under a `complete` header for a week, are ticked
+against the test that covers each — with **the one that is genuinely still open left open**. Three
+irreconcilable container image sizes are reconciled and re-measured at 542 MB (the README said 570;
+the base image moves, which is why CI re-measures every push). A decision recording the image
+ceiling as 350 MB was one renegotiation behind the 700 MB CI actually gates on. Two decisions shared
+the number 7.7. And a `TODO` asked for messages written immediately below it.
+
 ## 0.1.1 — 2026-09-21
 
 The first release was opened in a browser and every defect below came out of one sitting. Four of

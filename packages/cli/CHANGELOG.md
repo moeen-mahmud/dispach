@@ -1,5 +1,92 @@
 # dispach
 
+## 0.1.2
+
+### Patch Changes
+
+- **`init` knows the endpoints people actually use.** OpenRouter, Groq, NVIDIA NIM and Ollama Cloud
+  join the presets. Any OpenAI-compatible `/chat/completions` endpoint already worked — there is no
+  provider branch in the transport — so what a preset buys is getting the base URL's _shape_ right: it
+  must end at the version segment, because the runtime appends `/chat/completions` itself and a URL
+  copied from a provider's docs with the full path is refused.
+
+  **Local Ollama and Ollama Cloud are two presets on purpose.** Local needs no key, and the absent
+  `apiKeyEnv` is what makes the manifest omit the field and the provider send no `authorization`
+  header at all. The hosted endpoint needs one. With a single preset, choosing it and then editing the
+  base URL to the hosted endpoint — the obvious move — produced a keyless manifest with no route to a
+  key short of hand-editing the field back in.
+
+  `--preset`'s help text is now **derived from the preset table** rather than written beside it, where
+  it had already drifted to five names against nine rows.
+
+  Found while there: `validateApiKeyEnv` and `validateBaseUrls` both iterated a hardcoded
+  `["main", "selector", "compactor"]` while the loader walks custom roles too — so a **custom role's**
+  `apiKeyEnv` and `baseUrl` were never validated, and those three checks are the whole of that field's
+  validation. A custom role naming an unset key loaded cleanly and 401'd at the first turn that used
+  it; one whose base URL included `/chat/completions` 404'd there.
+
+- **A model id that matches only a _family_ row now says so.** Reported as "deepseek v4.1 flash seems
+  not working", and the mechanism was not a failed match. The capability registry globs `*` and picks
+  by specificity, so `deepseek-v4.1-flash` matched `deepseek-v4*` — 11 non-`*` characters — rather than
+  the measured `deepseek-v4-flash*` at 17, because the registry cannot express "v4.`<anything>`-flash"
+  as a literal prefix. The agent then budgeted against **393,216 tokens against a measured 1,048,576**,
+  37.5% of the window, and nothing anywhere reported it: `validate` printed `registry deepseek-v4*`,
+  which is exactly what a precise match prints, and the boot warning only fires when no row matched at
+  all.
+
+  `family` is now a third provenance between `registry` and `fallback`, with its own warning, because
+  "no row matched" and "a family row matched, which is not your model" send a reader to different
+  places — the second means a measured sibling may be one version segment away. `registryShadows`
+  asserts that any pattern a longer pattern extends is marked as a family, so adding a narrow row
+  cannot silently turn the row beneath it into an unmarked net, which is what happened here.
+
+  No pattern was added for v4.1 ids. That would claim a measured number for something nobody has
+  probed; `model probe <agent> --window` is the honest route, and the pattern can land with the number
+  and the date beside it.
+
+- **A shell command cut in half by a blank line is refused rather than run.** The NLT parser clears an
+  open field when it sees a blank line — deliberately, so prose does not glue onto the last value — and
+  a model that writes a multi-line script without wrapping it therefore loses everything after the
+  first blank. The parser already caught two shapes of that: a value spanning lines unwrapped, and a
+  shell heredoc whose terminator never arrived.
+
+  What it could not catch is a value cut after a _single_ line that looks complete.
+  `command: ./deploy.sh --stage` is a valid command, so nothing raises, the shell runs it, and the
+  flags that followed the blank line are delivered as the reply.
+
+  The obvious detector is unusable, and that is the interesting part: the damaged shape is **textually
+  identical** to the most ordinary output there is — a call, a blank line, then the model's reply. A
+  detector that fired on it would spend a repair on every model that omits `END`, which costs far more
+  than the bug. The discriminator is the **orphan `END`**: a closer arriving with no block open can
+  only mean the model believed it was still inside the block the prose interrupted, so the prose was
+  the rest of the value. Exact rather than heuristic, and it needs no guess about the prose.
+
+  The root cause is unchanged and stays that way — tolerating blank lines inside values is its own bug,
+  and the set of shapes a model writes is not enumerable, which is why a backstop exists at all. This
+  makes the loss visible so the step is refused and repaired.
+
+  Evidence, stated rather than implied: replaying the committed 16-attempt corpus gives **identical
+  flagged counts** before and after — no regression and no false positive — and no attempt in that
+  corpus exhibits the shape, because the two previously-recorded `split` cases were already caught by
+  the multi-line signal. This closes a reachable gap rather than an observed one.
+
+- **The HTTP API is on by default, and `init` no longer asks.** "Serve the HTTP API?" defaulted to
+  _No_ — the wizard's internal default for a menu is a 1-based index, and element 0 of that list is
+  `none` — so `--yes`, the non-interactive funnel and `GET /v1/provision` all produced an agent with
+  its API switched off.
+
+  Which is asking whether somebody wants the product. An always-on server is what this runtime is:
+  `dispach run` and `dispach web run` are _views_ that attach to a live host and start nothing, and
+  nobody answers no at minute two of setting an agent up. The question is withdrawn and `--server none`
+  is the opt-out, which is exactly the precedent the `schedules` question set when it was removed — the
+  flag stays, the step does not, and the default moves to the one funnel both paths pass through.
+
+  Two consequences carried deliberately. The "keep it running in the background?" question was gated on
+  having a channel _or_ a server, so it is now always asked — with the server answer gone, the
+  remaining half would have hidden it from exactly the agent that has a server and no channel. And
+  `GET /v1/provision` no longer serves the step at all, because that list is generated from the
+  wizard's own walk; a browser form loses a control it should never have had.
+
 Generated by Changesets, one entry per change. The **curated** release notes are the root
 `CHANGELOG.md`, which is where a reader should start — this file is the record beneath it.
 

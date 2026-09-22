@@ -12,6 +12,7 @@
 
 import { BRAND } from "@dispach/core"
 import { DEFAULT_ROW_LIMIT, MIN_ROW_LIMIT } from "#lib/const"
+import { PRESETS } from "#lib/init-flow"
 import type { ArgSpec, CommandSpec, FlagSpec } from "#lib/schema"
 
 /** Accepted by every command, so the render mode is answered the same way everywhere. */
@@ -89,7 +90,11 @@ export const COMMANDS: readonly CommandSpec[] = [
                 name: "preset",
                 kind: "string",
                 placeholder: "id",
-                help: "model endpoint: openai | anthropic | deepseek | ollama | custom",
+                // Derived, not written down. This list said "openai | anthropic | deepseek |
+                // ollama | custom" while `PRESETS` had grown to nine — a hand-kept copy beside a
+                // real table, which is the drift this repo keeps paying for and which `--help`
+                // exists to be the authority on.
+                help: `model endpoint: ${PRESETS.map((preset) => preset.id).join(" | ")}`,
                 defaultHelp: "openai",
             },
             { name: "model", kind: "string", placeholder: "id", help: "model id" },
@@ -146,8 +151,10 @@ export const COMMANDS: readonly CommandSpec[] = [
                 name: "server",
                 kind: "string",
                 placeholder: "level",
+                // No wizard step since 0.1.2 — flag-only, like `--schedules`. An always-on server is
+                // the product, so `local` is the default and `none` is the deliberate opt-out.
                 help: "serve the HTTP API: none | local",
-                defaultHelp: "none",
+                defaultHelp: "local",
             },
             {
                 name: "schedules",

@@ -74,6 +74,12 @@ describe("nextQuestion", () => {
         // No webBackend or webKey: the fallback answer to the web question is "1" — none — and a
         // backend nobody will use is a question that lies. No composioKey, no telegramAllow and no
         // telegramToken, for the same reason.
+        //
+        // No `server` either, as of 0.1.2: the question was withdrawn and `local` is defaulted at
+        // `complete()`, because an always-on server is the product and "Serve the HTTP API?"
+        // defaulted to *No*. `daemon` appears here as a direct consequence — it used to be gated on
+        // `telegram === "connected" || server === "local"`, and with `server` gone that gate would
+        // have refused the question to exactly the agent that has a server and no channel.
         expect(seen).toEqual([
             "user",
             "name",
@@ -86,8 +92,8 @@ describe("nextQuestion", () => {
             "web",
             "composio",
             "telegram",
-            "server",
             "skills",
+            "daemon",
             "dirChoice",
         ])
     })
@@ -217,7 +223,10 @@ describe("validateAnswer", () => {
     test("presets accept a number or a name", () => {
         expect(validateAnswer("preset", "3")).toEqual({ ok: true, value: "deepseek" })
         expect(validateAnswer("preset", "OLLAMA")).toEqual({ ok: true, value: "ollama" })
-        expect(validateAnswer("preset", "9").ok).toBe(false)
+        // One past the end, derived — a literal `9` was out of range until the list reached nine
+        // presets in 0.1.2, at which point it became a valid choice and this assertion stopped
+        // testing anything.
+        expect(validateAnswer("preset", String(PRESETS.length + 1)).ok).toBe(false)
     })
 
     test("the base URL rules are the loader's own, applied at the question", () => {
