@@ -46,25 +46,39 @@ dispach/
 ├── docs/
 ├── packages/
 │   ├── core/                    @dispach/core
-│   ├── cli/                     @dispach/cli          bin: dispach
+│   ├── cli/                     **dispach**                 the published package; bin: dispach
 │   ├── server/                  @dispach/server
 │   ├── client/                  @dispach/client             typed client for /v1
+│   ├── web/                     @dispach/web                the browser UI, served by the API
 │   ├── channel-telegram/        @dispach/channel-telegram
 │   ├── tools-composio/          @dispach/tools-composio
 │   ├── tools-system/            @dispach/tools-system       shell + files
-│   ├── tools-web/               @dispach/tools-web          search + fetch
-│   └── tools-mcp/               @dispach/tools-mcp
+│   └── tools-web/               @dispach/tools-web          search + fetch
 ├── examples/
 │   ├── minimal/                 # smallest thing that runs: one model, no tools
 │   ├── reference/               # every agent.yaml field; future phases commented with their phase
-│   ├── workspace-template/      # the tiered workspace files, to copy (Phase 3.5)
-│   └── telegram-assistant/      # a worked workspace (Phases 3.5 + 4)
+│   ├── workspace-template/      # the tiered workspace files, to copy
+│   ├── shell-agent/             # an agent with a real shell, for the container
+│   ├── team/                    # a supervisor and two members, from one manifest
+│   └── telegram-assistant/      # a worked workspace
 ├── docker/
-│   └── Dockerfile
+│   ├── Dockerfile
+│   └── entrypoint.sh
 └── scripts/
     ├── bench-boot.ts
     └── rename-brand.ts
 ```
+
+Nine workspace packages, **one published name**. `packages/cli` publishes as `dispach` with the
+command at `bin` and the client at `dispach/client`; the other eight are `"private": true` and are
+bundled into that tarball, so there is one thing to install, version and trust. Their manifests stay
+at `0.1.0` on purpose — `.changeset/config.json` ignores them, so only the published version means
+anything.
+
+Two things this tree used to get wrong, both the same shape as the phantom rows doc 04 carried:
+`tools-mcp/` was listed and **has never existed on any branch** (decision 4.7 keeps MCP as one
+provider among several — planned, never written), and `web/` was missing while being served by the
+API on the same origin.
 
 ### Dependency rule
 

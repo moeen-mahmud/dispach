@@ -178,7 +178,7 @@ packages/cli/        `dispach` binary — lib/ plumbing, components/ Ink, pure r
 packages/server/     HTTP/SSE/WS surface
 packages/client/     typed client for the API — reattach, streams, typed errors
 packages/channel-*/  Telegram. A second channel comes from a plugin, not from here
-packages/tools-*/    system (shell, files), Composio, web, MCP
+packages/tools-*/    system (shell, files), Composio, web. No MCP package exists — see decision 4.7
 docs/                design + plan (read these)
 evals/               fixtures/ the shared catalogue and tasks; tools/ committed results.
                      Every performance claim has a number here

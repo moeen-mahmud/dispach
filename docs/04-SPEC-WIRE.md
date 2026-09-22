@@ -175,7 +175,9 @@ POST /v1/agents            { answers: {step: value, …} }
 **Provisioning is one POST, and it ends in an adopt rather than a restart.** The directory is
 written and the agent is **live before the response returns** — served, channels started, schedules
 armed — without disturbing anything else the process hosts. A restart would drop every other
-agent's in-flight turn to add one, which is the same reason `reload` answers 501.
+agent's in-flight turn to add one, which is the same reason `reload` replaces a single agent rather
+than restarting the process. (`reload` answered `501` until 16.2b; this sentence said so for two
+phases after it stopped being true.)
 
 `answers` is a subset: every step left out takes its default, exactly as `init --yes` does with
 flags. `GET /v1/provision` lists each step with its prompt, default, choices, a `secret` flag and a
@@ -274,7 +276,7 @@ indistinguishable from the runtime crashing. Retry once the turn ends.
 This answered `501 reload_not_supported` until 17.1, when `Runtime.replace` (16.2b) made the
 honest version possible. The old refusal's argument was correct about in-place mutation and is
 preserved above; what changed is that an **attached** view owns no runtime, so `/restart` in a CLI
-session hosted by a server has to reach it through here. Decisions 11.20 and 11.220.
+session hosted by a server has to reach it through here. Decisions 11.22 and 11.220.
 
 ### Turns
 
@@ -1010,9 +1012,25 @@ schedule began: nothing in core records in-flight turns, so there is no handle t
 **Served under Bun only.** Bun has an upgrade path in `Bun.serve`; Node has none without a
 dependency, and adding one for an endpoint this section itself calls secondary is the wrong trade.
 Under Node the route answers `501 websocket_unavailable` naming the reason — better than a
-connection failure a client reads as a network problem. Authentication is `?token=` because a
-browser's `WebSocket` constructor cannot set headers; the token therefore reaches proxy access logs,
-which is stated rather than hidden. Decision 11.21.
+connection failure a client reads as a network problem. Decision 11.23.
+
+**Authentication is the subprotocol list, and `?token=` is deprecated.** A browser's `WebSocket`
+constructor cannot set ordinary headers, but the subprotocol list *is* a header it sends on the
+caller's behalf:
+
+```js
+new WebSocket(url, ["dispach.bearer", key])
+```
+
+The server **echoes** the chosen subprotocol, or the browser closes the socket instantly with no
+readable reason. `?token=` is still accepted and will be removed no earlier than the next minor —
+dropping it in the same change that introduced the replacement would break every client using the
+form this document had advertised since Phase 13, for no security a deprecation window does not also
+buy. Prefer the subprotocol: a credential in a URL reaches proxy access logs, a `Referer`, and
+anything in between. Decision 11.235.
+
+This paragraph described `?token=` as *the* mechanism for two phases after that stopped being true,
+and cited 11.21 — which is about `createHandler` being a plain function — rather than 11.23.
 
 Everything achievable over HTTP + SSE stays there. WS exists for interactive clients, not
 as the primary API. VelaOps' web chat is the intended consumer.

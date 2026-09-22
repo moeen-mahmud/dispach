@@ -7,8 +7,13 @@ skills. This document supersedes the flat `context.files` list in `02-SPEC-MANIF
 `promptStyle` rendering for `delimiters` and `intensity`, the authoring checks behind the
 `workspace` command, `eval rules`, `examplesIn` placement (extraction into the assembly's examples
 slot), `SOUL.md` with `requires`/`onUnmet` and the `soul distill` scaffold, and `knowledge/`.
-Still design-only: `skillsIn` (the capability resolves and is carried, but skills arrive in
-Phase 5, so there is nothing to place).
+`skillsIn` is implemented too, and this line said otherwise for several phases: it read *"still
+design-only — the capability resolves and is carried, but skills arrive in Phase 5, so there is
+nothing to place"*, which was true when written and stopped being true when Phase 5 landed.
+`Agent` reads `capabilities.promptStyle.skillsIn` and puts each activated skill body in that role,
+which `assembleContext` places in `SLOT.skill` — unpinned, because a procedure applies to the turn
+that summoned it and carrying it through compaction would keep an agent following last hour's
+instructions.
 
 **Why it replaced the flat list.** A flat ordered array cannot express three things that
 turned out to matter: which files are cache-stable versus volatile, which sit after the
@@ -478,12 +483,18 @@ A heuristic judgement that refuses to load a file is a heuristic nobody keeps, s
 0 by default. `--strict` exits non-zero for CI, where a warning someone has accepted and a warning
 nobody has read look identical.
 
-The bullet-density check is currently **unconditional** rather than gated on every bound channel
-having `markdown: none | basic`. Channels arrive in Phase 4 and the manifest section is refused
-until then, so gating it now would ship a check that could never fire.
+The bullet-density check is **unconditional** rather than gated on every bound channel having
+`markdown: none | basic`. The original reason was that channels arrived in Phase 4 and the manifest
+section was refused until then, so gating it would have shipped a check that could never fire.
+Channels shipped; the gate did not, because **no `markdown` field was ever added to a channel
+entry** — `delimiters` in `promptStyle` is a different thing, about how the *prompt* is marked up
+rather than what a provider renders. So the check stays unconditional for a better reason than the
+first one: there is nothing to gate it on.
 
-Not yet checked: duplication between workspace files and registered tools or skills, which needs
-both to exist (Phases 3.6 and 5).
+Not checked: duplication between workspace files and registered tools or skills. The stated reason
+was that it needed both to exist (Phases 3.6 and 5) — both do now, so this is an unbuilt check
+rather than a blocked one. Worth saying plainly, because "needs X to exist" reads as scheduled and
+this is not.
 
 The framing here follows OpenAI's guidance on prompts generally — treat them as application
 code: versioned in git, reviewed in the PR that changes the behaviour they support, covered

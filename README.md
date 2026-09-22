@@ -3,9 +3,9 @@
 A lightweight, model-agnostic AI agent runtime.
 
 Dispach turns a stateless OpenAI-compatible `/chat/completions` endpoint into an agent that
-uses tools, remembers across sessions, acts on your machine under a policy you set, and lives in
-messaging channels. Scheduling and delegation to other agents are designed and not yet built —
-see Status. Bun-first TypeScript, Apache-2.0.
+uses tools, remembers across sessions, acts on your machine under a policy you set, lives in
+messaging channels, runs on a schedule, and delegates to other agents. Bun-first TypeScript,
+Apache-2.0.
 
 > To dispatch is to send a thing on its way with the authority to see it done — to decide
 > what handles it, hand it over, and answer for the result.
@@ -24,8 +24,23 @@ Also built since: the plugin API with all four middleware wrap points, superviso
 typed handoffs, the Docker image and a compose front door, a typed client, operator keys, approvals
 over the wire, and a browser UI on the same origin as the API.
 
-Not built yet: WhatsApp. `docs/05-PLAN.md` has every phase with its acceptance criteria and what is
-ticked.
+And in 0.1.1: settings and schedules are editable from the browser as well as the terminal, and a
+plugin-supplied channel loads under `serve` — `PluginContext.defineChannel` is documented API that
+had never worked through the binary.
+
+Not built: **WhatsApp**, and **MCP as a tool provider**. Neither is a gap waiting on effort.
+WhatsApp is a legal question rather than an engineering one — decision 8.4 records that Baileys
+reverse-engineers WhatsApp Web with no appeal path, and that Meta's terms effective 15 Jan 2026
+prohibit the Business Solution where a general-purpose AI assistant is the primary functionality,
+which is this product. Anyone can now write that channel as a plugin; whether the first one is
+WhatsApp is a separate decision.
+
+**MCP** is planned rather than refused, and the distinction matters. Decision 4.7 keeps it as *one
+tool provider among several, never the substrate* — Composio is called directly for that reason —
+so a `tools-mcp` provider is a thing that could be written and has not been. `01-ARCHITECTURE.md`
+listed the package in its tree for months anyway; it has never existed on any branch.
+
+`docs/05-PLAN.md` has every phase with its acceptance criteria and what is ticked.
 
 ## Scope
 
@@ -69,7 +84,7 @@ Full rationale for every decision, including the negative ones, is in `docs/00-D
 
 ```bash
 npm i -g dispach          # the `dispach` command
-dispach --version         # 0.1.0
+dispach --version         # 0.1.1
 ```
 
 and in an application that talks to a running server:
@@ -143,7 +158,7 @@ bun run build                       # builds every package the binary imports
 cd packages/cli && bun link         # puts `dispach` on your PATH
 cd ../..
 
-dispach --version                   # 0.1.0
+dispach --version                   # 0.1.1
 dispach --help
 ```
 
@@ -201,6 +216,15 @@ dispach config set milo model.main.id deepseek-v4-pro
 dispach config env milo MODEL_API_KEY               # prompted, masked, written 0600
 dispach config allow milo @your_handle              # who a channel accepts messages from
 ```
+
+Since 0.1.1 the **browser does the same job**, against a running server rather than a file on this
+machine: `GET` and `PATCH /v1/agents/:id/config` are the same editor reached remotely, and the
+Settings panel is generated from the one table in core that both surfaces read, so neither can offer
+a field the other does not. It covers tools, policy, model, limits, channels, delivery, schedules and
+the server block, asks the same two confirmations, and reports the write and whether it is *in force*
+separately — an edit made while a turn is running is saved and applied at the next start rather than
+being reported as a failure. Schedules are editable there too; one the manifest declares is shown and
+refused, because reconciliation would restore it from the file at the next boot.
 
 `config <agent>` with no action opens the editor, which covers the same fields plus one `allowFrom` row
 per channel and every secret the manifest depends on — masked as you type, and never shown afterwards.
@@ -336,7 +360,9 @@ turned that into a crash loop that took the API and the page down with it. A hos
 fail because one of N agents is misconfigured.
 
 Then open `http://localhost:7420` and paste nothing: the claim link in the logs carries a one-time
-token the page exchanges for a key it keeps. Reading the container's own output is what confers
+token the page exchanges for a key it keeps. From there the page creates agents, holds a streaming
+conversation with one, and — since 0.1.1 — changes its settings and schedules; the tool, channel and
+key panels remain reports. Reading the container's own output is what confers
 first ownership, which grants nothing new to anyone who could already run `docker compose logs`.
 
 **`--build` is not optional after the first run.** `image: dispach:local` names a tag, and compose
@@ -591,8 +617,10 @@ thing that will distinguish a plugin from a scramble when enforcement lands.
 
 ## Commands
 
-`dispach --help` prints this from the same table the parser uses, so the two cannot drift.
-`dispach <command> --help` has the flags.
+`dispach --help` is generated from the same `CommandSpec` table the parser uses, so *it* cannot
+drift. **This table is hand-written and had**: it was missing `schedules`, `plugins`, `credential`,
+`start` and `web` — including the one command that mints an API key. `dispach --help` is the
+authority; read this as a map. `dispach <command> --help` has the flags.
 
 | Command | What it does |
 | --- | --- |
@@ -603,16 +631,21 @@ thing that will distinguish a plugin from a scramble when enforcement lands.
 | `stop` | stop everything — services and any loose `serve` |
 | `remove` | delete an agent: directory, sessions, memory, logs, service |
 | `config` | read and change an agent's settings, and fill in its secrets |
+| `start` | switch a stopped agent back on, and have a running host adopt it now |
+| `web` | open the browser view of a running agent |
+| `schedules` | what runs unattended: when each fires next, and how the last run went |
 | `sessions` | list stored conversations, or inspect one |
 | `memory` | search what an agent remembers, or rebuild the index |
 | `skills` | browse the catalogues and install, or check one agent's skills |
 | `sources` | the repositories skills come from: list, add, search |
 | `tools` | the resolved tool catalogue, or warm a remote provider's cache |
+| `plugins` | what each plugin this agent loaded registered, and what it declared |
+| `credential` | mint, list and revoke operator keys for the API, optionally scoped |
 | `validate` | load a manifest and report what it resolved to |
 | `workspace` | check the workspace files against the authoring rules |
 | `soul` | scaffold a compact identity file from a long-form one |
 | `agents` | what one or more manifest *paths* produce |
-| `keys` | press a chord and see the bytes, Ink's reading of them, and the intent |
+| `keys` | a keyboard diagnostic — press a chord and see the bytes, Ink's reading of them, and the intent. **Not credentials; that is `credential`** |
 | `model probe` | ask the endpoint what it can actually do — window, output cap, prompt caching |
 | `terminal-setup` | teach a terminal to send shift+enter as a newline |
 
@@ -629,6 +662,9 @@ thing that will distinguish a plugin from a scramble when enforcement lands.
 | `docs/09-API-GUIDE.md` | The agent server, walked through from `compose up` to a streamed reply |
 | `packages/client/README.md` | The typed client — turns, streams, reattach, typed errors |
 | `docs/07-SPEC-WORKSPACE.md` | Workspace file tiers, budgets, and prompt-style rendering |
+| `docs/08-MEMORY.md` | How memory is stored, retrieved and injected, with the measured numbers |
+| `docs/12-OPENCLAW-CUTOVER.md` | Moving off the runtime this one replaces |
+| `.changeset/README.md` | How a release is cut, and why the tag stays a human action |
 | `CLAUDE.md` | The standing brief: hard rules and the hazards already paid for |
 | `evals/` | Every performance claim, with the number and a script to reproduce it |
 

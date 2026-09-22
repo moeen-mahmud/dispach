@@ -27,7 +27,7 @@ two disagree, the spec is right and this file is stale.
 
 ```bash
 git clone https://github.com/moeen-mahmud/dispach && cd dispach
-cp .env.example .env          # then DISPACH_API_TOKEN and MODEL_API_KEY
+cp .env.example .env          # then DISPACH_API_TOKEN. A model key is NOT required to start
 docker compose up -d --wait
 ```
 
@@ -36,15 +36,48 @@ an arm64 Docker Desktop: **5.8 s** to healthy.
 
 ```bash
 curl -s localhost:7420/v1/ready
-# {"status":"ready","agents":1}
+# {"status":"ready","agents":0}
 ```
 
-`/v1/health` and `/v1/ready` are the only routes that need no token — an orchestrator's probe
-cannot hold one, and a probe that got a 401 forever would mark a healthy container unhealthy.
+**Zero, and that is the supported first state.** This guide used to say `agents: 1` and point every
+later command at a `minimal` agent, because compose once mounted the repository's own example — so
+a fresh clone came up hosting a sample nobody asked for. It does not any more, and following the
+old text got a `404` on every request. The API, the page at `/` and the reference at `/docs` exist
+*before* there is anything to talk to, which is what makes provisioning through them possible.
+
+Four routes need no token: `GET /v1/health`, `GET /v1/ready`, `GET /docs` and
+`GET /v1/openapi.json` (plus the browser UI's own assets). A probe cannot hold a credential, and
+the moment a reference is most useful is before you have one.
+
+So make an agent. Either inside the container, or over the wire:
 
 ```bash
 export TOKEN=$(grep DISPACH_API_TOKEN .env | cut -d= -f2-)
-export A=localhost:7420/v1/agents/minimal
+
+# the terminal way, onto the volume
+docker compose exec server dispach init --user "you" --name milo
+
+# or the wire way — GET /v1/provision lists every question, its `fallback` and its `choices`,
+# generated from the same walk the terminal wizard performs, so the two cannot drift
+curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/provision | jq '.steps[].step'
+curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"answers":{"user":"you","name":"milo","purpose":"…","preset":"openai",
+       "model":"gpt-4o-mini","baseUrl":"https://api.openai.com/v1","apiKey":"sk-…",
+       "system":"none","web":"none","composio":"none","telegram":"none",
+       "server":"local","skills":"none"}}' \
+  localhost:7420/v1/agents
+# → 201 {"id":"milo","dir":"/home/dispach/.dispach/agents/milo","adopted":["milo"], …}
+```
+
+`201` with `adopted: ["milo"]` means it is **already live** — served, channels started, schedules
+armed — with nothing else the process hosts disturbed. `201` with `adopted: []` and an `error` means
+the agent is on disk and not running, which is a success about the file and a failure about the
+process; read `adopted`, not the status code. The returned `id` is the **slug**, which is what every
+route keys on: a name of "My Bot" yields `my-bot`, and 0.1.1 fixed a bug where the route returned
+the name instead and a browser then reported a running agent as not running.
+
+```bash
+export A=localhost:7420/v1/agents/milo
 ```
 
 ---
@@ -81,7 +114,7 @@ event: stream.replay
 data: {"turnId":"t_…","state":"running","events":4,"truncated":false,"dropped":0,"chunks":"none"}
 
 event: turn.start
-data: {"v":1,"ts":"…","runtimeId":"rt_…","agentId":"minimal","turnId":"t_…","type":"turn.start","data":{"source":"api","inputTokens":10}}
+data: {"v":1,"ts":"…","runtimeId":"rt_…","agentId":"milo","turnId":"t_…","type":"turn.start","data":{"source":"api","inputTokens":10}}
 
 event: model.chunk
 data: {…,"type":"model.chunk","data":{"delta":"I can","kind":"text"}}
@@ -275,7 +308,7 @@ curl -s -H "Authorization: Bearer $TOKEN" $A
 
 ```json
 {
-  "id": "minimal", "name": "Minimal", "status": "loaded",
+  "id": "milo", "name": "Milo", "status": "loaded",
   "model": "deepseek-v4-pro", "dialect": "nlt", "window": 393216,
   "tools": 40, "skills": 8, "schedules": 0,
   "entryPhase": null, "channels": [], "warnings": []
@@ -297,6 +330,75 @@ at it is how days get lost.
 
 ---
 
+## 6b. Change it
+
+New in 0.1.1, and the part that is easy to get wrong in the other direction — this is **the
+person's editor over HTTP**, not the agent's:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" $A/config
+```
+
+```json
+{ "editable": true, "file": "/home/dispach/.dispach/agents/milo/agent.yaml",
+  "settings": [
+    { "path": "limits.maxSteps", "means": "tool calls allowed in one turn", "value": 40 },
+    { "path": "tools.untrusted.onMutate", "means": "refuse | confirm | allow — …",
+      "confirm": "Setting this to \"allow\" turns off the check that stops text from outside the conversation driving a tool that changes things. …",
+      "value": "refuse" },
+    …
+  ] }
+```
+
+The list is generated from one table in core that the terminal's `dispach config` reads too, so
+neither surface can offer a field the other does not. Three things about the shape:
+
+- **`value` is the manifest's source text, unexpanded.** `${MODEL_ID}` comes back as `${MODEL_ID}`.
+  An editor that showed the *loaded* value and wrote it back would bake the expansion in, turning a
+  manifest that follows its environment into one that does not.
+- **`value` absent means the file does not set the field** — which is not the same as set to
+  nothing, and is what lets a control tell "unset" from "empty".
+- **`confirm` appears on exactly two fields**, the two whose only purpose is to stop a check
+  running. Show the sentence; do not send `confirm: true` until somebody has read it.
+
+```bash
+curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"path":"limits.maxSteps","value":"12"}' $A/config
+# {"path":"limits.maxSteps","before":40,"after":12,"reflowed":false,"applied":true}
+```
+
+**`value` is text**, exactly as it is typed at a terminal — a bare word, a number, `true`, a list as
+`["a", "b"]`, a map as `{k: v}` — read by the same parser the `config` command uses. One parser,
+because two would eventually disagree about whether `["a", "b"]` is a list of two strings.
+
+**Read `applied`, do not assume it.** The file is written before the agent is replaced, and the
+replace is refused while a turn is in flight, so a successful write can legitimately come back
+`"applied": false` with the reason under `pending` — the edit then takes effect at the next start.
+Returning a `409` there and implying nothing had happened would leave a written manifest described
+as unwritten. `reflowed: true` means the source editor could not place the path and the document was
+re-serialised: correct, and its comments have moved, which is worth a look at the diff.
+
+Both routes are `admin`. That is not a role — there are no users, teams or roles here, and the
+browser mints itself an unscoped key because the browser is the owner. It is the *person's* editor,
+so nothing in it is floored; the **agent's** editor is the `config_set` tool and that one is, because
+an agent able to widen its own inbound gate could be talked into it by the message it is reading.
+Two fields are the person's alone and are not settable here at all: `channels[].allowFrom`, which is
+a key inside a list entry and has its own action, and `tools.providers.<id>.writeRoots`.
+
+Schedules are writable the same way, with one refusal worth knowing:
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" $A/schedules/morning-brief
+# 409 {"error":{"code":"schedule_manifest_owned", …}}
+```
+
+A schedule the **manifest** declares is restored from the file by reconciliation at the next boot, so
+a write here would be undone — which the route answered `200` to until 0.1.1. Change the
+`schedules:` entry through `PATCH /config` instead, or create a separate schedule through
+`POST …/schedules`, which is API-owned and fully editable.
+
+---
+
 ## 7. Or use the client
 
 Everything above, typed, with the sharp edges handled:
@@ -305,7 +407,7 @@ Everything above, typed, with the sharp edges handled:
 import { createClient, DispachError } from "@dispach/client"
 
 const client = createClient({ baseUrl: "http://localhost:7420", token: process.env.DISPACH_API_TOKEN })
-const agent = client.agent("minimal")
+const agent = client.agent("milo")
 
 const turn = await agent.send("what can you do?")
 for await (const token of turn.tokens()) process.stdout.write(token)
@@ -347,12 +449,12 @@ Worth knowing before you design around it, because each of these is a decision r
 
 | | |
 | --- | --- |
-| **No agent provisioning.** | An agent exists because a manifest is mounted. There is no `POST /v1/agents`. |
+| ~~**No agent provisioning.**~~ | **This is now wrong and is kept to say so.** `POST /v1/agents` exists (16.5), writes the directory, and the agent is live before the response returns. `GET /v1/provision` serves the question list. A caller may **not** choose the directory (`dir` and `dirChoice` are refused — the sandbox decides), may not have a secret read back, and on a server that required no credential and is reachable from the network the route needs a key carrying `admin`. |
 | **No outbound peer calls.** | `from` is the *inbound* half. Your agent reaching another one is a tool, not a route — and `allowFrom` is inbound-only, which is a separate recorded trap. |
 | **No per-sender authorisation.** | `from` says who sent a message and confers nothing. A recipient acts under its **own** owner's grants, whoever asked. A sender cannot widen what your agent may do by declaring itself. |
 | **No OpenAI-compatible surface.** | `/v1` is its own protocol. Nothing here answers `/v1/chat/completions`. |
-| **One agent per container, by choice.** | `serve` accepts several manifests and one process hosts N agents — that is decision 8.5 and always was. The *image* runs one, because a shared process means one agent's runaway `exec` starves the others. A second agent is a second service. |
+| **A second container is for isolation, not capacity.** | One process hosts N agents (decision 8.5), and the image's bare `serve` hosts **every enabled agent in the sandbox** — so `dispach init` inside the container is enough and no second container is needed to add one. What a second container buys is isolation: a shared process means one agent's runaway `exec` starves the others. It needs its own port *and its own home volume*, since two sharing one would share a `store.db` whose rows are keyed by agent id. This row used to say the image runs one agent, which was true of an earlier `CMD`. |
 | **No approval history.** | A pending approval lives in the serving process's memory, because the thing it resolves is a suspended turn *in that process*. A row surviving a restart would describe a question nobody is still waiting on. |
-| **No live reload.** | An agent's configuration is fixed for its process lifetime — the tool catalogue resolves once and the cached prompt prefix depends on it staying fixed. `POST /reload` answers `409` and says so. |
+| **No live *mutation*** — but reload and config edits work. | An agent's configuration is fixed for the lifetime of its **instance**: the catalogue resolves once and the cached prefix depends on that. So a change produces a **new instance** rather than a mutated one. `POST /reload` re-reads the manifest and answers `{id, status, adopted}`; `PATCH /v1/agents/:id/config` writes one field and then does the same replace. Both answer `409` while a turn is in flight, because tearing one down would close its store under a turn recorded as running — and the config route reports the write and whether it is in force *separately*, so an edit made during a turn is saved and applied at the next start rather than reported as a failure. |
 | **No CORS.** | The web UI is same-origin. A default `*` would be catastrophic on a loopback bind, where the spec permits omitting the token entirely. |
 | **WebSocket is secondary, and Bun-only.** | Everything achievable over HTTP + SSE stays there. `/v1/ws` answers `501` under Node, which has no upgrade path without a dependency. |

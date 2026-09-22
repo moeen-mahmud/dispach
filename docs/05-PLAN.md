@@ -1248,14 +1248,20 @@ it than a test that kills the process at a chosen instruction. **Part B** is `ch
 
 ### Part B — deviations from the plan as written
 
-- **`POST /v1/agents/:id/reload` answers 501 rather than reloading.** Decision 11.20. The spec
-  describes rebuilding the tool index live, which contradicts the fixed-catalogue design the cached
-  prompt prefix depends on. The refusal names the reason and points at a restart.
-- **WebSocket is Bun-only.** Decision 11.21. Node gets a 501 naming the reason rather than a
-  dependency on `ws`; SSE plus `POST /messages` covers everything the endpoint does.
+- **`POST /v1/agents/:id/reload` answers 501 rather than reloading.** Decision 11.22 — this line
+  cited 11.20, which is about `init` asking for the API key; every citation in this block was off by
+  two, because two decisions were inserted earlier in section 11 and the references never moved. The
+  spec describes rebuilding the tool index live, which contradicts the fixed-catalogue design the
+  cached prompt prefix depends on. The refusal names the reason and points at a restart. **Reversed
+  in 16.2b:** `Runtime.replace` gives the changed manifest a *new instance*, which honours the
+  fixed-catalogue design rather than contradicting it, so the route works.
+- **WebSocket is Bun-only.** Decision 11.23 (cited as 11.21 — see above). Node gets a 501 naming the
+  reason rather than a dependency on `ws`; SSE plus `POST /messages` covers everything the endpoint
+  does. Still true.
 - **`GET /v1/agents/:id/skills` returns `{ skills: [], supported: false }`.** A bare empty array
   cannot be told apart from "this agent has no skills", which is the silent-nothing shape rule 8
-  exists to prevent. Phase 5 fills it in.
+  exists to prevent. Phase 5 fills it in — and did: the route returns the real catalogue, and the
+  field it settled on is **`configured`** rather than `supported`.
 - **`Agent.previewContext` is a new core seam.** `GET /v1/agents/:id/context` must show the prompt
   the agent *actually* assembles, so it calls `assembleContext` with the same arguments `send` does
   rather than the server rebuilding the argument list — which would answer a question about a prompt
@@ -1265,8 +1271,8 @@ it than a test that kills the process at a chosen instruction. **Part B** is `ch
   first event, because `Agent.send` awaits the session write before emitting. Creating a buffer
   inside `attach` instead would make a typo'd turn id indistinguishable from a real one and leave
   the client tailing an empty stream forever.
-- **Bun's `idleTimeout` was killing SSE streams at 10 s.** Decision 11.22 — found by running the
-  binary, invisible to the tests, and now derived from `HEARTBEAT_MS`.
+- **Bun's `idleTimeout` was killing SSE streams at 10 s.** Decision 11.24 (cited as 11.22) — found
+  by running the binary, invisible to the tests, and now derived from `HEARTBEAT_MS`.
 
 ---
 
@@ -4173,7 +4179,8 @@ unchanged; `adopt` passes pass-through stopwatches and contributes to no report.
 offered *refuse* or *abort and record why*, and refusing is the rung that needs neither. It also
 removes the approval-abandonment step entirely rather than implementing it — an approval that is
 waiting **is** a suspended turn, so a disposable agent cannot have a question outstanding. Nothing
-in the server calls `replace` yet; `POST /reload` still answers 501 and 16.5 is what opens the door.
+in the server calls `replace` yet; `POST /reload` still answers 501 at this point, and 16.5 is what
+opens the door — it is wired now.
 
 **Acceptance**
 
@@ -4257,10 +4264,13 @@ configuration the tests use. Also worth recording as a five-minute trap rather t
 backtick inside a SQL comment in a template literal **terminates the string**, and the resulting
 error points at the next line.
 
-**Not done here, deliberately.** `POST /v1/agents/:id/reload` still answers `501`. `Runtime.replace`
-is what that request was reaching for, and wiring it is Phase 19's doc reconciliation — the 501's
-argument is about a session's cached prefix changing underneath a conversation, which is a decision
-to revisit rather than a wire to connect. The per-agent launchd label is still there; 16.4 retires
+**Not done here, deliberately.** `POST /v1/agents/:id/reload` still answers `501` at this point in
+the build. `Runtime.replace` is what that request was reaching for, and the 501's argument is about
+a session's cached prefix changing underneath a conversation — a decision to revisit rather than a
+wire to connect. **Revisited and connected since:** the route replaces the agent and answers
+`{id, status, adopted}`, with `409` while a turn is in flight. The cached-prefix argument survives
+intact and is *why* it is a replace: a changed manifest produces a **new instance** rather than a
+mutated one, so nothing is ever swapped underneath a live conversation. The per-agent launchd label is still there; 16.4 retires
 it with the orphaned-`disable`-row migration note.
 
 
@@ -4455,7 +4465,9 @@ plugins, so a manifest naming a channel a plugin supplies is refused at load wit
 makes `PluginContext.defineChannel` unreachable through the CLI. It is the recorded "a check that
 only one surface performs is a check the two disagree on" hazard, inverted: here the *preflight* is
 the stricter one. Recorded below rather than fixed, because the honest fix is a two-pass load and
-that is a decision rather than an edit.
+that is a decision rather than an edit. **Fixed in 0.1.1** — the two-pass, and the reasoning for
+choosing it over the alternative this entry leaned toward is in the backlog item and decision
+11.243.
 
 ## Phase 17 — the front ends
 
@@ -4557,7 +4569,9 @@ matched the bare `::` comparison. `claimUrl` had shipped with that since Phase 1
 
 ### 17.3 — The web UI grows up — **built** (2026-09-20)
 
-Scoped deliberately: the picker, deep links and the **read-only** panels. Provisioning is 17.4,
+Scoped deliberately: the picker, deep links and the **read-only** panels — read-only *as of 17.3*;
+0.1.1 gave the settings and schedule panels write access, and 17.4 below added provisioning.
+Provisioning is 17.4,
 because creating an agent from a browser is a different kind of work — a multi-step form, masked
 secrets, and a write that adopts a live agent — and keeping them apart means the browser
 verification here creates nothing.
@@ -4607,8 +4621,11 @@ verification here creates nothing.
    exactly what a visual pass is for.
 
 **Not verified in a browser:** a live `needs_input` channel. Producing one needs a transport that
-emits it, and the carried `defineChannel` defect means a plugin channel cannot load through the
-CLI's `serve` at all. The markup is covered by render tests against the real payload shape.
+emits it, and the carried `defineChannel` defect meant a plugin channel could not load through the
+CLI's `serve` at all. The markup is covered by render tests against the real payload shape. *(0.1.1
+removed the second half of that blocker: a plugin channel now loads and is named in the banner. A
+`needs_input` producer still has to be written — nothing in this tree emits the state, which
+`04-SPEC-WIRE.md` now says on the page a client reads.)*
 
 **Playwright's MCP server disconnected** after the last rebuild, so the final cosmetic fix was
 verified in the **served bundle** (`<code>` present, no literal backtick) rather than on screen.
@@ -4839,6 +4856,67 @@ has not been created yet.
 
 ---
 
+## 0.1.1 — what the first release's own browser found — **shipped** (2026-09-21)
+
+Not a phase. 0.1.0 shipped, the owner opened the web UI against the container for the first time,
+and six defects came out of one sitting. **Four of them were one bug.** Recorded here because a
+patch release that fixes the surface a phase declared "built" is exactly the evidence that phase's
+acceptance criteria could not produce — 17.4's own notes say *"Not verified: the paint"*.
+
+The meta-point decided the verification plan. Every defect was in the class this repo's web tests
+cannot see: `packages/web/test/` is props-in/markup-out via `renderToStaticMarkup`, so it mounts no
+effects, and the transcript reducer's 20 tests were all single-stream and well-ordered. The reducer
+was *correct* — every one of them still passes, unchanged. The bugs lived in the imperative shell, in an undocumented server ordering contract, and
+in a render-identity cascade.
+
+**The one bug behind four symptoms.** `app.tsx` called `clientRef.current.agent(agentId)` in its
+**render body**, and `packages/client` returns a fresh object literal per call — so `agent` had a new
+identity every render, which invalidated a chain of `useCallback`s, which re-fired the reattach
+effect, which had no cleanup, so each render opened another event stream and each stream's
+`setState` committed a render that opened another. Self-feeding. Six concurrent streams folded into
+one transcript and one *mutable* `StreamFilter`, which is why a real reply rendered
+`DoingDoingDoing good good good…` and then repeated eight more times. The arithmetic named it before
+the source did: the first thinking block was 1068 characters and each repeat was 178, and
+**1068 = 178 × 6**. The permanent `Failed to fetch` banner was the same cascade exhausting the
+browser's per-origin budget, made permanent by an error path that never cleared on a later success.
+
+The fix is not the memo alone. Subscription ownership moved into `packages/web/src/lib/live.ts`,
+where a second stream for one turn is **refused**, because the memo stops today's loop and not the
+shape — the next effect to gain a dependency would reopen it. That module is also the only half
+assertable without a DOM, which is the point: *the shell is where the untested code was*.
+
+**The other two.** The message page is newest-first and `04-SPEC-WIRE.md` documented the message
+shape and **no order at all** — so `packages/cli` reversed it with a comment saying why and the
+browser did not. The unstated contract was the defect. And `POST /v1/agents` returned the *name*
+where every route keys on the slug, so creating "Milo" wrote `agents/Milo`, declared `id: milo`,
+returned `{id: "Milo", adopted: ["milo"]}`, and the browser compared those two and reported
+**"written, and not running"** about an agent that was running — with no error text, because there
+had been no error.
+
+**Two features, both closing gaps a phase had left open deliberately.** `GET`/`PATCH
+/v1/agents/:id/config` make the browser the person's editor (decision 11.241), generated from
+`SETTINGS` so it cannot drift from the terminal's; and the schedule panel got CRUD, wiring client
+methods that had existed with **zero callers** since they were written. `defineChannel` works
+through the binary for the first time (11.243, and the backlog item below).
+
+**Three defects found by doing the work rather than by planning it**, each recorded where it
+belongs: a manifest-owned schedule accepted an API write that the next boot silently undid (11.242);
+`bun run typecheck` had been red on `development` since the previous commit; and the *docs* carried a
+set of claims the code had already falsified, which 11.245 catalogues.
+
+**Verification.** 3543 tests, node 1437, nine packages typechecking, lint at baseline, `bench:boot`
+ok, `verify:package` reporting `the bin runs — 0.1.1`, and the whole editing surface exercised in a
+real browser against the rebuilt container — including a save that wrote the manifest inside the
+container and a `409` on the one field whose confirmation had not been ticked. Every new guard was
+revert-checked in both directions.
+
+**Release shape.** First real use of Changesets, as one package (11.244): `ignore: ["@dispach/*"]`
+rather than `fixed`, the `v*` tag left a human action because a `GITHUB_TOKEN`-pushed tag triggers
+no other workflow, and the version guard repointed at the published manifest — where it went red on
+the bump, which is the guard doing its job for the first time under this shape.
+
+---
+
 ## Carried backlog
 
 Three findings that belong to no phase, recorded here so a session with no context still finds
@@ -4905,7 +4983,7 @@ Low urgency, and the reason is worth keeping: **a floor is the safe direction.**
 window over-compacts and wastes tokens; it never overflows an endpoint. A cost bug, not a correctness
 one.
 
-### `defineChannel` is unreachable through the CLI — **medium urgency** *(found 2026-09-19, in 16.6)*
+### ~~`defineChannel` is unreachable through the CLI~~ — **fixed in 0.1.1** *(found 2026-09-19 in 16.6, fixed 2026-09-21)*
 
 A manifest declaring a channel type supplied by one of its own plugins is refused at load:
 
@@ -4919,10 +4997,11 @@ manifest_validation_failed: channels[0] declares type "qrstub", which is not reg
 
 The same manifest boots correctly through `Runtime.create`, which reads the manifest **header** for
 `plugins`, loads them, and only then validates `channels[].type` against the host's registrations
-*plus* the plugin's (`runtime.ts:1357` and `:1454`). Every CLI surface instead pre-loads with
-`knownChannels: CHANNEL_IDS`, the static first-party list — `serve.ts:106`, and the same line in
-`validate`, `tools`, `workspace`, `model` and `init` — so the refusal happens before the plugin that
-would have satisfied it is ever imported.
+*plus* the plugin's (`runtime.ts:1387` reads the header and loads them, `:1470` passes
+`Object.keys(supply.channels)` to the load). Every CLI surface instead pre-loaded with
+`knownChannels: CHANNEL_IDS`, the static first-party list — in `serve`, `validate`, `tools`,
+`workspace`, `model`, `skills` and `init` — so the refusal happened before the plugin that would
+have satisfied it was ever imported.
 
 Reproduced with a two-line plugin calling `context.defineChannel("qrstub", …)`. It is the recorded
 *"a check that only `run` performs is a check `validate` disagrees with"* hazard with the polarity
@@ -4935,10 +5014,38 @@ the dead-vocabulary shape again, except here the vocabulary is *documented publi
 (`03-SPEC-PLUGIN-API.md`, `PluginContext.defineChannel`) that a third-party author would find
 simply does not work.
 
-**Not fixed in 16.6, because the fix is a decision.** The CLI's pre-load exists to get `loaded.env`
+**Not fixed in 16.6, because the fix was a decision.** The CLI's pre-load exists to get `loaded.env`
 (the server token) before `Runtime.create`, so it genuinely needs a manifest in hand first. Making
-it agree with the runtime means either a two-pass load in the CLI — read header, load plugins,
+it agree with the runtime meant either a two-pass load in the CLI — read header, load plugins,
 validate — or moving the channel-type check out of the pre-load and letting `Runtime.create` be the
-only place that decides it. The second is smaller and matches the existing rule that one function
-owns a load-bearing check, but it moves *when* the error is reported, which is worth choosing
-deliberately rather than as a side effect of a phase about channel status.
+only place that decides it. This paragraph recommended the second as smaller and matching the rule
+that one function owns a load-bearing check, noting only that it moves *when* the error is reported.
+
+**Resolved 2026-09-21 as the two-pass, against that recommendation.** Decision 11.243 carries the
+full reasoning; the short version is that the preference above was wrong for a reason visible only
+at the destination. `Runtime.create`'s manifest pass is a bare `sources.map(...)`
+with **no try/catch** (`runtime.ts:1469`), so a genuinely unknown channel type would throw from
+there and take the whole host down — reintroducing the crash loop `serve`'s skip-and-report loop was
+built to fix, by a different route. Making it survivable needs core to know whether the caller
+*named* these manifests or discovered them, and that asymmetry belongs to the caller.
+
+The two-pass's feared cost is also smaller than it sounds: `agentPluginSupply` returns immediately
+when `refs` is empty, so an agent with no `plugins:` block pays **nothing**, and only one that
+declares plugins pays a second `setup()` — which `validate` has always done. And it *strengthens*
+the crash-loop fix rather than trading against it: the plugin load now happens inside the guarded
+loop, so a plugin that throws on import makes one discovered agent broken-and-skipped instead of
+killing the host, which is what it did from inside `Runtime.create`.
+
+`serve` and `validate` — the two surfaces that host and check channels — now take the same two
+passes. The other five commands still pre-load against the static table: `init`, `workspace`,
+`model`, `tools` and `skills`, at seven call sites, since `init` reaches it twice more through
+`lib/init-skills.ts`. That is deliberate rather than unfinished — none of them starts a channel, so
+the stricter check costs a third-party author nothing there, and the shape is now in two places to
+copy if a sixth command ever needs it.
+
+**The transferable rule is the one this entry got wrong:** before choosing between copying a check
+and moving it, read what happens at the destination when the check fails.
+
+`packages/cli/test/serve.test.ts` is the public API's first in-tree consumer — a two-field plugin
+defining one channel, loaded by the real binary — and it asserts the other direction too, that a
+nonsense type is still refused where the skip loop can see it. Both were revert-checked.

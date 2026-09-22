@@ -212,6 +212,51 @@ await agent.schedules()
 await agent.context()         // the prompt the next turn would send
 ```
 
+## Changing things
+
+Every method above reads. These write, and they are the surface `dispach config` and
+`dispach schedules` cover at a terminal.
+
+```ts
+const { editable, file, settings } = await agent.config()
+// settings: [{ path, means, confirm?, value? }, …]
+
+const result = await agent.setConfig("limits.maxSteps", "12")
+if (!result.applied) console.warn(result.pending?.message)   // written; in force at the next start
+```
+
+Four things about `setConfig`, each of which has a wrong answer that looks right:
+
+- **`value` is a string**, not a JSON value: `"12"`, `"true"`, `'["now", "memory_write"]'`,
+  `'{system: {}}'`. Core's `parseSettingValue` reads it — the same function the terminal uses — so
+  one parser decides whether `["a", "b"]` is a list of two strings. Passing `JSON.stringify(x)` is
+  right for a list or a map and **wrong for a string**, where it would send the quotes.
+- **Read `applied`.** The manifest is written and *then* the agent is replaced, because an agent's
+  settings are fixed for its instance's lifetime. The replace is refused while a turn is in flight,
+  so a successful write can arrive with `applied: false` and the reason under `pending`.
+- **Two fields need `{ confirm: true }`**, and `config()` says which by carrying a `confirm`
+  sentence on the row. Show that sentence first; the server refuses without it, at
+  `409 config_confirm_required`.
+- **`value` comes back unexpanded.** `${MODEL_ID}` is `${MODEL_ID}`, not the model. Writing back a
+  value you read from the *loaded* manifest instead would bake the expansion in.
+
+```ts
+await agent.createSchedule({ id: "hourly", kind: "every", expr: "1h",
+                             task: "Check the queue.", deliver: "none" })
+await agent.updateSchedule("hourly", { enabled: false })
+await agent.deleteSchedule("hourly")
+const fired = await agent.runSchedule("hourly")   // out of band; does NOT move the next run
+```
+
+The accepted schedule shape is deliberately `Record<string, unknown>` rather than a declared
+interface: it is `prepareScheduleWrite`'s, in core, and a second declaration here would be a second
+definition of what a valid schedule is — right when written and wrong at the next field.
+
+A schedule the **manifest** declares refuses `updateSchedule` and `deleteSchedule` with
+`schedule_manifest_owned`, because reconciliation restores every field from the file at the next
+boot and the write would silently not survive. `schedules()` reports `origin` so a caller can tell
+which rows it may touch. `runSchedule` is allowed on either, because it writes nothing.
+
 ## Testing against it
 
 `createClient` takes a `fetch`, and the server's `createHandler` is a plain

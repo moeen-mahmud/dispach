@@ -17,10 +17,12 @@ VelaOps is its first consumer, not its owner.
 | `02-SPEC-MANIFEST.md` | `agent.yaml` — the single config contract. |
 | `03-SPEC-PLUGIN-API.md` | Plugin and middleware contracts. |
 | `04-SPEC-WIRE.md` | HTTP/SSE surface and the lifecycle event schema. |
-| `05-PLAN.md` | Sixteen phases, each with acceptance criteria. The build order. |
-| `06-VELAOPS-INTEGRATION.md` | The compat adapter, migration strategy, and what must never leak into core. |
+| `05-PLAN.md` | Every phase with acceptance criteria, plus the carried backlog. The build order. |
+| `06-VELAOPS-INTEGRATION.md` | Migration strategy and what must never leak into core. **The compat adapter it once described was deleted rather than built** — VelaOps calls `/v1` like any other client. |
 | `07-SPEC-WORKSPACE.md` | The tiered agent workspace — the `SOUL.md` identity pair, `AGENTS.md`, `POLICY.md`, `USER.md`, `MEMORY.md`, `REMINDER.md`, budgets, and per-model rendering. Supersedes `context.files` in doc 02, which survives as a deprecated alias. |
 | `08-MEMORY.md` | How memory is stored, retrieved, and injected — Phase 6 through 6.5, with the numbers. |
+| `09-API-GUIDE.md` | The agent server walked through, `compose up` to a streamed reply. The *guide*; doc 04 is the contract. |
+| `12-OPENCLAW-CUTOVER.md` | Moving off the runtime this one replaces. |
 
 `CLAUDE.md` lives at the repo root, not here. It is the standing brief for coding agents.
 
@@ -42,20 +44,30 @@ subsystems are only testable end-to-end.
 
 ## Status
 
-Phases 0–3 implemented and verified: manifest, loop, model layer, store and sessions, the Ink
-CLI, and the tool layer with both dialects. Measured numbers live in `evals/` — see
-`evals/tools/README.md` for the NLT-versus-native comparison that Phase 3's gate turns on.
+**Shipped: `dispach@0.1.1`.** Phases 0 through 19 are built, the last being the VelaOps cutover. This section named Phase 3 as the
+frontier and "everything from Phase 4 on" as design-only for long enough to be actively misleading,
+which is the drift the closing paragraph below warns about — so it is now a pointer rather than a
+second copy of the plan:
 
-Phase 3.5 is in, all of it: the workspace tiers, frontmatter and comment stripping, per-file and
-total budgets, the rule guard, `context.files` as a deprecated alias, `promptStyle` rendering,
-`examplesIn` placement, `SOUL.md` gating with `soul distill`, `knowledge/`, the `workspace`
-script, `bun run eval:rules`, and `evals/prompt-style/` with committed numbers behind the `examplesIn`
-and `intensity` defaults. Phase 3.7 is in: `init` scaffolds a validated starter agent from the
-workspace templates. Phase 3.8 is in: agents live in the `~/.dispach` sandbox and run by bare
-name, bare `run` opens a picker, `init` is an Ink wizard generating the SOUL.md identity pair, the
-AGENTS.md operations file, and a reference-style manifest, and the chat/wizard/picker surfaces share one TUI kit
-(`cli/src/lib/theme.ts` + `components/`). Still design-only: Phase 3.6 and everything from
-Phase 4 on.
+> **`05-PLAN.md` marks every phase `built` with the date it landed.** Read it there. A status
+> summary maintained by hand in a second file is a status summary that is right on the day it is
+> written, which is the whole lesson of the six phantom event rows in doc 04 and the
+> `packages/channel-whatsapp` that was listed in doc 01 and has never existed.
+
+In one paragraph: the manifest and loop, the store, both tool dialects, the tiered workspace, the
+system and web providers with a policy engine and a hardline floor, Telegram, the HTTP/SSE/WS
+server, an idempotent outbox, memory on FTS5, skills with two catalogues, the compaction ladder,
+phase scoping, scheduling, the plugin API with all four middleware wrap points, supervisor
+delegation, launchd services, the Docker image and compose front door, a typed client, scoped
+operator keys, the full-screen TUI, and a browser UI on the same origin as the API — which since
+0.1.1 edits settings and schedules rather than only reporting them.
+
+Not built: **WhatsApp**, which decision 8.4 makes a legal question rather than an engineering one,
+and which a plugin channel can now supply; and **MCP as a tool provider**, which decision 4.7 keeps
+as *one provider among several, never the substrate* — planned, not refused, and never written.
+`01-ARCHITECTURE.md` listed a `tools-mcp/` package in its tree for months; it has never existed.
+
+Measured numbers live in `evals/`, each with a script to reproduce it.
 
 When code and these documents disagree, **the code wins** and the doc is stale — fix it in
 the same PR. A planning doc that quietly drifts from the implementation is worse than no
