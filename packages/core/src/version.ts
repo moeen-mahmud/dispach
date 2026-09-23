@@ -11,4 +11,4 @@
  * Kept in step by that test rather than by discipline — `changeset version` rewrites the manifest
  * and knows nothing about this line, so a bump turns the suite red until somebody edits it here.
  */
-export const VERSION = "0.1.2"
+export const VERSION = "0.1.3"
