@@ -1,0 +1,221 @@
+$schema: https://api.gitbook.com/gitbook-docs.yaml
+site:
+  title: Dispach
+  structure:
+    - type: section
+      key: section-documentation
+      title: Documentation
+      path: docs
+      default: true
+      children:
+        - type: space
+          key: space-documentation
+          title: Dispach Documentation
+          path: documentation
+          default: true
+          content:
+            directory: ./docs
+            language: en
+
+    - type: section
+      key: section-packages
+      title: Packages
+      path: packages
+      children:
+        - type: space
+          key: space-cli
+          title: CLI
+          path: cli
+          default: true
+          content:
+            directory: ./packages/cli
+            language: en
+        - type: space
+          key: space-client
+          title: TypeScript Client
+          path: client
+          content:
+            directory: ./packages/client
+            language: en
+        - type: space
+          key: space-server
+          title: Server
+          path: server
+          content:
+            directory: ./packages/server
+            language: en
+        - type: space
+          key: space-channel-telegram
+          title: Telegram Channel
+          path: channel-telegram
+          content:
+            directory: ./packages/channel-telegram
+            language: en
+        - type: space
+          key: space-channel-whatsapp
+          title: WhatsApp Channel
+          path: channel-whatsapp
+          content:
+            directory: ./packages/channel-whatsapp
+            language: en
+        - type: space
+          key: space-tools-system
+          title: System Tools
+          path: tools-system
+          content:
+            directory: ./packages/tools-system
+            language: en
+        - type: space
+          key: space-tools-web
+          title: Web Tools
+          path: tools-web
+          content:
+            directory: ./packages/tools-web
+            language: en
+        - type: space
+          key: space-tools-composio
+          title: Composio Tools
+          path: tools-composio
+          content:
+            directory: ./packages/tools-composio
+            language: en
+
+    - type: section
+      key: section-examples
+      title: Examples
+      path: examples
+      children:
+        - type: space
+          key: space-example-minimal
+          title: Minimal
+          path: minimal
+          default: true
+          content:
+            directory: ./examples/minimal
+            language: en
+        - type: space
+          key: space-example-reference
+          title: Reference
+          path: reference
+          content:
+            directory: ./examples/reference
+            language: en
+        - type: space
+          key: space-example-shell-agent
+          title: Shell Agent
+          path: shell-agent
+          content:
+            directory: ./examples/shell-agent
+            language: en
+        - type: space
+          key: space-example-team
+          title: Team
+          path: team
+          content:
+            directory: ./examples/team
+            language: en
+        - type: space
+          key: space-example-telegram-assistant
+          title: Telegram Assistant
+          path: telegram-assistant
+          content:
+            directory: ./examples/telegram-assistant
+            language: en
+        - type: space
+          key: space-example-workspace-template
+          title: Workspace Template
+          path: workspace-template
+          content:
+            directory: ./examples/workspace-template
+            language: en
+
+    - type: section
+      key: section-evaluations
+      title: Evaluations
+      path: evals
+      children:
+        - type: space
+          key: space-eval-budget
+          title: Token Budget
+          path: budget
+          default: true
+          content:
+            directory: ./evals/budget
+            language: en
+        - type: space
+          key: space-eval-handoff
+          title: Handoff
+          path: handoff
+          content:
+            directory: ./evals/handoff
+            language: en
+        - type: space
+          key: space-eval-memory
+          title: Memory
+          path: memory
+          content:
+            directory: ./evals/memory
+            language: en
+        - type: space
+          key: space-eval-nlt-heredoc
+          title: NLT Heredoc
+          path: nlt-heredoc
+          content:
+            directory: ./evals/nlt-heredoc
+            language: en
+        - type: space
+          key: space-eval-phases
+          title: Phase-Scoped Tools
+          path: phases
+          content:
+            directory: ./evals/phases
+            language: en
+        - type: space
+          key: space-eval-prompt-style
+          title: Prompt Style
+          path: prompt-style
+          content:
+            directory: ./evals/prompt-style
+            language: en
+        - type: space
+          key: space-eval-rules
+          title: Rule Following
+          path: rules
+          content:
+            directory: ./evals/rules
+            language: en
+        - type: space
+          key: space-eval-skills
+          title: Skill Indexing
+          path: skills
+          content:
+            directory: ./evals/skills
+            language: en
+        - type: space
+          key: space-eval-tools
+          title: Tool Dialects
+          path: tools
+          content:
+            directory: ./evals/tools
+            language: en
+        - type: space
+          key: space-eval-web
+          title: Web Injection
+          path: web
+          content:
+            directory: ./evals/web
+            language: en
+
+    - type: section
+      key: section-deployment
+      title: Deployment
+      path: deployment
+      children:
+        - type: space
+          key: space-docker
+          title: Docker
+          path: docker
+          default: true
+          content:
+            directory: ./docker
+            language: en
