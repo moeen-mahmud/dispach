@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Rewrite the command table in `README.md` and `packages/cli/README.md` from the command specs.
+ * Rewrite the command table in `README.md` from the command specs. `packages/cli/README.md` is a
+ * gitignored copy that `prepack` makes at publish time, so it is never written here.
  *
  *     bun scripts/readme-commands.ts
  *
@@ -13,7 +14,7 @@ import { join, resolve } from "node:path"
 import { withCommandTable } from "../packages/cli/src/lib/readme-table.ts"
 
 const ROOT = resolve(import.meta.dirname, "..")
-for (const path of [join(ROOT, "README.md"), join(ROOT, "packages", "cli", "README.md")]) {
+for (const path of [join(ROOT, "README.md")]) {
     const next = withCommandTable(readFileSync(path, "utf8"))
     if (next === undefined) {
         process.stderr.write(

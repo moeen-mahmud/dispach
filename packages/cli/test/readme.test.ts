@@ -1,10 +1,11 @@
 /**
  * The README's command table is generated, and this is what makes "generated" mean anything.
  *
- * `README.md` and `packages/cli/README.md` are byte-identical on purpose (the second is what npm
- * shows), and both carry the table between two markers. A command added to `COMMANDS` without
- * `bun scripts/readme-commands.ts` fails here rather than shipping a README that lists everything
- * but the newest verb — which is what the hand-written table did for five commands at once.
+ * The root `README.md` carries the table between two markers. `packages/cli/README.md` is **not**
+ * tracked — `prepack` copies the root one at publish time, and it is gitignored — so only the root
+ * file is checked; reading the copy passed on a machine that had packed once and failed in CI. A
+ * command added to `COMMANDS` without `bun scripts/readme-commands.ts` fails here rather than
+ * shipping a README that lists everything but the newest verb.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -15,18 +16,10 @@ import { withCommandTable } from "../src/lib/readme-table.ts"
 const ROOT = resolve(import.meta.dirname, "..", "..", "..")
 
 describe("the README command table", () => {
-    test("matches the command specs in both copies", () => {
-        for (const path of ["README.md", join("packages", "cli", "README.md")]) {
-            const readme = readFileSync(join(ROOT, path), "utf8")
-            const rendered = withCommandTable(readme)
-            expect(rendered, `${path} has no command-table markers`).toBeDefined()
-            expect(rendered, `${path} is stale — run bun scripts/readme-commands.ts`).toBe(readme)
-        }
-    })
-
-    test("the two READMEs are one file", () => {
-        expect(readFileSync(join(ROOT, "packages", "cli", "README.md"), "utf8")).toBe(
-            readFileSync(join(ROOT, "README.md"), "utf8"),
-        )
+    test("matches the command specs", () => {
+        const readme = readFileSync(join(ROOT, "README.md"), "utf8")
+        const rendered = withCommandTable(readme)
+        expect(rendered, "README.md has no command-table markers").toBeDefined()
+        expect(rendered, "README.md is stale — run bun scripts/readme-commands.ts").toBe(readme)
     })
 })
