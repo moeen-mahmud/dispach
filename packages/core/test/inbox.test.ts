@@ -6,8 +6,8 @@
  * is only ever tested by accident is one whose tolerances drift without anyone noticing.
  */
 
-import { describe, expect, test } from "bun:test"
 import { isAllowed } from "../src/index.ts"
+import { describe, expect, test } from "./_harness.ts"
 
 const from = (senderHandle: string, peerId = `${senderHandle}@s.whatsapp.net`) => ({
     peerId,

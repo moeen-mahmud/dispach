@@ -22,9 +22,9 @@
  * **Baileys reverse-engineers WhatsApp Web, which WhatsApp's terms do not permit, and there is no
  * appeal path when a number is banned** — including during development. That is a risk an operator
  * takes deliberately for an account they chose; it is not one a runtime should take on behalf of
- * everybody who installs it. So the tarball, the compiled binaries and the container image carry
- * none of this: it is built, typechecked, linted and tested here, imported by nothing, and reaches
- * an agent only through `plugins add`.
+ * everybody who installs it. So the tarball and the container image carry none of this: it is
+ * built, typechecked, linted and tested here, imported by nothing, and reaches an agent only
+ * through `plugins add`.
  *
  * **Pair a spare number.** Not advice — the recorded position (decision 8.4), and the reason this
  * sentence is in the package README as well as here.
@@ -32,7 +32,7 @@
  * ## What it is
  *
  * One self-contained ES module. Baileys is bundled in — no runtime install, hard rule 5 — which is
- * what makes the same directory work in a checkout, in the compiled binary and in the container.
+ * what makes the same directory work in a checkout, under the npm install and in the container.
  * Three of Baileys' optional media dependencies stay external (`sharp`, `jimp`,
  * `link-preview-js`); it loads each inside a `catch` and this channel is text, so their absence
  * costs image thumbnails and link previews and nothing else.
@@ -98,11 +98,24 @@ export const whatsappChannel: ChannelFactory = (context) => {
             `channels.${context.id}.pairWith: "${written}" is not a WhatsApp number — the digits with the country code, with or without a +.`,
         )
 
+    /**
+     * The bracket of the Linked-devices label. Printable ASCII and short, because it goes into a
+     * protocol field WhatsApp validates and a value it cannot display is a pairing that fails with
+     * no explanation. The risk that even a valid one is refused by some accounts is the field's
+     * own documentation, not a load-time check — a name is a legitimate thing to want.
+     */
+    const deviceName = stringField(context.config, "deviceName")
+    if (deviceName !== undefined && !/^[\x20-\x7e]{1,32}$/.test(deviceName))
+        throw new Error(
+            `channels.${context.id}.deviceName: "${deviceName}" must be 1-32 printable ASCII characters — it is the bracket of the phone's Linked-devices label.`,
+        )
+
     const pairingDelayMs = context.config.pairingDelayMs
     return new WhatsAppTransport({
         id: context.id,
         authDir,
         ...(pairWith === undefined ? {} : { pairWith }),
+        ...(deviceName === undefined ? {} : { deviceName }),
         ...(typeof pairingDelayMs === "number" ? { pairingDelayMs } : {}),
         ...(api === undefined ? {} : { api }),
     })

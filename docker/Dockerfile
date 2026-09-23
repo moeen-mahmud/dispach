@@ -6,17 +6,25 @@
 # directory that persists, a package set its own documented features require, and one place an agent
 # can live.
 #
-# ## Two stages, and the runtime has no toolchain at all
+# ## Two stages: Bun builds, Node runs
 #
-# The builder has the workspace, the lockfile and every dev dependency. The runtime has **one file**:
-# the compiled binary. No Bun, no Node, no `node_modules`, no lockfile, no nine `package.json`
-# copies, no seven `dist/` directories. `bun build --compile` embeds the runtime beside the bundled
-# program, so there is nothing left to resolve at boot — which is also why it starts *faster* than
-# the npm shape (measured: 70-90 ms against 90-110 ms on `validate --json`).
+# The builder has the workspace, the lockfile and every dev dependency, and produces **the npm
+# tarball** — the same `dispach-<version>.tgz` that `npm publish` ships. The runtime installs that
+# tarball with `npm i -g` and nothing else, so the container runs byte-for-byte what
+# `npm i -g dispach` runs on a laptop: one installed package, `ink` and `react` resolved by npm,
+# everything else bundled into `dist/`.
 #
-# Deleting the runtime `bun install` has a side effect worth naming: `ink` declares
-# `react-devtools-core` a **peerDependency**, so `--production` did not skip it and ~17 MB of
-# developer tooling reached every shipped image. It cannot arrive now.
+# **Node, not a Bun-compiled binary, and it was measured.** Until 0.1.3 the runtime stage held one
+# `bun build --compile` file. Bun cannot complete the WhatsApp Noise handshake — the socket opens and
+# no QR or code ever arrives, reproduced at three levels against the same bundle that pairs under
+# Node in two seconds — so the image carried a channel it could not finish pairing. Node is what the
+# npm install already ran under; the image now runs under it too, and there is one runtime to reason
+# about instead of two.
+#
+# No `bun install` in the runtime stage, still: `ink` declares `react-devtools-core` a
+# **peerDependency**, so a `--production` install of the workspace pulled ~17 MB of developer tooling
+# into every image. Installing the *tarball* cannot — its dependency list is the two packages the
+# published `package.json` names.
 #
 # ## Why debian and not alpine
 #
@@ -30,24 +38,18 @@
 # is the same "shipped feature unusable in the only supported deployment" failure this file already
 # refuses for `git`.
 #
-# **bun's musl `--compile` target has open correctness bugs** — oven-sh/bun #15829, where
-# `bun-linux-musl-x64-modern` emits a *glibc* binary; #29681, where the prebuilt musl binary still
-# wants glibc; #14292, where `--compile` is broken for musl arm64. Shipping a compiled binary onto
-# alpine bets the image on bun's least-travelled target.
+# **Size stopped being the argument.** Alpine is ~5 MB against debian-slim's ~75 MB, and the
+# apt layer this image needs is ~180 MB either way. Builder and runtime are both Debian 13 (trixie),
+# glibc 2.41, so there is no libc gap between the machine that builds and the machine that runs.
 #
-# **Size stopped being the argument.** Alpine is ~5 MB against debian-slim's ~75 MB, and the compiled
-# linux binary alone is ~100 MB. Builder and runtime are both Debian 13 (trixie), glibc 2.41, so
-# there is no libc gap between the machine that compiles and the machine that runs.
-#
-# **Distroless is disqualified twice**, which is worth writing down because it is otherwise the
-# obvious modern answer: `exec` runs `sh -c`, so an image with no shell deletes the tool layer; and a
-# musl-linked binary in `base-debian13` fails at load.
+# **Distroless is disqualified**, which is worth writing down because it is otherwise the obvious
+# modern answer: `exec` runs `sh -c`, so an image with no shell deletes the tool layer.
 
 # ─── builder ──────────────────────────────────────────────────────────────────────────────
 #
-# `oven/bun:1` rather than `oven/bun:1-alpine`: the host target is then glibc and no
-# cross-compilation happens at all, which is the one bun path without open bugs. Buildx runs this
-# stage on the target platform, so the architecture is already right.
+# Bun is the dev toolchain — install, bundle, pack — and appears in this stage only. The tarball it
+# writes is architecture-independent, so buildx runs this stage once per platform and produces the
+# same bytes on both.
 FROM oven/bun:1 AS builder
 WORKDIR /build
 
@@ -59,9 +61,6 @@ COPY packages/cli/package.json ./packages/cli/
 COPY packages/server/package.json ./packages/server/
 COPY packages/web/package.json ./packages/web/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/
-# Copied so `bun install --frozen-lockfile` sees every workspace member — and for no other reason.
-# Nothing imports this package, so none of it reaches the compiled binary, and the runtime stage
-# copies only that binary. Baileys is installed in the builder and thrown away with it.
 COPY packages/channel-whatsapp/package.json ./packages/channel-whatsapp/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
@@ -77,19 +76,24 @@ RUN bun install --frozen-lockfile --ignore-scripts
 COPY tsconfig.base.json ./
 COPY scripts ./scripts
 COPY packages ./packages
+# The npm page's readme, which `prepack` copies beside the package. Copied by hand here because
+# `bun pm pack` runs with `--ignore-scripts` below — the same reason the install did.
+COPY README.md ./packages/cli/README.md
 
-# Every package the binary imports, not just core and cli — the compile bundles what the CLI
-# resolves through each sibling's `dist/`, so a partial build produces a binary missing a provider.
+# Every package the CLI imports, not just core and cli — the bundle resolves each sibling through its
+# `dist/`, so a partial build produces a package missing a provider.
 RUN bun run build
 
-# One compile path shared with a developer's machine: the same script, so the image cannot drift
-# from what `bun run build:binary` produces locally. It also *runs* what it built — the host target
-# is executable here — so a binary that cannot start fails the image build rather than the
-# healthcheck. The glob resolves in the shell because the architecture is in the filename.
-RUN bun run build:binary && mv dist-bin/dispach-linux-* /out-dispach
+# The tarball `npm publish` would ship, from the one package this repository publishes. `bun pm pack`
+# honours `files` exactly as `npm pack` does, and there is no npm in this stage — the `node` on
+# `oven/bun`'s PATH is a shim that runs bun.
+RUN mkdir /out && cd packages/cli && bun pm pack --destination /out --ignore-scripts
 
 # ─── runtime ──────────────────────────────────────────────────────────────────────────────
-FROM debian:trixie-slim AS runtime
+#
+# The official Node image on the same Debian release as before, so the apt layer below is unchanged
+# and glibc is the one the builder has. `-slim` carries `node`, `npm` and `corepack` and nothing else.
+FROM node:24-trixie-slim AS runtime
 
 # ─── What the agent's shell can reach ─────────────────────────────────────────────────────
 #
@@ -131,10 +135,18 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
 # glibc — that is what static linking is for.
 COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /uvx /usr/local/bin/
 
-# The binary. This is the entire application.
-COPY --from=builder /out-dispach /usr/local/bin/dispach
+# The application: the published package, installed the way a laptop installs it. `npm i -g` puts
+# `dispach` on `/usr/local/bin` and the package under `/usr/local/lib/node_modules`. `--omit=dev`
+# is belt and braces — a tarball's `package.json` carries no devDependencies — and `--ignore-scripts`
+# because nothing this package or its two dependencies need runs at install. The cache is deleted
+# because it is a build artefact that would otherwise ship in the layer.
+COPY --from=builder /out/*.tgz /tmp/dispach.tgz
+RUN npm install -g --omit=dev --ignore-scripts /tmp/dispach.tgz \
+    && rm /tmp/dispach.tgz \
+    && npm cache clean --force \
+    && dispach --version
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod 0755 /usr/local/bin/dispach /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
 # ─── The agent's home ─────────────────────────────────────────────────────────────────────
 #
@@ -149,7 +161,11 @@ RUN chmod 0755 /usr/local/bin/dispach /usr/local/bin/entrypoint.sh
 # **`USER` does not set `$HOME` in Docker** — it is inherited from the build environment. Without the
 # explicit `ENV` the sandbox resolves against `/root`: writable while building, refused under
 # `USER dispach`, and the failure lands on the first turn rather than at start.
-RUN useradd --create-home --uid 1000 --shell /bin/bash dispach
+# The node image ships a `node` user at uid 1000. Removed rather than renamed, so the account, its
+# group and its home carry this project's name and the compose file's `chown 1000:1000` advice
+# stays true.
+RUN userdel -r node \
+    && useradd --create-home --uid 1000 --shell /bin/bash dispach
 ENV HOME=/home/dispach
 
 # `LANG` because a missing UTF-8 default corrupts any tool that emits one, in a container where
@@ -183,7 +199,6 @@ EXPOSE 7420
 # Telegram outage must not read as an unhealthy container and get it restarted into the same outage.
 # So this answers "can it serve a turn", which is the question an orchestrator is actually asking.
 #
-# `curl` rather than the old `bun -e`: there is no Bun in this stage any more, which is the point.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:7420/v1/ready > /dev/null || exit 1
 

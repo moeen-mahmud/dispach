@@ -622,8 +622,12 @@ export const DAEMON_CHOICES: readonly {
     readonly value: string
     readonly label: string
 }[] = [
-    { value: "none", label: "No — it runs while you have `serve` open in a terminal" },
+    // `service` first and the question's fallback, since 0.1.3. Enter-through and `--yes` used to
+    // mean *no service*, so the always-on shape the product is built around was the one answer a
+    // person had to choose deliberately — and a paired channel on an agent nothing was serving was
+    // the first thing every new user hit. `--daemon none` is still one flag away.
     { value: "service", label: "Yes — in the background: starts at login, restarts on crash" },
+    { value: "none", label: "No — it runs while you have `serve` open in a terminal" },
 ]
 
 export function daemonChoice(value: string): (typeof DAEMON_CHOICES)[number] | undefined {
@@ -1082,7 +1086,9 @@ export function nextQuestion(
                 return {
                     step,
                     prompt: "Keep it running in the background?",
-                    fallback: "1",
+                    // By name, never `"1"`: the order of `DAEMON_CHOICES` and the default are two
+                    // decisions, and an index makes them one forever.
+                    fallback: "service",
                     options: DAEMON_CHOICES.map((choice) => ({
                         value: choice.value,
                         label: choice.label,
@@ -1851,11 +1857,16 @@ function whatsappEntry(answers: InitAnswers): readonly string[] {
     return [
         `  # Unofficial: this runs Baileys, which reverse-engineers WhatsApp Web. The number can be`,
         `  # banned and there is no appeal — use a spare one.`,
-        `  # Pairing does not complete under Bun, so use the npm-installed \`${BRAND.slug}\` rather than`,
-        `  # the compiled binary or the container image. The channel says so at start.`,
+        `  # Pairing does not complete under Bun; every install of \`${BRAND.slug}\` runs under Node, so`,
+        `  # this only matters when running from a checkout with bun. The channel says so at start.`,
         `  - type: whatsapp`,
         `    id: wa                     # the channel segment of every session key it produces`,
         `    authDir: ./.whatsapp       # the paired session — 0600, and gitignored for you`,
+        `    # What the phone lists under Linked devices: "Google Chrome (<deviceName>)". The left`,
+        `    # half is fixed by the protocol; only the bracket is yours. Some accounts refuse a`,
+        `    # non-standard name under pairing-by-code — if pairing is refused, remove this and pair`,
+        `    # again. New pairings only; a linked device keeps the name it was paired with.`,
+        `    # deviceName: ${slugify(answers.name)}`,
         ...(number === ""
             ? [
                   `    # No number, so pairing is a QR to scan. Set pairWith to the account's own`,
@@ -2167,7 +2178,7 @@ function manifestFor(answers: InitAnswers): string {
         `  # observationMaxTokens: 2000`,
         `  # budgets: { static: 2000, volatile: 3500, reminder: 500, total: 6000 }`,
         `  # rules:`,
-        `  #   perRuleSuccess: 0.90    # measure with \`${BRAND.slug} eval rules\`, do not guess`,
+        `  #   perRuleSuccess: 0.90    # measure with \`bun run eval:rules\` in a checkout, do not guess`,
         `  #   reliabilityTarget: 0.80 # at 0.90 per rule this permits TWO rules, not four`,
         `  #   onExceed: fail`,
         ``,

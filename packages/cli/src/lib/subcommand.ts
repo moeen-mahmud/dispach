@@ -19,7 +19,6 @@
  */
 
 import { findCommand } from "#lib/commands"
-import { selfInvocation } from "#lib/self"
 import { spawnCaptureAsync } from "#lib/spawn"
 
 export interface SubcommandResult {
@@ -113,28 +112,16 @@ export async function runSubcommand(request: SubcommandRequest): Promise<Subcomm
     // rule 8 forbids, whatever the message says.
     if (refusal !== undefined) return { lines: [refusal], code: 1 }
 
-    /**
-     * **The compiled binary is its own command and takes no script argument.**
-     *
-     * This read `[execPath, argv[1], ...]` unconditionally, which is right under node and wrong in
-     * the artefact this ships as: `argv[1]` there is `/$bunfs/root/<binary>`, a path inside bun's
-     * embedded filesystem, and passing it made every pane command answer `Unknown command
-     * "/$bunfs/root/<bin>-linux-arm64"`. Reported on `/channels` in the container; it was never
-     * about `/channels`.
-     *
-     * `request.interpreter`/`request.script` still override, because the tests inject both.
-     */
-    const self = selfInvocation()
-    const interpreter = request.interpreter ?? self.command
-    const lead =
-        request.script !== undefined
-            ? [request.script]
-            : request.interpreter !== undefined
-              ? [""]
-              : self.args
+    // The interpreter and the script that started this process — `node` and `dist/index.js` under
+    // the npm install, `bun` and `src/index.ts` from a checkout. `request.interpreter`/`request.script`
+    // override, because the tests inject both; an interpreter injected without a script gets an
+    // empty one rather than this process's, which would run the wrong program under the fake.
+    const interpreter = request.interpreter ?? process.execPath
+    const script =
+        request.script ?? (request.interpreter !== undefined ? "" : (process.argv[1] ?? ""))
     const result = await spawnCaptureAsync({
         command: interpreter,
-        args: [...lead, ...subcommandArgv(request)],
+        args: [script, ...subcommandArgv(request)],
         ...(request.env === undefined ? {} : { env: request.env }),
         timeoutMs: request.timeoutMs ?? 30_000,
     })

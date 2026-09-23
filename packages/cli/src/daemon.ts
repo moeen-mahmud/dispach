@@ -55,7 +55,6 @@ import { liveHosts } from "#lib/lifecycle"
 import { type FollowIO, followLogs } from "#lib/log-follow"
 import { bytes, indent, keyValue, tildify } from "#lib/render"
 import { listAgents, logPaths, sandboxRoot, serverLogPaths, storePath } from "#lib/sandbox"
-import { isCompiledBinary } from "#lib/self"
 import { type Exec, resolveServiceManager, unsupported } from "#lib/service"
 import { renderUnit } from "#lib/systemd"
 
@@ -211,8 +210,6 @@ async function serverInstallAction(
     const plan: ServicePlan = {
         label,
         // **No manifest.** The sandbox is the inventory, read at every start.
-        // `scriptPath` is empty for a compiled binary, which is the whole command on its own —
-        // filtered rather than conditionally spread so there is one expression to read.
         programArguments: [
             binary.execPath,
             binary.scriptPath,
@@ -293,9 +290,7 @@ async function serverInstallAction(
  */
 function binaryFacts(): BinaryFacts {
     const execPath = realpathOr(process.execPath)
-    // A compiled binary has no script: `argv[1]` is a `/$bunfs/` path that no process can execute,
-    // and `realpath` on it returns it unchanged rather than failing, so the plist would look fine.
-    const scriptPath = isCompiledBinary() ? "" : realpathOr(process.argv[1] ?? "")
+    const scriptPath = realpathOr(process.argv[1] ?? "")
     const gitRoot = findGitRoot(dirname(scriptPath))
     return { execPath, scriptPath, ...(gitRoot === undefined ? {} : { gitRoot }) }
 }

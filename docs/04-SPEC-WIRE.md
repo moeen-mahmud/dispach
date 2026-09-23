@@ -97,7 +97,6 @@ and WebSocket surfaces can return:
 | `agent_stopped` | 400 | Adoption was asked for an agent that is switched off. `start` is the way back, and it is the one caller that enables before adopting. |
 | `turn_not_running` | 409 | No cancel handle for that turn **on this API** — a channel- or schedule-started turn has none. |
 | `internal_error` | 500 | An unexpected throw. The event stream carries what happened around it. |
-| `websocket_unavailable` | 501 | `/v1/ws` under Node, which has no upgrade path without a dependency. |
 | `server_token_missing` | — | `createHandler` was built with neither a token nor `allowUnauthenticated`. Thrown at construction, not returned. |
 | `server_public_without_token` | — | A non-loopback bind with no token. Thrown at construction. |
 | `frame_not_json` | — | WebSocket frame did not parse. Sent as a `ws.error` frame. |
@@ -1056,10 +1055,12 @@ per process, shared by the HTTP handler and this bridge. It does not reach a tur
 schedule began: nothing in core records in-flight turns, so there is no handle to share, and
 `POST /stop` says exactly that with `turn_not_running`.
 
-**Served under Bun only.** Bun has an upgrade path in `Bun.serve`; Node has none without a
-dependency, and adding one for an endpoint this section itself calls secondary is the wrong trade.
-Under Node the route answers `501 websocket_unavailable` naming the reason — better than a
-connection failure a client reads as a network problem. Decision 11.23.
+**Served under Bun and Node.** Until 0.1.3 this route answered `501 websocket_unavailable` under
+Node, on the argument that the spec calls the endpoint secondary and Node has no upgrade path
+without a dependency (decision 11.23). That held while the container ran under Bun; with Node the
+only shipped runtime, "secondary" had become "absent from every install", so the server carries
+`ws` and both adapters drive the same bridge — one set of frames, one origin guard, one
+authentication path.
 
 **Authentication is the subprotocol list, and `?token=` is deprecated.** A browser's `WebSocket`
 constructor cannot set ordinary headers, but the subprotocol list *is* a header it sends on the

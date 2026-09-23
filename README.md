@@ -4,15 +4,16 @@ A lightweight, model-agnostic AI agent runtime.
 
 Dispach turns a stateless OpenAI-compatible `/chat/completions` endpoint into an agent that
 uses tools, remembers across sessions, acts on your machine under a policy you set, lives in
-messaging channels, runs on a schedule, and delegates to other agents. Bun-first TypeScript,
-Apache-2.0.
+messaging channels, runs on a schedule, and delegates to other agents. TypeScript, built with Bun
+and shipped on Node, Apache-2.0.
 
 > To dispatch is to send a thing on its way with the authority to see it done — to decide
 > what handles it, hand it over, and answer for the result.
 
 ## Status
 
-**Pre-release, and it runs.** Install a single binary, or work from a checkout (both below).
+**Pre-release, and it runs.** Install from npm, Homebrew or the container image, or work from a
+checkout (all below). Every install runs under Node.
 
 Built and in use: the manifest and agent loop, the store and sessions, tools with the NLT and
 native dialects, the tiered workspace, system and web tool providers with a policy engine, the
@@ -106,16 +107,15 @@ so there is one thing to install, one thing to version and one thing to trust. `
 pulls in no terminal UI — asserted by the package's own tests, because an HTTP client has no
 business paying the ~170-210 ms that importing Ink and React costs.
 
-### Or the standalone binary
-
-One file, no Node and no `node_modules`. `bun build --compile` embeds the runtime, which is also
-why it starts *faster* than a `node_modules` install — there is no module resolution left to do at
-boot. Measured on an M-series mac, `validate --json`: **70–90 ms compiled against 90–110 ms through
-Node**.
+### Or with Homebrew
 
 ```bash
 brew install moeen-mahmud/tap/dispach
 ```
+
+The formula depends on `node` and installs the same npm tarball, so a brew install and an npm
+install run identical code — one runtime, one artefact to checksum. (Until 0.1.3 the formula shipped
+a Bun-compiled binary, and Bun cannot complete the WhatsApp handshake; see below.)
 
 The name is fully qualified on purpose. Homebrew taps from it with no separate `brew tap`, and
 naming a formula in full is *itself* what Homebrew accepts as consent to load a third-party tap —
@@ -124,30 +124,15 @@ until `brew trust moeen-mahmud/tap` is run, because a bare name carries no such 
 
 `brew services start dispach` then runs the always-on server; `brew info` prints the rest.
 
-Or take the asset straight from a release — `darwin-arm64`, `darwin-x64`, `linux-x64` and
-`linux-arm64`, each with a `.sha256` beside it:
+### Or the container
 
 ```bash
-base=https://github.com/moeen-mahmud/dispach/releases/latest/download
-curl -fsSL -O "$base/dispach-darwin-arm64"
-curl -fsSL -O "$base/dispach-darwin-arm64.sha256"
-shasum -a 256 -c dispach-darwin-arm64.sha256      # must print "OK"
-chmod +x dispach-darwin-arm64
-sudo mv dispach-darwin-arm64 /usr/local/bin/dispach
+docker pull ghcr.io/moeen-mahmud/dispach:0.1.3
 ```
 
-Download with `-O`, not `-o dispach`: the checksum file names the asset, so renaming before the
-check makes `shasum -c` look for a file that is not there.
-
-Two things worth knowing about the macOS asset, because the failure has no error message:
-
-- **The release binary is ad-hoc signed, and it has to be.** A compiled Bun binary arrives
-  *linker-signed*, which macOS refuses on exec — **exit 137 with no output at all**, which reads as
-  a crash rather than as a policy. `codesign -dv` reports such a file as signed, so the obvious
-  check passes on a binary that cannot run. The release re-signs every darwin asset, and
-  `scripts/build-binary.ts` refuses to produce an unsigned one.
-- **Gatekeeper still applies to a downloaded file.** A binary fetched with a browser carries a
-  quarantine attribute; `xattr -d com.apple.quarantine dispach` clears it. `curl` does not set it.
+The [Docker](#docker) and [Compose](#hosting-with-compose) sections below have the run lines and
+the reasons behind them. The image is `node:24-trixie-slim` with `git`, `python3`, `uv` and `jq`,
+because the agent has a shell.
 
 ### Or from a checkout
 
@@ -175,8 +160,8 @@ Four things that are not obvious:
   `tools-system`, `tools-web`, `tools-composio` and `channel-telegram` from their `dist`, so building
   only `core` and `cli` leaves the binary running yesterday's provider code — and the symptom is the
   worst kind: your change is correct, a test fails, and the stack trace points into a stale `dist`.
-- **Node 24+ must be on your `PATH`.** The built binary's shebang is `#!/usr/bin/env node`; Bun builds
-  it and Node runs it.
+- **Node 24+ must be on your `PATH`.** The built entry's shebang is `#!/usr/bin/env node`; Bun builds
+  it and Node runs it — the same runtime every install ships.
 - **`DISPACH_HOME` relocates the whole sandbox.** Point it at a temporary directory and every agent,
   the store and the logs go there instead of `~/.dispach` — which is how to try things out, and how
   every test in this repo avoids touching a real one.
@@ -306,13 +291,17 @@ connects a channel, because a REPL that quietly started answering Telegram while
 would be a surprise — and because a messaging provider allows exactly one listener per token, so
 the two would fight over your bot.
 
-`serve` still dies with its terminal. On macOS:
+`serve` still dies with its terminal. So `init` asks whether to keep it running — the default is
+yes — and puts the service up itself: one service hosts every agent in the sandbox, and the agent
+just written is adopted by it before the wizard finishes. By hand, and afterwards:
 
 ```bash
-dispach daemon install milo   # checks it will boot, then installs a LaunchAgent
-dispach daemon status         # running? how many restarts? why did it stop?
-dispach daemon restart milo   # after editing agent.yaml or .env
-dispach daemon logs milo
+dispach daemon install        # one service for every agent; checks it will boot first
+dispach status                # the service, every agent, every channel — one screen
+dispach restart milo          # reload one agent in place, after editing agent.yaml or .env
+dispach restart               # the whole service
+dispach logs -f               # the server's stderr; the same as `daemon logs`
+dispach agents                # what the sandbox holds and who is serving it
 ```
 
 If you want everything off — services *and* a `serve` you left in a tab three days ago — there is
@@ -338,12 +327,12 @@ plaintext to any local process, so the agent reads its credentials from the `.en
 manifest — which `init` writes `0600` — and the plist carries only `HOME`, `PATH` and the two brand
 variables.
 
-**Linux and containers.** There is no `daemon` on Linux: nothing in this project's test environment
-can run `systemctl`, and shipping a unit file nobody has executed is how a "supported" platform
-turns out not to be. `daemon` there refuses and prints the `ExecStart=` line with the paths already
-resolved, which is the part that is hard to get right by hand. In a container, run `serve` in the
-foreground and let the container runtime supervise it — it handles SIGTERM, finishes the delivery
-in flight, and exits 0.
+**Linux and containers.** On Linux `daemon install` writes a systemd **user** unit and prints the
+two commands that start it — it does not run them, because nothing in this project's test
+environment can execute `systemctl`, and a unit nobody has started is how a "supported" platform
+turns out not to be. Mind `loginctl enable-linger`, or the unit stops with your last session. In a
+container, the image's own `serve` is the process and the container runtime supervises it — it
+handles SIGTERM, finishes the delivery in flight, and exits 0.
 
 ## Hosting with Compose
 
@@ -477,8 +466,8 @@ fenced as untrusted. What the agent's shell can reach is `sh`, `bash`, `git`, `p
 and `curl` — `git` because the skills catalogue is fetched with it and its absence *deletes* that
 feature rather than degrading it, `python3` and `uv` because a skill shipping scripts needs them.
 
-What is **absent on purpose**, and asserted as such: no Bun and no Node, because the application is
-one compiled binary; no `wget`, so there is one obvious HTTP client rather than two; and no pager
+What is **absent on purpose**, and asserted as such: no Bun — the application is the published npm
+package running under Node, exactly what a laptop runs; no `wget`, so there is one obvious HTTP client rather than two; and no pager
 and no editor, because `exec` hands a child a file descriptor and never a TTY — anything that pages
 or prompts blocks until its deadline and reads as a hung agent. The CI `docker` job asserts both
 lists, that the image is glibc, that a C-extension wheel installs with no compiler present, that a
@@ -505,13 +494,13 @@ consequence: run it on a laptop and the policy is the only boundary there is.
 ## Docker
 
 ```bash
-docker build -f docker/Dockerfile -t dispach .
+docker pull ghcr.io/moeen-mahmud/dispach:0.1.3          # or build it: docker build -f docker/Dockerfile -t dispach .
 docker run --rm -p 7420:7420 \
   --env-file examples/minimal/.env \
   -e DISPACH_API_TOKEN=pick-something \
   -v "$PWD/examples/minimal:/agent" \
   -v dispach-home:/home/dispach \
-  dispach
+  ghcr.io/moeen-mahmud/dispach:0.1.3
 ```
 
 The token is not optional and is not boilerplate. The image binds `0.0.0.0`, because a process
@@ -525,8 +514,10 @@ as anything `dispach init` creates inside the container. There is **one agents d
 there was not before: the image used to set `DISPACH_HOME=/state`, so `init` wrote to `/state/agents`
 while the CMD served `/agent`, and an agent created in the container was invisible to every listing.
 
-The image is `debian:trixie-slim` and the runtime stage contains **one file** — the compiled binary.
-No Bun, no Node, no `node_modules`. glibc rather than musl is deliberate and is about Python: PyPI's
+The image is `node:24-trixie-slim` and the runtime stage installs **the published npm tarball** with
+`npm i -g` — the container runs byte-for-byte what `npm i -g dispach` runs on a laptop. No Bun: it
+is the dev toolchain, and the runtime that cannot finish a WhatsApp pairing. glibc rather than musl
+is deliberate and is about Python: PyPI's
 C-extension wheels are `manylinux`, so on alpine anything without a `musllinux` build compiles from
 source, and this image ships no compiler — a wheel would fail *inside a tool call*. Non-root as
 `dispach` (uid 1000) — **a host directory bind-mounted at `/home/dispach` has to be writable by
@@ -538,15 +529,14 @@ deliberately. A Telegram outage must not read as an unhealthy container and get 
 the same outage, so the probe answers "can it serve a turn" rather than "is everything connected".
 Channel state lives on the agent resource instead.
 
-Measured on an arm64 Docker Desktop: the image is **542 MB** against a 700 MB ceiling
-(re-measured 2026-09-22; it was 570 MB on 2026-09-17, and the delta is the base image moving
-underneath rather than anything in this tree — which is why the CI `docker` job re-measures on
-every push instead of trusting the number in this sentence) and `docker compose up -d --wait` reaches healthy in **5.7 s** —
-the same as before, because readiness is tens of milliseconds in-process and almost all of that is
-waiting for the first healthcheck probe. Where the size goes: 109 MB debian-slim, 180 MB of apt
-packages (of which `git` alone is **92 MB**, because Debian's git pulls perl), 47 MB of `uv`, and
-85 MB of compiled binary. `git` is the price of glibc and glibc is the price of Python wheels that
-install rather than compile. The healthcheck reports healthy, an
+Measured on an arm64 Docker Desktop at 0.1.3: the image is **701 MB** against an 800 MB ceiling,
+and `docker compose up -d --wait` reaches healthy in about six seconds — readiness is tens of
+milliseconds in-process and almost all of that is waiting for the first healthcheck probe. Where the
+size goes: 110 MB Debian, 160 MB of Node (with npm and corepack, kept so the agent's shell has a
+Node toolchain), 158 MB of apt packages (of which `git` alone is **92 MB**, because Debian's git
+pulls perl), 47 MB of `uv`, and 58 MB for the installed package with `ink` and `react`. Node costs
+about 75 MB more than the compiled binary it replaced in 0.1.3, and buys the one thing the binary
+could not do: pair WhatsApp. The healthcheck reports healthy, an
 unauthenticated write is refused with 401, `store.db` lands on the home volume owned by uid 1000,
 and a real streaming turn against DeepSeek reconstructs from 26 `model.chunk` frames. The CI
 `docker` job rebuilds and re-measures on every push, because a figure nobody re-checks is a figure
@@ -640,20 +630,31 @@ thing that will distinguish a plugin from a scramble when enforcement lands.
 
 ### WhatsApp
 
-Shipped as a plugin and **not in this binary**, deliberately: Baileys reverse-engineers WhatsApp
-Web, WhatsApp's terms do not permit it, and there is no appeal path when a number is banned —
-including during development. **Pair a spare number.**
+Bundled, like Telegram — no `plugins add` step. But read this first: Baileys reverse-engineers
+WhatsApp Web, WhatsApp's terms do not permit it, and there is no appeal path when a number is
+banned — including during development. **Pair a spare number.**
+
+`init --whatsapp connected --whatsapp-number <digits>` writes the channel with `pairWith` set to the
+account's own number; pairing is then an eight-character code typed into the phone under *Linked
+devices › Link with phone number*, offered where the number was typed. Afterwards:
 
 ```bash
-dispach plugins add <agent> moeen-mahmud/dispach-whatsapp --ref v0.1.0
+dispach channels pair milo wa     # start a host if none is up, adopt milo, show the code, wait
+dispach channels list milo        # what it is reachable on, and whether it is paired
+dispach channels unpair milo wa   # forget the session
 ```
 
-Then `type: whatsapp` with an `authDir` and an `allowFrom` of **digits, no `+`**. There is no token:
-pairing is a QR reported as `needs_input`, which the browser draws and `GET /v1/agents/<id>` carries.
+`pairWith` is the account the agent *runs as*; `allowFrom` is who may message it, and the paired
+account is always admitted — `allowFrom` means who *else*. Numbers take a `+` and separators
+anywhere they are typed.
 
-**It pairs under Node and not under Bun** — measured against the same bundle: the npm-installed
-`dispach` works, the compiled binary and the container image do not, and the channel says so at
-start rather than connecting to nothing in silence.
+`deviceName: milo` on the channel shows as `Google Chrome (milo)` under Linked devices. The left
+half is fixed by the protocol; the bracket is yours. Some accounts refuse a non-standard name under
+pairing-by-code — the refusal says so, and removing the field fixes it. New pairings only.
+
+**It pairs under Node and not under Bun**, measured against the same bundle, which is why every
+install of `dispach` runs under Node since 0.1.3. From a checkout under `bun run` the channel says
+so at start rather than connecting to nothing in silence.
 
 ### Installing one
 
@@ -670,8 +671,9 @@ The verification is the same `conformance()` suite the plugin's own author runs.
 
 **A plugin is one self-contained bundle.** Nothing is installed while this runtime runs (hard rule
 5), so a tree that declares runtime dependencies and ships no `node_modules` is refused by name
-rather than half-loading at your next boot. That rule is what makes the compiled binary and the
-container — neither of which has a `node_modules` — resolve a plugin exactly as a checkout does.
+rather than half-loading at your next boot. That rule is what makes the npm install and the
+container — whose `node_modules` holds only the two declared dependencies — resolve a plugin
+exactly as a checkout does.
 
 What git costs, said rather than discovered: no version resolution and no integrity check. `--ref`
 pins a tag or a commit, the resolved commit is recorded beside the code and printed by `plugins
@@ -681,38 +683,42 @@ it.
 
 ## Commands
 
-`dispach --help` is generated from the same `CommandSpec` table the parser uses, so *it* cannot
-drift. **This table is hand-written and had**: it was missing `schedules`, `plugins`, `credential`,
-`start` and `web` — including the one command that mints an API key. `dispach --help` is the
-authority; read this as a map. `dispach <command> --help` has the flags.
+Generated from the same `CommandSpec` table the parser and `dispach --help` use — by
+`bun scripts/readme-commands.ts`, and a test fails when this copy is stale. It used to be
+hand-written, and was missing five commands at once. `dispach <command> --help` has the flags.
 
+<!-- commands:begin — generated by scripts/readme-commands.ts; do not edit by hand -->
 | Command | What it does |
 | --- | --- |
-| `init` | create an agent — manifest, workspace, env, validated before it exits |
-| `run` | an interactive session; bare `run` picks from the sandbox |
-| `serve` | the HTTP API and the agent's channels. The only command that binds a socket |
-| `daemon` | install, start, stop and inspect a background service (macOS) |
-| `stop` | stop everything — services and any loose `serve` |
-| `remove` | delete an agent: directory, sessions, memory, logs, service |
+| `init` | create a new agent: manifest, workspace, and env files |
+| `run` | start an interactive session — bare `run` picks from the sandbox |
+| `schedules` | list schedules, when they next fire, and how the last run went |
+| `sessions` | list stored sessions, or inspect one |
+| `memory` | search what the agent remembers, or rebuild the index from the files |
 | `config` | read and change an agent's settings, and fill in its secrets |
-| `start` | switch a stopped agent back on, and have a running host adopt it now |
-| `web` | open the browser view of a running agent |
-| `schedules` | what runs unattended: when each fires next, and how the last run went |
-| `sessions` | list stored conversations, or inspect one |
-| `memory` | search what an agent remembers, or rebuild the index |
-| `skills` | browse the catalogues and install, or check one agent's skills |
-| `sources` | the repositories skills come from: list, add, search |
-| `tools` | the resolved tool catalogue, or warm a remote provider's cache |
-| `channels` | what an agent is reachable on: connect, disconnect, set a credential, unpair |
-| `plugins` | install a plugin from git, list what an agent loaded, or remove one |
-| `credential` | mint, list and revoke operator keys for the API, optionally scoped |
-| `validate` | load a manifest and report what it resolved to |
+| `validate` | load and validate a manifest, then exit |
 | `workspace` | check the workspace files against the authoring rules |
-| `soul` | scaffold a compact identity file from a long-form one |
-| `agents` | what one or more manifest *paths* produce |
-| `keys` | a keyboard diagnostic — press a chord and see the bytes, Ink's reading of them, and the intent. **Not credentials; that is `credential`** |
-| `model probe` | ask the endpoint what it can actually do — window, output cap, prompt caching |
-| `terminal-setup` | teach a terminal to send shift+enter as a newline |
+| `soul` | scaffold a hand-edited compact identity from a long-form document |
+| `skills` | browse the catalogue and install — or list, scaffold, check one agent's skills |
+| `sources` | the repositories skills come from: list, add, search |
+| `channels` | what an agent is reachable on: connect, disconnect, set a credential, unpair |
+| `plugins` | install a plugin, list what an agent loaded, or remove one |
+| `agents` | the agents in the sandbox, and whether anything is serving them |
+| `restart` | reload one agent on the running host, or restart the whole service |
+| `status` | the service, the hosts, every agent and its channels — one screen |
+| `logs` | the server's stderr tail — the same as `daemon logs` |
+| `tools` | show the resolved tool catalogue, or fetch a remote provider's schemas into the cache |
+| `serve` | run the HTTP API and connect the agents' channels |
+| `credential` | mint, list and revoke operator credentials, optionally scoped |
+| `keys` | press a chord and see the bytes, Ink's reading of them, and the intent |
+| `terminal-setup` | teach this terminal to send shift+enter as a new line |
+| `remove` | delete a sandbox agent: its directory, sessions, memory, logs and service |
+| `stop` | stop one agent for good, or everything — named, it stays stopped across restarts |
+| `start` | switch an agent back on, and have a running host adopt it now |
+| `model` | ask the endpoint what it can actually do — window, output cap, prompt caching |
+| `web` | open the browser view of a running agent |
+| `daemon` | keep an agent serving in the background — starts at login, restarts on crash |
+<!-- commands:end -->
 
 ## Documentation
 
@@ -729,7 +735,8 @@ authority; read this as a map. `dispach <command> --help` has the flags.
 | `docs/07-SPEC-WORKSPACE.md` | Workspace file tiers, budgets, and prompt-style rendering |
 | `docs/08-MEMORY.md` | How memory is stored, retrieved and injected, with the measured numbers |
 | `docs/12-OPENCLAW-CUTOVER.md` | Moving off the runtime this one replaces |
-| `.changeset/README.md` | How a release is cut, and why the tag stays a human action |
+| `RELEASING.md` | How a release is cut: the changelog, `bun run release`, and what the tag publishes |
+| `CHANGELOG.md` | What changed in each release, in bullets |
 | `CLAUDE.md` | The standing brief: hard rules and the hazards already paid for |
 | `evals/` | Every performance claim, with the number and a script to reproduce it |
 

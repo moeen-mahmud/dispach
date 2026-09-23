@@ -1,13 +1,16 @@
 name: release
 
-# Tag-driven, and the tag is the only trigger. Changesets owns the version number
-# (`bun run version:packages` writes it); this workflow turns a tag into artifacts and
-# publishes nothing on its own.
+# Tag-driven, and the tag is the only trigger. `bun run release <version>` writes the version into
+# the three places that must agree and cuts the CHANGELOG section; a person reviews, commits and
+# pushes `v<version>`. This workflow turns that tag into artefacts and publishes nothing on its own.
+#
+# Order: npm first, because the formula's URL and digest are of the tarball the registry serves;
+# then the GitHub Release (notes from CHANGELOG.md), the tap commit and the image, in parallel.
 on:
   push:
     tags: ["v*"]
-  # Buildable without a tag so the matrix can be proven before a release depends on it. A manual
-  # run uploads artifacts and touches neither the GitHub release nor the registry.
+  # Buildable without a tag so the pipeline can be proven before a release depends on it. A manual
+  # run builds and verifies and touches neither the registry, the release, the tap nor GHCR.
   workflow_dispatch:
 
 permissions:
@@ -19,157 +22,25 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────────────────
-  # The four binaries.
-  #
-  # Split by *runner* rather than by target, because `codesign` is macOS-only and a darwin binary
-  # cross-compiled on Linux cannot be signed on the machine that built it. Bun's own output is
-  # already ad-hoc *linker-signed*, which macOS kills on exec — exit 137, no output — so an
-  # unsigned darwin asset is a download that fails for every user with no diagnostic at all.
-  # `scripts/build-binary.ts` refuses that case rather than producing it.
-  #
-  # Each leg therefore builds the two targets it can sign, and runs the one it can execute.
-  binaries:
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-latest
-            targets: darwin-arm64,darwin-x64
-          - runner: ubuntu-latest
-            targets: linux-x64,linux-arm64
-    steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - run: bun install --frozen-lockfile
-
-      # Required rather than defensive: every sibling package resolves through its `dist/`, so a
-      # fresh checkout has nothing for the compile to bundle.
-      - name: build
-        run: bun run build
-
-      - name: compile
-        run: bun run build:binary -- --targets ${{ matrix.targets }}
-
-      # A checksum per asset, written beside it. Not a nicety for a 61-103 MB binary people are
-      # asked to put on their PATH.
-      - name: checksums
-        run: |
-          cd dist-bin
-          for f in dispach-*; do
-            case "$f" in *.sha256) continue ;; esac
-            shasum -a 256 "$f" > "$f.sha256"
-            cat "$f.sha256"
-          done
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: binaries-${{ matrix.runner }}
-          path: dist-bin/*
-          if-no-files-found: error
-          retention-days: 7
-
-  # The Homebrew formula, generated from the digests of the assets that were just published.
-  #
-  # Generated and *attached*, never committed from here. A tap resolves `Formula/dispach.rb` on the
-  # default branch, so the formula has to be committed — but by a person, reviewing the diff, after
-  # the release exists. CI pushing to main to update a checksum is a moving part with write access
-  # and no reviewer, for a file somebody has to look at anyway.
-  #
-  # It cannot run before `publish-binaries`, because the digests it embeds must be of the bytes
-  # actually attached to the release rather than of a rebuild that would hash differently.
-  formula:
-    needs: publish-binaries
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: binaries-*
-          merge-multiple: true
-          path: dist-bin
-
-      - name: generate
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          bun scripts/brew-formula.ts --version "$version" > dispach.rb
-          ruby -c dispach.rb
-          cat dispach.rb
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dispach.rb
-          fail_on_unmatched_files: true
-
-      # Names the one step this workflow deliberately does not take, on the run page, where the
-      # person who just cut the release is already looking. Without it the formula is attached and
-      # nothing anywhere says the tap is still serving the previous version — which is how
-      # `brew install` stayed broken through the whole of 0.1.0 while the README documented it.
-      - name: the tap is a separate repository
-        run: |
-          echo "dispach.rb is attached to this release. The tap is moeen-mahmud/homebrew-tap:"
-          echo
-          echo "  gh release download ${GITHUB_REF_NAME} --repo ${GITHUB_REPOSITORY} \\"
-          echo "    --pattern dispach.rb --clobber --dir Formula"
-          echo "  brew audit --strict --formula ./Formula/dispach.rb"
-          echo
-          echo "Until that is committed, brew install serves the previous version."
-
-  # Attach the assets to the GitHub release. Tag-only: a `workflow_dispatch` run stops after the
-  # matrix, so the pipeline can be exercised without publishing anything.
-  publish-binaries:
-    needs: binaries
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: binaries-*
-          merge-multiple: true
-          path: dist-bin
-      - name: what is being published
-        run: ls -lh dist-bin
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist-bin/*
-          fail_on_unmatched_files: true
-
-  # ─────────────────────────────────────────────────────────────────────────────────────────
   # The npm package — one name, `dispach`, carrying the CLI and the client.
   #
-  # **Skipped rather than failed when `NPM_TOKEN` is absent.** A release that ships four signed
-  # binaries and a container image should not go red because a registry credential has not been set
-  # up yet; the tag is the same tag either way, and the package can be published by hand afterwards
-  # with `npm publish` from `packages/cli`. A hard failure here would also make the *first* tag of
-  # any fork red for a reason that has nothing to do with the code.
+  # **Fails, rather than skips, when `NPM_TOKEN` is absent.** It used to skip with a note, on the
+  # argument that a registry credential should not turn a release of binaries and an image red.
+  # There are no binaries any more: the formula installs the npm tarball and the image is built from
+  # the same tarball, so a release that did not publish to npm has published a formula pointing at
+  # nothing. A green run that shipped nothing is hard rule 8.
   #
   # `verify:package` runs before publishing and is the real gate: it packs the tarball, installs it
   # into an empty directory and uses it the three documented ways — the bin, `import "dispach"`, and
   # `dispach/client`. Reading the bundle instead is not an option, because it is minified and a
   # regex for `from "x"` matches the word *from* inside a help string.
   npm:
-    needs: binaries
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # `--provenance` needs `id-token: write`, and without it `npm publish` fails at the last
     # step with `EUSAGE — Provenance generation in GitHub Actions requires "write" access to the
-    # "id-token" permission`. It is worth having: provenance links the published tarball to this
-    # commit and this workflow, verifiable by anyone on the package page, and it is the only part
-    # of a supply chain a publisher can attest to for free.
+    # "id-token" permission`. Provenance links the published tarball to this commit and this
+    # workflow, verifiable by anyone on the package page.
     #
     # **`contents: read` is restated deliberately.** A job-level `permissions` block *replaces* the
     # top-level one rather than adding to it, so omitting it would silently drop the read access
@@ -178,12 +49,14 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -194,37 +67,155 @@ jobs:
       - name: verify the package
         run: bun run verify:package
 
-      - name: the tag and the version agree
+      # The three places a version lives must agree before anything is published: the tag, the
+      # package manifest and `VERSION` in core. `bun run release` writes all three; this refuses a tag
+      # that skipped it.
+      - name: the tag, the package and VERSION agree
+        id: version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           pkg=$(node -p "require('./packages/cli/package.json').version")
-          if [ "$tag" != "$pkg" ]; then
-            echo "tag v$tag does not match package version $pkg" >&2
+          core=$(grep -o 'VERSION = "[^"]*"' packages/core/src/version.ts | cut -d'"' -f2)
+          if [ "$pkg" != "$core" ]; then
+            echo "packages/cli/package.json says $pkg, packages/core/src/version.ts says $core" >&2
             exit 1
           fi
-          echo "v$tag"
+          if [ "${GITHUB_REF}" = "refs/tags/v${pkg}" ] || [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "version=$pkg" >> "$GITHUB_OUTPUT"
+            echo "v$pkg"
+          else
+            echo "tag ${GITHUB_REF_NAME} does not match package version $pkg" >&2
+            exit 1
+          fi
+
+      # The section this release publishes as its notes. Checked here, before anything is
+      # published, because a tag with no notes is refused rather than released with an empty body.
+      - name: the changelog has a section for this version
+        run: bun scripts/changelog-section.ts "${{ steps.version.outputs.version }}" > /dev/null
+
+      - name: NPM_TOKEN is set
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN is not set. Nothing was published, and the formula and image depend on the tarball this job publishes. Add the secret and re-run the workflow for this tag."
+            exit 1
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: publish
-        if: env.NODE_AUTH_TOKEN != ''
+        if: startsWith(github.ref, 'refs/tags/v')
         working-directory: packages/cli
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: skipped
-        if: env.NODE_AUTH_TOKEN == ''
-        run: echo "NPM_TOKEN is not set — nothing published. The release is otherwise complete."
+  # ─────────────────────────────────────────────────────────────────────────────────────────
+  # The GitHub Release, with the CHANGELOG section as its body. Tag-only.
+  release:
+    needs: npm
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: release notes
+        run: bun scripts/changelog-section.ts "${{ needs.npm.outputs.version }}" > /tmp/notes.md && cat /tmp/notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/notes.md
+          fail_on_unmatched_files: true
+
+  # ─────────────────────────────────────────────────────────────────────────────────────────
+  # The Homebrew formula, committed to the tap.
+  #
+  # The formula is a URL and a digest of the tarball the registry now serves, so it cannot be written
+  # before `npm` has published — and the digest is of the **downloaded** bytes, never of a local
+  # rebuild that would hash differently. `moeen-mahmud/homebrew-tap` is a separate repository, and
+  # this job commits to it with `TAP_TOKEN`: a fine-grained PAT with contents:write on that one
+  # repository. **Absent, the job fails and names the secret** — the previous arrangement attached
+  # the formula and printed the manual step, and the tap served 0.1.0 through the whole of 0.1.1.
+  formula:
+    needs: npm
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      # The registry can take a moment to serve a just-published version. Bounded: five minutes,
+      # after which the failure names the version rather than hashing a 404 page.
+      - name: download the published tarball
+        run: |
+          version="${{ needs.npm.outputs.version }}"
+          for _ in $(seq 1 30); do
+            url=$(npm view "dispach@${version}" dist.tarball 2>/dev/null) && [ -n "$url" ] && break
+            sleep 10
+          done
+          [ -n "$url" ] || { echo "::error::dispach@${version} is not on the registry yet"; exit 1; }
+          echo "$url"
+          curl -fsSL "$url" -o dispach.tgz
+          sha256sum dispach.tgz | cut -d' ' -f1 > dispach.sha256
+          cat dispach.sha256
+
+      - name: generate
+        run: |
+          bun scripts/brew-formula.ts --version "${{ needs.npm.outputs.version }}" --sha256 "$(cat dispach.sha256)" > dispach.rb
+          ruby -c dispach.rb
+          cat dispach.rb
+
+      - name: TAP_TOKEN is set
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::TAP_TOKEN is not set — the formula was generated but not committed to moeen-mahmud/homebrew-tap. Add a fine-grained PAT with contents:write on that repository and re-run this job."
+            exit 1
+          fi
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+
+      - uses: actions/checkout@v5
+        with:
+          repository: moeen-mahmud/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+
+      - name: commit to the tap
+        run: |
+          version="${{ needs.npm.outputs.version }}"
+          mkdir -p tap/Formula
+          cp dispach.rb tap/Formula/dispach.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/dispach.rb
+          if git diff --cached --quiet; then
+            echo "the tap already serves ${version}"
+          else
+            git commit -m "dispach ${version}"
+            git push
+          fi
 
   # ─────────────────────────────────────────────────────────────────────────────────────────
   # The image, to GHCR.
   #
   # Two architectures, because the agent container is as likely to land on an arm64 host as an
   # amd64 one and a single-arch image fails at `docker run` with an exec-format error rather than
-  # at pull. `image:` in `docker-compose.yml` already names a tag, so pointing a deployment at
-  # GHCR is a one-line change by design.
+  # at pull. `docker-compose.yml` pulls `ghcr.io/moeen-mahmud/dispach:${DISPACH_VERSION:-latest}`.
+  #
+  # Built from the checkout rather than from the published tarball, so a `workflow_dispatch` run can
+  # prove the image without a publish — the Dockerfile packs the same tarball `npm` publishes.
   image:
+    needs: npm
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -242,8 +233,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # No floating `:latest` on its own. A tag people copy into a compose file has to pin, or a
-      # deployment stops being one the next time this workflow runs.
+      # `latest` only on a tag; the version tags are what a compose file pins.
       - id: meta
         uses: docker/metadata-action@v5
         with:

@@ -1,5 +1,113 @@
 # Changelog
 
+Short bullets per release; the reasoning lives in `docs/00-DECISIONS.md`. `bun run release <version>`
+turns the Unreleased section into a dated one, and the release workflow publishes that section as the
+GitHub Release notes. See `RELEASING.md`.
+
+## Unreleased
+
+```bash
+npm i -g dispach@0.1.3
+brew upgrade moeen-mahmud/tap/dispach
+docker pull ghcr.io/moeen-mahmud/dispach:0.1.3
+```
+
+### Node is the runtime, everywhere
+
+- **Every install runs under Node**: the npm bin (as before), the Homebrew formula (now
+  `depends_on "node"` and installs the npm tarball) and the container (`node:24-trixie-slim`, the
+  same tarball via `npm i -g`). Bun stays the dev toolchain — install, bundle, test.
+- **Compiled single-file binaries are dropped.** Bun cannot complete the WhatsApp handshake, so the
+  brew and Docker installs carried a channel they could not pair. One runtime to reason about.
+- `/v1/ws` works under Node. It answered `501 websocket_unavailable` there; with Node the only
+  shipped runtime that had become "absent from every install". `ws` is the dependency.
+- Image: 701 MB (was 542). Node costs ~75 MB more than the binary it replaces; ceiling moved to 800.
+- `docker-compose.yml` pulls `ghcr.io/moeen-mahmud/dispach:${DISPACH_VERSION:-latest}`; `--build`
+  still builds from a checkout.
+
+### Pairing finishes the job
+
+- **`init` starts the host, then pairs through it.** With the background service (now the default
+  answer), the wizard puts the server up, has it adopt the new agent, and the WhatsApp code comes
+  from that host — so when the phone accepts, the agent is already answering. No `serve` afterwards.
+- **`channels pair <agent> <channel>` does the same**: starts a host if none is up, adopts the agent,
+  shows the host's code, waits for the phone. Telegram reloads the agent on the live host after the
+  token is written. Both print where to chat.
+- `init --daemon service` **never installed the service** — it called the retired per-agent
+  install, and the failure was swallowed. Fixed, and `service` is now the default answer.
+- **Device name is opt-in**: `deviceName: milo` on the WhatsApp channel shows as `Google Chrome (milo)`
+  under Linked devices. The left half is fixed by the protocol; some accounts refuse a non-standard
+  name under pairing-by-code, and the refusal says so. Default stays `Google Chrome (Ubuntu)`.
+
+### CLI
+
+- `dispach agents` — bare, lists the sandbox: on/off, who serves it, or why it is broken.
+- `dispach restart <agent>` reloads one agent on its host in place; bare, restarts the service.
+- `dispach status` — the service, every agent, every channel and any pending pairing code, one screen.
+- `dispach logs` — alias for `daemon logs`, flags and all.
+- Slash commands in `--plain` mode went to the model as prose: `/config get x`, `/channels` and every
+  other CLI command. Fixed; a guard now reads both input paths.
+- `web` recommended `keys new`, which is the keyboard diagnostic. It is `credential create`. A guard
+  now checks every `dispach <verb>` in a hint against the command table — and caught the generated
+  manifest naming `dispach eval`, which was a script.
+
+### Releases
+
+- **Changesets are gone.** `CHANGELOG.md` is hand-written; `bun run release <version>` bumps the
+  three version spots and dates the section; the tag publishes. `RELEASING.md` has the five steps.
+- The workflow **fails by name** when `NPM_TOKEN` or `TAP_TOKEN` is missing — it used to skip the
+  publish and go green. The formula is committed to `moeen-mahmud/homebrew-tap` automatically.
+- The GitHub Release body is the changelog section; a tag with no section is refused before publish.
+
+### Channels
+
+- **WhatsApp is bundled**, like Telegram. No `plugins add` step — name the channel and it works.
+- **Pairing is an 8-character code**, not a QR. `pairWith` names the account; omit it for a QR.
+- `pairWith` is **not** `allowFrom`: the account the agent runs as, versus who may message it.
+- **The paired account is always admitted.** `allowFrom` means who *else*.
+- **The chat with yourself works.** The owner's `fromMe` messages were discarded as the agent's echo.
+- **Numbers take a `+` and separators everywhere**; a literal comparison used to match nobody.
+- LID-addressed chats report the phone number from `remoteJidAlt`.
+- The code is shown by `channels list`, `status`, the `serve` banner, `GET /v1/agents/:id` and the web UI.
+- **A second pairing code was requested mid-login**, clobbering the one about to finish. The guard
+  keys on pair-success (`account`), not on `registered`.
+- A refused pairing reconnected every second forever, burning codes; it backs off and stops after three.
+- `channels <agent> [connect | disconnect | credential | unpair]`, and the matching routes. Credentials
+  are write-only.
+
+**Read this before pairing a number.** Baileys reverse-engineers WhatsApp Web. WhatsApp's terms do
+not permit it and a banned number has no appeal. **Use a spare one.**
+
+### Plugins
+
+- `plugins add | list | remove` — a plugin can be installed. Three lookups: built-in → `~/.dispach/plugins/` → import.
+- One self-contained bundle; `add` refuses a tree with unbundled runtime dependencies and runs `conformance()` first.
+- `--ref` pins a tag or commit. No integrity check — the `dispachApi` gate is compatibility, not authenticity.
+- **Breaking:** `dispach plugins <agent>` is now `dispach plugins list <agent>`.
+
+### An agent starts if it can take a turn
+
+- A broken channel, plugin, tool provider or pinned tool is a **warning**, not a refusal. Reported on
+  `agent.warnings`, the `serve` banner, `GET /v1/agents/:id` and a browser panel.
+- Still fatal: the model block, the schema, workspace files, the rule budget, a duplicate channel `id`.
+- `validate` builds the tool registry the way `run` does.
+
+### Serving
+
+- **A taken port moves the server** to the next free one and says so. An explicit `--port` still refuses.
+- **A failed turn says why.** The browser and `serve` render the `error` event like the CLI does.
+
+### Fixes
+
+- `channels list` said `connected` when it meant `enabled`, and `paired` for a `creds.json` Baileys
+  writes before linking. It reports the manifest plus live host status.
+- The QR is drawn in the browser instead of printed as base64.
+- A transport whose `id` or `type` disagrees with its manifest entry is refused at load.
+- `serve()` dropped its fifth forwarded option — a supplied capability answered `501`.
+- `stop()` immediately after `start()` could hang the WhatsApp transport.
+- The landing palette overflowed a 30-row terminal.
+- `docs/03-SPEC-PLUGIN-API.md` documented a Channel interface that never existed.
+
 ## 0.1.2 — 2026-09-22
 
 Four defects in creating an agent, all reported from use, and all of them the kind that reads as

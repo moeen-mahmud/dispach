@@ -76,7 +76,7 @@ context:
   # observationMaxTokens: 2000
   # budgets: { static: 2000, volatile: 3500, reminder: 500, total: 6000 }
   # rules:
-  #   perRuleSuccess: 0.90    # measure with `dispach eval rules`, do not guess
+  #   perRuleSuccess: 0.90    # measure with `bun run eval:rules` in a checkout, do not guess
   #   reliabilityTarget: 0.80 # at 0.90 per rule this permits TWO rules, not four
   #   onExceed: fail
 

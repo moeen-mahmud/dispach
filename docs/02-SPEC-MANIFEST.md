@@ -683,6 +683,7 @@ it does **not** read `printQr` — the QR is carried through `needs_input`, neve
 | field | meaning |
 | --- | --- |
 | `authDir` | Where the paired session is kept. Relative to the agent; default `./.whatsapp`. Every file is written `0600` and the directory `0700`, re-applied each time a new signal key is written rather than once at creation — these credentials **are** the linked device. Gitignore it; `init` does. |
+| `deviceName` | Optional. What the phone lists under *Linked devices*, in the bracket: `Google Chrome (<deviceName>)`. Default `Ubuntu`, so the entry reads `Google Chrome (Ubuntu)`. The left-hand token is a fixed enum the phone renders and cannot be changed; only the bracket is free text. **Some accounts refuse a non-standard name under pairing-by-code** — the code is issued, the phone says it could not link, and the transport reports `whatsapp_pairing_refused`. If that happens, remove the field and pair again. Applies to new pairings only: an already-linked device keeps the name it was paired with. 1–32 printable ASCII characters. |
 | `allowFrom` | **Digits, no `+`** — `["8801711223344"]`. Compared literally against what WhatsApp reports, so `+8801711223344` matches nobody. Inbound only, and empty permits nobody; the first refused message prints the exact line to paste. |
 
 There is no token and nothing to fill into `.env`: pairing is a QR somebody scans, reported as
@@ -690,8 +691,9 @@ There is no token and nothing to fill into `.env`: pairing is a QR somebody scan
 `dispach plugins add <agent> <repo>` and name it in `plugins:`. Until you do, the agent starts with
 the channel reported broken, which is 0.1.3's rule for every optional capability.
 
-**It pairs under Node and not under Bun** (decision 11.256), measured: the npm-installed `dispach`
-works, the compiled binary and the container image do not, and the channel says so at start.
+**It pairs under Node and not under Bun** (decision 11.256), measured — which is why every shipped
+install (npm, brew, the container) runs under Node since 0.1.3. From a checkout under `bun run`
+the channel says so at start.
 Baileys reverse-engineers WhatsApp Web with no appeal path when a number is banned — use a spare
 number.
 

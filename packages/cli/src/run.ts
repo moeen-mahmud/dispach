@@ -56,6 +56,7 @@ import { negotiateKeyboard } from "#lib/keyboard"
 import { agentIdFor, hostToken, liveHostOf } from "#lib/lifecycle"
 import { ENABLE_MOUSE } from "#lib/mouse"
 import { resolveModeFromProcess } from "#lib/output"
+import { offeredCommands } from "#lib/palette"
 import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { keyValue } from "#lib/render"
 import { priorMessages, reopenNote, resumeNotice } from "#lib/resume"
@@ -1185,7 +1186,10 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
     const dispatch = async (
         trimmed: string,
     ): Promise<"exit" | "restart" | "handled" | "prompt"> => {
-        const command = resolveSessionCommand(trimmed)
+        // With the offered list, as the rich path passes it. Without it only the session verbs
+        // resolve, so `/config get model.main.id` or `/channels` typed at a `--plain` prompt went to
+        // the model as prose — the exact drift `App.tsx` records having fixed on the other path.
+        const command = resolveSessionCommand(trimmed, offeredCommands())
         if (command === undefined) return "prompt"
         switch (command.kind) {
             case "exit":

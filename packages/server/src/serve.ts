@@ -1,14 +1,14 @@
 /**
  * Binding the handler to a port.
  *
- * Two adapters, because the runtime targets are Bun (primary) and Node 24+ (soft compat). Both are
+ * Two adapters, because a checkout runs under Bun and everything shipped runs under Node. Both are
  * thin — the handler is a `(Request) => Promise<Response>` and neither adapter contains a route.
  *
- * **WebSocket is Bun-only, and says so rather than pretending.** Bun has an upgrade path built into
- * `Bun.serve`; Node has none without a dependency, and adding `ws` to satisfy an endpoint the spec
- * itself calls secondary ("everything achievable over HTTP + SSE stays there") is the wrong trade.
- * Under Node the endpoint answers 501 naming the reason, which is a better outcome than a silent
- * connection failure a client would read as a network problem.
+ * **WebSocket works under both, since 0.1.3.** Node has no upgrade path without a dependency, and
+ * until 0.1.3 the endpoint answered 501 under Node on the argument that the spec calls it secondary.
+ * That held while the container ran under Bun. With Node the only shipped runtime, "secondary" had
+ * become "absent from every install", so `ws` is the dependency — one adapter around the same
+ * `attachWebSocket` bridge, so the two runtimes cannot disagree about a frame.
  */
 
 import { HarnessError } from "@dispach/core"
@@ -24,6 +24,11 @@ export interface ServeOptions extends Omit<HandlerOptions, "allowUnauthenticated
     readonly allowedOrigins?: readonly string[]
     /** `server.allowedHosts`. Only consulted on a loopback bind. */
     readonly allowedHosts?: readonly string[]
+    /**
+     * Which adapter binds the port. Detected from the runtime when omitted; a test running under
+     * Bun passes `"node"` to exercise the adapter every install ships, which nothing else reaches.
+     */
+    readonly engine?: "bun" | "node"
 }
 
 export interface RunningServer {
@@ -116,9 +121,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         },
     })
 
-    const underBun = typeof Bun !== "undefined" && typeof Bun.serve === "function"
+    const underBun =
+        options.engine === "bun" ||
+        (options.engine === undefined &&
+            typeof Bun !== "undefined" &&
+            typeof Bun.serve === "function")
     if (underBun) return serveWithBun(handler, options, running)
-    return serveWithNode(handler, options)
+    return serveWithNode(handler, options, running)
 }
 
 // ─── Bun ─────────────────────────────────────────────────────────────────────────────────
@@ -208,48 +217,35 @@ function serveWithBun(
 // ─── Node ────────────────────────────────────────────────────────────────────────────────
 
 async function serveWithNode(
-    handler: (request: Request) => Promise<Response>,
+    handler: ServerHandler,
     options: ServeOptions,
+    running: Map<string, AbortController>,
 ): Promise<RunningServer> {
     const { createServer } = await import("node:http")
+    const { WebSocketServer } = await import("ws")
+    const bridge = attachWebSocket(options.runtime, handler.authenticate, running)
+
+    /** A fetch `Request` for a Node request — the shape the handler and the bridge both read. */
+    const toRequest = (req: import("node:http").IncomingMessage, body?: Buffer): Request => {
+        const url = `http://${req.headers.host ?? `${options.host}:${options.port}`}${req.url ?? "/"}`
+        const headers = new Headers()
+        for (const [key, value] of Object.entries(req.headers)) {
+            if (typeof value === "string") headers.set(key, value)
+            else if (Array.isArray(value)) headers.set(key, value.join(", "))
+        }
+        const method = req.method ?? "GET"
+        return new Request(url, {
+            method,
+            headers,
+            ...(method === "GET" || method === "HEAD" || body === undefined ? {} : { body }),
+        })
+    }
 
     const server = createServer((req, res) => {
         void (async () => {
             const chunks: Buffer[] = []
             for await (const chunk of req) chunks.push(chunk as Buffer)
-
-            const url = `http://${req.headers.host ?? `${options.host}:${options.port}`}${req.url ?? "/"}`
-            const headers = new Headers()
-            for (const [key, value] of Object.entries(req.headers)) {
-                if (typeof value === "string") headers.set(key, value)
-                else if (Array.isArray(value)) headers.set(key, value.join(", "))
-            }
-
-            if (new URL(url).pathname === "/v1/ws") {
-                res.writeHead(501, { "content-type": "application/json; charset=utf-8" })
-                res.end(
-                    JSON.stringify({
-                        error: {
-                            code: "websocket_unavailable",
-                            message:
-                                "This process is running under Node, where /v1/ws is not served.",
-                            hint: "Run under Bun for WebSocket support, or use GET /v1/events (SSE) plus POST /v1/agents/:id/messages — everything the WS endpoint does is achievable over HTTP, which is why the spec calls it secondary.",
-                        },
-                    }),
-                )
-                return
-            }
-
-            const method = req.method ?? "GET"
-            const response = await handler(
-                new Request(url, {
-                    method,
-                    headers,
-                    ...(method === "GET" || method === "HEAD"
-                        ? {}
-                        : { body: Buffer.concat(chunks) }),
-                }),
-            )
+            const response = await handler(toRequest(req, Buffer.concat(chunks)))
 
             const out: Record<string, string> = {}
             response.headers.forEach((value, key) => {
@@ -277,6 +273,80 @@ async function serveWithNode(
         })
     })
 
+    /**
+     * The upgrade, on Node's own `upgrade` event — the one HTTP request the request listener above
+     * never sees. `noServer` because the decision to upgrade is the bridge's, made from the fetch
+     * `Request` exactly as under Bun; `ws` only completes the handshake once that decision is
+     * "accept". The subprotocol the bridge chose travels through a map keyed by the request,
+     * because `handleProtocols` is a server-wide option and the choice is per handshake.
+     */
+    const chosenProtocol = new WeakMap<import("node:http").IncomingMessage, string>()
+    const wss = new WebSocketServer({
+        noServer: true,
+        // Echoed, or the browser closes the socket the instant it opens — the same rule the Bun
+        // adapter states beside its `headers`. `false` aborts the handshake for an offer the
+        // bridge did not name, which is the other half of the same rule.
+        handleProtocols: (_protocols, request) => chosenProtocol.get(request) ?? false,
+    })
+    // `end`, never `write` then `destroy`: destroying drops what has not been flushed, and the
+    // client then sees a reset where a 403 was written — a refusal with its reason deleted.
+    const refuse = (socket: import("node:stream").Duplex, status: number, body: string) => {
+        socket.end(
+            `HTTP/1.1 ${status} Refused\r\ncontent-type: application/json; charset=utf-8\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`,
+        )
+    }
+    server.on("upgrade", (req, socket, head) => {
+        void (async () => {
+            const request = toRequest(req)
+            if (new URL(request.url).pathname !== "/v1/ws") {
+                socket.destroy()
+                return
+            }
+            // The origin guard, duplicated here for the reason the Bun adapter gives: a browser does
+            // not apply same-origin to `WebSocket`, so nothing but this refuses a cross-origin
+            // handshake.
+            const problem = originProblem(request, {
+                host: options.host,
+                ...(options.allowedOrigins === undefined
+                    ? {}
+                    : { allowedOrigins: options.allowedOrigins }),
+                ...(options.allowedHosts === undefined
+                    ? {}
+                    : { allowedHosts: options.allowedHosts }),
+            })
+            if (problem !== undefined) {
+                refuse(socket, 403, JSON.stringify({ error: problem }))
+                return
+            }
+            const attempt = await bridge.accept(request)
+            if (attempt.kind === "reject") {
+                refuse(socket, attempt.response.status, await attempt.response.text())
+                return
+            }
+            if (attempt.protocol !== undefined) chosenProtocol.set(req, attempt.protocol)
+            wss.handleUpgrade(req, socket, head, (ws) => {
+                const adapted = {
+                    data: attempt.session,
+                    send: (message: string) => ws.send(message),
+                    close: (code?: number, reason?: string) => ws.close(code, reason),
+                }
+                ws.on("message", (raw, isBinary) => {
+                    const bytes = Array.isArray(raw)
+                        ? Buffer.concat(raw)
+                        : raw instanceof ArrayBuffer
+                          ? Buffer.from(raw)
+                          : raw
+                    bridge.handlers.message(
+                        adapted,
+                        isBinary ? new Uint8Array(bytes) : bytes.toString("utf8"),
+                    )
+                })
+                ws.on("close", () => bridge.handlers.close(adapted))
+                bridge.handlers.open(adapted)
+            })
+        })().catch(() => socket.destroy())
+    })
+
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject)
         server.listen(options.port, options.host, () => {
@@ -292,9 +362,11 @@ async function serveWithNode(
         url: `http://${options.host}:${port}`,
         port,
         host: options.host,
-        websocket: false,
+        websocket: true,
         stop: () =>
             new Promise<void>((resolve) => {
+                bridge.closeAll()
+                wss.close()
                 server.closeAllConnections?.()
                 server.close(() => resolve())
             }),

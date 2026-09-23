@@ -20,26 +20,28 @@
  * without a command, reporting failure for the one thing that had worked.
  */
 
-import { BRAND, HarnessError, VERSION } from "@dispach/core"
+import { HarnessError, VERSION } from "@dispach/core"
 import { agentsCommand } from "#agents"
 import { browseCommand } from "#browse"
 import { daemonCommand } from "#daemon"
 import { initCommand } from "#init"
 import { keysCommand } from "#keys"
 import { parse } from "#lib/args"
-import { announce, type BootstrapResult, ensureServer } from "#lib/bootstrap"
+import { announce, ensureServer } from "#lib/bootstrap"
 import { actionOrRef } from "#lib/commands"
 import { askExactly, askYesNo } from "#lib/confirm"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { readEnv } from "#lib/env"
 import { finishNow, installGuards } from "#lib/exit"
 import { helpText } from "#lib/help"
+import { installServerUnit } from "#lib/host-actions"
 import { resolveAgentRef } from "#lib/sandbox"
 import { quietAcceptedWarnings } from "#lib/warnings"
 import { memoryCommand } from "#memory"
 import { modelCommand } from "#model"
 import { pluginsCommand } from "#plugins"
 import { removeCommand } from "#remove"
+import { restartCommand } from "#restart"
 import { runCommand } from "#run"
 import { schedulesCommand } from "#schedules"
 import { serveCommand } from "#serve"
@@ -48,6 +50,7 @@ import { skillsCommand } from "#skills"
 import { soulCommand } from "#soul"
 import { sourcesCommand } from "#sources"
 import { startCommand } from "#start"
+import { statusCommand } from "#status"
 import { stopCommand } from "#stop"
 import { terminalSetupCommand } from "#terminal-setup"
 import { toolsCommand } from "#tools"
@@ -66,36 +69,6 @@ function report(error: unknown): number {
         process.stderr.write(`${String(error)}\n`)
     }
     return EXIT_FAILURE
-}
-
-/**
- * Install and start the server unit, as the bootstrap does it.
- *
- * Reuses `daemonCommand` rather than reaching into the service layer, so a bootstrapped unit and
- * one installed by hand are byte-identical — a second plan builder is how the two come to differ in
- * a way nobody notices until one of them will not start. Its output is swallowed: the bootstrap's
- * whole contract is *one line*, and `daemon install`'s four-row report in front of `agents` would
- * be the opposite.
- */
-async function installServerUnit(): Promise<BootstrapResult> {
-    const write = process.stdout.write.bind(process.stdout)
-    // Replaced rather than piped, because `daemon install` writes with `process.stdout.write`
-    // directly and there is nothing to intercept further down. Restored in a `finally`, or every
-    // subsequent line of this process would vanish.
-    process.stdout.write = (() => true) as typeof process.stdout.write
-    try {
-        const code = await daemonCommand({ action: "install" })
-        if (code !== EXIT_OK) {
-            return {
-                kind: "failed",
-                message: `daemon install exited ${code}`,
-                hint: `Run \`${BRAND.slug} daemon install\` to see what it said.`,
-            }
-        }
-        return { kind: "started", label: `${BRAND.slug}.server` }
-    } finally {
-        process.stdout.write = write
-    }
 }
 
 async function dispatch(argv: readonly string[]): Promise<number> {
@@ -206,6 +179,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 ...(daemon === undefined ? {} : { daemon }),
                 yes: flags.bool("yes"),
                 plain: flags.bool("plain"),
+                installServer: installServerUnit,
             })
         }
 
@@ -368,6 +342,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 manifestPath: resolveAgentRef(ref),
                 ...(positionals[2] === undefined ? {} : { channelId: positionals[2] }),
                 json: flags.bool("json"),
+                installServer: installServerUnit,
             })
         }
 
@@ -384,11 +359,48 @@ async function dispatch(argv: readonly string[]): Promise<number> {
             })
         }
 
-        case "agents":
+        case "agents": {
+            const store = flags.str("store")
             return await agentsCommand({
+                // Bare lists the sandbox; names or paths describe those agents in full.
                 manifestPaths: positionals.map((ref) => resolveAgentRef(ref)),
+                ...(store === undefined ? {} : { store }),
                 json: flags.bool("json"),
             })
+        }
+
+        case "restart": {
+            const store = flags.str("store")
+            return await restartCommand({
+                // Optional: bare restarts the service, named reloads that agent where it runs.
+                ...(manifestPath === undefined ? {} : { manifestPath: resolved() }),
+                ...(store === undefined ? {} : { store }),
+                json: flags.bool("json"),
+            })
+        }
+
+        case "status": {
+            const store = flags.str("store")
+            return await statusCommand({
+                ...(store === undefined ? {} : { store }),
+                json: flags.bool("json"),
+            })
+        }
+
+        case "logs": {
+            // An alias for `daemon logs`, flags and all: `--lines`, `--follow`, `--truncate`.
+            const lines = flags.num("lines")
+            const store = flags.str("store")
+            return await daemonCommand({
+                action: "logs",
+                ...(manifestPath === undefined ? {} : { manifestPath: resolved() }),
+                ...(lines === undefined ? {} : { lines }),
+                follow: flags.bool("follow"),
+                truncate: flags.bool("truncate"),
+                ...(store === undefined ? {} : { store }),
+                json: flags.bool("json"),
+            })
+        }
 
         case "serve": {
             const port = flags.num("port")

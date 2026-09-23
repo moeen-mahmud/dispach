@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type { ChannelHost } from "@dispach/core"
 import { pairLater, pairWhatsApp } from "../src/lib/init-whatsapp.ts"
 
@@ -58,7 +59,7 @@ function run(script: Parameters<typeof scripted>[0]) {
         go: () =>
             pairWhatsApp({
                 manifestPath: "/tmp/agent.yaml",
-                dir: mkdtempSync(tmpdir()),
+                dir: mkdtempSync(join(tmpdir(), "init-wa-")),
                 number: "8801711223344",
                 channelId: "wa",
                 factory,

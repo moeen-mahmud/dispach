@@ -444,11 +444,11 @@ describe("the WhatsApp channel is bundled, and says what that costs", () => {
     /**
      * The half that bundling makes dangerous, and the reason this describe block still exists.
      *
-     * It **does not pair under Bun**, so the compiled binaries and the container image now carry a
-     * channel they cannot finish pairing. A bundled channel that silently did nothing would be
-     * strictly worse than an absent one, so the transport names the limitation at start with the
-     * remedy — and this asserts the sentence has not been deleted as tidy-up, which is exactly what
-     * happens to a warning nobody has a test for.
+     * It **does not pair under Bun**. Nothing this project ships runs under Bun since 0.1.3, but
+     * `bun run src/index.ts` from a checkout does, and a bundled channel that silently did nothing
+     * there would be strictly worse than an absent one — so the transport names the limitation at
+     * start with the remedy, and this asserts the sentence has not been deleted as tidy-up, which is
+     * exactly what happens to a warning nobody has a test for.
      */
     test("the runtime it cannot pair under is still named at start", () => {
         const transport = readFileSync(
@@ -814,8 +814,8 @@ describe("the image can build what the repo builds", () => {
         //
         // **Once, not twice.** This asserted two copies until 15.5, because both stages installed:
         // the builder to link the workspace, the runtime to install production dependencies. The
-        // runtime stage has no install any more — the application is one compiled binary — so a
-        // second copy would be a stage doing work nothing needs.
+        // runtime stage installs the packed tarball and never the workspace, so a second copy would
+        // be a stage doing work nothing needs.
         const { builder } = stages()
         const packages = readdirSync(join(SRC, "..", ".."), { withFileTypes: true })
             .filter((entry) => entry.isDirectory())
@@ -829,21 +829,25 @@ describe("the image can build what the repo builds", () => {
         expect(missing).toEqual([])
     })
 
-    test("the runtime stage installs nothing and carries no source", () => {
+    test("the runtime stage installs the tarball and never the workspace", () => {
         // The property that makes one manifest copy correct, and it is worth locking rather than
-        // implying. A runtime `bun install --production` is how ~17 MB of `react-devtools-core`
-        // reached every shipped image: `ink` declares it a **peerDependency**, so `--production`
-        // does not skip it. Deleting the install is what makes that unrepresentable; reintroducing
-        // one would restore the cost silently, and the image would still work.
+        // implying. A runtime `bun install --production` of the *workspace* is how ~17 MB of
+        // `react-devtools-core` reached every shipped image: `ink` declares it a **peerDependency**,
+        // so `--production` does not skip it. Installing the packed tarball cannot — its dependency
+        // list is the two packages the published `package.json` names.
         //
-        // No `COPY packages/` either: the whole application is the compiled binary, so a `dist/`
-        // arriving in the runtime stage means something is being resolved at boot that should have
-        // been bundled.
+        // No `COPY packages/` either: the application is the published package, so a `dist/`
+        // arriving from the checkout means the image runs something `npm i -g dispach` does not.
+        // And no Bun in the runtime: it is the runtime that cannot finish the WhatsApp handshake,
+        // and the whole reason 0.1.3 moved the image to Node.
         const { runtime } = stages()
         expect(runtime).not.toContain("bun install")
+        expect(runtime).not.toContain("oven/bun")
         expect(runtime.match(/^COPY packages\//m)).toBeNull()
-        // And the binary is there, which is the other half of "the application is one file".
         expect(runtime).toContain("COPY --from=builder")
+        // `stages()` split on `FROM `, so the stage's first line is its base image.
+        expect(runtime).toMatch(/^node:\d+/)
+        expect(runtime).toContain("npm install -g")
     })
 })
 
@@ -994,5 +998,48 @@ describe("first-party packages use only the public core API", () => {
                 hasPlugin: true,
             })
         }
+    })
+})
+
+describe("both input paths resolve slash commands the same way", () => {
+    /**
+     * The plain path called `resolveSessionCommand(trimmed)` with no offered list, so only the
+     * session verbs resolved there: `/config get model.main.id` or `/channels` typed at a `--plain`
+     * prompt went to the model as prose and were billed — the exact drift `App.tsx` records having
+     * fixed on the rich path. A command handled on one output path and not the other is invisible,
+     * so this reads both call sites rather than trusting either.
+     */
+    test("every call passes the offered list", () => {
+        const calls = FILES.flatMap((file) =>
+            // To the end of the line, not to the first `)`: the argument itself is a call.
+            [...file.text.matchAll(/resolveSessionCommand\(([^\n]*)/g)].map((match) => ({
+                path: file.path,
+                args: match[1] ?? "",
+            })),
+        ).filter((call) => !call.path.startsWith("lib/session-commands"))
+        expect(calls.length).toBeGreaterThanOrEqual(2)
+        for (const call of calls) {
+            expect(`${call.path}: ${call.args}`).toContain("offeredCommands()")
+        }
+    })
+})
+
+describe("every command a hint names exists", () => {
+    /**
+     * `web` told people to run `keys new --label …`. `keys` is the keyboard diagnostic and takes no
+     * positionals; the verb is `credential create`. A hint naming a command that does not exist is
+     * a dead end printed at the exact moment somebody is stuck, so every `${BRAND.slug} <word>` in
+     * the source is checked against the command table.
+     */
+    test("a slug-prefixed verb always names a real command", () => {
+        const names = new Set(COMMANDS.map((command) => command.name))
+        const offenders: string[] = []
+        for (const file of FILES) {
+            for (const match of file.text.matchAll(/\$\{BRAND\.slug\} ([a-z][a-z-]*)\b/g)) {
+                const verb = match[1] ?? ""
+                if (!names.has(verb)) offenders.push(`${file.path}: ${verb}`)
+            }
+        }
+        expect(offenders).toEqual([])
     })
 })

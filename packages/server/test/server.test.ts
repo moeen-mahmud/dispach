@@ -928,8 +928,8 @@ describe("the websocket subscribe frame", () => {
      * answered `ws.subscribed` to say the change had worked. Rule 8, over a socket.
      *
      * Driven through `bridge.handlers.message` with a fake socket rather than a real connection —
-     * `Socket` is a three-method interface, and `/v1/ws` is Bun-only, so a portless test is the one
-     * that runs everywhere.
+     * `Socket` is a three-method interface, so a portless test is the one that runs everywhere;
+     * `serve-node.test.ts` is the one that opens a real socket.
      */
 
     test("sets the filter from agentId", async () => {

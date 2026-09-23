@@ -5162,6 +5162,58 @@ comments predicted, so there is a test now rather than a fifth comment (11.259).
 palette had no clamp — the 23rd command pushed the frame one row past a 30-row terminal and the
 first command scrolled off the top with no counter (11.260).
 
+### 3f — the close-out: Node ships, pairing finishes the job, four verbs, no changesets — **shipped** (2026-09-23)
+
+The last round before the tag, from one message: pairing worked and four things around it did not.
+
+**Node is the runtime every install runs (11.268).** The WhatsApp transport cannot complete the
+Noise handshake under Bun, and the brew formula and the container both shipped a `bun build
+--compile` binary — so two of three install paths carried a channel they could not pair. The
+formula now `depends_on "node"` and installs the npm tarball (`scripts/brew-formula.ts` takes a
+`--sha256` of the registry's bytes); the image is `node:24-trixie-slim` with `npm i -g` of the same
+tarball, packed in the builder with `bun pm pack`; the compiled binaries, `build:binary`, the CI
+`binary` matrix and `lib/self.ts` are gone. Measured: image 701 MB (ceiling 800, layer table in
+`ci.yml`), start-to-ready 143 ms in the container, `bun pm pack` 366 files / 6.2 MB. Surfaced by the
+move and fixed: `/v1/ws` answered `501` under Node — one `ws` adapter around the shared bridge now,
+with a test under `engine: "node"` and the refusal bodies asserted by the CI `bundle` job because
+Bun's `node:http` shim never delivers a write on an `upgrade` socket.
+
+**The host pairs the channel (11.272).** `lib/host-actions.ts` holds the three moves three commands
+share: `ensureHost` (the bootstrap plus a bounded wait for the lease), `adoptOnHost` (`POST /start`),
+`reloadOnHost` (`POST /reload`), and `waitForPairing` over the host's `needs_input`. `init` answers
+the service question — now defaulting to `service`, by name — puts the host up, has it adopt the new
+agent, and pairs **through it**, so the phone accepting is the agent answering; the closing screen
+prints the web URL. `channels pair` takes the same path; Telegram reloads on the live host after the
+token lands. Found on the way: `init --daemon service` had never installed anything since 16.4 — it
+called the retired per-agent install and swallowed the refusal.
+
+**Four verbs (11.270).** `agents` bare lists the sandbox with the durable switch and the live host;
+`restart <agent>` reloads in place (adopts when nothing holds it, refuses by name when nothing runs),
+bare `restart` is the service; `status` folds the service report, the listing and every hosted
+agent's channels with any pending code; `logs` is `daemon logs`. Fixed with guards that went red
+reverted: plain-mode slash commands billed to the model (`run.ts` never passed the offered list —
+both call sites are now read by a test), `web` recommending `keys new`, and — caught by the new
+hint guard on its first run — the generated manifest naming `dispach eval`, a script this plan had
+already recorded as "documented as a CLI command in four places". README command table is generated
+from `COMMANDS` (`scripts/readme-commands.ts`, `readme.test.ts`).
+
+**`deviceName` (11.271).** "milo (Dispach)" is not expressible: the left token is a `PlatformType`
+enum the phone renders. `channels[].deviceName` replaces `browser[0]` only, giving `Google Chrome
+(milo)`; opt-in, because some accounts refuse a non-standard name under pairing-by-code (Baileys
+#2560), and the `whatsapp_pairing_refused` hint names the field. Threaded to the Baileys `connect`
+seam and asserted there.
+
+**Releases (11.269).** Changesets removed. Root `CHANGELOG.md` with `## Unreleased`;
+`scripts/release.ts` refuses a non-newer version, a dirty tree and an empty section, writes the
+three lockstep spots and the date, runs the gate and prints the two git commands; `release.yml` is
+npm → GitHub Release (body from `scripts/changelog-section.ts`) → tap commit with `TAP_TOKEN` →
+image, and a missing `NPM_TOKEN` or `TAP_TOKEN` fails by name rather than skipping. `RELEASING.md`
+has the five steps.
+
+**Owner actions before the tag:** set `NPM_TOKEN` and `TAP_TOKEN` in the repository secrets; pair
+once on the Mac to see the `init` → host → code flow end to end (I do not trigger pairing); try
+`deviceName` on a spare pairing and record which of "Google Chrome (milo)" / refusal happened.
+
 ### Not done in 3a, and why it is written down
 
 - **`config_set channels` writes a type nothing supplies, reports success, and the next boot

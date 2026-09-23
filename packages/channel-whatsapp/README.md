@@ -12,8 +12,8 @@ WhatsApp for a Dispach agent, through [Baileys](https://github.com/WhiskeySocket
 > **Pair a spare number.** Not a personal one, not a business one you rely on, not one that is
 > somebody's two-factor recovery. That is the whole of the advice and it is not hedged.
 >
-> This is why the package ships **outside** the Dispach bundle: the tarball, the compiled binaries
-> and the container image carry none of it. An operator opts in by name, for an account they chose.
+> This is why the package ships **outside** the Dispach bundle: the tarball and the container
+> image carry none of it. An operator opts in by name, for an account they chose.
 > If you want WhatsApp with no such risk, the official Cloud API is a different integration behind
 > the same `ChannelTransport` interface, and it is not this.
 
@@ -90,7 +90,7 @@ bun run build     # one self-contained ES module, Baileys inlined
 
 Nothing is installed at runtime (hard rule 5), so the published artefact is one file with its
 dependencies bundled in — which is what makes the same directory work in a checkout, in the
-compiled binary and in the container. Three of Baileys' optional media dependencies stay external
+npm install and in the container. Three of Baileys' optional media dependencies stay external
 (`sharp`, `jimp`, `link-preview-js`); Baileys loads each inside a `catch` and this channel is text,
 so their absence costs image thumbnails and link previews and nothing else.
 

@@ -11,7 +11,7 @@ Standing brief for coding agents working in this repository. Read this first, ev
 
 It turns a stateless OpenAI-compatible `/chat/completions` endpoint into an agent that lives
 in messaging channels, uses tools, remembers, runs on a schedule, and delegates to other
-agents. Bun-first TypeScript.
+agents. TypeScript; built and tested with Bun, shipped on Node.
 
 Its first consumer is VelaOps, an agent provisioning platform, where it replaces the
 OpenClaw gateway process inside each agent container. **VelaOps is a consumer, not the
@@ -69,7 +69,7 @@ framework explainers, go straight to the specific thing.
 
 | | |
 | --- | --- |
-| Runtime | Bun (primary), Node 24+ (soft compat, CI-tested, never a blocker) |
+| Runtime | Node 24+ ships (npm bin, brew formula, container). Bun is the dev toolchain only: install, `bun build`, `bun test`. Nothing shipped runs under Bun since 0.1.3 — it cannot complete the WhatsApp handshake |
 | Package manager | `bun` — never npm, pnpm, or yarn |
 | Workspaces | Bun workspaces, monorepo |
 | Build | `bun build` + `tsc --emitDeclarationOnly` |
@@ -79,7 +79,7 @@ framework explainers, go straight to the specific thing.
 | CLI rendering | Ink 7 + React 19, `.tsx`, in `packages/cli` only — lazily imported |
 | Schema | Zod |
 | Storage | SQLite via `bun:sqlite` / `node:sqlite` adapter |
-| Release | Changesets, semver |
+| Release | Semver. `CHANGELOG.md` by hand, `bun run release <version>` bumps and dates, the `v*` tag publishes (`RELEASING.md`) |
 
 Commands:
 
@@ -1095,6 +1095,27 @@ Never claim a performance property without a number in `evals/` and a script to 
   still resolves `@dispach/channel-telegram` to its `dist`, so a transport change is invisible until
   that package is rebuilt. Recorded for `core` and the tool packages already; it is a property of
   every workspace dependency, and it cost a confused debugging round here.
+- **Nothing shipped runs under Bun, and a Bun-only test cannot see the Node adapter.** Since 0.1.3 the
+  npm bin, the brew formula and the container all run under Node, because the WhatsApp transport cannot
+  complete the Noise handshake under Bun (measured; `onBun()` still names it for `bun run` from a
+  checkout). `bun test` runs under Bun, so `serve({ engine: "node" })` is the only thing that exercises
+  the adapter every install ships — and Bun's `node:http` shim never delivers a write made on an
+  `upgrade` socket, so the 403/401 bodies of a refused WebSocket handshake are asserted by the CI
+  `bundle` job under real Node, not by the suite. Run the built entry under `node` after touching the
+  server or the bundle.
+- **`init` puts the host up and pairs through it; a command that pairs in its own process leaves a
+  session nothing reads.** `lib/host-actions.ts` is the one copy of ensure-host → adopt → reload →
+  wait-for-code, used by `init`, `channels pair` and `restart`. `init` stopped declaring `needsServer`
+  because the bootstrap installed a server before the question was asked, which made the answer
+  decorative — and `init --daemon service` had installed nothing since 16.4, calling the retired
+  per-agent verb with the refusal swallowed. A test-only injection (`installServer`) is what stops
+  `bun test` installing a LaunchAgent; a caller with none gets the manual line.
+- **Every `${BRAND.slug} <verb>` in the source is checked against `COMMANDS`, and the first run caught
+  two.** `web` said `keys new` (the keyboard diagnostic) for `credential create`, and the generated
+  manifest said `dispach eval rules` for a `bun run` script — the second already recorded in the plan
+  as "documented as a CLI command in four places". A hint naming a command that does not exist is a
+  dead end printed at the moment somebody is stuck; the README command table is generated for the
+  same reason.
 - **`Bun.serve`'s `idleTimeout` defaults to 10 seconds and will kill your SSE streams.** The
   heartbeat is 15 s, so the server closed its own event streams before the first keep-alive frame —
   printing `[Bun.serve]: request timed out after 10 seconds` and closing *cleanly*, which a client

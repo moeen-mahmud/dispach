@@ -1,14 +1,15 @@
 # Dispach as a hosted agent server.
 #
 #   cp .env.example .env               # then a token and a model key
-#   docker compose up -d --build --wait
+#   docker compose up -d --wait        # pulls ghcr.io/moeen-mahmud/dispach
 #   curl localhost:7420/v1/ready
 #   docker compose logs server         # the claim link, for the web UI at localhost:7420
 #
-# **`--build` is not optional after the first run**, and leaving it off is a trap rather than a
-# slow path: `image:` below names a tag, compose builds only when that tag is *absent*, so a second
-# `up` reuses whatever was built before and reports healthy. Measured — a two-day-old image came up
-# green and served a binary that predated two phases.
+# Working from a checkout: `docker compose up -d --build --wait`. **`--build` is then not optional
+# after the first run**, and leaving it off is a trap rather than a slow path: `image:` below names
+# a tag, compose builds only when that tag is *absent*, so a second `up` reuses whatever was built
+# before and reports healthy. Measured — a two-day-old image came up green and served code that
+# predated two phases.
 #
 # At the **repo root** rather than in `docker/`, so `git clone && docker compose up` needs no `-f`.
 # The Dockerfile stays where it is; `build.dockerfile` points at it.
@@ -25,14 +26,19 @@ name: dispach
 services:
     # `server`, not `agent`: this hosts zero or more agents and is not one. It comes up with none.
     server:
+        # **The published image, pulled; the local build, on request.** `image:` names the GHCR tag
+        # and `pull_policy: missing` makes a plain `up` pull it once, so a fresh clone needs no
+        # toolchain. `docker compose build` (or `up --build`) still builds from this checkout and
+        # tags the result under the same name, which is the developer loop — and is why the trap in
+        # the header comment exists: after a local build, a plain `up` reuses it.
+        #
+        # Pin the version in `.env` (`DISPACH_VERSION=0.1.3`) for a deployment. The default is
+        # `latest` only because a compose file people copy has to work before they read it.
+        image: ghcr.io/moeen-mahmud/dispach:${DISPACH_VERSION:-latest}
+        pull_policy: missing
         build:
             context: .
             dockerfile: docker/Dockerfile
-        # `image:` names what a local build tags *and* what a future registry pull would fetch, so
-        # publishing to GHCR later is a one-line change rather than a restructure. Untagged
-        # deliberately: a floating `:latest` in a compose file people copy is how a pinned
-        # deployment stops being one.
-        image: dispach:local
 
         # **No `command:` here, and that is load-bearing.** The image's CMD carries
         # `--host 0.0.0.0`; a compose `command:` replaces CMD wholesale, so adding one — even to
@@ -187,7 +193,7 @@ services:
     # would delete the other's schedules and report success.
     #
     # server-two:
-    #     image: dispach:local
+    #     image: ghcr.io/moeen-mahmud/dispach:${DISPACH_VERSION:-latest}
     #     ports:
     #         - "7421:7420"
     #     environment:

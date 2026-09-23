@@ -20,40 +20,13 @@
  */
 
 import { BRAND } from "@dispach/core"
-import { browsableHost } from "@dispach/server"
 import { openInBrowser, openMessage } from "#lib/browser"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { agentIdFor, anyLiveHost, hostToken, liveHostOf } from "#lib/lifecycle"
 import type { WebOptions } from "#lib/schema"
+import { webUrl } from "#lib/web-url"
 
-/**
- * Where the page lives, with the agent it should open.
- *
- * `?agent=` rather than `/agents/milo` for the reason `04-SPEC-WIRE.md` gives for having no
- * catch-all: a path needs a route, a `WEB_ASSETS` entry, a spec row and a `spec.test.ts` change,
- * and a wildcard would make `/v1/agentss` answer `200 text/html`. A query parameter needs none of
- * them, and the page reads it.
- *
- * No credential is attached. A claim is minted at boot and printed by `serve`, deliberately once —
- * a fresh one per invocation would leave a standing credential in a log — and a durable key in an
- * address bar lands in history, a bookmark and whatever syncs them. The page asks when it has to.
- */
-export function webUrl(baseUrl: string, agentId?: string): string {
-    const url = new URL(baseUrl)
-    url.pathname = "/"
-    /**
-     * A bind is not an address, and the container is where that stops being theoretical.
-     *
-     * The lease publishes what was actually bound, which inside the image is `0.0.0.0` — every
-     * interface, and a link no browser can open. `browsableHost` is the same substitution
-     * `claimUrl` has always made, shared rather than copied a third time. Found by running this
-     * *in the container*: on a laptop `serve` binds `127.0.0.1` and the substitution never fires,
-     * so the defect is invisible everywhere except where it is deployed.
-     */
-    url.hostname = browsableHost(url.hostname)
-    if (agentId !== undefined && agentId !== "") url.searchParams.set("agent", agentId)
-    return url.toString()
-}
+export { webUrl }
 
 export async function webCommand(options: WebOptions): Promise<number> {
     const action = options.action ?? "run"
@@ -105,7 +78,7 @@ export async function webCommand(options: WebOptions): Promise<number> {
     if (outcome.opened && hostToken(options.manifestPath ?? "") !== undefined) {
         process.stdout.write(
             `  if the page asks for a credential, mint one:\n` +
-                `    ${BRAND.slug} keys new --label 'my browser'\n`,
+                `    ${BRAND.slug} credential create --label 'my browser'\n`,
         )
     }
     return EXIT_OK

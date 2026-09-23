@@ -512,7 +512,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     // Two stated costs. Assigning `process.title` overwrites the argv region, so `ps` shows this
     // instead of the full command line — the arguments stay visible in `launchctl print` and in
     // `daemon status`. And **Bun ignores the assignment entirely**: measured against the same
-    // manifest, Node shows the title while `bun` and the compiled binary both show raw argv.
+    // manifest, Node shows the title while `bun run` from a checkout shows raw argv.
     // So this works on the soft-compat runtime and nowhere else, which is worth knowing before
     // relying on it — the line stays because it costs nothing where it does not work.
     const firstAgent = agents[0]
@@ -714,9 +714,6 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             process.stdout.write(
                 `  unauthenticated — loopback only. Set ${config.tokenEnv} to bind a public host.\n`,
             )
-        }
-        if (!running.websocket) {
-            process.stdout.write("  /v1/ws unavailable under Node — SSE and HTTP are unaffected.\n")
         }
         // The single highest-value place to mention the daemon: this is the exact moment a person
         // learns that `serve` lives and dies with the terminal it was typed into. Left unsaid, the

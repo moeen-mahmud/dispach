@@ -4,7 +4,7 @@
  * ## The assets are inlined, not read from disk
  *
  * Decision 11.200, and it was measured rather than chosen on taste. `dispach` has to work as a
- * source checkout, as a bundled `dist/`, and as a compiled single-file executable, and
+ * source checkout and as a bundled `dist/` (and, until 0.1.3, as a compiled single-file executable), and
  * `import x from "./f.html" with { type: "file" }` **fails in the middle one** — the emitted sidecar
  * comes back as a *relative* spec that resolves against the process cwd, so any invocation from a
  * directory other than the output one is an `ENOENT`. That is every real invocation:

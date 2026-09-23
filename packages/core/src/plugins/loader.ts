@@ -16,8 +16,8 @@
  * one answered, so "which code is loaded" has an answer that is not a guess.
  *
  * A plugin installed there is **one self-contained bundle**: nothing installs dependencies, ever, so
- * the compiled binary and the container — neither of which has a `node_modules` — resolve a plugin
- * exactly as a checkout does. `plugins add` is what refuses a tree that would need an install; by the
+ * the npm install and the container — whose `node_modules` holds only the two declared
+ * dependencies — resolve a plugin exactly as a checkout does. `plugins add` is what refuses a tree that would need an install; by the
  * time this runs, a directory is either enterable or a refusal.
  *
  * The alternative was importing everything dynamically, and it is unavailable for a structural

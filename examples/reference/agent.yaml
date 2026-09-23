@@ -167,7 +167,7 @@ context:
   # computes the allowance rather than trusting a table — the arithmetic is unintuitive and
   # authors consistently overestimate it.
   rules:
-    perRuleSuccess: 0.90        # measure it with `eval rules`, do not guess
+    perRuleSuccess: 0.90        # measure it with `bun run eval:rules` in a checkout, do not guess
     reliabilityTarget: 0.80     # at 0.90 per rule this permits TWO rules, not four
     onExceed: fail              # fail | warn
   # ── Phase 3.5: capability-gated long-form identity ──
