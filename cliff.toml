@@ -1,0 +1,32 @@
+# git-cliff: drafts the next CHANGELOG.md section from conventional commits.
+# `bun run changelog:draft` writes the draft under `## Unreleased`; edit it, then `bun run release`.
+
+[changelog]
+header = ""
+body = """
+{% for group in ["Features", "Fixes", "Performance"] %}\
+{% set picked = commits | filter(attribute="group", value=group) %}\
+{% if picked | length > 0 %}
+### {{ group }}
+{% for commit in picked %}
+- {% if commit.breaking %}**Breaking:** {% endif %}{{ commit.message | split(pat="\n") | first | trim | upper_first }}\
+{% endfor %}
+{% endif %}\
+{% endfor %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+filter_commits = true
+protect_breaking_commits = true
+commit_parsers = [
+    { message = "^feat", group = "Features" },
+    { message = "^fix", group = "Fixes" },
+    { message = "^perf", group = "Performance" },
+    { message = "^release", skip = true },
+    { message = "^(chore|ci|test|docs|style|refactor|build)", skip = true },
+]

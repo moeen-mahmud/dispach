@@ -3,8 +3,10 @@
 One package, one number, one tag. Semver. Short bullets in `CHANGELOG.md`; the reasoning lives in
 `docs/00-DECISIONS.md`.
 
-1. **Write the notes as you go**, under `## Unreleased` in `CHANGELOG.md`. Bullets, grouped under
-   short headings when there are many. Name the command or the route, say what changed, stop.
+1. **Draft the notes**: `bun run changelog:draft` writes the `feat`, `fix` and `perf` commits since
+   the last release under `## Unreleased` in `CHANGELOG.md` (git-cliff, `cliff.toml`). Edit them into
+   short bullets for someone installing the release: what changed, one line each, **Breaking**
+   marked. No reasons — those go in `docs/00-DECISIONS.md`.
 2. **Cut it** from a clean `main`:
 
    ```bash

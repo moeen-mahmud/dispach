@@ -94,7 +94,7 @@ const body = unreleased?.[1]?.trim() ?? ""
 if (unreleased === null || body === "" || body === "_Nothing yet._") {
     fail(
         "CHANGELOG.md has nothing under ## Unreleased",
-        "Write the release's bullets there first. A release with no notes is refused rather than published empty.",
+        "`bun run changelog:draft` drafts them from the commits since the last release; edit, then run this again.",
     )
 }
 

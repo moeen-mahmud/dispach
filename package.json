@@ -40,15 +40,17 @@
         "prepare": "husky",
         "verify:package": "bun scripts/verify-package.ts",
         "release": "bun scripts/release.ts",
-        "changelog:section": "bun scripts/changelog-section.ts"
+        "changelog:section": "bun scripts/changelog-section.ts",
+        "changelog:draft": "bun scripts/changelog-draft.ts"
     },
     "devDependencies": {
-        "husky": "9.1.7",
+        "@biomejs/biome": "^2.3.11",
         "@commitlint/cli": "^20.5.0",
         "@commitlint/config-conventional": "^20.5.0",
-        "@biomejs/biome": "^2.3.11",
-        "lint-staged": "^16.4.0",
         "@types/bun": "^1.3.5",
+        "git-cliff": "2.14.2",
+        "husky": "9.1.7",
+        "lint-staged": "^16.4.0",
         "typescript": "^5.9.3"
     }
 }
