@@ -287,7 +287,7 @@ export function answeredRows(
         telegramAllow: "Telegram handle",
         telegramToken: "Bot token",
         whatsapp: "WhatsApp",
-        whatsappAllow: "WhatsApp number",
+        whatsappNumber: "WhatsApp number",
         schedules: "none",
         server: "HTTP API",
         // Was literally `"starter"` — a value pasted into the label column, so the confirm screen

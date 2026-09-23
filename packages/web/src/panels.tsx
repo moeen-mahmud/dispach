@@ -837,6 +837,22 @@ export const SERVER_PANELS: readonly { readonly panel: PanelName; readonly label
  * a failure both fall back to the text, which is what this did for every payload until now.
  */
 function QrPayload(props: { readonly kind: string; readonly payload: string }): React.ReactElement {
+    /**
+     * A pairing code is read by a person and typed into a phone, so it is set large and grouped.
+     *
+     * WhatsApp issues eight characters and shows them as two groups of four; matching that is what
+     * makes somebody confident they are looking at the right thing. Grouped **for display only** —
+     * the payload is never rewritten, because a code with a hyphen typed into a field that wants
+     * eight characters fails in a way nobody attributes to the panel that drew it.
+     */
+    if (props.kind === "pairing_code")
+        return (
+            <p className="payload-code" data-kind={props.kind}>
+                {props.payload.length === 8
+                    ? `${props.payload.slice(0, 4)} ${props.payload.slice(4)}`
+                    : props.payload}
+            </p>
+        )
     const drawn = props.kind === "qr" ? qrPath(props.payload) : undefined
     if (drawn === undefined)
         return (

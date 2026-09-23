@@ -447,3 +447,364 @@ describe("the runtime it will not pair under is named, not left to a README", ()
         await channel.stop()
     })
 })
+
+describe("pairing by code, when a number says which account to link", () => {
+    /**
+     * WhatsApp's alternative to scanning: an eight-character code typed into the phone under
+     * Linked devices. It is the only route that works on a surface which cannot draw a barcode,
+     * and the better one everywhere else — which is why `pairWith` exists.
+     *
+     * **`pairWith` is not `allowFrom`.** The first is the account the agent runs as; the second is
+     * who may talk to it. Folding them together is the documented "chat not found" class of
+     * failure one field over, so they are separate fields and this file asserts both behaviours.
+     */
+    function codeSocket(options: {
+        registered: boolean
+        account?: unknown
+        code?: string
+        fail?: boolean
+    }) {
+        const asked: string[] = []
+        const base = fakeBaileys()
+        const api: BaileysApi = {
+            connect: async (args) => {
+                const socket = await base.api.connect(args)
+                return Object.assign(socket, {
+                    authState: {
+                        creds: {
+                            registered: options.registered,
+                            ...(options.account === undefined ? {} : { account: options.account }),
+                        },
+                    },
+                    requestPairingCode: async (number: string) => {
+                        asked.push(number)
+                        if (options.fail === true) throw new Error("bad number")
+                        return options.code ?? "K7Q2M4XP"
+                    },
+                })
+            },
+        }
+        return { api, asked, emit: base.emit }
+    }
+
+    function withPairing(api: BaileysApi, pairWith: string) {
+        return whatsappChannel({
+            id: "wa",
+            agentId: "test",
+            dir: authDir,
+            env: {},
+            // The three-second settle is a seam for exactly this: sleeping it here would trade a
+            // fast file for a slow one and teach everybody to skip it.
+            config: { authDir, api, pairWith, pairingDelayMs: 0 },
+        })
+    }
+
+    test("an unpaired session asks for a code and reports it as needs_input", async () => {
+        const socket = codeSocket({ registered: false })
+        const { host, states } = recorder()
+        const channel = withPairing(socket.api, "8801711223344")
+        await channel.start(host)
+        await settle()
+
+        expect(socket.asked).toEqual(["8801711223344"])
+        const waiting = states.find((state) => state.status === "needs_input")
+        expect(waiting?.input?.kind).toBe("pairing_code")
+        expect(waiting?.input?.payload).toBe("K7Q2M4XP")
+        // The sentence has to say where to type it; a bare code is a string with no instructions.
+        expect(waiting?.detail).toContain("Linked devices")
+        await channel.stop()
+    })
+
+    /**
+     * The guard that matters. This runs inside the **reconnect loop**, so every transient close
+     * reaches it — and asking a live session to pair again is at best wasted and at worst logs the
+     * device out.
+     */
+    test("a session already linked is never asked to pair again", async () => {
+        const socket = codeSocket({ registered: true })
+        const { host } = recorder()
+        const channel = withPairing(socket.api, "8801711223344")
+        await channel.start(host)
+        await settle()
+
+        expect(socket.asked).toEqual([])
+        await channel.stop()
+    })
+
+    /**
+     * **The bug that broke the first real pairing.** After the code is typed, `pair-success`
+     * writes `account` and WhatsApp closes with 515; login completes on the reconnect, and only
+     * then is `registered` set. On that reconnect a guard reading `registered` asked for a
+     * *second* code, and `requestPairingCode` overwrites `me` — a fresh pairing on top of the one
+     * about to finish. The phone listed the device; our creds held `me` and `pairingCode` and none
+     * of the pair-success fields. `account` is the field pair-success writes and nothing else does.
+     */
+    test("a session the phone has accepted is not asked to pair again while login finishes", async () => {
+        const socket = codeSocket({ registered: false, account: { details: "…" } })
+        const { host } = recorder()
+        const channel = withPairing(socket.api, "8801711223344")
+        await channel.start(host)
+        await settle()
+
+        expect(socket.asked).toEqual([])
+        await channel.stop()
+    })
+
+    /**
+     * Baileys keeps emitting `qr` on the same socket whether or not a code was requested, roughly
+     * every twenty seconds. Honouring both makes the code vanish from the panel mid-entry, which
+     * reads as the pairing having failed.
+     */
+    test("the QR that keeps arriving does not displace the code", async () => {
+        const socket = codeSocket({ registered: false })
+        const { host, states } = recorder()
+        const channel = withPairing(socket.api, "8801711223344")
+        await channel.start(host)
+        // **Before the code arrives as well as after.** Baileys emits its first QR inside the
+        // settle wait, so suppressing only afterwards showed a barcode and then replaced it with a
+        // code — which reads as the first one having failed.
+        socket.emit({ qr: "2@duringthewait" })
+        await settle()
+        socket.emit({ qr: "2@somethingelse" })
+        await settle()
+
+        const kinds = states
+            .filter((state) => state.status === "needs_input")
+            .map((state) => state.input?.kind)
+        expect(kinds).toEqual(["pairing_code"])
+        await channel.stop()
+    })
+
+    /**
+     * A failed request does not take the connection down: the QR path is live on the same socket,
+     * so a channel that cannot get a code can still be paired by scanning. Turning this into a
+     * reconnect would take the QR away too.
+     */
+    test("a refused request is reported and leaves the QR path working", async () => {
+        const socket = codeSocket({ registered: false, fail: true })
+        const { host, states, errors } = recorder()
+        const channel = withPairing(socket.api, "8801711223344")
+        await channel.start(host)
+        await settle()
+        expect(errors.length).toBeGreaterThan(0)
+
+        socket.emit({ qr: "2@fallback" })
+        await settle()
+        const waiting = states.find((state) => state.input?.kind === "qr")
+        expect(waiting?.input?.payload).toBe("2@fallback")
+        await channel.stop()
+    })
+
+    /**
+     * **Normalised, not refused — a reversal.** The first version refused `+880 1711 223344`, on
+     * the reasoning that one spelling is easier to match than two. That put the burden on the
+     * person: a number reads off a contact card with a `+` and spaces, means exactly one thing, and
+     * OpenClaw folds it ("E.164-style, normalised internally"). So does this now. What is still
+     * refused is a value with no number in it, because `requestPairingCode` fails opaquely on one.
+     */
+    test("a number with a + and spaces is folded to digits, and a non-number is refused", async () => {
+        const socket = codeSocket({ registered: false })
+        const channel = withPairing(socket.api, "+880 1711-223344")
+        const { host } = recorder()
+        await channel.start(host)
+        await settle()
+        expect(socket.asked).toEqual(["8801711223344"])
+        await channel.stop()
+
+        expect(() => withPairing(fakeBaileys().api, "not-a-number")).toThrow(/pairWith/)
+    })
+})
+
+describe("the chat with yourself is the agent's conversation", () => {
+    /**
+     * Reported the moment pairing first worked: the agent showed as a linked device on the phone
+     * and answered nothing. The owner had opened the chat with themselves — the obvious first
+     * test for an agent linked to your own number — and every message they typed arrived as
+     * `fromMe`, because they *are* the account. The filter written to stop the agent answering
+     * its own echo discarded all of it.
+     */
+    const me = "8801711223344@s.whatsapp.net"
+    const context = { ownJids: new Set([me]), sentIds: ["SENT-1"] }
+    const at = (jid: string, extra: Record<string, unknown> = {}) => ({
+        key: { remoteJid: jid, fromMe: true, id: "IN-1", ...extra },
+        message: { conversation: "hello agent" },
+    })
+
+    test("the owner typing to themselves is read", () => {
+        const raw = toInbound(at(me), context)
+        expect(raw?.text).toBe("hello agent")
+        expect(raw?.senderHandle).toBe("8801711223344")
+    })
+
+    test("the agent's own reply is not read back, even in that chat", () => {
+        expect(toInbound(at(me, { id: "SENT-1" }), context)).toBeUndefined()
+    })
+
+    test("the owner talking to somebody else from their phone is not the agent's business", () => {
+        expect(toInbound(at("15551234567@s.whatsapp.net"), context)).toBeUndefined()
+    })
+
+    test("a linked device's suffix does not hide the owner", () => {
+        // The account is `…@s.whatsapp.net`; this phone is `…:12@s.whatsapp.net`. Same person.
+        expect(toInbound(at("8801711223344:12@s.whatsapp.net"), context)?.text).toBe("hello agent")
+    })
+
+    /**
+     * WhatsApp now addresses many chats by LID — an opaque id ending `@lid` — and carries the
+     * phone form in `remoteJidAlt`. Read only `remoteJid` and the sender is a LID's digits, which
+     * is nobody's phone number and matches nobody's `allowFrom`. Nothing to do with self-chat: it
+     * broke every third-party sender under LID addressing too.
+     */
+    test("a LID-addressed chat reports the phone number, from the alternate JID", () => {
+        const raw = toInbound(
+            {
+                key: {
+                    remoteJid: "236700000000001@lid",
+                    remoteJidAlt: "15551234567@s.whatsapp.net",
+                    id: "L1",
+                },
+                message: { conversation: "hi" },
+            },
+            context,
+        )
+        expect(raw?.senderHandle).toBe("15551234567")
+        // Delivery goes back to the form Baileys can route.
+        expect(raw?.peerId).toBe("15551234567@s.whatsapp.net")
+    })
+
+    test("the owner under LID addressing is still the owner", () => {
+        const lidContext = { ownJids: new Set([me, "236700000000009@lid"]), sentIds: [] }
+        const raw = toInbound(
+            {
+                key: { remoteJid: "236700000000009@lid", remoteJidAlt: me, fromMe: true, id: "X" },
+                message: { conversation: "via lid" },
+            },
+            lidContext,
+        )
+        expect(raw?.text).toBe("via lid")
+    })
+})
+
+describe("a refused pairing stops rather than hammering the number", () => {
+    /**
+     * Measured in the container on 2026-09-22: three codes in fifteen seconds, each invalidated by
+     * a `loggedOut` before anybody could finish typing the one before it. Nobody can enter eight
+     * characters in seven seconds, so pairing could never complete — and every pass was another
+     * failed pairing recorded against a real WhatsApp number, which decision 8.4 says is what gets
+     * an account banned with no appeal.
+     *
+     * The cause was one branch: `loggedOut` never touched `#failures`, because it was written for
+     * the case where a *person* revoked a working session. A refused pairing wears the same status
+     * code and is the opposite situation.
+     */
+    /**
+     * A socket reporting `registered: false` — a session that has **never paired**, which is the
+     * whole scenario. A fake with no `authState` reads as registered by design, because treating a
+     * working session as unpaired is the worse error, so it would exercise the revocation branch
+     * instead and prove nothing about this one.
+     */
+    function rejecting(registered = false) {
+        const base = fakeBaileys()
+        const api: BaileysApi = {
+            connect: async (args) => {
+                const socket = await base.api.connect(args)
+                return Object.assign(socket, { authState: { creds: { registered } } })
+            },
+        }
+        return {
+            api,
+            emit: base.emit,
+            refuse: () =>
+                base.emit({
+                    connection: "close",
+                    lastDisconnect: { error: { output: { statusCode: 401 } } },
+                }),
+        }
+    }
+
+    function channelFor(api: BaileysApi) {
+        return whatsappChannel({
+            id: "wa",
+            agentId: "test",
+            dir: authDir,
+            env: {},
+            config: { authDir, api, pairWith: "8801711223344", pairingDelayMs: 0 },
+        })
+    }
+
+    test("it gives up by name after a few refusals, instead of looping", async () => {
+        const socket = rejecting()
+        const { host, states, errors } = recorder()
+        const channel = channelFor(socket.api)
+        await channel.start(host)
+        await settle()
+
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+            socket.refuse()
+            await settle()
+        }
+
+        const refused = errors.find(
+            (entry) => (entry as { code?: string }).code === "whatsapp_pairing_refused",
+        )
+        expect(refused).toBeDefined()
+        expect(states.some((state) => state.status === "error")).toBe(true)
+        await channel.stop()
+    })
+
+    /**
+     * The other half, and the reason this is a *distinction* rather than a cap: a session that
+     * really did connect and was then revoked from the phone must still wipe and pair again. That
+     * is the stuck-with-no-QR state the logout branch exists for.
+     */
+    /**
+     * The same distinction on the other branch: a 401 on a session pair-success has accepted is a
+     * revocation (wipe, offer a fresh code), never a refused pairing — even though `registered`
+     * is still false on the reconnect where it would arrive.
+     */
+    test("a 401 after pair-success is a revocation, not a refusal", async () => {
+        const base = fakeBaileys()
+        const api: BaileysApi = {
+            connect: async (args) => {
+                const socket = await base.api.connect(args)
+                return Object.assign(socket, {
+                    authState: { creds: { registered: false, account: { details: "…" } } },
+                })
+            },
+        }
+        const { host, errors } = recorder()
+        const channel = channelFor(api)
+        await channel.start(host)
+        await settle()
+        base.emit({
+            connection: "close",
+            lastDisconnect: { error: { output: { statusCode: 401 } } },
+        })
+        await settle()
+        const codes = errors.map((entry) => (entry as { code?: string }).code)
+        expect(codes).toContain("whatsapp_logged_out")
+        expect(codes).not.toContain("whatsapp_pairing_refused")
+        await channel.stop()
+    })
+
+    test("a revocation of a registered session still re-pairs", async () => {
+        const socket = rejecting(true)
+        const { host, errors } = recorder()
+        const channel = channelFor(socket.api)
+        await channel.start(host)
+        await settle()
+
+        socket.refuse()
+        await settle()
+
+        expect(
+            errors.some((entry) => (entry as { code?: string }).code === "whatsapp_logged_out"),
+        ).toBe(true)
+        expect(
+            errors.some(
+                (entry) => (entry as { code?: string }).code === "whatsapp_pairing_refused",
+            ),
+        ).toBe(false)
+        await channel.stop()
+    })
+})

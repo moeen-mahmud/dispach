@@ -63,9 +63,18 @@ try {
     // 201 MB: `dist/` was never cleaned, so a month of stale chunks — a hundred of them importing a
     // package renamed away — would have been published. Renegotiate it with a measurement.
     check("under 1000 files", tarball.entryCount < 1000, `${tarball.entryCount}`)
+    /**
+     * Renegotiated 2026-09-22, with the measurement the comment above asks for.
+     *
+     * 25 MB → 35 MB, because bundling the WhatsApp channel put **8.2 MB** of Baileys into the
+     * tarball and took it from ~18.4 MB to **26.6 MB**. That is a decision (the channel ships by
+     * default now) rather than a regression, so the ceiling moves rather than the code — and it
+     * moves to a number that still catches what this check exists for: the 201 MB, 2,693-file
+     * publish an uncleaned `dist/` once produced.
+     */
     check(
-        "under 25 MB unpacked",
-        tarball.unpackedSize < 25e6,
+        "under 35 MB unpacked",
+        tarball.unpackedSize < 35e6,
         `${(tarball.unpackedSize / 1e6).toFixed(1)} MB`,
     )
 

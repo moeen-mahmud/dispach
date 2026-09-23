@@ -210,6 +210,24 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     // Flags win over the manifest: the manifest is the deployment's intent and a flag is this
     // invocation's. `--port 0` is honoured — it means "any free port", which a test wants.
     const port = options.port ?? config.port
+    /**
+     * Whether a taken port is a refusal or a starting point.
+     *
+     * **A flag is an instruction and the manifest is a preference.** `--port 7420` names one socket
+     * and failing is the correct answer — silently serving somewhere else would be the "looks
+     * configured and is not" shape this file already refuses for a manifest disagreement. Everything
+     * else walks: `init` writes `port: 7420` into every manifest it generates, so on a machine with
+     * a container, a service and a checkout the default collides constantly, and the old behaviour
+     * was a dead end that named no way out.
+     *
+     * `--port 0` never walks — the OS is already picking a free one, and there is nothing to avoid.
+     *
+     * This is only safe because **the lease carries the address, not the manifest**: `publishAddress`
+     * runs after the bind with whatever was actually taken, so `stop`, `web url` and an attached
+     * `run` follow the socket rather than the file. That mechanism exists for `--port 0` and this
+     * rides on it.
+     */
+    const walkPorts = options.port === undefined
     const host = options.host ?? config.host
     // `loaded.env`, never `env`. `ambientEnv` returns the *process* environment — the agent's own
     // `.env` beside the manifest is layered in by `loadManifest`, which is why every other
@@ -240,7 +258,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                 channelId: string
                 status: string
                 detail?: string
-                input?: { kind: string; expiresAt?: string }
+                input?: { kind: string; payload: string; expiresAt?: string }
             }
             /**
              * A `needs_input` names where the payload is, and never prints it.
@@ -251,14 +269,27 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
              * resource carries the payload because `statusOf` returns it, so that is what this
              * points at.
              */
+            /**
+             * **A pairing code is printed; a QR is pointed at.** The rule above — never print the
+             * payload — was written for a QR, which is hundreds of bytes nobody can read off a
+             * log. An eight-character code is the opposite: it *is* the thing to read, and a line
+             * saying "GET /v1/agents/milo carries it" sent a person to a browser to fetch eight
+             * characters the terminal already had.
+             */
             const waiting =
                 data.input === undefined
                     ? ""
-                    : ` (${data.input.kind}${
-                          data.input.expiresAt === undefined
-                              ? ""
-                              : `, expires ${data.input.expiresAt}`
-                      } — GET /v1/agents/${event.agentId ?? ""} carries it)`
+                    : data.input.kind === "pairing_code"
+                      ? `\n\n    ${data.input.payload}\n${
+                            data.input.expiresAt === undefined
+                                ? ""
+                                : `\n  expires ${data.input.expiresAt}`
+                        }`
+                      : ` (${data.input.kind}${
+                            data.input.expiresAt === undefined
+                                ? ""
+                                : `, expires ${data.input.expiresAt}`
+                        } — GET /v1/agents/${event.agentId ?? ""} carries it)`
             process.stdout.write(
                 `  ${data.channelId}: ${data.status}${data.detail === undefined ? "" : ` — ${data.detail}`}${waiting}\n`,
             )
@@ -378,71 +409,82 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     const claim = liveKeys === 0 || options.claim === true ? createClaimTicket() : undefined
 
     let running: Awaited<ReturnType<typeof serve>>
+    /**
+     * Ports actually tried, so the banner can say it moved and the refusal can say how far it looked.
+     * The first entry is what was asked for.
+     */
+    const attempted: number[] = []
     try {
-        running = await serve({
-            runtime,
-            host,
-            port,
-            approvals,
-            // The origin allowlists, from the manifest. Passed rather than defaulted, because the
-            // guard's *default* behaviour is what protects a server whose operator configured
-            // nothing — these two only widen it.
-            allowedOrigins: config.allowedOrigins,
-            allowedHosts: config.allowedHosts,
-            /**
-             * How `POST /v1/agents/:id/start` finds a manifest for an agent this host is not
-             * holding. Injected because `packages/server` may not import the CLI, and the sandbox
-             * layout is the CLI's — the same seam 16.5's provisioning route needs.
-             *
-             * Matched on the manifest's **id**, not on the directory name, because `:id` in the
-             * route is an agent id and the two are allowed to differ for a hand-copied directory.
-             */
-            resolveAgent: (agentId) => manifestForId(agentId, env),
-            /**
-             * How `POST /v1/agents` creates one. The server owns the route and the gate; this is
-             * the implementation, injected because `packages/server` may not import the CLI.
-             *
-             * Both halves come from `lib/provision.ts`, which is also what `init` writes through —
-             * so an agent provisioned over HTTP is byte-identical to one created at a terminal, and
-             * the step list a browser renders is the walk the wizard performs.
-             *
-             * Injected **unconditionally**, including in the container. What keeps provisioning out
-             * of there is the loopback gate rather than this absence — the image's `CMD` binds
-             * `0.0.0.0`, so the route answers `403`. A container that deliberately binds loopback
-             * and wants to provision into itself is then a thing that works, which is the right
-             * answer for `docker run -it … init`'s neighbour.
-             */
-            provision: {
-                steps: () => provisionSteps({ agentDirBase: agentsDir(env) }),
-                create: (answers) =>
-                    provisionAgent({ answers, defaults: { agentDirBase: agentsDir(env) } }),
-            },
-            /**
-             * The same functions the `channels` command calls, injected for the same reason the
-             * provisioner is: *how* a channel is switched off or re-credentialled is the CLI's —
-             * `editManifest` for one, `applySecret` at `0600` for the other — and a second
-             * implementation inside the server is how the browser and the terminal come to disagree
-             * about what "disconnect" means.
-             */
-            channels: {
-                setEnabled: setChannelEnabled,
-                setCredential: setChannelCredential,
-                unpair: unpairChannel,
-            },
-            ...(claim === undefined ? {} : { claim }),
-            ...(token === undefined || token === "" ? {} : { token }),
+        running = await bindWalking(port, walkPorts, (candidate) => {
+            attempted.push(candidate)
+            return serve({
+                runtime,
+                host,
+                port: candidate,
+                approvals,
+                // The origin allowlists, from the manifest. Passed rather than defaulted, because the
+                // guard's *default* behaviour is what protects a server whose operator configured
+                // nothing — these two only widen it.
+                allowedOrigins: config.allowedOrigins,
+                allowedHosts: config.allowedHosts,
+                /**
+                 * How `POST /v1/agents/:id/start` finds a manifest for an agent this host is not
+                 * holding. Injected because `packages/server` may not import the CLI, and the sandbox
+                 * layout is the CLI's — the same seam 16.5's provisioning route needs.
+                 *
+                 * Matched on the manifest's **id**, not on the directory name, because `:id` in the
+                 * route is an agent id and the two are allowed to differ for a hand-copied directory.
+                 */
+                resolveAgent: (agentId) => manifestForId(agentId, env),
+                /**
+                 * How `POST /v1/agents` creates one. The server owns the route and the gate; this is
+                 * the implementation, injected because `packages/server` may not import the CLI.
+                 *
+                 * Both halves come from `lib/provision.ts`, which is also what `init` writes through —
+                 * so an agent provisioned over HTTP is byte-identical to one created at a terminal, and
+                 * the step list a browser renders is the walk the wizard performs.
+                 *
+                 * Injected **unconditionally**, including in the container. What keeps provisioning out
+                 * of there is the loopback gate rather than this absence — the image's `CMD` binds
+                 * `0.0.0.0`, so the route answers `403`. A container that deliberately binds loopback
+                 * and wants to provision into itself is then a thing that works, which is the right
+                 * answer for `docker run -it … init`'s neighbour.
+                 */
+                provision: {
+                    steps: () => provisionSteps({ agentDirBase: agentsDir(env) }),
+                    create: (answers) =>
+                        provisionAgent({ answers, defaults: { agentDirBase: agentsDir(env) } }),
+                },
+                /**
+                 * The same functions the `channels` command calls, injected for the same reason the
+                 * provisioner is: *how* a channel is switched off or re-credentialled is the CLI's —
+                 * `editManifest` for one, `applySecret` at `0600` for the other — and a second
+                 * implementation inside the server is how the browser and the terminal come to disagree
+                 * about what "disconnect" means.
+                 */
+                channels: {
+                    setEnabled: setChannelEnabled,
+                    setCredential: setChannelCredential,
+                    unpair: unpairChannel,
+                },
+                ...(claim === undefined ? {} : { claim }),
+                ...(token === undefined || token === "" ? {} : { token }),
+            })
         })
     } catch (error) {
         // The runtime is already up; leaving it running after a failed bind would hold the store
         // open and keep channels polling with nothing serving.
         await runtime.stop("server failed to bind")
         if (error instanceof HarnessError) throw error
+        const looked = attempted.length > 1 ? ` — also tried ${attempted.slice(1).join(", ")}` : ""
         throw new HarnessError({
             code: "server_bind_failed",
-            message: `Could not bind ${host}:${port}: ${
+            message: `Could not bind ${host}:${port}${looked}: ${
                 error instanceof Error ? error.message : String(error)
             }`,
-            hint: "Another process is probably on that port. Pass --port, or set server.port in the manifest.",
+            hint: walkPorts
+                ? `Every port in the range is taken. Pass --port to name a free one, or stop whatever is holding them — \`${BRAND.slug} stop\` releases one this runtime started.`
+                : "Another process is on that port, and --port was given explicitly so nothing else was tried. Drop the flag to let it walk to the next free port, or name a different one.",
             cause: error,
         })
     }
@@ -537,6 +579,18 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         const browsable = `http://${browsableHost(host)}:${running.port}`
         const boundNote = browsable === running.url ? "" : ` (bound ${host} — every interface)`
         process.stdout.write(`${BRAND.name} serving on ${browsable}${boundNote}\n`)
+
+        /**
+         * **It moved, so it says so.** A port walk that reported nothing would make `server.port:
+         * 7420` in the manifest a line that is quietly false for the life of the process — the same
+         * "looks configured and is not" failure the bind-disagreement check above refuses, arrived
+         * at by a different route. Named on its own line rather than folded into the URL, because
+         * the remedy is about the *other* process and not about this one.
+         */
+        if (running.port !== port)
+            process.stdout.write(
+                `  moved from ${port} — something else is on it. \`--port ${port}\` would refuse instead of moving.\n`,
+            )
 
         /**
          * The web UI and the reference, named because nothing named them.
@@ -744,3 +798,43 @@ function waitForSignal(): Promise<void> {
 
 /** Re-exported for the boundaries test, which asserts this module imports no renderer. */
 export const SERVE_EXIT_FAILURE = EXIT_FAILURE
+
+/** How far past the requested port a walk will look before giving up. */
+const PORT_WALK = 16
+
+/**
+ * Bind at `first`, or at the next free port after it.
+ *
+ * Only a port that is **taken** advances the walk. Every other failure is rethrown on the spot: a
+ * permission error on port 80 would otherwise be retried sixteen times and reported as "the range
+ * is full", which sends a reader to the wrong problem entirely.
+ *
+ * Detected from the message rather than from a code, because that is what the runtime gives us —
+ * Bun's `serve` throws `Failed to start server. Is port 7420 in use?` and Node's listener reports
+ * `EADDRINUSE`. Both spellings are matched; a shape neither covers falls through to a rethrow,
+ * which is the safe direction.
+ */
+async function bindWalking<T>(
+    first: number,
+    walk: boolean,
+    bind: (port: number) => Promise<T>,
+): Promise<T> {
+    // `0` is the OS picking for us. There is nothing to walk past, and incrementing it would turn
+    // "any free port" into a request for port 1.
+    const last = walk && first !== 0 ? first + PORT_WALK : first
+    for (let candidate = first; ; candidate += 1) {
+        try {
+            return await bind(candidate)
+        } catch (error) {
+            if (candidate >= last || !portIsTaken(error)) throw error
+        }
+    }
+}
+
+/** Whether a bind failure was "somebody else has this port" rather than anything else. */
+function portIsTaken(error: unknown): boolean {
+    if (typeof error === "object" && error !== null && "code" in error)
+        if ((error as { code?: unknown }).code === "EADDRINUSE") return true
+    const message = error instanceof Error ? error.message : String(error)
+    return message.includes("EADDRINUSE") || message.includes("in use")
+}

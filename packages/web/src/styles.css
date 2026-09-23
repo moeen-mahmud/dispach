@@ -254,6 +254,22 @@ textarea:focus {
    viewport stops resolving. 240px is comfortably above the ~2px-per-module a camera needs for the
    61-module matrix WhatsApp issues. White background is not decoration — the quiet zone and the
    light modules have to be light whatever the page theme is, or nothing reads it. */
+/* A pairing code is typed by a person off the screen, so it is set large, monospaced and widely
+   tracked: at body size an 8-character code is a string somebody mistypes. Selectable, because
+   copy-paste is the other way it gets entered. */
+.payload-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    margin: 10px 0;
+    user-select: all;
+}
+
+.channel-input.stale .payload-code {
+    opacity: 0.35;
+}
+
 .payload-qr {
     display: block;
     width: 240px;

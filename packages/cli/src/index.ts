@@ -178,7 +178,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
             const telegram = flags.str("telegram")
             const telegramAllow = flags.str("telegram-allow")
             const whatsapp = flags.str("whatsapp")
-            const whatsappAllow = flags.str("whatsapp-allow")
+            const whatsappNumber = flags.str("whatsapp-number")
             const server = flags.str("server")
             const schedules = flags.str("schedules")
             const skills = flags.str("skills")
@@ -200,7 +200,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 ...(schedules === undefined ? {} : { schedules }),
                 ...(telegramAllow === undefined ? {} : { telegramAllow }),
                 ...(whatsapp === undefined ? {} : { whatsapp }),
-                ...(whatsappAllow === undefined ? {} : { whatsappAllow }),
+                ...(whatsappNumber === undefined ? {} : { whatsappNumber }),
                 ...(server === undefined ? {} : { server }),
                 ...(skills === undefined ? {} : { skills }),
                 ...(daemon === undefined ? {} : { daemon }),

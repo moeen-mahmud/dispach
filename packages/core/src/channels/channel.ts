@@ -148,8 +148,18 @@ export type ChannelStatus = "starting" | "connected" | "disconnected" | "error" 
  * costs a consumer nothing.
  */
 export interface ChannelInput {
-    /** `qr`: render `payload` as a 2D barcode. Nothing else is defined yet. */
-    readonly kind: "qr"
+    /**
+     * How to present `payload`.
+     *
+     * `qr` — render it as a 2D barcode. `pairing_code` — show it as text to be typed in, which is
+     * WhatsApp's alternative to scanning and the only route that works on a surface that cannot
+     * draw a barcode.
+     *
+     * The set grows inside `v: 1` because this is a **string on the wire**; a client that has never
+     * heard of a kind must still show the payload rather than an empty box, which is why every
+     * renderer here has an unknown-kind branch.
+     */
+    readonly kind: "qr" | "pairing_code"
     /** The bytes to render or display, verbatim. Never a sentence — that is `detail`. */
     readonly payload: string
     /**
@@ -249,6 +259,19 @@ export interface ChannelTransport {
      * channel in the state a first start produces: no session, and pairing offered again.
      */
     reset?(): Promise<void>
+    /**
+     * Senders this transport vouches for, admitted whether or not `allowFrom` names them.
+     *
+     * One case, and it is the account owner: a WhatsApp channel paired to a number *is* that
+     * number, and the person who typed the pairing code is the first person who will talk to
+     * it — in the chat with themselves. Measured: a freshly paired agent refused its own owner
+     * with *"has no allowFrom, which permits nobody"* until they edited the manifest and
+     * restarted. OpenClaw admits the linked number regardless of `allowFrom` for the same reason.
+     *
+     * Merged into the gate by core rather than checked by the transport, so there is still one
+     * place that decides who gets in — and so `allowFrom` keeps meaning "who else".
+     */
+    readonly alwaysAllow?: readonly string[]
 }
 
 export interface WebhookDelivery {

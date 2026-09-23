@@ -585,7 +585,7 @@ describe("every answer the wizard has is reachable at the terminal", () => {
     test("whatsapp in particular, because this is the one that got away", () => {
         const served = provisionSteps({ agentDirBase: "/tmp/provision-wa" })
         expect(served.map((step) => step.step)).toContain("whatsapp")
-        const allow = served.find((step) => step.step === "whatsappAllow")
+        const allow = served.find((step) => step.step === "whatsappNumber")
         // And its follow-up is attributed to the answer that opens it, so a browser form can hide
         // the field until somebody says yes.
         expect(allow?.requires).toEqual({ step: "whatsapp", value: "connected" })

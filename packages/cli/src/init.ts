@@ -37,11 +37,13 @@ import {
     planFiles,
     type QuestionDefaults,
     SKILLS_CHOICES,
+    slugify,
     TELEGRAM_TOKEN_ENV,
     validateAnswer,
     webBackendByValue,
 } from "#lib/init-flow"
 import { findAndInstallSkill } from "#lib/init-skills"
+import { type PairOutcome, pairLater, pairWhatsApp } from "#lib/init-whatsapp"
 import { negotiateKeyboard } from "#lib/keyboard"
 import { resolveModeFromProcess } from "#lib/output"
 import { complete, FLAG_FOR, fillDefaults, writeAgentFiles } from "#lib/provision"
@@ -216,6 +218,25 @@ async function runInit(options: InitOptions): Promise<InitResult> {
         }
     }
 
+    /**
+     * Pair WhatsApp here, while the person who typed the number is still sitting at the terminal.
+     *
+     * After the skills install so the agent is complete, before the service install so what gets
+     * started is an agent whose channel is already linked. It cannot fail the init — every path
+     * inside reports and returns — and it is **skipped without a terminal**, because a scripted run
+     * has nobody to read a code and opening a socket to WhatsApp in CI is the expensive default the
+     * wizard's fallback rule exists to prevent.
+     */
+    let paired: PairOutcome | undefined
+    if (answers.whatsapp === "connected" && (answers.whatsappNumber ?? "") !== "" && interactive) {
+        paired = await pairWhatsApp({
+            manifestPath,
+            dir: targetDir,
+            number: answers.whatsappNumber ?? "",
+            channelId: "wa",
+        })
+    }
+
     let installed = false
     if (answers.daemon === "service") {
         process.stdout.write("\n")
@@ -230,6 +251,10 @@ async function runInit(options: InitOptions): Promise<InitResult> {
         }
     }
 
+    // Named only when it did not finish here, so the closing block never tells somebody to go and
+    // scan a code they have already used.
+    if (answers.whatsapp === "connected" && paired !== "paired")
+        process.stdout.write(`\n${pairLater(slugify(answers.name))}`)
     process.stdout.write(nextSteps(answers, targetDir, distilled, installed))
     return { kind: "ok", manifestPath: join(targetDir, "agent.yaml") }
 }
@@ -269,7 +294,7 @@ function fromFlags(options: InitOptions): Partial<Record<InitStep, string>> {
         ["telegram", options.telegram],
         ["telegramAllow", options.telegramAllow],
         ["whatsapp", options.whatsapp],
-        ["whatsappAllow", options.whatsappAllow],
+        ["whatsappNumber", options.whatsappNumber],
         ["server", options.server],
         ["schedules", options.schedules],
         // `--skills` takes a choice name *or* the words to search for, and the sugar is here rather than

@@ -8,8 +8,14 @@
  *   - type: whatsapp
  *     id: wa
  *     authDir: ./.whatsapp     # the paired session. 0600, and gitignore it.
+ *     pairWith: "8801711223344"      # THIS account is linked. Pairing is a code, not a QR.
  *     allowFrom: ["8801711223344"]   # digits, no +. Inbound only, closed by default.
  * ```
+ *
+ * `pairWith` and `allowFrom` answer different questions and are usually different people: the
+ * first is the account the agent *runs as*, the second is who may talk to it. Omit `pairWith` and
+ * pairing falls back to a QR.
+ *
  *
  * ## Why this package is not in the binary
  *
@@ -74,9 +80,30 @@ export const whatsappChannel: ChannelFactory = (context) => {
 
     const api = context.config.api as BaileysApi | undefined
 
+    /**
+     * The account this agent becomes a linked device of — digits only, and **not `allowFrom`**.
+     *
+     * Set it and pairing is a code typed into the phone rather than a barcode to scan. Refused
+     * here rather than at first connect, because `requestPairingCode` fails opaquely on a
+     * malformed number and the moment somebody can act on it is the moment they wrote it.
+     */
+    // **Normalised, not refused.** `+880 1711-223344` is how a number reads off a contact card and
+    // it means exactly one thing, so it is folded to digits the way OpenClaw's `allowFrom` is
+    // ("E.164-style, normalised internally"). Refused only when nothing usable is left — a word
+    // is not a number and `requestPairingCode` fails opaquely on one.
+    const written = stringField(context.config, "pairWith")
+    const pairWith = written === undefined ? undefined : written.replace(/[^0-9]/g, "")
+    if (written !== undefined && !/^[0-9]{6,20}$/.test(pairWith ?? ""))
+        throw new Error(
+            `channels.${context.id}.pairWith: "${written}" is not a WhatsApp number — the digits with the country code, with or without a +.`,
+        )
+
+    const pairingDelayMs = context.config.pairingDelayMs
     return new WhatsAppTransport({
         id: context.id,
         authDir,
+        ...(pairWith === undefined ? {} : { pairWith }),
+        ...(typeof pairingDelayMs === "number" ? { pairingDelayMs } : {}),
         ...(api === undefined ? {} : { api }),
     })
 }

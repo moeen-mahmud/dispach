@@ -400,43 +400,66 @@ describe("every host that loads plugins names the plugin root", () => {
     })
 })
 
-describe("the WhatsApp channel stays out of the binary", () => {
+describe("the WhatsApp channel is bundled, and says what that costs", () => {
     /**
-     * Baileys reverse-engineers WhatsApp Web, which WhatsApp's terms do not permit and for which
-     * there is no appeal when a number is banned. That is a risk an operator takes deliberately for
-     * an account they chose; it is not one this runtime takes on behalf of everybody who installs
-     * it. So the package is built, typechecked, linted and tested with everything else — contract
-     * drift against `ChannelTransport` is caught by our own suite rather than by somebody else's CI
-     * — and reaches an agent only through `plugins add`.
+     * **This reverses the decision the previous version of this block enforced** (Moeen,
+     * 2026-09-22). It used to assert that nothing imported the package: Baileys reverse-engineers
+     * WhatsApp Web, and shipping it to everybody was a risk the runtime was not taking on their
+     * behalf. The cost of that was a wizard question whose answer produced a manifest naming a
+     * plugin no route could supply — reported as "it says whatsapp is connected … but it didn't
+     * show any code to pair". The opt-in now lives where every other capability's does: naming the
+     * channel in a manifest.
      *
-     * What actually pulls a package into the binary is a static import in `providers.ts` plus the
-     * workspace devDependency. Neither is a thing anybody would notice adding, and adding either
-     * would put 7 MB of unofficial protocol code into the tarball, the four compiled binaries and
-     * the image. So both are asserted, and against `package.json` rather than against the built
-     * bundle: a `dist` scan would go green on a stale build.
+     * So the guard inverts. What matters is no longer *absence* but that the two things bundling
+     * makes untrue are still said out loud.
      */
     const WHATSAPP = "channel-whatsapp"
 
-    test("no CLI source imports it", () => {
-        // An *import*, not a mention: `lib/plugin-install.ts` names the package in a comment as the
-        // example of a monorepo subdirectory, which is exactly the thing this rule is about and not
-        // a violation of it.
-        const offenders = FILES.filter((file) =>
-            new RegExp(`from ["'][^"']*${WHATSAPP}`).test(file.text),
-        ).map((file) => file.path)
-        expect(offenders).toEqual([])
+    test("it is registered, so a manifest naming the type needs no install step", () => {
+        const providers = FILES.find((file) => file.path.endsWith("lib/providers.ts"))
+        expect(providers).toBeDefined()
+        expect(providers?.text).toContain("whatsapp: whatsappChannel")
+        // Both tables: the factory is what `channels:` resolves, the plugin entry is what a
+        // manifest naming the package by name resolves. Telegram is in both for the same reason.
+        expect(providers?.text).toContain(`${BRAND.packageScope}/${WHATSAPP}`)
     })
 
-    test("and it is not a dependency of the published package", () => {
+    /**
+     * **A bundled dependency is a devDependency.** A consumer must never be asked to install code
+     * that is already inside `dist/`, and getting this wrong is invisible in a working tree — the
+     * symlinks are already in `node_modules` from before the edit, so only a fresh checkout fails.
+     */
+    test("it is a devDependency, because it is bundled rather than installed", () => {
         const manifest = JSON.parse(
             readFileSync(join(SRC, "..", "package.json"), "utf8"),
         ) as Record<string, Record<string, string> | undefined>
-        for (const section of ["dependencies", "devDependencies", "peerDependencies"]) {
-            expect(Object.keys(manifest[section] ?? {}).join(" ")).not.toContain(WHATSAPP)
-        }
+        expect(Object.keys(manifest.devDependencies ?? {})).toContain(
+            `${BRAND.packageScope}/${WHATSAPP}`,
+        )
+        expect(Object.keys(manifest.dependencies ?? {})).not.toContain(
+            `${BRAND.packageScope}/${WHATSAPP}`,
+        )
     })
 
-    test("the package really is there — otherwise this test proves nothing", () => {
+    /**
+     * The half that bundling makes dangerous, and the reason this describe block still exists.
+     *
+     * It **does not pair under Bun**, so the compiled binaries and the container image now carry a
+     * channel they cannot finish pairing. A bundled channel that silently did nothing would be
+     * strictly worse than an absent one, so the transport names the limitation at start with the
+     * remedy — and this asserts the sentence has not been deleted as tidy-up, which is exactly what
+     * happens to a warning nobody has a test for.
+     */
+    test("the runtime it cannot pair under is still named at start", () => {
+        const transport = readFileSync(
+            join(SRC, "..", "..", WHATSAPP, "src", "transport.ts"),
+            "utf8",
+        )
+        expect(transport).toContain("BUN_LIMITATION")
+        expect(transport).toMatch(/hint:/)
+    })
+
+    test("the package really is there — otherwise these tests prove nothing", () => {
         expect(existsSync(join(SRC, "..", "..", WHATSAPP, "package.json"))).toBe(true)
     })
 })

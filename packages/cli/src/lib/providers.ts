@@ -14,6 +14,7 @@
  */
 
 import telegramPlugin, { telegramChannel } from "@dispach/channel-telegram"
+import whatsappPlugin, { whatsappChannel } from "@dispach/channel-whatsapp"
 import type {
     BuiltInPlugins,
     ChannelFactory,
@@ -66,6 +67,26 @@ export const PROVIDER_IDS: readonly string[] = Object.keys(TOOL_PROVIDERS)
  */
 export const CHANNELS: Readonly<Record<string, ChannelFactory>> = {
     telegram: telegramChannel,
+    /**
+     * **Bundled, and the two things that costs are stated rather than left to a README.**
+     *
+     * It was deliberately outside the bundle until now, so that running WhatsApp was a thing an
+     * operator opted into by name. Bundling it makes `channels: [{type: whatsapp}]` work with no
+     * install step, which is what a person expects of a channel the wizard offers — and moves the
+     * opt-in from *obtaining the code* to *configuring the channel*, which is where every other
+     * capability's opt-in already lives.
+     *
+     * **Baileys reverse-engineers WhatsApp Web.** WhatsApp's terms do not permit it and a banned
+     * number has no appeal path. Nothing here connects until a manifest names the channel, so a
+     * binary that never mentions WhatsApp never opens a socket to it — but the code now ships to
+     * everybody, which is a change in what this project distributes rather than in what it does.
+     *
+     * **It does not pair under Bun**, which means the compiled binaries and the container image
+     * carry a channel they cannot finish pairing. The transport says so at start with the remedy,
+     * which is the only honest arrangement: a bundled channel that silently did nothing would be
+     * worse than one that is absent.
+     */
+    whatsapp: whatsappChannel,
 }
 
 export const CHANNEL_IDS: readonly string[] = Object.keys(CHANNELS)
@@ -91,6 +112,7 @@ export const CHANNEL_IDS: readonly string[] = Object.keys(CHANNELS)
  */
 export const BUILT_IN_PLUGINS: BuiltInPlugins = {
     "@dispach/channel-telegram": telegramPlugin,
+    "@dispach/channel-whatsapp": whatsappPlugin,
     "@dispach/tools-composio": composioPlugin,
     "@dispach/tools-system": systemPlugin,
     "@dispach/tools-web": webPlugin,

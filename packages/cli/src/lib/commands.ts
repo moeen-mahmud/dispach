@@ -158,7 +158,7 @@ export const COMMANDS: readonly CommandSpec[] = [
                 // A number, not a secret: unlike a bot token there is nothing here worth keeping out
                 // of shell history, so this one gets a flag and `--telegram-allow`'s twin does not
                 // need explaining twice.
-                name: "whatsapp-allow",
+                name: "whatsapp-number",
                 kind: "string",
                 placeholder: "digits",
                 help: "whose number may message it — digits with no +, empty permits nobody",
@@ -664,6 +664,10 @@ export const COMMANDS: readonly CommandSpec[] = [
                     {
                         value: "credential",
                         help: "set the channel's token in the .env, prompted and not echoed",
+                    },
+                    {
+                        value: "pair",
+                        help: "connect it the way that channel needs — a code for WhatsApp, a token for Telegram",
                     },
                     {
                         value: "unpair",

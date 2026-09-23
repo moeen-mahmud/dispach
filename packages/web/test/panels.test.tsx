@@ -236,6 +236,27 @@ describe("the channels panel", () => {
         expect(html).toContain('class="payload-qr"')
     })
 
+    test("a pairing code is set for reading, not drawn as a barcode", () => {
+        // WhatsApp's other route: eight characters typed into the phone. Drawing it as a QR would
+        // be encoding a code whose whole purpose is to be read off the screen by a person.
+        const html = renderToStaticMarkup(
+            createElement(ChannelsPanel, {
+                channels: [
+                    {
+                        ...waiting,
+                        input: { ...waiting.input, kind: "pairing_code", payload: "K7Q2M4XP" },
+                    },
+                ],
+                now: NOW,
+            }),
+        )
+        expect(html).toContain('data-kind="pairing_code"')
+        expect(html).toContain("payload-code")
+        expect(html).not.toContain("payload-qr")
+        // Grouped the way WhatsApp shows it, and the payload itself is never rewritten.
+        expect(html).toContain("K7Q2 M4XP")
+    })
+
     test("an unknown kind still renders its payload", () => {
         // The `kind` set can grow inside `v: 1` while the field's type cannot, so a build that has
         // never heard of a kind must still show what it was given — the difference between a page a

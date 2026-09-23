@@ -25,7 +25,7 @@
  */
 
 import { existsSync, readFileSync, rmSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 import {
     type AgentManifest,
     editManifest,
@@ -50,6 +50,24 @@ export interface ChannelEntry {
      * question anybody asks is "is this filled in".
      */
     readonly credentialSet?: boolean
+    /**
+     * The WhatsApp account this channel links to, when one is configured.
+     *
+     * Its presence is what decides *how* pairing happens — a code typed into the phone rather than
+     * a QR — so a listing that did not carry it had to describe the method with a constant, and
+     * that constant said "paired by QR" for a channel that pairs by code and has never paired.
+     */
+    readonly pairWith?: string
+    /**
+     * Whether a pairing already exists on disk.
+     *
+     * A fact about the filesystem rather than about a running process, which is exactly why it
+     * belongs in a manifest-reading listing: "is this linked" is answerable without a host, and
+     * answering it is the difference between "connected" and something true.
+     */
+    readonly paired?: boolean
+    /** Where a WhatsApp session lives, as written. Relative paths are relative to the manifest. */
+    readonly authDir?: string
     /** Senders this channel accepts. Inbound only. */
     readonly allowFrom: readonly string[]
 }
@@ -84,6 +102,15 @@ export function channelsOf(manifestPath: string): readonly ChannelEntry[] {
             enabled: channel.enabled !== false,
             ...(variable === undefined ? {} : { credentialEnv: variable }),
             ...(variable === undefined ? {} : { credentialSet: (env[variable] ?? "") !== "" }),
+            ...(typeof (channel as Record<string, unknown>).pairWith === "string"
+                ? { pairWith: (channel as Record<string, unknown>).pairWith as string }
+                : {}),
+            ...(channel.type === "whatsapp"
+                ? { paired: hasPairing(manifestPath, channel as Record<string, unknown>) }
+                : {}),
+            ...(typeof (channel as Record<string, unknown>).authDir === "string"
+                ? { authDir: (channel as Record<string, unknown>).authDir as string }
+                : {}),
             allowFrom: channel.allowFrom ?? [],
         }
     })
@@ -230,3 +257,29 @@ export function pairingDirOf(
 }
 
 export type { AgentManifest }
+
+/**
+ * Whether this WhatsApp session is actually linked to an account.
+ *
+ * **`creds.json` existing is not the answer**, which is the second false claim this listing had:
+ * Baileys writes that file the moment it connects, carrying freshly generated keys and
+ * `registered: false`, so a channel that has never paired in its life has one. Measured on a live
+ * run — the listing said `linked` and `needs_input` in the same row. `registered` inside it is the
+ * real signal and is the same field the transport's own pairing guard reads.
+ *
+ * Unreadable or malformed reads as **not** linked: the cost of saying "not linked yet" about a
+ * working channel is a person re-running a command, and the cost of the reverse is somebody
+ * waiting for a pairing that nothing is going to offer.
+ */
+function hasPairing(manifestPath: string, channel: Record<string, unknown>): boolean {
+    const configured = typeof channel.authDir === "string" ? channel.authDir : "./.whatsapp"
+    const dir = isAbsolute(configured) ? configured : resolve(dirname(manifestPath), configured)
+    const file = join(dir, "creds.json")
+    if (!existsSync(file)) return false
+    try {
+        const creds = JSON.parse(readFileSync(file, "utf8")) as { registered?: unknown }
+        return creds.registered === true
+    } catch {
+        return false
+    }
+}

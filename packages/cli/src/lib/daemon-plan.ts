@@ -25,7 +25,12 @@ export interface Finding {
 export interface BinaryFacts {
     /** `realpath(process.execPath)` — the interpreter, absolute. */
     readonly execPath: string
-    /** `realpath(process.argv[1])` — the script, absolute. */
+    /**
+     * `realpath(process.argv[1])` — the script, absolute. **Empty for a compiled binary**, which
+     * is its own command and has no script to name; see `lib/self.ts`. A plist that passed one
+     * would name a path inside bun's embedded filesystem and exit 1 at every boot, into a log
+     * nobody has been told about — the failure this whole subsystem exists to refuse.
+     */
     readonly scriptPath: string
     /** Nearest ancestor of `scriptPath` holding a `.git`, if any. */
     readonly gitRoot?: string

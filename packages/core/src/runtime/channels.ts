@@ -134,7 +134,15 @@ export class ChannelHub {
                 new Inbox({
                     channelId: binding.transport.id,
                     channelType: binding.transport.type,
-                    ...(binding.allowFrom === undefined ? {} : { allowFrom: binding.allowFrom }),
+                    // The manifest's list plus whoever the transport vouches for — the account
+                    // owner, for a channel paired to a number. Merged here so the gate stays one
+                    // function and `allowFrom` keeps meaning "who else".
+                    ...(() => {
+                        const vouched = binding.transport.alwaysAllow ?? []
+                        const listed = binding.allowFrom ?? []
+                        const merged = [...listed, ...vouched]
+                        return merged.length === 0 ? {} : { allowFrom: merged }
+                    })(),
                 }),
             )
         }

@@ -397,7 +397,9 @@ describe("the signal handlers are registered before the socket binds", () => {
     test("claimSignals and waitForSignal both precede the serve() call", () => {
         const claim = SOURCE.indexOf("claimSignals()")
         const register = SOURCE.indexOf("waitForSignal()")
-        const bind = SOURCE.indexOf("running = await serve({")
+        // The bind moved inside `bindWalking` when a taken port started walking to the next one.
+        // Anchored on the call that performs it, which is what "before the socket binds" means.
+        const bind = SOURCE.indexOf("running = await bindWalking(")
 
         expect(claim).toBeGreaterThan(-1)
         expect(register).toBeGreaterThan(-1)
@@ -794,4 +796,125 @@ describe("a failure a person must act on reaches the log", () => {
         expect(body).toContain("data.message")
         expect(body).toContain("data.hint")
     })
+})
+
+describe("a taken port moves the server rather than stopping it", () => {
+    /**
+     * Reported from use: a container published 7420, and `dispach serve` on the same machine
+     * dead-ended with `server_bind_failed` and a hint naming two flags. `init` writes
+     * `port: 7420` into every manifest it generates, so on a machine with a container, a
+     * service and a checkout the default collides constantly.
+     *
+     * A walk is only safe because **the lease carries the address and the manifest does not** —
+     * `publishAddress` runs after the bind with whatever was actually taken, so `stop`, `web url`
+     * and an attached `run` follow the socket. That mechanism exists for `--port 0`.
+     *
+     * Both directions are asserted, because the interesting half is the refusal: a flag is an
+     * instruction, and a `--port` that silently served somewhere else would be the
+     * "looks configured and is not" shape this file's bind-disagreement check already refuses.
+     */
+    function manifestOn(port: number): string {
+        const dir = mkdtempSync(join(tmpdir(), "serve-port-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: walker
+model:
+  main:
+    id: test-model
+    baseUrl: https://example.invalid/v1
+    apiKeyEnv: MODEL_API_KEY
+server:
+  enabled: true
+  port: ${port}
+`,
+            "utf8",
+        )
+        return join(dir, "agent.yaml")
+    }
+
+    /** Hold a port for the duration of one test, the way another process would. */
+    async function occupied(): Promise<{ port: number; release: () => Promise<void> }> {
+        const { createServer } = await import("node:net")
+        const server = createServer()
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+        const address = server.address()
+        if (address === null || typeof address === "string") throw new Error("no port")
+        return {
+            port: address.port,
+            release: () =>
+                new Promise<void>((resolve) => {
+                    server.close(() => resolve())
+                }),
+        }
+    }
+
+    async function serveManifest(
+        manifest: string,
+        extra: readonly string[],
+    ): Promise<{ out: string; exited: boolean }> {
+        const store = join(mkdtempSync(join(tmpdir(), "serve-port-store-")), "store.db")
+        const child = spawn(
+            process.execPath,
+            [BINARY, "serve", manifest, "--store", store, ...extra],
+            {
+                env: {
+                    ...process.env,
+                    MODEL_API_KEY: "test-key",
+                    [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+                },
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        )
+        let out = ""
+        const settled = await new Promise<boolean>((resolve, reject) => {
+            const overall = setTimeout(() => reject(new Error(`no outcome:\n${out}`)), 25_000)
+            let quiet: ReturnType<typeof setTimeout> | undefined
+            const done = (exited: boolean) => {
+                clearTimeout(overall)
+                if (quiet !== undefined) clearTimeout(quiet)
+                resolve(exited)
+            }
+            const collect = (chunk: Buffer) => {
+                out += chunk.toString()
+                if (!out.includes("serving on") && !out.includes("server_bind_failed")) return
+                if (quiet !== undefined) clearTimeout(quiet)
+                quiet = setTimeout(() => done(false), 400)
+            }
+            child.stdout.on("data", collect)
+            child.stderr.on("data", collect)
+            child.on("exit", () => done(true))
+        })
+        if (!settled) child.kill("SIGTERM")
+        return { out, exited: settled }
+    }
+
+    test("the manifest's port being taken moves it to the next one, and it says so", async () => {
+        const held = await occupied()
+        try {
+            const { out } = await serveManifest(manifestOn(held.port), [])
+            expect(out).toContain(`serving on http://127.0.0.1:${held.port + 1}`)
+            // Silent relocation would make `server.port` a line that is false for the life of the
+            // process. The remedy names the flag that refuses instead.
+            expect(out).toContain(`moved from ${held.port}`)
+            expect(out).not.toContain("server_bind_failed")
+        } finally {
+            await held.release()
+        }
+    }, 30_000)
+
+    test("an explicit --port refuses, because a flag is an instruction", async () => {
+        const held = await occupied()
+        try {
+            const { out } = await serveManifest(manifestOn(held.port), [
+                "--port",
+                String(held.port),
+            ])
+            expect(out).toContain("server_bind_failed")
+            expect(out).toContain("--port was given explicitly")
+            expect(out).not.toContain("moved from")
+        } finally {
+            await held.release()
+        }
+    }, 30_000)
 })

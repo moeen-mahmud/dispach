@@ -69,7 +69,7 @@ export const FLAG_FOR: Record<InitStep, string> = {
     whatsapp: "--whatsapp",
     // A number rather than a secret, so unlike the Telegram token it *does* get a flag: nothing
     // about a phone number is worth keeping out of shell history.
-    whatsappAllow: "--whatsapp-allow",
+    whatsappNumber: "--whatsapp-number",
     // No flag, same reason as every other secret: a token on a command line lands in history.
     telegramToken: "(asked at the prompt only)",
     schedules: "--schedules",
@@ -237,9 +237,9 @@ export function complete(
         // listed in this literal is silently dropped, with no type error, because the return type's
         // field is optional. `whatsapp` is required precisely so that cannot happen to it.
         whatsapp: answers.whatsapp ?? "none",
-        ...(answers.whatsappAllow === undefined || answers.whatsappAllow === ""
+        ...(answers.whatsappNumber === undefined || answers.whatsappNumber === ""
             ? {}
-            : { whatsappAllow: answers.whatsappAllow }),
+            : { whatsappNumber: answers.whatsappNumber }),
         // `none` writes the commented block with its worked example — see SCHEDULE_CHOICES. Defaulted
         // here rather than as a step fallback because there is no step: this funnel is the one place
         // both the wizard and `--schedules daily` pass through, which is the lesson `apiKeyEnv` above

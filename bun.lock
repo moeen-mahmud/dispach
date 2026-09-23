@@ -36,7 +36,7 @@
       "name": "dispach",
       "version": "0.1.2",
       "bin": {
-        "dispach": "./dist/index.js",
+        "dispach": "dist/index.js",
       },
       "dependencies": {
         "ink": "7.1.1",
@@ -44,6 +44,7 @@
       },
       "devDependencies": {
         "@dispach/channel-telegram": "workspace:*",
+        "@dispach/channel-whatsapp": "workspace:*",
         "@dispach/client": "workspace:*",
         "@dispach/core": "workspace:*",
         "@dispach/server": "workspace:*",

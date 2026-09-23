@@ -151,8 +151,21 @@ export function isAllowed(raw: RawInbound, allowFrom: readonly string[] | undefi
     return false
 }
 
-/** Fold case and drop one leading `@`, so the same person written three ways compares equal. */
+/**
+ * Fold case and drop one leading `@`, so the same person written three ways compares equal.
+ *
+ * **A phone number is folded to its digits.** `+880 1711-223344` is how a number reads off a
+ * contact card, `8801711223344` is how a WhatsApp JID carries it, and they are one person — the
+ * same argument the `@` tolerance above makes for handles. Compared literally, an `allowFrom`
+ * copied from a contact matched nobody, and the refusal that names the sender printed the digits
+ * form as the line to add, so the person had to notice that their `+` was the whole problem.
+ *
+ * Applied only when the value is a number with punctuation and nothing else: a Telegram handle
+ * containing a `+` does not exist, and `abc-def` is left alone because stripping separators from
+ * a name would fold two different handles into one.
+ */
 function normaliseSender(value: string): string {
     const trimmed = value.trim()
-    return (trimmed.startsWith("@") ? trimmed.slice(1) : trimmed).toLowerCase()
+    const bare = (trimmed.startsWith("@") ? trimmed.slice(1) : trimmed).toLowerCase()
+    return /^\+?[0-9][0-9 .()-]*$/.test(bare) ? bare.replace(/[^0-9]/g, "") : bare
 }

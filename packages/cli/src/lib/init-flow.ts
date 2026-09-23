@@ -254,7 +254,7 @@ export interface InitAnswers {
      */
     readonly telegramAllow?: string
     /** A WhatsApp number in digits. There is no token: pairing is a QR, not a credential. */
-    readonly whatsappAllow?: string
+    readonly whatsappNumber?: string
     /**
      * Whether to serve the HTTP API: `none` or `local`.
      *
@@ -567,8 +567,6 @@ export function telegramChoice(value: string): (typeof TELEGRAM_CHOICES)[number]
  * one file — and a rename that left a literal here would print an install command for a repository
  * that does not exist. The owner is a person's GitHub handle, which a rename does not move.
  */
-export const WHATSAPP_PLUGIN_NAME = `${BRAND.slug}-whatsapp`
-export const WHATSAPP_PLUGIN_REPO = `moeen-mahmud/${WHATSAPP_PLUGIN_NAME}`
 
 export const WHATSAPP_CHOICES: readonly {
     readonly value: string
@@ -768,7 +766,7 @@ export const STEP_ORDER: readonly InitStep[] = [
     "telegramAllow",
     "telegramToken",
     "whatsapp",
-    "whatsappAllow",
+    "whatsappNumber",
     "skills",
     "daemon",
     "dirChoice",
@@ -900,7 +898,7 @@ export function nextQuestion(
         }
         // And nobody who said no to WhatsApp is asked whose number may message it. There is no
         // token step to skip: WhatsApp is paired by scanning a QR, not by pasting a credential.
-        if (step === "whatsappAllow" && partial.whatsapp !== "connected") continue
+        if (step === "whatsappNumber" && partial.whatsapp !== "connected") continue
         // `daemon` is asked of everyone, and used to be gated on
         // `telegram === "connected" || server === "local"`. `server` stopped being a question in
         // 0.1.2 and defaults to `local` at the funnel, so that half was true for every agent — and a
@@ -1042,15 +1040,25 @@ export function nextQuestion(
                         label: choice.label,
                     })),
                 }
-            case "whatsappAllow":
+            case "whatsappNumber":
                 return {
                     step,
-                    // Digits, and the prompt says so. `allowFrom` is compared literally against the
-                    // number WhatsApp reports, so `+8801…` matches nobody — the Telegram
-                    // `@handle`-against-a-numeric-chat-id trap in another provider's clothes.
-                    prompt: "Your WhatsApp number in digits, no + — who may message it",
-                    // Empty permits nobody, which is the safe default and a workable first run: the
-                    // first message from anyone is refused with the exact line to paste.
+                    /**
+                     * **The account the agent is linked to, which is not the same as who may
+                     * message it.** The old prompt asked for both at once — "Your WhatsApp number
+                     * … who may message it" — and wrote the answer to `allowFrom`, which is the
+                     * inbound gate. Two different facts behind one question, and the number a
+                     * person types is nearly always the first one.
+                     *
+                     * Given it, pairing is an **eight-character code typed into the phone** rather
+                     * than a QR to scan, which is the only route that works on a surface that
+                     * cannot draw a barcode. Left empty, pairing falls back to the QR.
+                     *
+                     * `allowFrom` stays empty and is filled in later from the log, which already
+                     * names a refused sender and prints the exact line to paste — the affordance
+                     * that makes a second question here unnecessary.
+                     */
+                    prompt: "Your WhatsApp number in digits, no + — the account it links to",
                     fallback: "",
                     optional: true,
                 }
@@ -1232,11 +1240,11 @@ export function validateAnswer(step: InitStep, raw: string): Answered {
                 : { ok: true, value: chosen.value }
         }
 
-        case "whatsappAllow": {
-            // Empty permits nobody, which is a real and safe answer. Anything else has to be the
-            // digits WhatsApp reports: the entry is compared literally, so `+8801…` connects
-            // perfectly and refuses the one person it was set up for. Refused *here*, where the
-            // value is typed, because that is the only moment somebody can still fix it cheaply.
+        case "whatsappNumber": {
+            // Empty is a real answer: no number means pairing by QR instead of by code. Anything
+            // else has to be the digits WhatsApp reports, because `requestPairingCode` fails
+            // opaquely on a malformed one. Refused *here*, where the value is typed, because that
+            // is the only moment somebody can still fix it cheaply.
             const raw = value.trim()
             if (raw === "") return { ok: true, value: "" }
             const digits = raw.replace(/[^0-9]/g, "")
@@ -1839,24 +1847,40 @@ const rule = (title: string): string =>
  */
 function whatsappEntry(answers: InitAnswers): readonly string[] {
     if (answers.whatsapp !== "connected") return []
-    const number = answers.whatsappAllow ?? ""
+    const number = answers.whatsappNumber ?? ""
     return [
         `  # Unofficial: this runs Baileys, which reverse-engineers WhatsApp Web. The number can be`,
-        `  # banned and there is no appeal — use a spare one. It is an opt-in plugin and is NOT in`,
-        `  # this binary: install it with \`${BRAND.slug} plugins add <agent> ${WHATSAPP_PLUGIN_REPO}\`.`,
-        `  # Until you do, the agent starts and reports this channel broken, which is the truth.`,
+        `  # banned and there is no appeal — use a spare one.`,
+        `  # Pairing does not complete under Bun, so use the npm-installed \`${BRAND.slug}\` rather than`,
+        `  # the compiled binary or the container image. The channel says so at start.`,
         `  - type: whatsapp`,
         `    id: wa                     # the channel segment of every session key it produces`,
         `    authDir: ./.whatsapp       # the paired session — 0600, and gitignored for you`,
         ...(number === ""
             ? [
+                  `    # No number, so pairing is a QR to scan. Set pairWith to the account's own`,
+                  `    # number, digits with no +, and it becomes a code you type into the phone.`,
+                  `    # pairWith: "8801711223344"`,
+              ]
+            : [
+                  `    # The account this agent becomes a linked device of. Pairing is an`,
+                  `    # eight-character code typed into the phone, under Linked devices.`,
+                  `    pairWith: "${number}"`,
+              ]),
+        // **The owner is in the gate from the start.** `pairWith` and `allowFrom` are different
+        // questions — the account the agent runs as, and who may talk to it — but the first person
+        // who will talk to it is its owner, in the chat with themselves, and an empty gate refused
+        // exactly that. A freshly paired agent showed as a linked device and answered nothing.
+        // Anyone else is added from the log, which names a refused sender and prints the line.
+        ...(number === ""
+            ? [
                   `    # INBOUND ONLY, and an empty list permits nobody — which is the safe default.`,
-                  `    # DIGITS, no + — the entry is compared literally, so "+8801..." matches nobody.`,
-                  `    # Message it and the log prints the exact line to paste here.`,
+                  `    # Message it and the log prints the exact line to paste here. A + is fine.`,
                   `    allowFrom: []`,
               ]
             : [
-                  `    # INBOUND ONLY, digits with no + — the entry is compared literally.`,
+                  `    # INBOUND ONLY. You are in it, so the chat with yourself works. Add others`,
+                  `    # from the log, which names a refused sender and prints the line. A + is fine.`,
                   `    allowFrom: ["${number}"]`,
               ]),
     ]
@@ -2264,15 +2288,11 @@ function manifestFor(answers: InitAnswers): string {
         `# Nothing is installed while the process runs, so a plugin is one self-contained bundle.`,
         `# Trusted in-process code: \`permissions\` is advisory in v1 — recorded, surfaced by`,
         `# \`${BRAND.slug} plugins list\`, enforced by nothing. Install plugins you trust.`,
-        ...(answers.whatsapp === "connected"
-            ? [
-                  `plugins:`,
-                  `  # NOT in this binary — install it before the channel above can work:`,
-                  `  #   ${BRAND.slug} plugins add ${slugify(answers.name)} ${WHATSAPP_PLUGIN_REPO}`,
-                  `  # The agent starts either way; until then the channel is reported broken.`,
-                  `  - "${WHATSAPP_PLUGIN_NAME}"`,
-              ]
-            : [`# plugins:`, `#   - "${BRAND.packageScope}/channel-telegram"`]),
+        // **No entry for WhatsApp any more.** It is bundled, so naming it here would name a plugin
+        // the binary already supplies — and a `plugins:` entry that cannot be satisfied is exactly
+        // what made a generated manifest print an install command that could not work.
+        `# plugins:`,
+        `#   - "${BRAND.packageScope}/channel-telegram"`,
         ``,
     )
     return lines.join("\n")

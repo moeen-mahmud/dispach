@@ -60,12 +60,37 @@ const MIN_SEND_INTERVAL_MS = 1_000
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 5_000, 15_000, 30_000, 60_000] as const
 
 /**
+ * Refused pairings before this stops asking.
+ *
+ * Low on purpose. Each attempt is a failed pairing recorded against a real WhatsApp number, and a
+ * banned number has no appeal — so the cost of one attempt too many is far higher than the cost of
+ * asking somebody to run the command again. Three is enough to ride out a single bad response and
+ * far short of anything that looks like abuse.
+ */
+const MAX_PAIRING_REJECTIONS = 3
+
+/** How many of our own sent message ids to remember, so a reply is never read back as input. */
+const SENT_ID_MEMORY = 512
+
+/**
  * How long a QR is offered before the next one replaces it.
  *
  * WhatsApp rotates it at roughly this interval and Baileys emits each one; this is what a reader
  * is told so a code nobody scanned in time reads as expired rather than as a broken scanner.
  */
 const QR_TTL_MS = 60_000
+
+/**
+ * How long a pairing code is offered before it is treated as lapsed.
+ *
+ * Longer than the QR's, because the two rotate differently: WhatsApp reissues a QR every twenty
+ * seconds or so, while a code is requested once and stays typeable for minutes. Generous rather
+ * than exact — the cost of saying "expired" early is somebody discarding a code that still works.
+ */
+const PAIRING_CODE_TTL_MS = 180_000
+
+/** How long to let the socket settle before asking for a code. Baileys' examples use the same. */
+const PAIRING_CODE_DELAY_MS = 3_000
 
 /** Baileys' `loggedOut`, inlined so the bundle does not depend on the enum's runtime shape. */
 const LOGGED_OUT = 401
@@ -92,6 +117,28 @@ const BUN_LIMITATION = {
     hint: "Measured against the same bundle: it pairs under Node in about two seconds and never under Bun. Run the npm-installed `dispach` (its bin runs under Node) rather than the compiled binary or the container image, both of which are Bun. It keeps trying regardless, in case the cause is fixed upstream.",
 } as const
 
+/**
+ * Whether this session has been accepted by the phone, whether or not login has finished.
+ *
+ * **`registered` alone was the bug.** After the code is typed, `pair-success` arrives, Baileys
+ * writes `account` (and `me`, `platform`, `signalIdentities`) and logs *"expect to restart the
+ * connection"*; WhatsApp then closes with 515 and login completes on the reconnect — and only
+ * *then* does `messages-recv.js` set `registered = true`. On that reconnect `registered` is still
+ * false, so a guard reading it requested a **second** code, and `requestPairingCode` overwrites
+ * `me` and starts a fresh pairing on top of the one that was about to finish. Measured on a real
+ * session: the phone listed the device, and the creds on disk held `me` and `pairingCode` and none
+ * of the pair-success fields — the state that second request leaves behind.
+ *
+ * `account` is written by pair-success and by nothing else, so it is the signal. Unknown reads as
+ * paired, for the reason `#requestCode` already gives: treating a working session as unpaired is
+ * the worse of the two errors.
+ */
+function pairedOnDisk(socket: WhatsAppSocket): boolean {
+    const creds = socket.authState?.creds
+    if (creds === undefined) return true
+    return creds.registered === true || (creds.account !== undefined && creds.account !== null)
+}
+
 /** True under Bun. `Bun` is a global the runtime defines and Node does not. */
 function onBun(): boolean {
     return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined"
@@ -117,6 +164,29 @@ export interface WhatsAppSocket {
     sendPresenceUpdate(presence: string, jid?: string): Promise<void>
     logout(): Promise<void>
     end(error?: Error): void
+    /**
+     * Ask WhatsApp for an eight-character code to type into the phone, instead of a QR to scan.
+     *
+     * Optional because it is a property of the installed Baileys rather than of this interface —
+     * a build without it must degrade to the QR, not fail to start.
+     */
+    requestPairingCode?(phoneNumber: string): Promise<string>
+    /**
+     * Baileys' own view of this session. Absent on a stub.
+     *
+     * Two fields matter and they are set at different moments. `account` is written by
+     * `pair-success` — the phone accepted the code — and survives the restart WhatsApp then
+     * demands. `registered` is written only once login completes on the connection *after* that
+     * restart. In between, a session is paired and not yet registered, and that window is where
+     * a guard reading only `registered` asks for a second code.
+     */
+    authState?: { creds?: { registered?: boolean; account?: unknown } }
+    /**
+     * The linked account, once connected. `id` is a phone JID or a LID; `lid` is the LID form when
+     * Baileys knows it. Both are needed to recognise the owner's own messages, because WhatsApp
+     * addresses the same chat by either depending on the peer.
+     */
+    user?: { id: string; lid?: string }
 }
 
 export interface ConnectionUpdate {
@@ -133,6 +203,13 @@ export interface MessagesUpsert {
 export interface WhatsAppMessage {
     key?: {
         remoteJid?: string | null
+        /**
+         * The other spelling of `remoteJid`. WhatsApp now addresses many chats by **LID** — an
+         * opaque per-account id ending `@lid` — and carries the phone-number form here, or the
+         * reverse. Reading only `remoteJid` reports a LID's digits as the sender, which matches
+         * nobody's `allowFrom`.
+         */
+        remoteJidAlt?: string | null
         fromMe?: boolean | null
         id?: string | null
         participant?: string | null
@@ -162,8 +239,29 @@ export interface WhatsAppTransportOptions {
     readonly id: string
     /** Where Baileys keeps the paired session. Absolute by the time it reaches here. */
     readonly authDir: string
+    /**
+     * The number of the WhatsApp account this agent becomes a linked device of, digits only.
+     *
+     * Set it and pairing is an **eight-character code typed into the phone** instead of a QR to
+     * scan — which is the only route that works at all when the surface offering it cannot draw a
+     * QR, and the better one everywhere else.
+     *
+     * **This is not `allowFrom`, and the two must never be folded together.** `allowFrom` is the
+     * inbound gate: who may talk to the agent. This is the account it *runs as*. They are usually
+     * different people, and conflating them is the documented "chat not found" class of failure
+     * one field over.
+     */
+    readonly pairWith?: string
     /** Injected by the tests, which never reach WhatsApp. */
     readonly api?: BaileysApi
+    /**
+     * How long to let the socket settle before asking for a pairing code.
+     *
+     * A seam for the same reason `api` is one: the wait is three seconds of real time, and a suite
+     * that actually slept it would trade a fast check for a slow one and teach everybody to skip
+     * the file. Nothing in a manifest sets this.
+     */
+    readonly pairingDelayMs?: number
 }
 
 export class WhatsAppTransport implements ChannelTransport {
@@ -179,18 +277,77 @@ export class WhatsAppTransport implements ChannelTransport {
         minSendIntervalMs: MIN_SEND_INTERVAL_MS,
     }
 
+    /**
+     * The paired account may always talk to its own agent. Set from `pairWith`, because the
+     * person who typed the code is the account, and an empty `allowFrom` refused exactly them.
+     */
+    readonly alwaysAllow: readonly string[]
     readonly #authDir: string
+    readonly #pairWith: string | undefined
+    readonly #pairingDelayMs: number
     readonly #api: BaileysApi | undefined
 
     #host: ChannelHost | undefined
     #socket: WhatsAppSocket | undefined
     #running = false
     #failures = 0
+    /**
+     * A code has been issued for this socket, so the QR updates that keep arriving are ignored.
+     *
+     * Baileys emits `qr` on the same connection whether or not a pairing code was requested, and
+     * it reissues roughly every twenty seconds. Without this the channel's status alternates
+     * between the code somebody is typing and a barcode they did not ask for — and the code
+     * disappears from the panel mid-entry, which reads as the pairing having failed.
+     *
+     * Per socket, cleared on reconnect, because a fresh socket needs a fresh code.
+     *
+     * Set **before** the request rather than after it, because the settle wait is three seconds and
+     * Baileys emits its first QR inside that window: without it the panel showed a barcode, then
+     * replaced it with a code, which reads as the first one having failed. Cleared again if the
+     * request is refused, since the QR is then the only route left and suppressing it would leave
+     * a channel offering nothing at all.
+     */
+    #codeIssued = false
+    /**
+     * Whether this attempt began from a session WhatsApp had already registered.
+     *
+     * **This, and not "has it connected yet", is what tells a revocation from a refused pairing.**
+     * The first version used a connection having opened in *this process*, which is a different
+     * question and got the documented case backwards: credentials revoked from the phone while the
+     * process was down produce a `loggedOut` on the very first connect, and that must still wipe
+     * and offer a fresh code — it is the stuck-with-no-QR state the branch exists for.
+     *
+     * Unknown counts as registered, which is the same default `#requestCode` takes and for the same
+     * reason: treating a working session as unpaired is the worse of the two errors.
+     */
+    #startedRegistered = true
+    /** Consecutive `loggedOut` closes on a session that has never connected. */
+    #pairingRejections = 0
+    /** Set when pairing has been refused enough times to stop asking. Ends the reconnect loop. */
+    #pairingGivenUp = false
+    /**
+     * The linked account's own identities, normalised. Filled from `socket.user` on open.
+     *
+     * What makes a self-chat answerable: the owner typing to themselves arrives as `fromMe` on a
+     * chat whose peer is one of these, and that is the one `fromMe` message the agent must read.
+     */
+    #ownJids = new Set<string>()
+    /**
+     * Ids of messages this transport sent, so its own replies are never read back as input.
+     *
+     * A ring rather than a growing set: an agent that answers for a week would otherwise hold
+     * every id it ever sent. Baileys ids are unique per session, so recent is enough.
+     */
+    #sentIds: string[] = []
     #loop: Promise<void> | undefined
 
     constructor(options: WhatsAppTransportOptions) {
         this.id = options.id
         this.#authDir = options.authDir
+        this.#pairWith = options.pairWith
+        this.alwaysAllow =
+            options.pairWith === undefined || options.pairWith === "" ? [] : [options.pairWith]
+        this.#pairingDelayMs = options.pairingDelayMs ?? PAIRING_CODE_DELAY_MS
         this.#api = options.api
     }
 
@@ -255,7 +412,13 @@ export class WhatsAppTransport implements ChannelTransport {
                 text: message.text,
             })
             const id = sent?.key?.id
-            return id === undefined ? { ok: true } : { ok: true, providerMessageId: id }
+            if (id !== undefined && id !== null) {
+                this.#sentIds.push(id)
+                if (this.#sentIds.length > SENT_ID_MEMORY) this.#sentIds.shift()
+            }
+            return id === undefined || id === null
+                ? { ok: true }
+                : { ok: true, providerMessageId: id }
         } catch (cause) {
             return {
                 ok: false,
@@ -308,10 +471,16 @@ export class WhatsAppTransport implements ChannelTransport {
      * receives nothing.
      */
     async #connect(host: ChannelHost): Promise<void> {
-        while (this.#running) {
+        while (this.#running && !this.#pairingGivenUp) {
             try {
                 const api = this.#api ?? (await loadBaileys())
                 mkdirSync(this.#authDir, { recursive: true, mode: 0o700 })
+                // **Decided before the socket exists, not once a code is in hand.** The intent to
+                // pair by code is known from the configuration, and Baileys starts emitting QRs as
+                // soon as it connects — so a flag set after the request leaves a window in which a
+                // barcode reaches the panel and is then replaced, which reads as a failed attempt.
+                // `#requestCode` clears it again if the request is refused.
+                this.#codeIssued = this.#pairWith !== undefined && this.#pairWith !== ""
                 const socket = await api.connect({
                     authDir: this.#authDir,
                     onUpdate: (update) => this.#onUpdate(host, update),
@@ -319,6 +488,11 @@ export class WhatsAppTransport implements ChannelTransport {
                     onMessages: (upsert) => this.#onMessages(host, upsert),
                 })
                 this.#socket = socket
+                // Captured before anything can change it: `creds.update` fires during pairing, so
+                // reading this at close time would report the state pairing left behind rather than
+                // the one it started from.
+                this.#startedRegistered = pairedOnDisk(socket)
+                await this.#requestCode(host, socket)
                 // Returns once the socket exists. Everything after this is events, and the loop
                 // only comes round again when one of them says the connection closed.
                 await this.#closed()
@@ -331,8 +505,73 @@ export class WhatsAppTransport implements ChannelTransport {
         }
     }
 
+    /**
+     * Ask for a pairing code, when a number was configured and this session is not already linked.
+     *
+     * **Guarded on `registered`, which is the whole correctness of it.** Asking again on a session
+     * that is already paired is at best wasted and at worst logs the device out — and this runs
+     * inside the reconnect loop, so every transient close would reach it. Baileys' own creds are
+     * the authority; a build that does not expose them is treated as *registered* rather than not,
+     * because re-pairing a working channel is the worse of the two errors.
+     *
+     * A failure here is reported and **not** rethrown: the QR path is still live on the same
+     * socket, so a channel that cannot get a code can still be paired by scanning. Turning that
+     * into a reconnect would take the QR away too.
+     */
+    async #requestCode(host: ChannelHost, socket: WhatsAppSocket): Promise<void> {
+        const number = this.#pairWith
+        if (number === undefined || number === "") return
+        if (pairedOnDisk(socket)) return
+        if (typeof socket.requestPairingCode !== "function") {
+            host.status(
+                "needs_input",
+                `channel "${this.id}" is set to pair by code and this build of baileys cannot`,
+                {
+                    kind: "qr",
+                    payload: "",
+                    expiresAt: new Date(Date.now() + QR_TTL_MS).toISOString(),
+                },
+            )
+            return
+        }
+        try {
+            // WhatsApp refuses a request that arrives before the socket has finished opening, and
+            // the refusal is a close rather than an error — indistinguishable from a network fault
+            // at the point it surfaces. Baileys' own examples wait; so does this.
+            await sleep(this.#pairingDelayMs)
+            if (!this.#running) return
+            const code = await socket.requestPairingCode(number)
+            host.status(
+                "needs_input",
+                `enter this code on WhatsApp for +${number} — Linked devices › Link with phone number`,
+                {
+                    kind: "pairing_code",
+                    payload: code,
+                    expiresAt: new Date(Date.now() + PAIRING_CODE_TTL_MS).toISOString(),
+                },
+            )
+        } catch (cause) {
+            // The QR is the only route left, so it must start reaching the host again.
+            this.#codeIssued = false
+            this.#report(host, cause)
+        }
+    }
+
     /** Resolves when `connection: "close"` is seen, which is what `#onUpdate` sets. */
     #closed(): Promise<void> {
+        /**
+         * **Already stopped means already closed**, and without this the loop parks forever.
+         *
+         * `stop()` resolves whatever promise this last handed out — but between `api.connect`
+         * returning and this being called there is a window with no promise to resolve, so a
+         * `stop()` landing in it resolved nothing and the `await this.#loop` inside it then waited
+         * on a promise nobody would ever settle. The window was one await wide and grew to two when
+         * pairing-code requests landed between them, at which point a test that stops immediately
+         * after starting hung for its full timeout — which is exactly what a process that will not
+         * exit looks like from outside, and is the same failure `stop()` already carries a comment
+         * about.
+         */
+        if (!this.#running) return Promise.resolve()
         return new Promise((resolve) => {
             this.#resolveClosed = resolve
         })
@@ -340,7 +579,7 @@ export class WhatsAppTransport implements ChannelTransport {
     #resolveClosed: (() => void) | undefined
 
     #onUpdate(host: ChannelHost, update: ConnectionUpdate): void {
-        if (update.qr !== undefined && update.qr !== "") {
+        if (update.qr !== undefined && update.qr !== "" && !this.#codeIssued) {
             // **The first producer of `needs_input`.** The payload is the raw QR string — the
             // caller renders it, because a terminal wants an ASCII block and a browser wants an
             // <img>, and a transport that picked one would be wrong for the other.
@@ -353,7 +592,12 @@ export class WhatsAppTransport implements ChannelTransport {
         }
 
         if (update.connection === "open") {
+            this.#pairingRejections = 0
             this.#failures = 0
+            const me = this.#socket?.user
+            this.#ownJids.clear()
+            if (me?.id !== undefined) this.#ownJids.add(bareJid(me.id))
+            if (me?.lid !== undefined) this.#ownJids.add(bareJid(me.lid))
             host.status("connected", "paired")
             return
         }
@@ -361,17 +605,52 @@ export class WhatsAppTransport implements ChannelTransport {
         if (update.connection === "close") {
             const code = update.lastDisconnect?.error?.output?.statusCode
             if (code === LOGGED_OUT) {
-                // **The one disconnect that is not transient.** Reconnecting with revoked
-                // credentials fails forever and never issues a QR, which is the stuck-with-no-QR
-                // state worth all of this care. Deleting them is what makes the next loop pass
-                // start a fresh pairing.
+                /**
+                 * **Two different events wear this status code, and treating them alike burns the
+                 * number.**
+                 *
+                 * A session that *had* connected and is now logged out was revoked by a person, on
+                 * the phone's linked-devices screen. Wiping and pairing again is exactly right.
+                 *
+                 * A session that has **never** connected and is logged out had its *pairing attempt*
+                 * refused. Wiping and retrying immediately is then a loop: measured in the container
+                 * at three codes in fifteen seconds, each invalidated before anybody could finish
+                 * typing the one before it — and every pass is another failed pairing against a real
+                 * WhatsApp number, which decision 8.4 says is the thing that gets an account banned
+                 * with no appeal. The old code never touched `#failures` here, so the backoff stayed
+                 * at one second forever.
+                 *
+                 * So a refused pairing counts, backs off, and eventually stops asking.
+                 */
                 this.#wipeCredentials()
-                host.status("disconnected", "logged out — pairing again, scan the next QR")
-                host.error({
-                    code: "whatsapp_logged_out",
-                    message: `Channel "${this.id}" was logged out of WhatsApp.`,
-                    hint: "The stored session was revoked — from the phone's linked-devices screen, or by WhatsApp. The saved credentials have been deleted and a new QR follows; scan it to pair again.",
-                })
+                if (this.#startedRegistered) {
+                    this.#pairingRejections = 0
+                    host.status("disconnected", "logged out — pairing again, scan the next QR")
+                    host.error({
+                        code: "whatsapp_logged_out",
+                        message: `Channel "${this.id}" was logged out of WhatsApp.`,
+                        hint: "The stored session was revoked — from the phone's linked-devices screen, or by WhatsApp. The saved credentials have been deleted and a new QR follows; scan it to pair again.",
+                    })
+                } else {
+                    this.#pairingRejections += 1
+                    this.#failures += 1
+                    if (this.#pairingRejections >= MAX_PAIRING_REJECTIONS) {
+                        this.#pairingGivenUp = true
+                        host.status(
+                            "error",
+                            `pairing refused ${this.#pairingRejections} times — not asking again`,
+                        )
+                        host.error({
+                            code: "whatsapp_pairing_refused",
+                            message: `WhatsApp refused ${this.#pairingRejections} pairing attempts for channel "${this.id}" and none completed.`,
+                            hint: onBun()
+                                ? "This is what the Bun limitation looks like from the outside: a code is issued and invalidated seconds later. Pair using the npm-installed package, whose bin runs under Node, then bring the paired session back. Retrying here only spends failed pairings against the number."
+                                : "Check that the number is the one WhatsApp is registered to, in digits with no +. Repeated failed pairings are the thing that gets an account restricted, so this stops rather than continuing.",
+                        })
+                    } else {
+                        host.status("disconnected", "pairing refused — trying once more")
+                    }
+                }
             } else {
                 this.#failures += 1
                 // Reported on the first failure and every eighth after it, so a long outage leaves
@@ -395,7 +674,7 @@ export class WhatsAppTransport implements ChannelTransport {
         // worst possible first impression.
         if (upsert.type !== "notify") return
         for (const message of upsert.messages) {
-            const raw = toInbound(message)
+            const raw = toInbound(message, { ownJids: this.#ownJids, sentIds: this.#sentIds })
             if (raw !== undefined) host.receive(raw)
         }
     }
@@ -452,7 +731,20 @@ export class WhatsAppTransport implements ChannelTransport {
  *
  * Exported for the test, which asserts on this mapping rather than on a live pairing.
  */
-export function toInbound(message: WhatsAppMessage):
+/** What `toInbound` needs to know about this connection that a message does not carry. */
+export interface InboundContext {
+    /** The linked account's own identities, from `bareJid`. Empty before the first open. */
+    readonly ownJids: ReadonlySet<string>
+    /** Ids of messages this transport sent. */
+    readonly sentIds: readonly string[]
+}
+
+const NO_CONTEXT: InboundContext = { ownJids: new Set(), sentIds: [] }
+
+export function toInbound(
+    message: WhatsAppMessage,
+    context: InboundContext = NO_CONTEXT,
+):
     | {
           providerMessageId?: string
           peerId: string
@@ -464,8 +756,33 @@ export function toInbound(message: WhatsAppMessage):
     | undefined {
     const jid = message.key?.remoteJid
     if (jid === null || jid === undefined || jid === "") return undefined
-    // Our own messages come back on the stream. Answering them is an agent talking to itself.
-    if (message.key?.fromMe === true) return undefined
+    const id = message.key?.id
+
+    /**
+     * **`fromMe` is two different things, and the old filter dropped both.**
+     *
+     * The agent's own replies come back on the stream as `fromMe`, and answering them is an agent
+     * talking to itself — that is the case the filter was written for. But **the owner typing in
+     * the chat with themselves is also `fromMe`**, because they *are* the account, and that is the
+     * one conversation a person linking their own number most expects to work. Measured: a freshly
+     * paired agent showed as a linked device and answered nothing, because every message its owner
+     * sent it was discarded here as its own echo.
+     *
+     * So the two are told apart by what only the transport knows: a message it sent has an id it
+     * recorded, and a chat with the owner has the owner's own JID as its peer. `fromMe` on any
+     * *other* chat is the owner talking to a third party from their phone, which is not the
+     * agent's conversation and stays skipped. OpenClaw calls this `selfChatMode` and defaults it
+     * on.
+     */
+    if (message.key?.fromMe === true) {
+        if (id !== null && id !== undefined && context.sentIds.includes(id)) return undefined
+        const peer = bareJid(jid)
+        const alt = message.key?.remoteJidAlt
+        const peerAlt = alt === null || alt === undefined ? undefined : bareJid(alt)
+        const isSelfChat =
+            context.ownJids.has(peer) || (peerAlt !== undefined && context.ownJids.has(peerAlt))
+        if (!isSelfChat) return undefined
+    }
     // A group has its own JID shape and a `participant`. Out of scope in v1 rather than
     // half-supported: `allowFrom` is per sender and a group's rules are a different question.
     if (jid.endsWith("@g.us") || jid === "status@broadcast") return undefined
@@ -488,21 +805,43 @@ export function toInbound(message: WhatsAppMessage):
               ? stamp.toNumber()
               : undefined
 
-    const id = message.key?.id
+    // **The phone-number form, whichever field carries it.** WhatsApp addresses many chats by LID
+    // now and puts the phone form in `remoteJidAlt`, or the reverse; `numberOf` on a LID reports
+    // digits that are nobody's phone number, so an `allowFrom` written from a contact card matched
+    // no one. Delivery uses the same form, so a reply goes back to a JID Baileys can route.
+    const phoneJid = phoneJidOf(jid, message.key?.remoteJidAlt)
     const name = message.pushName
     return {
         ...(id === null || id === undefined ? {} : { providerMessageId: id }),
-        peerId: jid,
-        // **The digits, with no `+`.** `allowFrom` is compared after folding case and dropping one
-        // leading `@`, and nothing strips a `+` — so this is the one spelling that matches an entry
-        // somebody typed, and it is the spelling the JID itself carries. The factory warns about
-        // the other one rather than trying to accept both, because two spellings for one field is
-        // how an allowlist comes to match nobody.
-        senderHandle: numberOf(jid),
+        peerId: phoneJid,
+        // Digits with no `+` — the spelling the JID itself carries. `allowFrom` is normalised the
+        // same way on its side now, so `+880…` written from a contact card matches this.
+        senderHandle: numberOf(phoneJid),
         ...(name === null || name === undefined || name === "" ? {} : { senderName: name }),
         text,
         receivedAt: new Date(seconds === undefined ? Date.now() : seconds * 1000).toISOString(),
     }
+}
+
+/** Of a JID and its alternate spelling, the one that names a phone number; else the primary. */
+export function phoneJidOf(jid: string, alt: string | null | undefined): string {
+    if (jid.endsWith("@s.whatsapp.net")) return jid
+    if (alt?.endsWith("@s.whatsapp.net") === true) return alt
+    return jid
+}
+
+/**
+ * A JID with its device suffix removed, for comparing identities.
+ *
+ * A linked device is `8801711223344:12@s.whatsapp.net`; the account is `8801711223344@s.whatsapp.net`.
+ * Same person, and the comparison that recognises the owner's self-chat has to say so.
+ */
+export function bareJid(jid: string): string {
+    const at = jid.indexOf("@")
+    if (at === -1) return jid
+    const local = jid.slice(0, at)
+    const colon = local.indexOf(":")
+    return `${colon === -1 ? local : local.slice(0, colon)}${jid.slice(at)}`
 }
 
 /** `8801711223344@s.whatsapp.net` → `8801711223344`. Also tolerates a bare number. */
@@ -550,6 +889,17 @@ async function loadBaileys(): Promise<BaileysApi> {
                 // rendered frame and put a credential-shaped block in a log file. The runtime
                 // carries the payload instead, through `needs_input`.
                 printQRInTerminal: false,
+                /**
+                 * **The device identity, and pairing by code does not work under the default.**
+                 *
+                 * Baileys defaults to `Browsers.macOS('Chrome')`, and against that
+                 * `requestPairingCode` is answered with a close and then a `loggedOut` — measured,
+                 * on a fresh session, twice. `Ubuntu/Chrome` pairs. Written as the literal triple
+                 * the helper produces rather than importing `Browsers`, so this stays one value
+                 * read in one place instead of an interop question on a namespace that already
+                 * needs two spellings above.
+                 */
+                browser: ["Ubuntu", "Chrome", "22.04.4"],
                 // Silenced for the same reason: this process has an event bus and a log file of
                 // its own, and a second logger writing to stdout is how a TUI gets corrupted.
                 logger: silentLogger(),

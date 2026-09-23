@@ -297,7 +297,7 @@ export interface InitOptions {
     /** `none` or `connected` — reachable on WhatsApp, through the opt-in plugin. */
     readonly whatsapp?: string
     /** One WhatsApp number in digits, or empty for an allowlist that permits nobody. */
-    readonly whatsappAllow?: string
+    readonly whatsappNumber?: string
     /** `none` or `local` — whether to serve the HTTP API on loopback. */
     readonly server?: string
     /** `none`, `daily` or `hourly` — what the agent runs on a schedule. */

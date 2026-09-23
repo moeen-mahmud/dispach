@@ -74,7 +74,7 @@ describe("nextQuestion", () => {
         }
         // No webBackend or webKey: the fallback answer to the web question is "1" — none — and a
         // backend nobody will use is a question that lies. No composioKey, no telegramAllow, no
-        // telegramToken and no whatsappAllow, for the same reason.
+        // telegramToken and no whatsappNumber, for the same reason.
         //
         // `whatsapp` is a top-level question beside `telegram` rather than a choice inside one:
         // two independent single-selects is what makes "both at once" fall out, and it needs no

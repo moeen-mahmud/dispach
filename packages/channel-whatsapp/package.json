@@ -1,7 +1,7 @@
 {
     "name": "@dispach/channel-whatsapp",
     "version": "0.1.0",
-    "description": "WhatsApp channel — Baileys over the WhatsApp Web protocol. Opt-in, distributed outside the bundle.",
+    "description": "WhatsApp channel \u2014 Baileys over the WhatsApp Web protocol. Opt-in, distributed outside the bundle.",
     "license": "Apache-2.0",
     "author": "Moeen Mahmud",
     "repository": {
