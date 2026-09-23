@@ -26,9 +26,10 @@ import {
     VERSION,
 } from "@dispach/core"
 import { installRefs } from "#browse"
-import { daemonCommand } from "#daemon"
+import { announce } from "#lib/bootstrap"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { markTerminalDirty, onExit } from "#lib/exit"
+import { adoptOnHost, ensureHost, type HostPairOutcome, waitForPairing } from "#lib/host-actions"
 import {
     COMPOSIO_KEY_ENV,
     composioEnabled,
@@ -49,6 +50,7 @@ import { resolveModeFromProcess } from "#lib/output"
 import { complete, FLAG_FOR, fillDefaults, writeAgentFiles } from "#lib/provision"
 import { agentsDir, outsideSandboxNote } from "#lib/sandbox"
 import type { InitOptions } from "#lib/schema"
+import { webUrl } from "#lib/web-url"
 
 /** Which flag supplies each step, for the refusal that names what is missing. */
 
@@ -219,43 +221,58 @@ async function runInit(options: InitOptions): Promise<InitResult> {
     }
 
     /**
-     * Pair WhatsApp here, while the person who typed the number is still sitting at the terminal.
+     * The host first, then the channel — because the host is what pairs it.
      *
-     * After the skills install so the agent is complete, before the service install so what gets
-     * started is an agent whose channel is already linked. It cannot fail the init — every path
-     * inside reports and returns — and it is **skipped without a terminal**, because a scripted run
-     * has nobody to read a code and opening a socket to WhatsApp in CI is the expensive default the
-     * wizard's fallback rule exists to prevent.
+     * When the answer was "keep it running", the server is put up now (the same bootstrap every
+     * host-wanting command uses, so a unit installed here and one installed by `daemon install` are
+     * the same unit) and asked to adopt the agent that was just written. WhatsApp then pairs
+     * **through that host**: it holds the socket, so when the phone accepts, the session is already
+     * in the process that will answer. No reload, no second command — which is the dead end this
+     * replaces, where `init` paired in its own process and the next line said to go and run `serve`.
+     *
+     * Without a host — `--daemon none`, a container, CI, no installer — pairing happens in this
+     * process as before and the closing screen names what to run. Neither path can fail the init;
+     * every branch reports and returns. And pairing is skipped without a terminal, because a
+     * scripted run has nobody to read a code.
      */
-    let paired: PairOutcome | undefined
-    if (answers.whatsapp === "connected" && (answers.whatsappNumber ?? "") !== "" && interactive) {
-        paired = await pairWhatsApp({
-            manifestPath,
-            dir: targetDir,
-            number: answers.whatsappNumber ?? "",
-            channelId: "wa",
-        })
-    }
-
-    let installed = false
+    let hostUrl: string | undefined
     if (answers.daemon === "service") {
         process.stdout.write("\n")
-        try {
-            installed = (await daemonCommand({ action: "install", manifestPath })) === EXIT_OK
-        } catch (error) {
-            process.stderr.write(
-                `the background service was not installed: ${
-                    error instanceof HarnessError ? error.message : String(error)
-                }\n`,
-            )
+        const { outcome, host } = await ensureHost({
+            ...(options.installServer === undefined ? {} : { install: options.installServer }),
+        })
+        const note = announce(outcome)
+        if (note !== undefined) process.stderr.write(note)
+        if (host?.baseUrl !== undefined) {
+            const adopted = await adoptOnHost(host, manifestPath)
+            if (adopted.ok) hostUrl = host.baseUrl
+            else
+                process.stderr.write(
+                    `pid ${host.pid} did not adopt ${slugify(answers.name)}${
+                        adopted.detail === undefined ? "" : `: ${adopted.detail}`
+                    }\n`,
+                )
         }
     }
 
+    let paired: PairOutcome | HostPairOutcome | undefined
+    if (answers.whatsapp === "connected" && (answers.whatsappNumber ?? "") !== "" && interactive) {
+        paired =
+            hostUrl !== undefined
+                ? await waitForPairing({ manifestPath, channelId: "wa" })
+                : await pairWhatsApp({
+                      manifestPath,
+                      dir: targetDir,
+                      number: answers.whatsappNumber ?? "",
+                      channelId: "wa",
+                  })
+    }
+
     // Named only when it did not finish here, so the closing block never tells somebody to go and
-    // scan a code they have already used.
+    // type a code they have already used.
     if (answers.whatsapp === "connected" && paired !== "paired")
         process.stdout.write(`\n${pairLater(slugify(answers.name))}`)
-    process.stdout.write(nextSteps(answers, targetDir, distilled, installed))
+    process.stdout.write(nextSteps(answers, targetDir, distilled, hostUrl))
     return { kind: "ok", manifestPath: join(targetDir, "agent.yaml") }
 }
 
@@ -360,8 +377,10 @@ function nextSteps(
     answers: InitAnswers,
     targetDir: string,
     distilled: boolean,
-    installed = false,
+    /** The address of the host now serving this agent, when the service is up and adopted it. */
+    hostUrl?: string,
 ): string {
+    const installed = hostUrl !== undefined
     // An agent inside the sandbox runs by bare name from anywhere; anything else by path.
     const inSandbox = dirname(targetDir) === agentsDir()
     const runRef = inSandbox ? basename(targetDir) : join(targetDir, "agent.yaml")
@@ -404,38 +423,34 @@ function nextSteps(
     // became questions is that a generated file was hiding them. One step rather than two once the
     // service is up: "run it" and "and by the way run starts nothing" are the same sentence, and
     // printing both made steps 1 and 2 read as duplicates of each other.
-    const reachable = answers.telegram === "connected" || answers.server === "local"
-    const what =
-        answers.telegram === "connected" && answers.server === "local"
-            ? "the Telegram bot and the HTTP API"
-            : answers.telegram === "connected"
-              ? "the Telegram bot"
-              : "the HTTP API"
-    if (reachable && installed) {
+    const channels = [
+        ...(answers.telegram === "connected" ? ["the Telegram bot"] : []),
+        ...(answers.whatsapp === "connected" ? ["WhatsApp"] : []),
+    ]
+    const reachable = channels.length > 0 || answers.server === "local"
+    const what = [...channels, ...(answers.server === "local" ? ["the HTTP API"] : [])].join(
+        " and ",
+    )
+    if (installed) {
+        // Already serving — so the first thing to do is talk to it, and the browser is the surface
+        // that needs no second terminal. The URL is the deliverable; `web` prints the same one.
         steps.push(
-            `${BRAND.slug} run ${runRef} — talks to it right here. It starts no channel and binds ` +
-                `no port; ${what} belongs to the service, which is already up.`,
+            `open ${webUrl(hostUrl, basename(targetDir))} — the web UI. The service is serving ` +
+                `${basename(targetDir)} now; ${what} ${channels.length + (answers.server === "local" ? 1 : 0) === 1 ? "is" : "are"} up.`,
         )
+        steps.push(`${BRAND.slug} run ${runRef} — talks to it here, attached to that same service.`)
     } else {
         steps.push(`${BRAND.slug} run ${runRef}`)
     }
-    if (reachable) {
-        if (!installed) {
-            steps.push(`${BRAND.slug} serve ${runRef} — starts ${what}; \`run\` starts neither`)
-        }
-        // And the half `serve` does not cover: it lives and dies with its terminal. Printed only
-        // when they asked for it, and only as a command — `init` deliberately does not install,
-        // because the token in step 1 is usually still missing at this moment and the check that
-        // exists to catch that would refuse. A service that fails from birth is the exact failure
-        // this capability was built against.
-        if (answers.daemon === "service" && !installed) {
-            // Only when the install did not happen. Printed unconditionally it read as a
-            // contradiction — a next step telling you to run the command whose output was two
-            // lines above.
+    if (reachable && !installed) {
+        steps.push(`${BRAND.slug} serve ${runRef} — starts ${what}; \`run\` starts neither`)
+        // And the half `serve` does not cover: it lives and dies with its terminal. Only when the
+        // service did not come up here — printed unconditionally it read as a contradiction, a
+        // next step telling you to run the command whose output was two lines above.
+        if (answers.daemon === "service") {
             steps.push(
-                `${BRAND.slug} daemon install ${runRef} — the same thing, supervised: starts at ` +
-                    `login and survives a reboot. Do this once the key and token above are in .env; ` +
-                    `the install checks them and refuses without them, on purpose.`,
+                `${BRAND.slug} daemon install — the same thing, supervised: one service hosts ` +
+                    `every agent, starts at login and survives a reboot.`,
             )
         }
     }
@@ -470,7 +485,7 @@ function nextSteps(
     // Said before the numbered list, because it changes what the list means: with a service
     // installed, `serve` is not something you need to run and the agent is already answering.
     const serviceNote = installed
-        ? `\nit is running in the background now — \`${BRAND.slug} daemon status ${runRef}\` at any time,\nand \`${BRAND.slug} stop\` turns everything off.\n`
+        ? `\nit is running in the background now — \`${BRAND.slug} status\` at any time,\n\`${BRAND.slug} restart ${runRef}\` after editing it, and \`${BRAND.slug} stop\` turns everything off.\n`
         : ""
 
     const soulNote = distilled

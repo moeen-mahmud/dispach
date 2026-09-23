@@ -72,7 +72,7 @@ dispach/
 Nine workspace packages, **one published name**. `packages/cli` publishes as `dispach` with the
 command at `bin` and the client at `dispach/client`; the other eight are `"private": true` and are
 bundled into that tarball, so there is one thing to install, version and trust. Their manifests stay
-at `0.1.0` on purpose — `.changeset/config.json` ignores them, so only the published version means
+at `0.1.0` on purpose — only `packages/cli/package.json` is versioned (`bun run release`), so only the published version means
 anything.
 
 Two things this tree used to get wrong, both the same shape as the phantom rows doc 04 carried:

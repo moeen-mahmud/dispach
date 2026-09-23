@@ -14,9 +14,6 @@
 node_modules
 **/node_modules
 
-# The compiled binaries. 61-103 MB each, and the builder compiles its own.
-dist-bin
-
 # Build output. The builder stage runs `bun run build` itself; shipping a stale local `dist/`
 # would be the recorded stale-dist hazard with a container around it.
 dist

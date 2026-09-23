@@ -104,17 +104,17 @@ const LOGGED_OUT = 401
  * code; it is somewhere inside the Noise handshake. Bun also warns that `ws`'s `upgrade` and
  * `unexpected-response` events are unimplemented, which is a real gap and may or may not be this one.
  *
- * That matters because it decides **where this channel works**: the npm-installed `dispach` runs
- * under `#!/usr/bin/env node` and pairs; the compiled binary and the container image are Bun and do
- * not. A channel that connects to nothing and reports nothing is the exact failure this runtime
- * exists to refuse, so it is named at start — as an error rather than a refusal, because the cause
- * is somebody else's and may be fixed without a release here.
+ * That is why nothing this project ships runs under Bun: the npm bin, the brew formula and the
+ * container image all run under Node since 0.1.3. What still reaches this line is `bun run
+ * src/index.ts` from a checkout, and a channel that connects to nothing and reports nothing is the
+ * exact failure this runtime exists to refuse — so it is named at start, as an error rather than a
+ * refusal, because the cause is somebody else's and may be fixed without a release here.
  */
 const BUN_LIMITATION = {
     code: "whatsapp_bun_unsupported",
     message:
         "WhatsApp pairing does not complete under Bun — the socket opens and the handshake never finishes.",
-    hint: "Measured against the same bundle: it pairs under Node in about two seconds and never under Bun. Run the npm-installed `dispach` (its bin runs under Node) rather than the compiled binary or the container image, both of which are Bun. It keeps trying regardless, in case the cause is fixed upstream.",
+    hint: "Measured against the same bundle: it pairs under Node in about two seconds and never under Bun. Every shipped install (npm, brew, the container) runs under Node; this process is running from a checkout with `bun run`. Use `node` — or the installed command — instead. It keeps trying regardless, in case the cause is fixed upstream.",
 } as const
 
 /**
@@ -229,6 +229,8 @@ export interface WhatsAppMessage {
 export interface BaileysApi {
     connect(options: {
         readonly authDir: string
+        /** The bracketed half of the Linked-devices label. `Ubuntu` when absent. */
+        readonly deviceName?: string
         readonly onUpdate: (update: ConnectionUpdate) => void
         readonly onCreds: () => void | Promise<void>
         readonly onMessages: (upsert: MessagesUpsert) => void
@@ -252,6 +254,17 @@ export interface WhatsAppTransportOptions {
      * one field over.
      */
     readonly pairWith?: string
+    /**
+     * What the phone shows under *Linked devices*, in the bracket: `Google Chrome (<deviceName>)`.
+     *
+     * The left token is a protobuf enum the phone renders from `platformType`, so it cannot carry
+     * a name; the bracket is `browser[0]`, the one free-text slot. Optional and off by default
+     * because WhatsApp validates the pairing-by-code request against canonical browser labels and
+     * **some accounts refuse a non-standard one** (Baileys #2560, OpenWA #1666): the code is
+     * issued, the phone says it could not link, and the socket is closed as logged out. The
+     * refusal names this field when it is set.
+     */
+    readonly deviceName?: string
     /** Injected by the tests, which never reach WhatsApp. */
     readonly api?: BaileysApi
     /**
@@ -284,6 +297,7 @@ export class WhatsAppTransport implements ChannelTransport {
     readonly alwaysAllow: readonly string[]
     readonly #authDir: string
     readonly #pairWith: string | undefined
+    readonly #deviceName: string | undefined
     readonly #pairingDelayMs: number
     readonly #api: BaileysApi | undefined
 
@@ -345,6 +359,7 @@ export class WhatsAppTransport implements ChannelTransport {
         this.id = options.id
         this.#authDir = options.authDir
         this.#pairWith = options.pairWith
+        this.#deviceName = options.deviceName
         this.alwaysAllow =
             options.pairWith === undefined || options.pairWith === "" ? [] : [options.pairWith]
         this.#pairingDelayMs = options.pairingDelayMs ?? PAIRING_CODE_DELAY_MS
@@ -483,6 +498,7 @@ export class WhatsAppTransport implements ChannelTransport {
                 this.#codeIssued = this.#pairWith !== undefined && this.#pairWith !== ""
                 const socket = await api.connect({
                     authDir: this.#authDir,
+                    ...(this.#deviceName === undefined ? {} : { deviceName: this.#deviceName }),
                     onUpdate: (update) => this.#onUpdate(host, update),
                     onCreds: () => this.#secureAuthDir(),
                     onMessages: (upsert) => this.#onMessages(host, upsert),
@@ -645,7 +661,9 @@ export class WhatsAppTransport implements ChannelTransport {
                             message: `WhatsApp refused ${this.#pairingRejections} pairing attempts for channel "${this.id}" and none completed.`,
                             hint: onBun()
                                 ? "This is what the Bun limitation looks like from the outside: a code is issued and invalidated seconds later. Pair using the npm-installed package, whose bin runs under Node, then bring the paired session back. Retrying here only spends failed pairings against the number."
-                                : "Check that the number is the one WhatsApp is registered to, in digits with no +. Repeated failed pairings are the thing that gets an account restricted, so this stops rather than continuing.",
+                                : this.#deviceName !== undefined
+                                  ? `deviceName is set ("${this.#deviceName}"), and some accounts refuse a non-standard device name under pairing-by-code. Remove deviceName from the channel and pair again; check the number too. Repeated failed pairings are the thing that gets an account restricted, so this stops rather than continuing.`
+                                  : "Check that the number is the one WhatsApp is registered to, in digits with no +. Repeated failed pairings are the thing that gets an account restricted, so this stops rather than continuing.",
                         })
                     } else {
                         host.status("disconnected", "pairing refused — trying once more")
@@ -881,7 +899,7 @@ async function loadBaileys(): Promise<BaileysApi> {
     }
 
     return {
-        connect: async ({ authDir, onUpdate, onCreds, onMessages }) => {
+        connect: async ({ authDir, deviceName, onUpdate, onCreds, onMessages }) => {
             const { state, saveCreds } = await useMultiFileAuthState(authDir)
             const socket = make({
                 auth: state,
@@ -898,8 +916,14 @@ async function loadBaileys(): Promise<BaileysApi> {
                  * the helper produces rather than importing `Browsers`, so this stays one value
                  * read in one place instead of an interop question on a namespace that already
                  * needs two spellings above.
+                 *
+                 * Slot 0 is what the phone prints in the bracket of the Linked-devices label; slot
+                 * 1 selects a `PlatformType` enum (the "Google Chrome" half) and cannot carry a
+                 * name. `deviceName` replaces slot 0 only — the pairing request's
+                 * `companion_platform_display` is built from both, and a non-canonical one is
+                 * what some accounts refuse, which is why the field is opt-in.
                  */
-                browser: ["Ubuntu", "Chrome", "22.04.4"],
+                browser: [deviceName ?? "Ubuntu", "Chrome", "22.04.4"],
                 // Silenced for the same reason: this process has an event bus and a log file of
                 // its own, and a second logger writing to stdout is how a TUI gets corrupted.
                 logger: silentLogger(),

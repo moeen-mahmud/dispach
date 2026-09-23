@@ -69,7 +69,10 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "init",
 
         inSession: "hidden",
-        needsServer: true,
+        // Not the bootstrap's: `init` asks whether to keep a server running, and a bootstrap that
+        // installed one before the question was asked made the answer decorative. `init` starts
+        // the host itself, after the files exist, when the answer is `service`.
+        needsServer: false,
         summary: "create a new agent: manifest, workspace, and env files",
         // No positional. It used to be the target *directory*, which read as the agent's name and
         // was not — `init milo` silently wrote ./milo into whatever checkout you were standing in,
@@ -740,10 +743,82 @@ export const COMMANDS: readonly CommandSpec[] = [
         name: "agents",
 
         inSession: "output",
-        needsServer: true,
-        summary: "list the agents one or more manifests produce",
-        args: [{ ...MANIFEST, variadic: true, help: "one or more paths to an agent.yaml" }],
-        flags: [JSON_FLAG],
+        needsServer: false,
+        summary: "the agents in the sandbox, and whether anything is serving them",
+        args: [
+            {
+                ...MANIFEST,
+                required: false,
+                variadic: true,
+                help: "paths or sandbox names to describe in full — bare, lists the sandbox",
+            },
+        ],
+        flags: [STORE, JSON_FLAG],
+    },
+    {
+        // `daemon restart` restarts the *service* — every agent it hosts. This reloads one agent in
+        // place, which is what a person wants after pairing a channel or editing agent.yaml, and it
+        // was reachable only as `/restart` inside a session or as `POST /v1/agents/:id/reload`.
+        name: "restart",
+
+        inSession: "hidden",
+        needsServer: false,
+        summary: "reload one agent on the running host, or restart the whole service",
+        args: [
+            {
+                ...MANIFEST,
+                required: false,
+                help: "path or sandbox agent name — bare, restarts the background service",
+            },
+        ],
+        flags: [STORE, JSON_FLAG],
+    },
+    {
+        // One screen for the question people actually have — "is it running and is it working?" —
+        // which `daemon status`, `agents` and `/status` each answered a third of.
+        name: "status",
+
+        inSession: "output",
+        needsServer: false,
+        summary: "the service, the hosts, every agent and its channels — one screen",
+        args: [],
+        flags: [STORE, JSON_FLAG],
+    },
+    {
+        name: "logs",
+
+        // Hidden from the session palette, where `/daemon logs` already is: two rows for one log
+        // would spend a landing row on a duplicate.
+        inSession: "hidden",
+        needsServer: false,
+        summary: "the server's stderr tail — the same as `daemon logs`",
+        args: [
+            {
+                ...MANIFEST,
+                required: false,
+                help: "path or sandbox agent name — bare, the server's own log",
+            },
+        ],
+        flags: [
+            {
+                name: "lines",
+                kind: "number",
+                placeholder: "n",
+                integer: true,
+                min: 1,
+                help: "how much of the log to show",
+                defaultHelp: "40",
+            },
+            {
+                name: "follow",
+                short: "f",
+                kind: "boolean",
+                help: "keep printing new lines until interrupted",
+            },
+            { name: "truncate", kind: "boolean", help: "empty the log first, in place" },
+            STORE,
+            JSON_FLAG,
+        ],
     },
     {
         // The one command whose whole purpose is to make a network call, which is why it is a command

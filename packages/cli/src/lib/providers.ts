@@ -81,10 +81,10 @@ export const CHANNELS: Readonly<Record<string, ChannelFactory>> = {
      * binary that never mentions WhatsApp never opens a socket to it — but the code now ships to
      * everybody, which is a change in what this project distributes rather than in what it does.
      *
-     * **It does not pair under Bun**, which means the compiled binaries and the container image
-     * carry a channel they cannot finish pairing. The transport says so at start with the remedy,
-     * which is the only honest arrangement: a bundled channel that silently did nothing would be
-     * worse than one that is absent.
+     * **It does not pair under Bun**, which is why every shipped install — npm, brew, the
+     * container — runs under Node since 0.1.3. From a checkout under `bun run` the transport says
+     * so at start with the remedy: a bundled channel that silently did nothing would be worse than
+     * one that is absent.
      */
     whatsapp: whatsappChannel,
 }

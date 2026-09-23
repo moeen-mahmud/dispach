@@ -75,18 +75,24 @@ jobs:
       # Reported either way, because "how big is it" is a question somebody asks long before it
       # fails a threshold.
       #
-      # **The ceiling, renegotiated twice in one day and each time with the measurement attached.**
+      # **The ceiling, renegotiated three times and each time with the measurement attached.**
       # 150 MB (Phase 11) → 350 (15.4, when the image actually shipping measured 287 and the gate
-      # had been red since the browser surface landed) → 700 (15.5, on the base-image change).
+      # had been red since the browser surface landed) → 700 (15.5, on the base-image change)
+      # → 800 (0.1.3, when the runtime became Node).
       #
-      # Measured on arm64 at 15.5, by layer, because "it got bigger" is not a finding:
+      # Measured on arm64 at 0.1.3, by layer, because "it got bigger" is not a finding:
       #
-      #   debian:trixie-slim          109 MB
-      #   apt packages                180 MB   ← of which `git` alone is 92
-      #   uv + uvx                     47 MB
-      #   the compiled binary          85 MB
-      #   ────────────────────────────────────
-      #                               570 MB
+      #   debian trixie (node:24-trixie-slim base)   110 MB
+      #   node 24 + npm + corepack                   160 MB   ← was an 85 MB compiled binary
+      #   apt packages                               158 MB   ← of which `git` alone is 92
+      #   uv + uvx                                    47 MB
+      #   the npm tarball, installed (ink, react)     58 MB
+      #   ──────────────────────────────────────────────────
+      #                                              701 MB
+      #
+      # Node costs ~75 MB more than the binary it replaced and buys the one thing the binary could
+      # not do: finish a WhatsApp pairing. The npm/corepack half of that layer is kept on purpose —
+      # the agent's shell gets a Node toolchain, which a good fraction of third-party skills assume.
       #
       # `git` at 92 MB is the price of glibc: Debian's git pulls perl and git-man, where alpine's
       # is a fraction of that. It buys prebuilt Python wheels, which is the trade 15.5.1 argues —
@@ -103,8 +109,8 @@ jobs:
           bytes=$(docker image inspect dispach:ci --format '{{.Size}}')
           mb=$(( bytes / 1000000 ))
           echo "image is ${mb} MB"
-          if [ "$mb" -gt 700 ]; then
-            echo "::error::image is ${mb} MB, over the 700 MB ceiling"
+          if [ "$mb" -gt 800 ]; then
+            echo "::error::image is ${mb} MB, over the 800 MB ceiling"
             exit 1
           fi
 
@@ -115,7 +121,7 @@ jobs:
       - name: the shell the agent gets
         run: |
           missing=""
-          for tool in sh bash git python3 curl jq uv dispach; do
+          for tool in sh bash git python3 curl jq uv node dispach; do
             docker run --rm --entrypoint sh dispach:ci -c "command -v $tool >/dev/null" \
               || missing="$missing $tool"
           done
@@ -125,16 +131,19 @@ jobs:
           fi
           echo "toolchain present"
 
-          # **Absent on purpose, and asserted.** Since 15.5 the runtime stage has no Bun and no
-          # Node: the application is one compiled binary, which is what deletes the runtime
-          # `bun install` — and with it the ~17 MB of `react-devtools-core` that `--production`
-          # could not skip, because `ink` declares it a peerDependency. A change that reintroduced
-          # either would quietly restore that cost, so it fails here instead.
+          # **Absent on purpose, and asserted.** No Bun: since 0.1.3 the runtime is Node, the
+          # runtime every install path shares, and the application is the published tarball
+          # installed with `npm i -g`. A `bun` in the runtime stage would mean a second runtime
+          # to reason about — the one that cannot finish the WhatsApp handshake.
           #
-          # No pager and no editor either: `exec` hands a child a file descriptor and never a TTY,
-          # so anything that pages or prompts blocks until `deadlineMs` and reads as a hung agent.
+          # No `react-devtools-core` either: `ink` declares it a peerDependency, and a `bun install
+          # --production` of the *workspace* once pulled ~17 MB of it into every image. Installing
+          # the tarball cannot, and this asserts that stays true.
+          #
+          # No pager and no editor: `exec` hands a child a file descriptor and never a TTY, so
+          # anything that pages or prompts blocks until `deadlineMs` and reads as a hung agent.
           present=""
-          for tool in bun node less nano vi; do
+          for tool in bun less nano vi; do
             docker run --rm --entrypoint sh dispach:ci -c "command -v $tool >/dev/null" \
               && present="$present $tool"
           done
@@ -142,7 +151,10 @@ jobs:
             echo "::error::these should not be in the image:$present"
             exit 1
           fi
-          echo "no runtime, no pager, no editor"
+          docker run --rm --entrypoint sh dispach:ci -c 'ls /usr/local/lib/node_modules/dispach/node_modules 2>/dev/null; ls /usr/local/lib/node_modules' \
+            | grep -q react-devtools-core \
+            && { echo "::error::react-devtools-core reached the image"; exit 1; }
+          echo "no bun, no devtools, no pager, no editor"
 
           # glibc, which is the whole reason the base image changed. A revert to musl passes every
           # test above and then fails inside a tool call, on a machine nobody is watching.
@@ -270,8 +282,10 @@ jobs:
           MODEL_API_KEY=ci-not-a-real-key
           ENV
           docker compose config -q
-          # The image is already built and tagged by the first step; retagging saves a rebuild.
-          docker tag dispach:ci dispach:local
+          # The image is already built by the first step; tagging it under the compose file's
+          # `image:` (the GHCR name, default `latest`) is what makes `pull_policy: missing` use it
+          # rather than reach for the registry.
+          docker tag dispach:ci ghcr.io/moeen-mahmud/dispach:latest
           docker compose up -d --wait || { docker compose logs; exit 1; }
           curl -sf localhost:7420/v1/ready || { docker compose logs; exit 1; }
           # The token is required, so an unauthenticated write must be refused — the property the
@@ -286,28 +300,16 @@ jobs:
           fi
           docker compose down -v
 
-  # The standalone binary, built and *run* on each platform that can run it.
+  # The published bundle, run under Node — the runtime every install path ships.
   #
   # A blocking job, because `bun test` cannot see this class of failure at all: tests import source,
-  # so a defect in how the program is bundled or signed is invisible to all 3,216 of them. The
-  # recorded instance is `--splitting` emitting a duplicate export — green suite, unparseable
-  # bundle. `--compile` is a second bundler shape with its own way to be wrong.
-  #
-  # The matrix is over *runners* rather than targets on purpose: each leg builds its own host target
-  # and executes it, so every asset in the matrix is proven rather than merely produced. The two
-  # cross-compiled legs (darwin-x64, linux-arm64) are built in the release workflow and cannot be
-  # run anywhere here, which the script says out loud rather than implying.
-  #
-  # macOS is not optional cover. Bun emits a *linker-signed* ad-hoc signature that macOS kills on
-  # exec — exit 137, no output — while `codesign -dv` reports the binary as signed, so the obvious
-  # check passes on a dead file. Only running it catches that, and only a macOS runner can.
-  binary:
-    runs-on: ${{ matrix.os }}
+  # so a defect in how the program is bundled is invisible to all of them. The recorded instance is
+  # `--splitting` emitting a duplicate export — green suite, unparseable bundle. And it runs under
+  # **Node**, which is what `npm i -g dispach`, the brew formula and the container all execute: the
+  # suite runs under bun, so this leg is the only one that exercises the shipped runtime end to end.
+  bundle:
+    runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
 
     # **Required, and deleting it turns every step below red.** No committed example validates with
     # an empty environment, and that is the feature rather than a gap: `validate` refuses a manifest
@@ -319,11 +321,6 @@ jobs:
     # The values are deliberately fake and nothing here reaches a network: `validate` loads and
     # checks, and `serve` binds loopback. Same shape and the same placeholders as the `docker` job
     # above, so the two cannot drift into disagreeing about what a CI environment looks like.
-    #
-    # This step was written and verified locally, where it passed — because `ambientEnv` layers the
-    # **cwd's** `.env`, and the repo root had one. That is the recorded hazard twice over: verify a
-    # workflow change against a fresh clone rather than against your working tree, and remember the
-    # cwd's `.env` is a participating layer.
     env:
       MODEL_ID: gpt-4o-mini
       MODEL_BASE_URL: https://api.openai.com/v1
@@ -334,41 +331,47 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
       - run: bun install --frozen-lockfile
 
       # Required, not defensive: the CLI resolves every sibling package through its `dist/`, so on a
-      # fresh checkout the compile fails on a directory that does not exist yet.
+      # fresh checkout the bundle fails on a directory that does not exist yet.
       - name: build
         run: bun run build
 
-      - name: compile and run the host target
-        run: bun run build:binary
-
-      # Past `--version`, which the script already asserts. This is the shape that matters: a real
-      # manifest through the whole loader, on the plain path, from a single file with no
-      # `node_modules` anywhere near it.
-      - name: the binary does real work
+      # The tarball, installed into an empty prefix and run from there — the shape a laptop, the
+      # formula and the image all share. Nothing below runs `dist/` from the checkout, because a
+      # checkout has a `node_modules` that can hide a dependency the tarball forgot to declare.
+      - name: install the tarball
         run: |
-          bin=$(ls dist-bin/dispach-*)
-          echo "using $bin"
-          "$bin" validate ./examples/minimal/agent.yaml --json | tee /tmp/out.json
+          set -e
+          out=$(mktemp -d)
+          (cd packages/cli && bun pm pack --destination "$out" --ignore-scripts)
+          prefix=$(mktemp -d)
+          npm install -g --prefix "$prefix" --omit=dev --ignore-scripts "$out"/dispach-*.tgz
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          "$prefix/bin/dispach" --version
+
+      # A real manifest through the whole loader, on the plain path, from the installed package.
+      - name: the package does real work
+        run: |
+          dispach validate ./examples/minimal/agent.yaml --json | tee /tmp/out.json
           grep -q '"ok": true' /tmp/out.json || {
-            echo "::error::the compiled binary could not validate the reference manifest"
+            echo "::error::the installed package could not validate the reference manifest"
             exit 1
           }
-          "$bin" --help > /dev/null
+          dispach --help > /dev/null
 
-      # The browser surface, from inside a single file.
-      #
-      # Decision 11.200 measured `with { type: "text" }` against source and bundled shapes;
-      # `--compile` is a third, and it is the one the release ships. The assets are inlined into
-      # the bundle, so if that stopped working here the failure would be a 500 from `/` on a
-      # binary whose every other command was fine.
-      - name: the binary serves the web UI
+      # The browser surface, from the installed package. Decision 11.200 measured
+      # `with { type: "text" }` against source and bundled shapes; the assets are inlined into the
+      # bundle, so if that stopped working the failure would be a 500 from `/` on a package whose
+      # every other command was fine.
+      - name: the package serves the web UI
         run: |
-          bin=$(ls dist-bin/dispach-*)
           export DISPACH_HOME="$(mktemp -d)"
-          "$bin" serve ./examples/minimal/agent.yaml --port 7431 > /tmp/serve.log 2>&1 &
+          dispach serve ./examples/minimal/agent.yaml --port 7431 > /tmp/serve.log 2>&1 &
           for _ in $(seq 1 30); do
             curl -fsS localhost:7431/v1/ready > /dev/null 2>&1 && break
             sleep 1
@@ -378,7 +381,7 @@ jobs:
             bytes=$(wc -c < /tmp/body)
             echo "$path -> $code, $bytes bytes"
             if [ "$code" != "200" ] || [ "$bytes" -lt 100 ]; then
-              echo "::error::$path answered $code with $bytes bytes from the compiled binary"
+              echo "::error::$path answered $code with $bytes bytes from the installed package"
               cat /tmp/serve.log
               exit 1
             fi
@@ -387,7 +390,8 @@ jobs:
 
       # **The origin guard, against a real loopback bind.** `origin.test.ts` covers the decision
       # table; this covers the thing a unit test cannot: real headers, on the strict bind, with the
-      # server the release ships.
+      # server the release ships — under Node, whose `http` server is a different code path from
+      # `Bun.serve`.
       #
       # The `Host: evil.example` row is the DNS-rebinding shape, and it is asserted on the **open**
       # webhook route as well — that route needs no credential and changes state, so it is the half
@@ -396,9 +400,8 @@ jobs:
       - name: a real bind refuses a rebinding request
         run: |
           set -e
-          bin=$(ls dist-bin/dispach-*)
           export DISPACH_HOME="$(mktemp -d)"
-          "$bin" serve ./examples/minimal/agent.yaml --port 7452 > /tmp/origin.log 2>&1 &
+          dispach serve ./examples/minimal/agent.yaml --port 7452 > /tmp/origin.log 2>&1 &
           for _ in $(seq 1 30); do
             curl -fsS localhost:7452/v1/ready > /dev/null 2>&1 && break
             sleep 1
@@ -426,14 +429,13 @@ jobs:
           kill %1
           [ "$fail" = 0 ] || { cat /tmp/origin.log; exit 1; }
 
-      # The lazy renderer boundary, checked in the one shape that can lose it. `--compile` resolves
-      # static imports at build time, so a module that reached Ink statically would drag ~170-210 ms
-      # of React into a command whose entire runtime is less than that — and nothing would fail.
+      # The lazy renderer boundary, in the shape that ships. A module that reached Ink statically
+      # would drag ~170-210 ms of React into a command whose entire runtime is less than that — and
+      # nothing would fail.
       - name: no renderer on the plain path
         run: |
-          bin=$(ls dist-bin/dispach-*)
           start=$(date +%s%N)
-          "$bin" validate ./examples/minimal/agent.yaml --json > /dev/null
+          dispach validate ./examples/minimal/agent.yaml --json > /dev/null
           ms=$(( ($(date +%s%N) - start) / 1000000 ))
           echo "validate --json in ${ms} ms"
           if [ "$ms" -gt 600 ]; then

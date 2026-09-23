@@ -24,6 +24,7 @@
 
 import { dirname } from "node:path"
 import { BRAND, HarnessError } from "@dispach/core"
+import { announce } from "#lib/bootstrap"
 import {
     type ChannelEntry,
     channelsOf,
@@ -33,10 +34,18 @@ import {
 } from "#lib/channel-actions"
 import { askSecret } from "#lib/confirm"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
+import {
+    adoptOnHost,
+    ensureHost,
+    liveChannels,
+    reloadOnHost,
+    waitForPairing,
+} from "#lib/host-actions"
 import { pairWhatsApp } from "#lib/init-whatsapp"
-import { agentIdFor, callHost, liveHosts } from "#lib/lifecycle"
+import { agentIdFor } from "#lib/lifecycle"
 import { keyValue, type Row } from "#lib/render"
 import type { ChannelsOptions } from "#lib/schema"
+import { webUrl } from "#lib/web-url"
 
 export async function channelsCommand(options: ChannelsOptions): Promise<number> {
     switch (options.action) {
@@ -87,7 +96,7 @@ async function list(options: ChannelsOptions): Promise<number> {
      * `enabled` and `disabled` are what the file actually says, and the live half now comes from
      * the host below instead of being disclaimed away.
      */
-    const live = await liveStatus(options)
+    const live = await liveChannels(options.manifestPath)
     const rows: Row[] = channels.map((channel) => {
         const now = live?.get(channel.id)
         return {
@@ -155,42 +164,6 @@ function pairingNote(channel: ChannelEntry): string {
 }
 
 /**
- * What the running host says about this agent's channels, or `undefined` when nothing holds it.
- *
- * Best effort throughout: a host that refuses, has no HTTP, or answers something unexpected leaves
- * the manifest view intact rather than failing the command. Reading a file must not start depending
- * on a socket.
- */
-async function liveStatus(options: ChannelsOptions): Promise<Map<string, LiveChannel> | undefined> {
-    const agentId = agentIdFor(options.manifestPath)
-    if (agentId === "") return undefined
-    const hosts = await liveHosts()
-    const holder = hosts.find((lease) => lease.agentId === agentId && lease.baseUrl !== undefined)
-    if (holder === undefined) return undefined
-    const reply = await callHost(
-        holder,
-        "GET",
-        `/v1/agents/${encodeURIComponent(agentId)}`,
-        options.manifestPath,
-    )
-    if (!reply.ok) return undefined
-    const body = reply.body as { channels?: readonly LiveChannel[] } | undefined
-    if (body?.channels === undefined) return undefined
-    return new Map(body.channels.map((channel) => [channel.id, channel]))
-}
-
-interface LiveChannel {
-    readonly id: string
-    readonly status: string
-    readonly detail?: string
-    readonly input?: {
-        readonly kind: string
-        readonly payload: string
-        readonly expiresAt?: string
-    }
-}
-
-/**
  * Connect a channel the way that channel needs.
  *
  * One verb for two mechanisms, because from the person's seat it is one action: "make this
@@ -215,10 +188,13 @@ async function pair(options: ChannelsOptions): Promise<number> {
         })
 
     if (channel.type === "telegram") {
-        // A token is the pairing. Prompted and not echoed, then switched on.
+        // A token is the pairing. Prompted and not echoed, then switched on — and the host holding
+        // the agent reloads it, or the manifest says "connected" while the process runs the old one.
         const code = await credential(options)
         if (code !== EXIT_OK) return code
-        return await flip(options, true)
+        const flipped = await flip(options, true)
+        process.stdout.write(`${await reloadNote(options.manifestPath)}\n`)
+        return flipped
     }
 
     if (channel.type !== "whatsapp")
@@ -242,35 +218,71 @@ async function pair(options: ChannelsOptions): Promise<number> {
         return EXIT_OK
     }
 
-    // A running host is already offering a code — show that one and wait, rather than opening a
-    // second socket to WhatsApp beside it.
-    const live = await liveStatus(options)
-    const now = live?.get(channelId)
-    if (now?.input !== undefined) {
-        process.stdout.write(
-            `${now.detail ?? "enter this code"}:\n\n    ${now.input.payload}\n\nWaiting for the phone…\n`,
-        )
-        const end = Date.now() + 120_000
-        while (Date.now() < end) {
-            await new Promise((resolve) => setTimeout(resolve, 2_000))
-            const again = (await liveStatus(options))?.get(channelId)
-            if (again?.status === "connected") {
-                process.stdout.write(`Paired. ${channelId} is linked to ${channel.pairWith}.\n`)
+    /**
+     * A host does the pairing when one can exist. It holds the socket, so when the phone accepts
+     * the session is already in the process that will answer — nothing to reload, nothing to start.
+     * The bootstrap puts one up first if none is; a container, CI or a caller with no installer
+     * gets `undefined` here and the standalone path below, which pairs in this process and names
+     * what to run next.
+     */
+    const agentId = agentIdFor(options.manifestPath)
+    const { outcome, host } = await ensureHost({
+        ...(options.installServer === undefined ? {} : { install: options.installServer }),
+    })
+    const note = announce(outcome)
+    if (note !== undefined) process.stderr.write(note)
+    if (host?.baseUrl !== undefined) {
+        const adopted = await adoptOnHost(host, options.manifestPath)
+        if (!adopted.ok) {
+            process.stderr.write(
+                `pid ${host.pid} did not adopt ${agentId}${adopted.detail === undefined ? "" : `: ${adopted.detail}`}\n`,
+            )
+        } else {
+            const result = await waitForPairing({ manifestPath: options.manifestPath, channelId })
+            if (result === "paired") {
+                process.stdout.write(
+                    `${channelId} is linked to ${channel.pairWith}, and pid ${host.pid} is serving it.\n  chat: ${webUrl(host.baseUrl, agentId)} — or \`${BRAND.slug} run ${agentId}\`\n`,
+                )
                 return EXIT_OK
             }
+            process.stdout.write(
+                result === "no-code"
+                    ? `No code arrived from pid ${host.pid} — \`${BRAND.slug} status\` shows what the channel is doing; run this again once it offers one.\n`
+                    : `Not paired yet — the host keeps offering codes; run this again.\n`,
+            )
+            return EXIT_FAILURE
         }
-        process.stdout.write(`Not paired yet — the host keeps offering codes; run this again.\n`)
-        return EXIT_FAILURE
     }
 
-    const outcome = await pairWhatsApp({
+    const paired = await pairWhatsApp({
         manifestPath: options.manifestPath,
         dir: dirname(options.manifestPath),
         number: channel.pairWith,
         channelId,
         ...(channel.authDir === undefined ? {} : { authDir: channel.authDir }),
     })
-    return outcome === "paired" ? EXIT_OK : EXIT_FAILURE
+    if (paired !== "paired") return EXIT_FAILURE
+    // On disk and read by nothing yet. Said here, because a pairing that lands in a session file
+    // and a process that never opens it is the exact dead end this verb exists to close.
+    process.stdout.write(
+        `Nothing is serving ${agentId} yet. \`${BRAND.slug} serve ${agentId}\` runs it here; \`${BRAND.slug} daemon install\` keeps a server running for every agent.\n`,
+    )
+    return EXIT_OK
+}
+
+/** One line on whether the host holding this agent picked the change up. */
+async function reloadNote(manifestPath: string): Promise<string> {
+    const reloaded = await reloadOnHost(manifestPath)
+    switch (reloaded.kind) {
+        case "reloaded":
+            return `pid ${reloaded.pid} reloaded it — the change is live.`
+        case "busy":
+            return `pid ${reloaded.pid} has a turn in flight; \`${BRAND.slug} restart ${agentIdFor(manifestPath)}\` once it finishes.`
+        case "failed":
+            return `pid ${reloaded.pid} did not reload it${reloaded.detail === undefined ? "" : `: ${reloaded.detail}`} — \`${BRAND.slug} restart ${agentIdFor(manifestPath)}\` to retry.`
+        case "no-host":
+            return `Nothing is hosting it right now; it takes effect at the next start.`
+    }
 }
 
 async function flip(options: ChannelsOptions, enabled: boolean): Promise<number> {

@@ -84,7 +84,7 @@ describe("the built page", () => {
 
     test("has no binary assets", () => {
         // The constraint `with { type: "text" }` imposes. A font or an image here would build fine
-        // and break the compiled binary — the distribution hardest to test and easiest to forget.
+        // and break the bundled `dist/` — the shape every install runs.
         for (const path of files(DIST)) {
             expect(/\.(html|js|css)$/.test(path)).toBe(true)
         }

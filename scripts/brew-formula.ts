@@ -1,25 +1,27 @@
 #!/usr/bin/env bun
 /**
- * Generates the Homebrew formula from binaries that actually exist.
+ * Generates the Homebrew formula for the published npm tarball.
  *
- * A generator rather than a committed file, because a formula is mostly four SHA-256 digests of
- * four release assets — and a committed formula carrying placeholder digests is the failure this
- * repo already has a rule about: a wrong number in a file outlives whoever guessed it, and the
- * symptom here is `brew install` refusing a download that is perfectly fine. So the digests come
- * from `dist-bin/*.sha256`, written by the release workflow beside the binaries it just built.
+ * A generator rather than a committed file, because a formula is mostly a URL and a SHA-256 of a
+ * release artefact — and a committed formula carrying a placeholder digest is the failure this repo
+ * already has a rule about: a wrong number in a file outlives whoever guessed it, and the symptom
+ * here is `brew install` refusing a download that is perfectly fine. So the digest is computed
+ * from the tarball the release workflow just published, never typed.
  *
- * ## The service block, and why it took until 16.4
+ * ## Node, not a compiled binary
  *
- * `service do` is what makes `brew services start` work, and it had to wait for the command it
- * runs: a bare `serve` with no manifest, which hosts the sandbox's enabled agents and reads that
- * sandbox at every start. Until 16.3 `serve` required a manifest, and a formula whose service block
- * ran a command that refuses is worse than one with no service block — `brew services start`
- * reports success and the unit dies into a log nobody has been told about.
+ * Until 0.1.3 the formula downloaded a `bun build --compile` binary per platform. Bun cannot complete
+ * the WhatsApp handshake (see `packages/channel-whatsapp/src/transport.ts`), so the brew install
+ * carried a channel it could not pair. The formula now `depends_on "node"` and installs the same
+ * tarball `npm i -g dispach` installs — one runtime across every install path, and one artefact to
+ * checksum instead of four.
  *
- * `run_type: :immediate` with `keep_alive: { crashed: true }` mirrors the plist this project
- * generates itself, deliberately: a configuration fault must stop the service **once** rather than
- * retry into a log nobody opens, which is the 57 MB lesson. `:always` would be the wrong answer
- * here for the same reason `KeepAlive: true` was.
+ * ## The service block
+ *
+ * `service do` is what makes `brew services start` work: a bare `serve` with no manifest, which hosts
+ * the sandbox's enabled agents and reads that sandbox at every start. `run_type: :immediate` with
+ * `keep_alive: { crashed: true }` mirrors the plist this project generates itself, deliberately: a
+ * configuration fault must stop the service **once** rather than retry into a log nobody opens.
  *
  * **Homebrew never starts a service at install time**, whatever the formula says. So the caveat is
  * the only place a first-time user learns that one command away is an always-on API — and it names
@@ -28,41 +30,40 @@
  *
  * ## Usage
  *
- *     bun scripts/brew-formula.ts --version 0.1.0 > Formula/dispach.rb
- *     bun scripts/brew-formula.ts                  # version from packages/cli/package.json
+ *     bun scripts/brew-formula.ts --version 0.1.3 --sha256 <digest>   > Formula/dispach.rb
+ *     bun scripts/brew-formula.ts --version 0.1.3 --tarball ./dispach-0.1.3.tgz > Formula/dispach.rb
+ *
+ * The release workflow uses the first form, hashing the tarball it downloads from the registry after
+ * `npm publish`; the second is for proving the formula locally against a `bun pm pack` output.
  */
 
+import { createHash } from "node:crypto"
 import { existsSync, readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { DEFAULT_BRAND } from "../packages/core/src/brand.ts"
 
 const ROOT = resolve(import.meta.dirname, "..")
-const OUT_DIR = join(ROOT, "dist-bin")
 const REPO = "moeen-mahmud/dispach"
-
-/** Formula asset per platform, in the order Homebrew's `on_macos`/`on_linux` blocks want them. */
-const ASSETS = [
-    { id: "darwin-arm64", os: "macos", cpu: "arm" },
-    { id: "darwin-x64", os: "macos", cpu: "intel" },
-    { id: "linux-arm64", os: "linux", cpu: "arm" },
-    { id: "linux-x64", os: "linux", cpu: "intel" },
-] as const
 
 function fail(message: string, hint: string): never {
     process.stderr.write(`\n  ${message}\n  hint: ${hint}\n\n`)
     process.exit(1)
 }
 
-function versionFromFlags(): string {
+function flag(name: string): string | undefined {
     const argv = process.argv.slice(2)
-    const flag = argv.indexOf("--version")
-    if (flag !== -1) {
-        const value = argv[flag + 1]
-        if (value === undefined || value.startsWith("--")) {
-            fail("--version needs a value", "For example: --version 0.1.0")
-        }
-        return value
+    const at = argv.indexOf(`--${name}`)
+    if (at === -1) return undefined
+    const value = argv[at + 1]
+    if (value === undefined || value.startsWith("--")) {
+        fail(`--${name} needs a value`, `For example: --${name} <value>`)
     }
+    return value
+}
+
+function version(): string {
+    const given = flag("version")
+    if (given !== undefined) return given
     const pkg = JSON.parse(readFileSync(join(ROOT, "packages", "cli", "package.json"), "utf8")) as {
         readonly version: string
     }
@@ -70,66 +71,57 @@ function versionFromFlags(): string {
 }
 
 /**
- * Read the digest `shasum -a 256` wrote, rather than hashing here.
- *
- * Reading the recorded digest means the formula asserts the same bytes the release publishes: if
- * the checksum file is missing, that asset was not built, and generating a formula that points at
- * it would produce a `brew install` failure at somebody else's terminal instead of here.
+ * The digest, from `--sha256` or computed from `--tarball`. One of the two is required: a formula
+ * with no digest is a formula Homebrew refuses, and guessing one is the failure this file exists to
+ * prevent.
  */
-function digest(id: string): string {
-    const path = join(OUT_DIR, `${DEFAULT_BRAND.slug}-${id}.sha256`)
-    if (!existsSync(path)) {
+function digest(): string {
+    const given = flag("sha256")
+    if (given !== undefined) {
+        if (!/^[0-9a-f]{64}$/.test(given)) fail("--sha256 is not a SHA-256", `Read: ${given}`)
+        return given
+    }
+    const tarball = flag("tarball")
+    if (tarball === undefined) {
         fail(
-            `No checksum for ${id}`,
-            `Expected ${path}. Build every target first: \`bun run build:binary -- --all\`, then write checksums with \`shasum -a 256\`. The release workflow does both.`,
+            "No digest",
+            "Pass --sha256 <digest> (the release workflow hashes the published tarball) or --tarball <path> to hash a local `bun pm pack` output.",
         )
     }
-    const first = readFileSync(path, "utf8").trim().split(/\s+/)[0]
-    if (first === undefined || !/^[0-9a-f]{64}$/.test(first)) {
-        fail(`Checksum for ${id} is not a SHA-256`, `Read from ${path}: ${first ?? "(empty)"}`)
-    }
-    return first
+    if (!existsSync(tarball))
+        fail(`No tarball at ${tarball}`, "Build one: cd packages/cli && bun pm pack")
+    return createHash("sha256").update(readFileSync(tarball)).digest("hex")
 }
 
-const version = versionFromFlags()
+const v = version()
 const slug = DEFAULT_BRAND.slug
-const url = (id: string) => `https://github.com/${REPO}/releases/download/v${version}/${slug}-${id}`
+const sha = digest()
+const pkg = "dispach"
 
-const blocks = ASSETS.map(
-    (asset) => `  on_${asset.os} do
-    on_${asset.cpu} do
-      url "${url(asset.id)}"
-      sha256 "${digest(asset.id)}"
-      def install
-        bin.install "${slug}-${asset.id}" => "${slug}"
-      end
-    end
-  end`,
-)
-
-// One `on_macos`/`on_linux` pair per CPU rather than nested `on_arm`/`on_intel` inside one
-// `on_macos`: Homebrew evaluates each block independently, so this reads as four flat cases and a
-// fifth platform is one more block rather than a restructure.
 process.stdout.write(`# Generated by scripts/brew-formula.ts — do not edit by hand.
 #
 # Regenerate with:
-#   bun run build:binary -- --all
-#   (cd dist-bin && for f in ${slug}-*; do shasum -a 256 "$f" > "$f.sha256"; done)
-#   bun scripts/brew-formula.ts --version ${version} > Formula/${slug}.rb
+#   bun scripts/brew-formula.ts --version ${v} --sha256 <sha256 of the npm tarball> > Formula/${slug}.rb
 class ${slug.charAt(0).toUpperCase()}${slug.slice(1)} < Formula
   desc "${DEFAULT_BRAND.name} — a model-agnostic AI agent runtime"
   homepage "https://github.com/${REPO}"
-  version "${version}"
+  url "https://registry.npmjs.org/${pkg}/-/${pkg}-${v}.tgz"
+  sha256 "${sha}"
   license "Apache-2.0"
 
-${blocks.join("\n\n")}
+  depends_on "node"
+
+  def install
+    system "npm", "install", *std_npm_args
+    bin.install_symlink Dir["#{libexec}/bin/*"]
+  end
 
   service do
     # No manifest: the server hosts every agent in the sandbox that is not switched off, and it
     # re-reads the sandbox at every start — so an agent created tomorrow needs no change here.
     run [opt_bin/"${slug}", "serve"]
     # Not :always. A configuration fault has to stop this once rather than relaunch it thirty times
-    # an hour into a log nobody opens. ${slug} daemon status is where the reason shows up.
+    # an hour into a log nobody opens. ${slug} status is where the reason shows up.
     keep_alive crashed: true
     run_type :immediate
     working_dir Dir.home

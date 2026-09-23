@@ -42,8 +42,8 @@ describe("serving the shell", () => {
          * The constraint `with { type: "text" }` imposes (decision 11.200), guarded rather than
          * remembered.
          *
-         * A webfont or a PNG cannot be inlined as text, so adding one would break the compiled
-         * binary — the distribution that is hardest to test and easiest to forget. Every asset here
+         * A webfont or a PNG cannot be inlined as text, so adding one would break the bundled
+         * `dist/` — the shape every install runs. Every asset here
          * is text by construction; this asserts the *list* has not grown something that only looks
          * like text.
          */

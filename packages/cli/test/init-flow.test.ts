@@ -743,3 +743,32 @@ describe("schedules, which is a flag and not a question", () => {
         }
     })
 })
+
+describe("the background service is the default answer", () => {
+    /**
+     * Enter-through and `--yes` used to mean *no service*: the wizard's fallback was `"1"`, an
+     * index into a list whose first row was "No". So the always-on shape the product is built
+     * around was the one answer a person had to choose deliberately, and a paired channel on an
+     * agent nothing was serving was the first thing every new user hit.
+     *
+     * Asserted at the far end — the answer `fillDefaults` would write — not on the constant, because
+     * a fallback and a choice order are two decisions and this is about what a scripted run gets.
+     */
+    test("a scripted run answers `service`", () => {
+        const partial: Record<string, string> = {}
+        for (;;) {
+            const question = nextQuestion(partial, DEFAULTS)
+            if (question === undefined) break
+            if (question.step === "daemon") {
+                // By name, never an index: the order of the choices and the default are separate.
+                expect(question.fallback).toBe("service")
+                const checked = validateAnswer("daemon", question.fallback)
+                expect(checked).toEqual({ ok: true, value: "service" })
+                return
+            }
+            partial[question.step] =
+                question.step === "preset" ? "deepseek" : question.fallback || "x"
+        }
+        throw new Error("the daemon question was never asked")
+    })
+})

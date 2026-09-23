@@ -5,8 +5,8 @@
  *
  * Nothing installs dependencies, ever — hard rule 5, and it is what makes this mechanism small
  * enough to be worth having at all. A plugin is fetched as a directory with a runnable entry file
- * and nothing to resolve, so the compiled binary and the container, neither of which has a
- * `node_modules`, load a plugin exactly as a checkout does. `notSelfContained` is what keeps that
+ * and nothing to resolve, so the npm install and the container — whose `node_modules` holds only
+ * the two declared dependencies — load a plugin exactly as a checkout does. `notSelfContained` is what keeps that
  * true: a tree that declares runtime dependencies and ships none is refused **here**, rather than
  * half-loading at somebody's next boot.
  *

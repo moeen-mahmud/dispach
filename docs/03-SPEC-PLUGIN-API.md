@@ -165,8 +165,8 @@ wrong for as long as it has none.
 
 **An installed plugin is one directory with a runnable entry and nothing to resolve.** That is the
 rule the whole install mechanism is built on, and it is what makes it small enough to be worth
-having: nothing installs dependencies, ever, so the compiled binary and the container — neither of
-which has a `node_modules` — load a plugin exactly as a checkout does.
+having: nothing installs dependencies, ever, so the npm install and the container — whose `node_modules`
+holds only the two declared dependencies — load a plugin exactly as a checkout does.
 
 `plugins add` is what keeps it true. A fetched tree that declares runtime `dependencies` and ships no
 `node_modules` is refused by name (`plugin_not_self_contained`) before anything is renamed into place

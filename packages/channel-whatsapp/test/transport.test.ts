@@ -415,8 +415,8 @@ describe("the runtime it will not pair under is named, not left to a README", ()
     /**
      * Measured at three levels: the same bundle gets a QR under Node in about two seconds and never
      * under Bun, and a raw `ws` probe to WhatsApp opens under both — so it is not the transport
-     * layer and not this code. It decides **where this channel works**, because the npm-installed
-     * `dispach` runs under Node and the compiled binary and container image are Bun.
+     * layer and not this code. It is why every shipped install runs under Node since 0.1.3; what
+     * still reaches Bun is `bun run` from a checkout.
      *
      * A channel that connects to nothing and reports nothing is precisely the failure this runtime
      * refuses, so it is reported at start. An error rather than a refusal: the cause is somebody
@@ -438,8 +438,8 @@ describe("the runtime it will not pair under is named, not left to a README", ()
             typeof (globalThis as { Bun?: unknown }).Bun === "undefined" || named !== undefined,
         ).toBe(true)
         if (named !== undefined) {
-            // The remedy, not just the symptom: which way of running it does work.
-            expect((named as { hint: string }).hint).toContain("npm-installed")
+            // The remedy, not just the symptom: which runtime does work.
+            expect((named as { hint: string }).hint).toContain("Node")
         }
         // Reported and still connecting — a refusal would make a fix upstream need a release here.
         fake.emit({ connection: "open" })
@@ -806,5 +806,64 @@ describe("a refused pairing stops rather than hammering the number", () => {
             ),
         ).toBe(false)
         await channel.stop()
+    })
+})
+
+describe("deviceName is the bracket of the Linked-devices label", () => {
+    /**
+     * The phone renders `<PlatformType enum> (<browser[0]>)`, so the only name a person can give the
+     * device is slot 0 — and the transport hands it to Baileys through `connect`, which is the seam
+     * the fake records. Asserted at that seam rather than on the option, because a name that stopped
+     * at the transport would pass every other test and pair as "Ubuntu".
+     */
+    test("reaches the socket's connect options", async () => {
+        let seen: string | undefined = "unset"
+        const fake = fakeBaileys()
+        const api: BaileysApi = {
+            connect: async (args) => {
+                seen = args.deviceName
+                return await fake.api.connect(args)
+            },
+        }
+        const named = whatsappChannel({
+            id: "wa",
+            agentId: "test",
+            dir: authDir,
+            env: {},
+            config: { authDir, api, deviceName: "milo" },
+        })
+        const { host } = recorder()
+        await named.start(host)
+        await settle()
+        expect(seen).toBe("milo")
+        await named.stop()
+
+        // Absent stays absent, so the canonical `Ubuntu` default lives in one place: `loadBaileys`.
+        seen = "unset"
+        const plain = whatsappChannel({
+            id: "wa",
+            agentId: "test",
+            dir: authDir,
+            env: {},
+            config: { authDir, api },
+        })
+        await plain.start(recorder().host)
+        await settle()
+        expect(seen).toBeUndefined()
+        await plain.stop()
+    })
+
+    test("a name the protocol cannot carry is refused where it is written", () => {
+        for (const bad of ["x".repeat(33), "milo\u{1F600}", "tab\there"]) {
+            expect(() =>
+                whatsappChannel({
+                    id: "wa",
+                    agentId: "test",
+                    dir: authDir,
+                    env: {},
+                    config: { authDir, deviceName: bad },
+                }),
+            ).toThrow(/deviceName/)
+        }
     })
 })

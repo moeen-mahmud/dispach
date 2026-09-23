@@ -3,6 +3,7 @@
  * receives. Domain shapes live in `types.ts`.
  */
 
+import type { BootstrapResult } from "#lib/bootstrap"
 import type { BrowseRow, InstallReport } from "#lib/browse"
 import type { Slice } from "#lib/scroll"
 import type { SessionRowSource } from "#lib/sessions-view"
@@ -308,20 +309,30 @@ export interface InitOptions {
     /** Take every default; never ask, even at a terminal. */
     readonly yes?: boolean
     readonly plain?: boolean
+    /**
+     * How to start the background server when the answer is `service`. Injected by the entry point
+     * (`installServerUnit`); absent in tests and for a caller that must not install anything, in
+     * which case `init` prints the command instead of running it.
+     */
+    readonly installServer?: () => Promise<BootstrapResult>
 }
 
 export interface AgentsOptions {
+    /** Empty lists the sandbox. */
     readonly manifestPaths: readonly string[]
+    readonly store?: string
     readonly json?: boolean
 }
 
 export interface ChannelsOptions {
-    /** `list` (the default), `connect`, `disconnect`, `credential` or `unpair`. */
+    /** `list` (the default), `connect`, `disconnect`, `credential`, `pair` or `unpair`. */
     readonly action?: string
     readonly manifestPath: string
     /** Which channel. Optional when the agent declares exactly one. */
     readonly channelId?: string
     readonly json?: boolean
+    /** For `pair`: how to start a host when none is up. See `InitOptions.installServer`. */
+    readonly installServer?: () => Promise<BootstrapResult>
 }
 
 export interface PluginsOptions {
