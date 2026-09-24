@@ -102,6 +102,9 @@ and WebSocket surfaces can return:
 | `webhook_type_invalid` | 400 | A type that is not an event, or `model.chunk`, which is one request per token. |
 | `webhook_scope_invalid` | 400 | `agents` names one this credential cannot reach or this server does not hold. |
 | `webhook_not_found` | 404 | No such subscription, or one outside this credential's reach; the two are indistinguishable. |
+| `agent_at_capacity` | 429 | The agent is already running `limits.maxConcurrentTurns` turns. Nothing was recorded; retry when one ends. |
+| `agent_token_budget_exhausted` | 429 | The agent has spent `limits.tokens.max` in the rolling window. Checked when a turn starts, so a running turn is never cut off. Nothing was recorded. |
+| `activity_needs_unscoped_key` | 403 | `GET /v1/activity` with a key scoped to agents or sessions. Activity is a fact about every agent on the server. |
 | `provision_answer_invalid` | 400 | One answer failed its step's validation, or was not a string. Carries the field. |
 | `provision_unknown_answer` | 400 | A key that is not a question this runtime asks. |
 | `provision_directory_refused` | 400 | `dir` or `dirChoice` over the wire. The sandbox decides; see above. |
@@ -169,6 +172,23 @@ so it is refused with a hint naming the reason. `OPTIONS` on those paths does no
 GET /v1/health   → 200 { status, version, uptimeMs, agents: number }
 GET /v1/ready    → 200 when every agent has loaded; 503 { status: "starting" } otherwise
 ```
+
+```
+GET /v1/activity → 200 { idle, turnsRunning, deliveries: { outbox, webhooks }, nextWakeAt? }
+                   admin, unscoped credentials only
+```
+
+`/v1/activity` is for whatever suspends and wakes the process; nothing in the runtime suspends
+itself. `idle` is true when no turn is running, no delivery is on the wire, and none is due.
+`nextWakeAt` is the earliest schedule due time or delivery retry, and may be in the past (due now).
+Each of `outbox` and `webhooks` is `{ pending, inflight, nextAttemptAt? }`. Schedules count only
+while the scheduler is started. A late wake is safe: the scheduler re-reads the clock when it fires.
+It cannot see a channel holding a connection open, so a deployment that suspends runs Telegram in
+`mode: webhook`.
+
+A turn refused by a governor limit (`limits.maxConcurrentTurns`, `limits.tokens`) is `429` on
+`POST /messages` and `POST …/schedules/:sid/run`, and a `ws.error` frame carrying the same code on
+the socket — in each case before a turn id is issued, so nothing is recorded.
 
 `/ready` flips at `runtime.ready` — before channels connect. Channel state is separately
 visible on the agent resource. This distinction is deliberate: a channel that cannot
@@ -734,6 +754,7 @@ here that the server does not register, or a registered route missing from here,
 | `PATCH /v1/agents/:id/config` | `admin` |
 | `PATCH /v1/agents/:id/channels/:channelId` | `admin` |
 | `POST /v1/agents/:id/channels/:channelId/unpair` | `admin` |
+| `GET /v1/activity` | `admin` |
 | `GET /v1/keys` | `admin` |
 | `POST /v1/keys` | `admin` |
 | `DELETE /v1/keys/:keyId` | `admin` |

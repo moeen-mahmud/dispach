@@ -21,6 +21,7 @@ import type {
     AgentStateStore,
     ArtifactRecord,
     ArtifactStore,
+    DeliveryBacklog,
     DeliveryRecord,
     DeliveryStatus,
     HandoffRecord,
@@ -1469,6 +1470,34 @@ export class SqliteStore implements Store {
             },
         }
 
+        /**
+         * One aggregate over a variable-length agent list. The `(agent_id, status, …)` indexes serve
+         * both tables; a process that owes nothing reads two empty ranges.
+         */
+        const backlogOf =
+            (table: "outbox" | "webhook_deliveries") =>
+            async (agentIds: readonly string[]): Promise<DeliveryBacklog> => {
+                if (agentIds.length === 0) return { pending: 0, inflight: 0 }
+                const row = db
+                    .prepare(
+                        `SELECT SUM(status = 'pending') AS pending, SUM(status = 'inflight') AS inflight,
+                            MIN(CASE WHEN status = 'pending' THEN next_attempt_at END) AS soonest
+                       FROM ${table}
+                      WHERE status IN ('pending', 'inflight')
+                        AND agent_id IN (${new Array(agentIds.length).fill("?").join(", ")})`,
+                    )
+                    .get<{
+                        pending: number | null
+                        inflight: number | null
+                        soonest: string | null
+                    }>(...agentIds)
+                return {
+                    pending: row?.pending ?? 0,
+                    inflight: row?.inflight ?? 0,
+                    ...(row?.soonest == null ? {} : { nextAttemptAt: row.soonest }),
+                }
+            }
+
         this.outbox = {
             enqueue: async (deliveries) => {
                 if (deliveries.length === 0) return []
@@ -1546,6 +1575,7 @@ export class SqliteStore implements Store {
                     )
                     return ids
                 }),
+            backlog: backlogOf("outbox"),
             recoverInflight: async (agentIds, nextAttemptAt) => {
                 if (agentIds.length === 0) return []
                 return db.transaction(() => {
@@ -2195,6 +2225,7 @@ export class SqliteStore implements Store {
                     q.webhookUnhealthy.run(error, at, subscriptionId)
                 })
             },
+            backlog: backlogOf("webhook_deliveries"),
             recoverInflight: async (agentIds, at) =>
                 db.transaction(() => {
                     const recovered: WebhookDeliveryRecord[] = []

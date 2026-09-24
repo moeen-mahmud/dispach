@@ -69,6 +69,11 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         summary: "Whether a turn can be served yet.",
         statuses: [{ code: 503, when: "still starting; channels may still be connecting" }],
     },
+    "GET /v1/activity": {
+        summary:
+            "Whether the process is idle, and when it must next be woken. For an external waker.",
+        statuses: [{ code: 403, when: "the key is scoped to agents or sessions" }],
+    },
     "GET /v1/agents": {
         summary: "Every agent this server knows about, hosted or switched off.",
     },
@@ -155,7 +160,13 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     "POST /v1/agents/:id/messages": {
         summary: "Start a turn. Returns once accepted; the turn runs detached.",
         body: MessageBody,
-        statuses: [{ code: 202, when: "accepted" }],
+        statuses: [
+            { code: 202, when: "accepted" },
+            {
+                code: 429,
+                when: "over limits.maxConcurrentTurns or limits.tokens; nothing recorded",
+            },
+        ],
     },
     "POST /v1/agents/:id/turns/:turnId/stop": {
         summary: "Cooperatively stop a turn this API started.",
@@ -263,7 +274,10 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             { code: 409, when: "the manifest declares it, so the next boot would re-create it" },
         ],
     },
-    "POST /v1/agents/:id/schedules/:sid/run": { summary: "Fire a schedule now, out of band." },
+    "POST /v1/agents/:id/schedules/:sid/run": {
+        summary: "Fire a schedule now, out of band.",
+        statuses: [{ code: 429, when: "over a governor limit; nothing recorded" }],
+    },
     "GET /v1/agents/:id/tools": { summary: "The resolved catalogue, with trust and phases." },
     "GET /v1/agents/:id/skills": { summary: "What the skills index holds." },
     "GET /v1/agents/:id/context": {

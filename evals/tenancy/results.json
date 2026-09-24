@@ -1,0 +1,97 @@
+{
+  "measuredAt": "2026-09-24T13:31:13.135Z",
+  "environment": {
+    "node": "v24.21.0",
+    "platform": "linux",
+    "arch": "arm64",
+    "cpu": "unknown",
+    "cpus": 4,
+    "memoryMb": 9935
+  },
+  "entry": "/usr/local/lib/node_modules/dispach/dist/index.js",
+  "agent": "init --yes (system, web and composio providers named; starter skill; no channels)",
+  "settleMs": 10000,
+  "results": {
+    "1": {
+      "runs": [
+        {
+          "coldStartMs": 157.490375,
+          "idleRssKb": 119076,
+          "resumeMs": 5.125917000001209,
+          "agentsHosted": 1
+        },
+        {
+          "coldStartMs": 139.14070899999933,
+          "idleRssKb": 118900,
+          "resumeMs": 4.75683299999946,
+          "agentsHosted": 1
+        },
+        {
+          "coldStartMs": 142.80412600000273,
+          "idleRssKb": 117164,
+          "resumeMs": 7.62041699999827,
+          "agentsHosted": 1
+        }
+      ],
+      "median": {
+        "coldStartMs": 142.80412600000273,
+        "idleRssKb": 118900,
+        "resumeMs": 5.125917000001209
+      }
+    },
+    "10": {
+      "runs": [
+        {
+          "coldStartMs": 209.95266699999775,
+          "idleRssKb": 145456,
+          "resumeMs": 6.196374999999534,
+          "agentsHosted": 10
+        },
+        {
+          "coldStartMs": 181.3502920000028,
+          "idleRssKb": 146688,
+          "resumeMs": 1.938125000000582,
+          "agentsHosted": 10
+        },
+        {
+          "coldStartMs": 210.48854199999187,
+          "idleRssKb": 146292,
+          "resumeMs": 3.473792000004323,
+          "agentsHosted": 10
+        }
+      ],
+      "median": {
+        "coldStartMs": 209.95266699999775,
+        "idleRssKb": 146292,
+        "resumeMs": 3.473792000004323
+      }
+    },
+    "100": {
+      "runs": [
+        {
+          "coldStartMs": 493.74395799999184,
+          "idleRssKb": 199860,
+          "resumeMs": 5.076792000007117,
+          "agentsHosted": 100
+        },
+        {
+          "coldStartMs": 497.2044590000005,
+          "idleRssKb": 198144,
+          "resumeMs": 6.928707999992184,
+          "agentsHosted": 100
+        },
+        {
+          "coldStartMs": 470.0809580000059,
+          "idleRssKb": 199968,
+          "resumeMs": 9.116290999983903,
+          "agentsHosted": 100
+        }
+      ],
+      "median": {
+        "coldStartMs": 493.74395799999184,
+        "idleRssKb": 199860,
+        "resumeMs": 6.928707999992184
+      }
+    }
+  }
+}

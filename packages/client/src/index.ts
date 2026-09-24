@@ -669,6 +669,24 @@ export interface SecretsWrittenLike {
     readonly error?: WireError
 }
 
+/** What a delivery queue still owes. `nextAttemptAt` may be in the past: due now. */
+export interface DeliveryBacklogLike {
+    readonly pending: number
+    readonly inflight: number
+    readonly nextAttemptAt?: string
+}
+
+/** `GET /v1/activity`: whether the process may be suspended, and when to wake it. */
+export interface ActivityLike {
+    readonly idle: boolean
+    readonly turnsRunning: number
+    readonly deliveries: {
+        readonly outbox: DeliveryBacklogLike
+        readonly webhooks: DeliveryBacklogLike
+    }
+    readonly nextWakeAt?: string
+}
+
 /** A webhook subscription as the server reports it. Never the secret. */
 export interface WebhookLike {
     readonly subscriptionId: string
@@ -761,6 +779,11 @@ export interface DispachClient {
     createAgent(answers: Readonly<Record<string, string>>): Promise<ProvisionedAgentLike>
     /** What every agent this credential reaches cost, from the per-call meter. */
     usage(options?: UsageOptions): Promise<UsageReportLike>
+    /**
+     * Whether the server is idle and when it must next be woken — for whatever suspends it. Needs
+     * the server token or an unscoped operator key.
+     */
+    activity(): Promise<ActivityLike>
     /** The webhook subscriptions this credential can see. */
     webhooks(): Promise<readonly WebhookLike[]>
     /**
@@ -1195,6 +1218,7 @@ export function createClient(options: ClientOptions): DispachClient {
         // Unwrapped, because the route wraps it: a list read declared as the wrong shape is how a
         // page crashed to black on `schedules.map is not a function`.
         usage: (options) => json<UsageReportLike>("GET", `/v1/usage${usageQuery(options)}`),
+        activity: () => json<ActivityLike>("GET", "/v1/activity"),
         webhooks: async () =>
             (await json<{ webhooks: readonly WebhookLike[] }>("GET", "/v1/webhooks")).webhooks,
         createWebhook: (input) =>

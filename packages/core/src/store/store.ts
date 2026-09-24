@@ -740,6 +740,19 @@ export interface WebhookDeliveryRecord {
     readonly lastError?: string
 }
 
+/**
+ * What a delivery queue still owes, for deciding whether the process may sleep.
+ *
+ * `nextAttemptAt` is the earliest `pending` row's, and may be in the past: that is work due now, not
+ * a wake time. `inflight` rows are bytes possibly on the wire, so a process holding one is not idle
+ * whatever else is true.
+ */
+export interface DeliveryBacklog {
+    readonly pending: number
+    readonly inflight: number
+    readonly nextAttemptAt?: string
+}
+
 export interface WebhookStore {
     create(subscription: {
         readonly subscriptionId: string
@@ -784,6 +797,8 @@ export interface WebhookStore {
         agentIds: readonly string[],
         at: string,
     ): Promise<readonly WebhookDeliveryRecord[]>
+    /** What these agents' subscriptions still owe. */
+    backlog(agentIds: readonly string[]): Promise<DeliveryBacklog>
 }
 
 /**
@@ -983,6 +998,8 @@ export interface OutboxStore {
         agentIds: readonly string[],
         nextAttemptAt?: string,
     ): Promise<readonly DeliveryRecord[]>
+    /** What these agents' outboxes still owe. */
+    backlog(agentIds: readonly string[]): Promise<DeliveryBacklog>
     get(id: number): Promise<DeliveryRecord | undefined>
     byDedupeKey(agentId: string, dedupeKey: string): Promise<DeliveryRecord | undefined>
     list(

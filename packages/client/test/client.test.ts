@@ -980,3 +980,13 @@ describe("creating an agent", () => {
         await runtime.stop()
     })
 })
+
+describe("activity", () => {
+    test("is the shape the server sends", async () => {
+        const { client, runtime } = await harness()
+        const activity = await client.activity()
+        expect(activity.idle).toBe(true)
+        expect(activity.deliveries.webhooks.pending).toBe(0)
+        await runtime.stop()
+    })
+})

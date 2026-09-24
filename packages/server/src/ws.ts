@@ -15,7 +15,7 @@
  * owns identity, which this runtime deliberately does not.
  */
 
-import type { AnyEvent, Runtime } from "@dispach/core"
+import type { AnyEvent, Runtime, TurnAdmission } from "@dispach/core"
 import { newTurnId } from "@dispach/core"
 import { bearerFromProtocols, PROTOCOL, withBearerHeader } from "./auth.ts"
 import { type Principal, reachesAgent, reachesSession } from "./principal.ts"
@@ -372,22 +372,48 @@ export function attachWebSocket(
                     return
                 }
 
-                const turnId = newTurnId()
-                const controller = new AbortController()
-                running.set(turnId, controller)
-                ws.send(JSON.stringify({ type: "ws.accepted", turnId }))
+                // Asked before `ws.accepted`, which is a promise that the turn will run. Synchronous
+                // unless the agent has a token budget to read, so `ws.accepted` still arrives in the
+                // same tick as the frame for every agent that had no limits before they existed.
+                const proceed = (admission: TurnAdmission): void => {
+                    if (!admission.ok) {
+                        ws.send(JSON.stringify({ type: "ws.error", ...admission.error.toDetail() }))
+                        return
+                    }
+                    const turnId = newTurnId()
+                    const controller = new AbortController()
+                    running.set(turnId, controller)
+                    ws.send(JSON.stringify({ type: "ws.accepted", turnId }))
 
-                // Detached, like the HTTP path. Closing the socket does not cancel the turn — only
-                // an explicit `stop` frame does.
-                void agent
-                    .send(text, {
-                        sessionKey: frame.sessionKey ?? "api:default",
-                        turnId,
-                        source: "ws",
-                        signal: controller.signal,
-                    })
-                    .catch(() => {})
-                    .finally(() => running.delete(turnId))
+                    // Detached, like the HTTP path. Closing the socket does not cancel the turn —
+                    // only an explicit `stop` frame does.
+                    void agent
+                        .send(text, {
+                            admission,
+                            sessionKey: frame.sessionKey ?? "api:default",
+                            turnId,
+                            source: "ws",
+                            signal: controller.signal,
+                        })
+                        .catch(() => {})
+                        .finally(() => running.delete(turnId))
+                }
+                const now = agent.admitNow()
+                if (now !== undefined) {
+                    proceed(now)
+                    return
+                }
+                agent.admit().then(proceed, (error: unknown) => {
+                    // The budget read failed: the store, not the caller. Said on the socket rather
+                    // than left as an unhandled rejection with the client waiting for `ws.accepted`.
+                    ws.send(
+                        JSON.stringify({
+                            type: "ws.error",
+                            code: "internal_error",
+                            message: error instanceof Error ? error.message : String(error),
+                        }),
+                    )
+                })
             },
 
             close(ws) {

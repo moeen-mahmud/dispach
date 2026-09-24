@@ -36,7 +36,7 @@ import { type Middleware, notify } from "../plugins/middleware.ts"
 import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams, type TurnStreamsOptions } from "../store/buffer.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
-import type { LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
+import type { DeliveryBacklog, LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
 import { expandTeams } from "../team/expand.ts"
 import type { HandoffTarget } from "../team/handoff.ts"
 import { handoffTool } from "../team/supervisor.ts"
@@ -231,6 +231,15 @@ export interface BootReport {
 /** Default database location, derived from the brand so a rename moves it. */
 export function defaultStorePath(cwd: string = process.cwd()): string {
     return resolve(cwd, BRAND.stateDir, "store.db")
+}
+
+/** `Runtime.activity`: what an external waker needs to suspend a process and wake it in time. */
+export interface RuntimeActivity {
+    readonly idle: boolean
+    readonly turnsRunning: number
+    readonly deliveries: { readonly outbox: DeliveryBacklog; readonly webhooks: DeliveryBacklog }
+    /** ISO time; absent when nothing is scheduled or owed. May be in the past: due now. */
+    readonly nextWakeAt?: string
 }
 
 export class Runtime {
@@ -803,6 +812,43 @@ export class Runtime {
     /** Every agent, members included. For a caller that needs the whole process, not the surface. */
     all(): readonly Agent[] {
         return [...this.#agents.values()]
+    }
+
+    /**
+     * Whether this process may be suspended now, and when it must be woken.
+     *
+     * For an **external** waker — a control plane that suspends idle silos. Nothing here suspends
+     * anything. `idle` means no turn is running, no delivery is on the wire, and none is due yet;
+     * `nextWakeAt` is the earliest of a schedule's due time and a pending delivery's retry. A late wake
+     * is safe: the scheduler re-reads the wall clock when it fires, so a schedule overdue by the length
+     * of a suspension runs once under its own late-fire policy, not once per missed timer.
+     *
+     * Schedules count only while the scheduler is started: under `run` nothing would fire them, and a
+     * wake time nothing acts on would keep a waker waking a process for no reason.
+     *
+     * What this cannot see is a channel holding a connection open. A Telegram long-poll suspended is a
+     * bot that answers late, not one that loses messages — Telegram holds updates — but a hosted
+     * deployment that suspends wants `mode: webhook`, which needs no process awake to receive.
+     */
+    async activity(now = Date.now()): Promise<RuntimeActivity> {
+        const ids = this.all().map((agent) => agent.id)
+        const turnsRunning = this.all().reduce((sum, agent) => sum + agent.inFlight, 0)
+        const [outbox, webhooks, schedule] = await Promise.all([
+            this.store.outbox.backlog(ids),
+            this.store.webhooks.backlog(ids),
+            this.scheduler.started ? this.store.schedules.nextDue(ids) : Promise.resolve(undefined),
+        ])
+        const candidates = [schedule, outbox.nextAttemptAt, webhooks.nextAttemptAt].filter(
+            (at): at is string => at !== undefined,
+        )
+        const nextWakeAt = candidates.sort()[0]
+        const dueNow = nextWakeAt !== undefined && Date.parse(nextWakeAt) <= now
+        return {
+            idle: turnsRunning === 0 && outbox.inflight === 0 && webhooks.inflight === 0 && !dueNow,
+            turnsRunning,
+            deliveries: { outbox, webhooks },
+            ...(nextWakeAt === undefined ? {} : { nextWakeAt }),
+        }
     }
 
     /**

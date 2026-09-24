@@ -191,6 +191,36 @@ Link-local addresses, where cloud metadata lives, are refused whatever is listed
 `GET /v1/webhooks` shows each subscription's `failing`, `lastError` and `pending`, so a hook
 nobody is receiving says so.
 
+### Cap what one agent can take
+
+When many customers' agents share a silo, cap each one in its manifest (or its template):
+
+```yaml
+limits:
+  maxConcurrentTurns: 4          # across all sessions
+  tokens: { max: 2000000, windowMs: 86400000 }   # a rolling day, every metered call
+```
+
+Over either limit, a new turn is **refused, not queued**: `429` with `agent_at_capacity` or
+`agent_token_budget_exhausted` and a hint. Nothing is recorded, so retrying with the same
+`Idempotency-Key` is clean. A channel sender gets a one-line reply instead of silence. The budget is
+checked when a turn starts, so a turn is never cut off mid-work. An agent cannot raise its own limits.
+
+### Let the silo sleep
+
+Whatever suspends idle silos asks this, with the server token or an unscoped key:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/activity
+# {"idle":true,"turnsRunning":0,"deliveries":{"outbox":{…},"webhooks":{…}},"nextWakeAt":"2026-09-24T13:35:13.574Z"}
+```
+
+Suspend it while `idle`, and wake it by `nextWakeAt`: a frozen process woken late fires a due
+schedule once. **A process stopped and started again is different**: started after `nextWakeAt`, it
+treats that occurrence as downtime and skips it, so start it a few seconds early. Run Telegram in
+`mode: webhook` for a silo that sleeps, because a long-poll needs the process awake to receive.
+Measured costs are in `evals/tenancy/`.
+
 ---
 
 ## 2. Ask it something

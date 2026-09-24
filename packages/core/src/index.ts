@@ -74,6 +74,7 @@ export {
     AbortedError,
     ConfigError,
     type ErrorDetail,
+    GovernorError,
     HarnessError,
     isHarnessError,
     ModelError,
@@ -308,11 +309,13 @@ export type {
 } from "./plugins/plugin.ts"
 export { satisfies as satisfiesApiRange } from "./plugins/semver.ts"
 export {
+    type AdmittedTurn,
     Agent,
     type AgentCreateOptions,
     type AgentDescription,
     type AgentSendOptions,
     resolveWorkspace,
+    type TurnAdmission,
 } from "./runtime/agent.ts"
 export {
     type ChannelFactory,
@@ -338,6 +341,7 @@ export {
     type DisposeReason,
     defaultStorePath,
     Runtime,
+    type RuntimeActivity,
     type RuntimeOptions,
     type StoreSource,
 } from "./runtime/runtime.ts"
@@ -436,6 +440,7 @@ export type {
     // The scope vocabulary, exported as types because the server enforces it, the CLI mints with
     // it and the client reads it back — three consumers, one definition.
     Capability,
+    DeliveryBacklog,
     DeliveryRecord,
     DeliveryStatus,
     EnqueueDelivery,

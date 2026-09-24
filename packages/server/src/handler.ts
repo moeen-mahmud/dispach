@@ -635,6 +635,39 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         { capability: "open" },
     )
 
+    /**
+     * Whether this process may be suspended, and when it must be woken — for an external waker.
+     *
+     * Not on `/v1/health`: that route is open, and a wake time says when this server's schedules
+     * fire. And unscoped keys only, because "is anything running" is a fact about every agent here,
+     * which a key narrowed to one of them has no business reading. `403`, not `404`: the refusal
+     * says what this credential may do and nothing about what exists.
+     */
+    router.add(
+        "GET",
+        "/v1/activity",
+        async (context) => {
+            const who = context.principal
+            if (
+                who.kind === "key" &&
+                who.scope !== undefined &&
+                (who.scope.agents !== undefined || who.scope.sessions !== undefined)
+            ) {
+                return fail(
+                    {
+                        code: "activity_needs_unscoped_key",
+                        message:
+                            "Activity covers every agent on this server, and this key is scoped.",
+                        hint: "Call this with the server token or an operator key minted with no agents or sessions scope — it is meant for whatever suspends and wakes the process, not for a tenant.",
+                    },
+                    403,
+                )
+            }
+            return json(await runtime.activity(now()))
+        },
+        { capability: "admin" },
+    )
+
     // ─── Agents ──────────────────────────────────────────────────────────────────────────
 
     /**
@@ -1141,6 +1174,9 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "/v1/agents/:id/stop",
         async (context) => {
             const id = context.params.id ?? ""
+            // These two routes do not go through `withAgent` — `start` acts on an agent nothing is
+            // hosting — so the scope check it would have made is made here, with the same 404.
+            if (!reachesAgent(context.principal, id)) return notFound("agent", id)
             const hosted = runtime.list().some((agent) => agent.id === id)
             const known = await runtime.store.agentState.get(id)
             // Neither hosted nor ever recorded means there is nothing here by that name. A 200 would
@@ -1193,6 +1229,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "/v1/agents/:id/start",
         async (context) => {
             const id = context.params.id ?? ""
+            if (!reachesAgent(context.principal, id)) return notFound("agent", id)
             if (runtime.list().some((agent) => agent.id === id)) {
                 // Already running. Enabled anyway, because a hosted agent with a `disabled` row is a
                 // state a crash between the two writes above can leave behind, and this is the command
@@ -1288,6 +1325,12 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const idempotency = parseIdempotencyKey(context.request)
                 if (idempotency.kind === "error") return fail(idempotency.error, 400)
 
+                // The governor answers now, while there is still a response to put it in. After this
+                // the turn detaches and a refusal would reach nobody. Nothing is recorded for a
+                // refused message — not a turn row, not an idempotency claim — so a retry is clean.
+                const admission = await agent.admit()
+                if (!admission.ok) return fail(admission.error.toDetail(), 429)
+
                 const turnId = newTurnId()
 
                 /**
@@ -1311,6 +1354,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         inputHash: await inputHash(sessionKey, text),
                         now: new Date(),
                     })
+                    if (claim.kind !== "claimed") admission.release()
                     if (claim.kind === "replay") {
                         return json({ turnId: claim.turnId, sessionKey, replayed: true }, 200)
                     }
@@ -1349,6 +1393,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 // turn's lifetime depends on the connection that started it.
                 const work = agent
                     .send(text, {
+                        admission,
                         sessionKey,
                         turnId,
                         source: "api",
@@ -2203,6 +2248,9 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const row = await agent.store.schedules.get(agent.id, sid)
                 if (row === undefined) return notFound("schedule", sid)
 
+                const admission = await agent.admit()
+                if (!admission.ok) return fail(admission.error.toDetail(), 429)
+
                 const runId = newRunId()
                 const sessionKey = scheduleSessionKey(row.sessionMode, row.id, runId)
                 const turnId = newTurnId()
@@ -2217,6 +2265,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 // the stream, and a disconnect never cancels the work.
                 void agent
                     .send(row.task, {
+                        admission,
                         sessionKey,
                         turnId,
                         source: `schedule:${row.id}:manual`,
