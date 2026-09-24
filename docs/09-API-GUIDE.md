@@ -64,7 +64,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"answers":{"user":"you","name":"milo","purpose":"…","preset":"openai",
        "model":"gpt-4o-mini","baseUrl":"https://api.openai.com/v1","apiKey":"sk-…",
        "system":"none","web":"none","composio":"none","telegram":"none",
-       "server":"local","skills":"none"}}' \
+       "skills":"none"}}' \
   localhost:7420/v1/agents
 # → 201 {"id":"milo","dir":"/home/dispach/.dispach/agents/milo","adopted":["milo"], …}
 ```

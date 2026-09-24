@@ -1,50 +1,72 @@
 # Dispach
 
-A lightweight, model-agnostic AI agent runtime.
+An open-source, self-hosted agent runtime your product calls over HTTP.
 
-Dispach turns a stateless OpenAI-compatible `/chat/completions` endpoint into an agent that
-uses tools, remembers across sessions, acts on your machine under a policy you set, lives in
-messaging channels, runs on a schedule, and delegates to other agents. TypeScript, built with Bun
-and shipped on Node, Apache-2.0.
+Your backend calls one API and Dispach runs the agents: each has its own memory, tools, schedules,
+channels and approvals, on any OpenAI-compatible model (including small local ones), on
+infrastructure you control. Every turn is detached and reattachable, every write takes an
+idempotency key, and the wire contract is published as OpenAPI 3.1 and checked in CI. One process
+hosts many agents, and scoped keys fence each one off. TypeScript, shipped on Node, Apache-2.0.
+
+**Where it is going: the multiplayer agent runtime.** 0.2.0 gives every user and every team in your
+product their own isolated runtime of agents. Those agents share rooms and memory with the people
+they work for, and stand in for them, openly, when they are away. That half is being built. Every
+other feature described in this README runs today.
 
 > To dispatch is to send a thing on its way with the authority to see it done — to decide
 > what handles it, hand it over, and answer for the result.
 
+## Call it over HTTP
+
+```bash
+git clone https://github.com/moeen-mahmud/dispach && cd dispach
+cp .env.example .env                    # set DISPACH_API_TOKEN; no model key needed to start
+docker compose up -d --build --wait
+export TOKEN=$(grep DISPACH_API_TOKEN .env | cut -d= -f2-)
+
+curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"answers":{"user":"you","name":"milo","apiKey":"sk-…"}}' localhost:7420/v1/agents
+# → 201 {"id":"milo",…,"adopted":["milo"]}: live now, no restart
+
+curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"text":"what can you do?"}' localhost:7420/v1/agents/milo/messages
+# → 202 {"turnId":"t_…","sessionKey":"api:default"}: the turn runs whether or not you stay
+```
+
+The defaults are OpenAI's. For another endpoint, add `"model"` and `"baseUrl"` to the answers;
+`GET /v1/provision` lists every question with its default and choices.
+
+**[`docs/09-API-GUIDE.md`](docs/09-API-GUIDE.md) is the walkthrough**: provisioning over the wire,
+streaming, reattaching after a dropped connection, approvals and keys. The reference is served at
+`http://localhost:7420/docs`, the contract is [`docs/04-SPEC-WIRE.md`](docs/04-SPEC-WIRE.md), and
+`dispach/client` is the typed client. The CLI and the full-screen terminal UI below are the same
+runtime from a terminal.
+
 ## Status
 
-**Pre-release, and it runs.** Install from npm, Homebrew or the container image, or work from a
-checkout (all below). Every install runs under Node.
+**Pre-release, and it runs: 0.1.3**, from npm, Homebrew or the container image. Every install runs
+under Node. [`CHANGELOG.md`](CHANGELOG.md) has what landed in each release.
 
-Built and in use: the manifest and agent loop, the store and sessions, tools with the NLT and
-native dialects, the tiered workspace, system and web tool providers with a policy engine, the
-Telegram channel, the HTTP/SSE server, an idempotent outbox, launchd services, skills with two
-catalogues, the full-screen TUI, the compaction ladder, phase-scoped tools, memory that carries
-across sessions, and scheduling — cron, interval and one-shot, DST-correct, on one timer.
+Built and in use:
 
-Also built since: the plugin API with all four middleware wrap points, supervisor delegation with
-typed handoffs, the Docker image and a compose front door, a typed client, operator keys, approvals
-over the wire, and a browser UI on the same origin as the API.
+- **Core runtime:** the agent loop with the NLT and native tool dialects, the manifest, the tiered
+  workspace, the compaction ladder, phase-scoped tools, memory that carries across sessions, skills
+  with two catalogues, and scheduling (cron, interval and one-shot, DST-correct).
+- **Serving and API:** the HTTP/SSE/WS server with detached turns, the typed client, scoped operator
+  keys, approvals over the wire, and provisioning an agent over HTTP with no restart.
+- **Channels and tools:** Telegram and WhatsApp (the latter a bundled plugin, with a warning;
+  [see below](#whatsapp)), the plugin API with all four middleware wrap points, and system and web
+  tool providers under a policy engine.
+- **Coordination and delivery:** supervisor delegation with typed handoffs, and an idempotent
+  outbox.
+- **Front ends and hosting:** a browser UI on the same origin as the API, the TUI, launchd
+  services, and the Docker image with a compose front door.
 
-And in 0.1.1: settings and schedules are editable from the browser as well as the terminal, and a
-plugin-supplied channel loads under `serve` — `PluginContext.defineChannel` is documented API that
-had never worked through the binary. In 0.1.2: creating an agent stopped being quietly wrong — a
-model id that matches only a *family* row says so instead of budgeting against a third of its
-window, four more endpoint presets, and the HTTP API on by default rather than asking a question
-nobody answers no to.
+Not built: **MCP as a tool provider.** It is planned, not refused. Decision 4.7 keeps it as *one
+tool provider among several, never the substrate* (Composio is called directly for that reason),
+so a `tools-mcp` provider is something that could be written and has not been.
 
-Not built: **WhatsApp**, and **MCP as a tool provider**. Neither is a gap waiting on effort.
-WhatsApp is a legal question rather than an engineering one — decision 8.4 records that Baileys
-reverse-engineers WhatsApp Web with no appeal path, and that Meta's terms effective 15 Jan 2026
-prohibit the Business Solution where a general-purpose AI assistant is the primary functionality,
-which is this product. Anyone can now write that channel as a plugin; whether the first one is
-WhatsApp is a separate decision.
-
-**MCP** is planned rather than refused, and the distinction matters. Decision 4.7 keeps it as *one
-tool provider among several, never the substrate* — Composio is called directly for that reason —
-so a `tools-mcp` provider is a thing that could be written and has not been. `01-ARCHITECTURE.md`
-listed the package in its tree for months anyway; it has never existed on any branch.
-
-`docs/05-PLAN.md` has every phase with its acceptance criteria and what is ticked.
+`docs/05-PLAN.md` has every 0.1.x phase with its acceptance criteria and what is ticked.
 
 ## Scope
 
@@ -385,7 +407,7 @@ container around it, and the same tell — everything works, nothing is current.
 curl -s -H "Authorization: Bearer $DISPACH_API_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"text":"what can you do?"}' \
-  localhost:7420/v1/agents/minimal/messages
+  localhost:7420/v1/agents/milo/messages
 # → {"turnId":"t_…","sessionKey":"api:default"}
 ```
 
