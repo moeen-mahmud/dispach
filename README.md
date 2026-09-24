@@ -763,4 +763,12 @@ hand-written, and was missing five commands at once. `dispach <command> --help` 
 
 ## License
 
-Apache-2.0. Copyright 2026 Moeen Mahmud.
+The runtime — every package this README describes, and everything published to npm, Homebrew and
+the container registry — is **Apache-2.0**, and stays Apache-2.0. Copyright 2026 Moeen Mahmud.
+
+**One directory is licensed differently: `packages/control`**, the control plane that places and
+suspends one runtime per user, is **FSL-1.1-ALv2** (its own `LICENSE.md`). Anyone may use it,
+commercially too, except to offer a competing hosted service, and each release becomes Apache-2.0
+two years after it ships. It is never published with the runtime. It imports nothing from the
+runtime and nothing in the runtime imports it — `bun run check:deps` enforces both directions, and
+`verify:package` checks the npm tarball.
