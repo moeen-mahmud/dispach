@@ -30,32 +30,35 @@ docker run --rm --entrypoint sh -v "$PWD/scripts:/repo/scripts:ro" \
 
 | agents in the silo | idle RSS | cold start → ready | resume after freeze |
 | --- | --- | --- | --- |
-| 1 | **116 MiB** | 143 ms | 5 ms |
-| 10 | **143 MiB** | 210 ms | 3 ms |
-| 100 | **195 MiB** | 494 ms | 7 ms |
+| 1 | **104 MiB** | 118 ms | 6 ms |
+| 10 | **120 MiB** | 151 ms | 6 ms |
+| 100 | **178 MiB** | 516 ms | 5 ms |
 
-Runs agreed within 2 MiB and 30 ms (`results.json` has every run).
+Runs agreed within 2 MiB and 50 ms (`results.json` has every run). These are the figures after the
+WhatsApp library was made lazy. The first measurement, the same day and before that change, was
+116 / 143 / 195 MiB and 143 / 210 / 494 ms.
 
-**The marginal agent is about 0.8 MiB. The silo is the cost.** 116 MiB is spent before the first
-agent: the plan's "~42 MB floor" is Node plus `node:sqlite` alone, and it was never the runtime's
-figure. Measured on the same build, by importing each package on its own under Node:
+**The marginal agent is about 0.75 MiB. The silo is the cost.** About 104 MiB is spent before the
+first agent: the plan's "~42 MB floor" is Node plus `node:sqlite` alone, and it was never the
+runtime's figure. Measured by importing each package on its own under Node, before the change:
 
 | loaded | RSS |
 | --- | --- |
 | `node` + `node:sqlite`, nothing else | 42 MiB |
 | `@dispach/core` | 73 MiB |
-| `@dispach/channel-whatsapp` on its own | 96 MiB — ~23 MiB of it is the WhatsApp transport |
-| whole `serve`, bare manifest | 138 MiB (heap *used* 22 MiB, heap *reserved* 57 MiB) |
+| `@dispach/channel-whatsapp` on its own | 96 MiB, ~23 MiB of it the WhatsApp library |
+| whole `serve`, bare manifest | 138 MiB (heap *used* 22 MiB, heap *reserved* 57 MiB) → **112 MiB lazy** |
 
-Two levers, neither taken in this phase:
+Two levers:
 
-- **The WhatsApp transport is imported eagerly** by `cli/src/lib/providers.ts`, whether or not any
-  agent names a `whatsapp` channel. Loading it lazily is worth ~23 MiB per silo. Doing it safely
-  needs care, because a module imported both statically and dynamically breaks the bundle (see
-  `CLAUDE.md`).
-- **`NODE_OPTIONS=--max-semi-space-size=1`** took the bare `serve` from 138 to 123 MiB by shrinking
-  V8's reserved young generation. That is an operator setting, and its effect on turn latency is
-  unmeasured.
+- **Taken: the WhatsApp library is behind a dynamic import.** It always was in source, but the
+  channel package built without splitting, so the library was inlined into its `dist` and reached
+  the CLI bundle as a static import. Every `serve` paid for it whether or not any agent named a
+  WhatsApp channel. The package now marks it external, the CLI bundle splits it into a chunk only
+  `start()` reaches, and `cli/test/bundle.test.ts` asserts that from the built bundle.
+- **Not taken: `NODE_OPTIONS=--max-semi-space-size=1`.** It took the bare `serve` from 138 to
+  123 MiB before the change by shrinking V8's reserved young generation. That is an operator
+  setting, and its effect on turn latency is unmeasured.
 
 ## What a silo costs per month
 

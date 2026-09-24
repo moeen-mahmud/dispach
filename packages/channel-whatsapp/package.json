@@ -22,7 +22,7 @@
         }
     },
     "scripts": {
-        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --external sharp --external jimp --external link-preview-js && tsc -p tsconfig.build.json",
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --external baileys --external sharp --external jimp --external link-preview-js && tsc -p tsconfig.build.json",
         "typecheck": "tsc -p tsconfig.json"
     },
     "dependencies": {

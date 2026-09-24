@@ -1,5 +1,5 @@
 {
-  "measuredAt": "2026-09-24T13:31:13.135Z",
+  "measuredAt": "2026-09-24T14:03:56.273Z",
   "environment": {
     "node": "v24.21.0",
     "platform": "linux",
@@ -15,82 +15,82 @@
     "1": {
       "runs": [
         {
-          "coldStartMs": 157.490375,
-          "idleRssKb": 119076,
-          "resumeMs": 5.125917000001209,
+          "coldStartMs": 125.55100000000002,
+          "idleRssKb": 105296,
+          "resumeMs": 5.523375000000669,
           "agentsHosted": 1
         },
         {
-          "coldStartMs": 139.14070899999933,
-          "idleRssKb": 118900,
-          "resumeMs": 4.75683299999946,
+          "coldStartMs": 117.6260000000002,
+          "idleRssKb": 106396,
+          "resumeMs": 7.034916999997222,
           "agentsHosted": 1
         },
         {
-          "coldStartMs": 142.80412600000273,
-          "idleRssKb": 117164,
-          "resumeMs": 7.62041699999827,
+          "coldStartMs": 108.95837500000198,
+          "idleRssKb": 106092,
+          "resumeMs": 6.391125000001921,
           "agentsHosted": 1
         }
       ],
       "median": {
-        "coldStartMs": 142.80412600000273,
-        "idleRssKb": 118900,
-        "resumeMs": 5.125917000001209
+        "coldStartMs": 117.6260000000002,
+        "idleRssKb": 106092,
+        "resumeMs": 6.391125000001921
       }
     },
     "10": {
       "runs": [
         {
-          "coldStartMs": 209.95266699999775,
-          "idleRssKb": 145456,
-          "resumeMs": 6.196374999999534,
+          "coldStartMs": 151.08941700000287,
+          "idleRssKb": 121384,
+          "resumeMs": 6.371457999994163,
           "agentsHosted": 10
         },
         {
-          "coldStartMs": 181.3502920000028,
-          "idleRssKb": 146688,
-          "resumeMs": 1.938125000000582,
+          "coldStartMs": 149.22529199998826,
+          "idleRssKb": 122768,
+          "resumeMs": 5.546750000008615,
           "agentsHosted": 10
         },
         {
-          "coldStartMs": 210.48854199999187,
-          "idleRssKb": 146292,
-          "resumeMs": 3.473792000004323,
+          "coldStartMs": 152.6770830000023,
+          "idleRssKb": 123228,
+          "resumeMs": 3.572916000004625,
           "agentsHosted": 10
         }
       ],
       "median": {
-        "coldStartMs": 209.95266699999775,
-        "idleRssKb": 146292,
-        "resumeMs": 3.473792000004323
+        "coldStartMs": 151.08941700000287,
+        "idleRssKb": 122768,
+        "resumeMs": 5.546750000008615
       }
     },
     "100": {
       "runs": [
         {
-          "coldStartMs": 493.74395799999184,
-          "idleRssKb": 199860,
-          "resumeMs": 5.076792000007117,
+          "coldStartMs": 489.95854199999303,
+          "idleRssKb": 181668,
+          "resumeMs": 3.3635840000060853,
           "agentsHosted": 100
         },
         {
-          "coldStartMs": 497.2044590000005,
-          "idleRssKb": 198144,
-          "resumeMs": 6.928707999992184,
+          "coldStartMs": 516.1450829999958,
+          "idleRssKb": 183276,
+          "resumeMs": 6.938708000001498,
           "agentsHosted": 100
         },
         {
-          "coldStartMs": 470.0809580000059,
-          "idleRssKb": 199968,
-          "resumeMs": 9.116290999983903,
+          "coldStartMs": 538.2049169999955,
+          "idleRssKb": 182348,
+          "resumeMs": 4.5615839999809396,
           "agentsHosted": 100
         }
       ],
       "median": {
-        "coldStartMs": 493.74395799999184,
-        "idleRssKb": 199860,
-        "resumeMs": 6.928707999992184
+        "coldStartMs": 516.1450829999958,
+        "idleRssKb": 182348,
+        "resumeMs": 4.5615839999809396
       }
     }
   }
