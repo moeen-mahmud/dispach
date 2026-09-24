@@ -92,6 +92,9 @@ and WebSocket surfaces can return:
 | `secret_not_referenced` | 400 | A name the agent's manifest does not read, or the server's own `server.tokenEnv`. Nothing was written. |
 | `secret_value_empty` | 400 | An empty value, which fails a load exactly as a missing one does. Nothing was written. |
 | `secrets_apply_failed` | 200 | Carried in `error` on a successful write when reloading or adopting failed with no code of its own. The values are on disk. |
+| `usage_group_invalid` | 400 | `?by=` named a grouping other than `agent`, `model`, `day` or `sender`. |
+| `usage_range_invalid` | 400 | `?from=` or `?to=` is not a date. |
+| `turns_page_invalid` | 400 | `?limit=` or `?before=` is not a positive whole number. |
 | `provision_answer_invalid` | 400 | One answer failed its step's validation, or was not a string. Carries the field. |
 | `provision_unknown_answer` | 400 | A key that is not a question this runtime asks. |
 | `provision_directory_refused` | 400 | `dir` or `dirChoice` over the wire. The sandbox decides; see above. |
@@ -208,6 +211,12 @@ POST /v1/agents            { answers: {step: value, …} }
                          → 201 { id, dir, files[], adopted[] }
 GET  /v1/templates       → { templates: [{ name, description?, vars[], problem? }] }
 
+GET /v1/usage?by&from&to → { buckets: [{ agentId?, model?, day?, sender?, calls, promptTokens,
+                                         cachedPromptTokens, outputTokens, estimatedCalls }],
+                             meteredSince? }
+GET /v1/agents/:id/usage   → { id, buckets[], meteredSince? }
+GET /v1/agents/:id/turns?limit&before → { id, turns[], nextBefore? }
+
 GET /v1/agents/:id/secrets → { id, secrets: [{ name, set, usedBy[] }] }
 PUT /v1/agents/:id/secrets   { values: {NAME: value, …} }
                          → 200 { id, written[], shadowed[], applied, adopted[], stopped?, error? }
@@ -292,6 +301,26 @@ The agent is rendered into memory, written to a staging directory outside the ag
 loaded by the same check `init` runs, and only then renamed into place. A request that fails leaves
 nothing behind. A broken template is **listed** with its `problem` rather than hidden, because an
 operator who put one in place and cannot see it has no way to learn it has a typo.
+
+**Usage is metered per model call, not read off the turn.** `turns.promptTokens` is the prompt the
+turn *ended* at, the last step's, which is a context-size figure: a five-step turn is billed five
+prompts and records one. A compactor call has no turn row at all and may be a different, cheaper
+model. So every call through `runStep`, main and compactor alike, writes one row (agent, session,
+turn, role, model, prompt, cached, output, sender), and `/usage` sums those. `turns` is unchanged.
+
+- `?by=` is a comma-separated list of `agent`, `model`, `day` (UTC) and `sender`, defaulting to
+  `agent,model`, the split a bill needs because prices differ per model. `by=` alone is one total.
+  `from` is inclusive and `to` exclusive, so a month is `from=2026-09-01&to=2026-10-01`.
+- `estimatedCalls` counts calls where either figure was our estimate rather than the endpoint's.
+  The estimate runs 16–20% low on tool-heavy prompts (`evals/budget/`), so a non-zero count means
+  the total is partly a guess.
+- `meteredSince` is the earliest call on record. The meter starts at the upgrade that added it and
+  earlier turns are not backfilled, since their stored figure is the wrong quantity.
+- Filtered by scope, **session prefix included**: a per-sender row is identity. `sender` groups by
+  who sent the turn, the key per-member billing in a shared space uses. A compaction a turn caused
+  is billed to that turn's sender.
+- Clearing a session does not erase what it cost (no cascade from `sessions`). Removing the agent
+  does.
 
 **Secrets are write-only and named by the manifest.** `GET /secrets` lists the variables the
 agent's manifest reads (as `${NAME}` or through an `*Env` field), whether each is set, and which
@@ -644,6 +673,9 @@ here that the server does not register, or a registered route missing from here,
 | `GET /v1/events` | `read` |
 | `GET /v1/provision` | `read` |
 | `GET /v1/templates` | `read` |
+| `GET /v1/usage` | `read` |
+| `GET /v1/agents/:id/usage` | `read` |
+| `GET /v1/agents/:id/turns` | `read` |
 | `POST /v1/agents/:id/approvals/:approvalId` | `chat` |
 | `POST /v1/agents/:id/messages` | `chat` |
 | `POST /v1/agents/:id/turns/:turnId/stop` | `chat` |

@@ -47,6 +47,9 @@ import {
     settingByPath,
     type TurnRecord,
     type TurnSender,
+    USAGE_GROUPS,
+    type UsageGroup,
+    type UsageQuery,
     VERSION,
 } from "@dispach/core"
 import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
@@ -60,7 +63,14 @@ import {
     originProblem,
     preflightHeaders,
 } from "./origin.ts"
-import { can, isScoped, type Principal, reachesAgent, reachesSession } from "./principal.ts"
+import {
+    can,
+    isScoped,
+    type Principal,
+    reachesAgent,
+    reachesSession,
+    scopeFilter,
+} from "./principal.ts"
 import { claimSpent, fail, forbidden } from "./respond.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
@@ -1761,6 +1771,80 @@ export function createHandler(options: HandlerOptions): ServerHandler {
 
     // ─── Turns, continued ────────────────────────────────────────────────────────────────
 
+    /**
+     * What this server's agents cost, from the meter: one row per model call, summed.
+     *
+     * Not `turns.prompt_tokens`, which holds only the last step's prompt and records nothing for a
+     * compactor call (migration 18). Filtered by the caller's scope, agents **and** session prefix,
+     * because a per-sender row is identity. `meteredSince` says how far back the meter goes: it
+     * starts at the upgrade that added it, and earlier turns are not guessed at.
+     */
+    router.add(
+        "GET",
+        "/v1/usage",
+        async (context) => {
+            const query = usageQuery(context.url)
+            if (query.kind === "error") return fail(query.error, 400)
+            const scope = scopeFilter(context.principal)
+            return json(await runtime.store.usage.report({ ...query.value, ...scope }))
+        },
+        { capability: "read" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/agents/:id/usage",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const query = usageQuery(context.url)
+                if (query.kind === "error") return fail(query.error, 400)
+                const prefix = scopeFilter(context.principal).sessionPrefix
+                return json({
+                    id: agent.id,
+                    ...(await runtime.store.usage.report({
+                        ...query.value,
+                        agentIds: [agent.id],
+                        ...(prefix === undefined ? {} : { sessionPrefix: prefix }),
+                    })),
+                })
+            }),
+        { capability: "read" },
+    )
+
+    /**
+     * Every turn this agent has taken, newest first, across sessions.
+     *
+     * Paged by `before`, the store's row key, never a timestamp, which can tie. A session-scoped
+     * key sees its own sessions' turns only.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/turns",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const limit = pageNumber(context.url, "limit")
+                const before = pageNumber(context.url, "before")
+                if (limit === null || before === null) {
+                    return fail(
+                        {
+                            code: "turns_page_invalid",
+                            message: "`limit` and `before` must be positive whole numbers.",
+                            hint: "Pass `before` exactly as the previous page's `nextBefore` returned it, and a `limit` up to 200.",
+                        },
+                        400,
+                    )
+                }
+                const prefix = scopeFilter(context.principal).sessionPrefix
+                const page = await runtime.store.turns.listForAgent(agent.id, {
+                    limit: Math.min(limit ?? 50, 200),
+                    ...(before === undefined ? {} : { before }),
+                    ...(prefix === undefined ? {} : { sessionPrefix: prefix }),
+                })
+                return json({ id: agent.id, ...page })
+            }),
+        { capability: "read" },
+    )
+
     router.add(
         "GET",
         "/v1/agents/:id/turns/:turnId",
@@ -3031,6 +3115,59 @@ function secretsTarget(
     const manifestPath = typeof source === "string" ? source : options.resolveAgent?.(id)
     if (manifestPath === undefined) return { kind: "response", response: notFound("agent", id) }
     return { kind: "found", id, manifestPath, admin }
+}
+
+/** A positive whole-number query parameter: `undefined` when absent, `null` when malformed. */
+function pageNumber(url: URL, name: string): number | undefined | null {
+    const raw = url.searchParams.get(name)
+    if (raw === null) return undefined
+    const value = Number(raw)
+    return Number.isSafeInteger(value) && value > 0 ? value : null
+}
+
+/**
+ * `?by=agent,model&from=…&to=…`, validated. `by` defaults to agent and model, which is the split a
+ * bill needs (prices differ per model). A grouping name reaches SQL only through the store's own
+ * whitelist; this refuses anything else by name rather than ignoring it.
+ */
+function usageQuery(
+    url: URL,
+):
+    | { readonly kind: "ok"; readonly value: UsageQuery }
+    | { readonly kind: "error"; readonly error: ErrorDetail } {
+    const rawBy = url.searchParams.get("by")
+    const by = rawBy === null ? ["agent", "model"] : rawBy.split(",").filter((part) => part !== "")
+    const unknown = by.filter((part) => !(USAGE_GROUPS as readonly string[]).includes(part))
+    if (unknown.length > 0) {
+        return {
+            kind: "error",
+            error: {
+                code: "usage_group_invalid",
+                message: `Cannot group usage by ${unknown.join(", ")}.`,
+                hint: `Group by any of ${USAGE_GROUPS.join(", ")}, comma-separated, or pass by= for one total.`,
+                field: "by",
+            },
+        }
+    }
+    const range: { from?: string; to?: string } = {}
+    for (const name of ["from", "to"] as const) {
+        const raw = url.searchParams.get(name)
+        if (raw === null) continue
+        const time = Date.parse(raw)
+        if (Number.isNaN(time)) {
+            return {
+                kind: "error",
+                error: {
+                    code: "usage_range_invalid",
+                    message: `${name} is ${JSON.stringify(raw)}, which is not a date.`,
+                    hint: "Send ISO-8601, like 2026-09-01 or 2026-09-01T00:00:00Z. `from` is inclusive and `to` exclusive, so a month is from=2026-09-01&to=2026-10-01.",
+                    field: name,
+                },
+            }
+        }
+        range[name] = new Date(time).toISOString()
+    }
+    return { kind: "ok", value: { by: by as UsageGroup[], ...range } }
 }
 
 function withAgent(

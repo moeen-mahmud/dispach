@@ -762,6 +762,25 @@ describe("every read is unwrapped the way its route wraps it", () => {
     })
 })
 
+describe("usage and turns", () => {
+    test("usage buckets and the turn list are the shapes the server sends", async () => {
+        const { client, runtime } = await harness()
+        const agent = client.agent("assistant")
+        await (await agent.send("hello")).text()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        const report = await client.usage({ by: ["agent"] })
+        // The kind of value, not just its contents: a wrapped response read as the wrong shape is
+        // how a page crashed on `.map is not a function`.
+        expect(Array.isArray(report.buckets)).toBe(true)
+        expect(report.buckets[0]?.agentId).toBe("assistant")
+        expect((await agent.usage({ by: [] })).buckets[0]?.calls).toBeGreaterThan(0)
+        const page = await agent.turns({ limit: 5 })
+        expect(Array.isArray(page.turns)).toBe(true)
+        expect(page.turns[0]?.input).toBe("hello")
+        await runtime.stop()
+    })
+})
+
 describe("creating an agent", () => {
     /** A provisioner that writes a real manifest, so `Runtime.adopt` has something to adopt. */
     function provisioner(dir: () => string): Provisioner {

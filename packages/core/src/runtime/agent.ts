@@ -33,7 +33,7 @@ import type { EventBus } from "../events/bus.ts"
 import { newTurnId } from "../loop/ids.ts"
 import { entryPhase, isPhased, unmatchedAllows } from "../loop/phases.ts"
 import type { TurnSender } from "../loop/sender.ts"
-import { runStep } from "../loop/step.ts"
+import { runStep, type StepUsage } from "../loop/step.ts"
 import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from "../loop/turn.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { LoadedManifest } from "../manifest/load.ts"
@@ -735,8 +735,10 @@ export class Agent {
         const skills = this.#activateSkills(input, history)
         const remembered = await this.#recall(input, sessionKey, history)
 
+        const meter = this.#meter(sessionKey, turnId, options.from?.id)
         const result = await runTurn({
             agentId: this.id,
+            meter,
             ...(this.#middleware.length === 0 ? {} : { middleware: this.#middleware }),
             sessionKey,
             turnId,
@@ -778,7 +780,7 @@ export class Agent {
                 maxParallelTools: this.manifest.limits.maxParallelTools,
             },
             ...(this.#toolRuntime === undefined ? {} : { tools: this.#toolRuntime }),
-            compaction: this.#compaction(sessionKey),
+            compaction: this.#compaction(sessionKey, meter),
             ...(isPhased(this.manifest.phases)
                 ? {
                       phases: {
@@ -1393,7 +1395,52 @@ export class Agent {
         return resolved
     }
 
-    #compaction(sessionKey: string): TurnCompaction {
+    /**
+     * What one turn's model calls cost, written as they happen.
+     *
+     * One closure per turn, handed to the turn loop **and** to the compactor, so a digest written
+     * during a member's turn is billed to that member rather than lost: the compactor has no turn
+     * row of its own and was the spend nothing recorded. The write is fire-and-forget by
+     * `StepInput.meter`'s contract, and a failure is a warning, never silence.
+     */
+    #meter(
+        sessionKey: string,
+        turnId: string,
+        sender: string | undefined,
+    ): (usage: StepUsage) => void {
+        return (usage) => {
+            this.store.usage
+                .record({
+                    agentId: this.id,
+                    sessionKey,
+                    turnId,
+                    role: usage.role,
+                    model: usage.model,
+                    promptTokens: usage.promptTokens,
+                    promptReported: usage.promptReported,
+                    ...(usage.cachedPromptTokens === undefined
+                        ? {}
+                        : { cachedPromptTokens: usage.cachedPromptTokens }),
+                    outputTokens: usage.outputTokens,
+                    outputReported: usage.outputReported,
+                    ...(sender === undefined ? {} : { sender }),
+                    at: new Date().toISOString(),
+                })
+                .catch((error: unknown) => {
+                    this.#bus.emit(
+                        "agent.warning",
+                        {
+                            code: "usage_record_failed",
+                            message: `Recording a model call's usage failed: ${error instanceof Error ? error.message : String(error)}`,
+                            hint: "The reply was unaffected; this call is missing from GET /v1/usage. A store that cannot be written is usually full or read-only.",
+                        },
+                        { agentId: this.id, sessionKey },
+                    )
+                })
+        }
+    }
+
+    #compaction(sessionKey: string, meter: (usage: StepUsage) => void): TurnCompaction {
         // `resolveRoles` always returns a compactor — it falls back to `main`, deliberately, so an
         // unconfigured role costs nothing. `configuredAs` is what distinguishes "configured" from
         // "inherited", and only a configured one gets to write digests: asking the model that is
@@ -1453,6 +1500,7 @@ export class Agent {
                               bus: this.#bus,
                               context: { agentId: this.id, sessionKey },
                               signal,
+                              meter,
                           })
                           return result.text
                       },

@@ -52,9 +52,13 @@ import type {
     TurnRecord,
     TurnStatus,
     TurnStore,
+    UsageBucket,
+    UsageGroup,
+    UsageQuery,
+    UsageStore,
 } from "../store.ts"
 import { DEFAULT_KEY_TOUCH_MS } from "../store.ts"
-import type { OpenOptions, SqlDatabase, SqlStatement } from "./driver.ts"
+import type { OpenOptions, SqlDatabase, SqlParam, SqlStatement } from "./driver.ts"
 import { openDatabase } from "./driver.ts"
 import { type MigrationReport, migrate } from "./migrations.ts"
 
@@ -656,6 +660,7 @@ export class SqliteStore implements Store {
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
     readonly handoffs: HandoffStore
+    readonly usage: UsageStore
     readonly operatorKeys: OperatorKeyStore
     readonly location: string
     /** What `migrate` did at open. Reported by boot rather than logged and forgotten. */
@@ -842,6 +847,18 @@ export class SqliteStore implements Store {
                 `SELECT * FROM turns WHERE agent_id = ? AND session_key = ?
                   ORDER BY started_at DESC, rowid DESC LIMIT ?`,
             ),
+            turnListForAgent: db.prepare(
+                `SELECT rowid AS row_key, * FROM turns
+                  WHERE agent_id = ? AND rowid < ? AND session_key LIKE ? ESCAPE '\\'
+                  ORDER BY rowid DESC LIMIT ?`,
+            ),
+            modelCallInsert: db.prepare(
+                `INSERT INTO model_calls
+                     (agent_id, session_key, turn_id, role, model, prompt_tokens, prompt_reported,
+                      cached_prompt_tokens, output_tokens, output_reported, sender, at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ),
+            modelCallDeleteAll: db.prepare("DELETE FROM model_calls WHERE agent_id = ?"),
             // Both take one agent id and are run once per owned agent inside a transaction, rather
             // than building an `IN (?,?,…)` list. A dynamic arity needs a fresh `prepare` per call
             // shape, which defeats the statement cache for the overwhelmingly common case of one
@@ -1280,6 +1297,24 @@ export class SqliteStore implements Store {
                 q.turnList
                     .all<TurnRow>(agentId, sessionKey, options?.limit ?? DEFAULT_PAGE)
                     .map(toTurn),
+            listForAgent: async (agentId, options) => {
+                const limit = options?.limit ?? DEFAULT_PAGE
+                // One extra row says whether there is a next page without a second COUNT query.
+                const rows = q.turnListForAgent.all<TurnRow & { row_key: number }>(
+                    agentId,
+                    options?.before ?? Number.MAX_SAFE_INTEGER,
+                    `${likePrefix(options?.sessionPrefix ?? "")}%`,
+                    limit + 1,
+                )
+                const page = rows.slice(0, limit)
+                const last = page.at(-1)
+                return {
+                    turns: page.map(toTurn),
+                    ...(rows.length > limit && last !== undefined
+                        ? { nextBefore: last.row_key }
+                        : {}),
+                }
+            },
             reapRunning: async (agentIds, reason) => {
                 if (agentIds.length === 0) return []
                 const ts = nowIso()
@@ -1959,6 +1994,26 @@ export class SqliteStore implements Store {
             },
         }
 
+        this.usage = {
+            record: async (call) => {
+                q.modelCallInsert.run(
+                    call.agentId,
+                    call.sessionKey ?? null,
+                    call.turnId ?? null,
+                    call.role,
+                    call.model,
+                    call.promptTokens,
+                    call.promptReported ? 1 : 0,
+                    call.cachedPromptTokens ?? null,
+                    call.outputTokens,
+                    call.outputReported ? 1 : 0,
+                    call.sender ?? null,
+                    call.at,
+                )
+            },
+            report: async (query) => usageReport(db, query),
+        }
+
         this.agentFootprint = async (agentId) => footprint(agentId)
 
         this.purgeAgent = async (agentId) =>
@@ -1981,6 +2036,9 @@ export class SqliteStore implements Store {
                 // are already counted. Deleted for the reason inbound keys are — rows keyed to an
                 // agent that no longer exists.
                 q.handoffDeleteAll.run(agentId)
+                // Not in the footprint either: what an agent cost is billing history, not something a
+                // person weighs before deleting it. Deleted rather than orphaned, for the same reason.
+                q.modelCallDeleteAll.run(agentId)
                 // Also not in the footprint, and deleted for the reason migration 15 gives: this
                 // is the table `kv` should have been, so the delete that `kv` could never have is
                 // the whole argument for the column. A state row surviving its agent would make a
@@ -2016,6 +2074,113 @@ export class SqliteStore implements Store {
         if (this.#closed) return
         this.#closed = true
         this.#db.close()
+    }
+}
+
+/** Escape a LIKE pattern's own metacharacters, so a session prefix matches literally. */
+function likePrefix(prefix: string): string {
+    return prefix.replace(/[\\%_]/g, (char) => `\\${char}`)
+}
+
+/**
+ * The SQL expression for each grouping. A whitelist, and the only way a grouping reaches the query:
+ * the route validates names against `USAGE_GROUPS`, and this map is what turns a name into SQL, so
+ * nothing a caller sent is ever concatenated.
+ */
+const USAGE_COLUMNS: Readonly<Record<UsageGroup, { readonly sql: string; readonly as: string }>> = {
+    agent: { sql: "agent_id", as: "agent_id" },
+    model: { sql: "model", as: "model" },
+    day: { sql: "substr(at, 1, 10)", as: "day" },
+    sender: { sql: "sender", as: "sender" },
+}
+
+interface UsageRow {
+    readonly agent_id?: string
+    readonly model?: string
+    readonly day?: string
+    readonly sender?: string | null
+    readonly calls: number
+    readonly prompt_tokens: number
+    readonly cached_prompt_tokens: number
+    readonly output_tokens: number
+    readonly estimated_calls: number
+}
+
+/**
+ * Totals per group.
+ *
+ * Prepared per call rather than once, because the grouping and the arity of the agent list vary.
+ * ponytail: a fresh prepare per request. Cache by shape if usage becomes a hot path.
+ */
+function usageReport(
+    db: SqlDatabase,
+    query: UsageQuery,
+): { buckets: UsageBucket[]; meteredSince?: string } {
+    if (query.agentIds !== undefined && query.agentIds.length === 0) return { buckets: [] }
+    const where: string[] = []
+    const params: SqlParam[] = []
+    if (query.agentIds !== undefined) {
+        where.push(`agent_id IN (${query.agentIds.map(() => "?").join(", ")})`)
+        params.push(...query.agentIds)
+    }
+    if (query.sessionPrefix !== undefined) {
+        where.push("session_key LIKE ? ESCAPE '\\'")
+        params.push(`${likePrefix(query.sessionPrefix)}%`)
+    }
+    // The window applies to the totals and not to `meteredSince`, which answers "how far back does
+    // this go at all" for whatever the caller may see.
+    const scopeWhere = [...where]
+    const scopeParams = [...params]
+    if (query.from !== undefined) {
+        where.push("at >= ?")
+        params.push(query.from)
+    }
+    if (query.to !== undefined) {
+        where.push("at < ?")
+        params.push(query.to)
+    }
+    const clause = (parts: readonly string[]) =>
+        parts.length === 0 ? "" : `WHERE ${parts.join(" AND ")}`
+    const groups = [...new Set(query.by)].map((name) => USAGE_COLUMNS[name])
+    const select = groups.map((group) => `${group.sql} AS ${group.as}`)
+    const groupBy =
+        groups.length === 0 ? "" : `GROUP BY ${groups.map((group) => group.sql).join(", ")}`
+    const rows = db
+        .prepare(
+            `SELECT ${[
+                ...select,
+                "COUNT(*) AS calls",
+                "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens",
+                "COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens",
+                "COALESCE(SUM(output_tokens), 0) AS output_tokens",
+                "COALESCE(SUM(CASE WHEN prompt_reported = 0 OR output_reported = 0 THEN 1 ELSE 0 END), 0) AS estimated_calls",
+            ].join(", ")}
+               FROM model_calls ${clause(where)} ${groupBy}
+              ${groupBy === "" ? "" : `ORDER BY ${groups.map((group) => group.sql).join(", ")}`}`,
+        )
+        .all<UsageRow>(...params)
+    const since = db
+        .prepare(`SELECT MIN(at) AS since FROM model_calls ${clause(scopeWhere)}`)
+        .get<{ since: string | null }>(...scopeParams)
+    const buckets = rows
+        // An ungrouped report over no rows still returns one all-zero row from the aggregate.
+        .filter((row) => groups.length > 0 || row.calls > 0)
+        .map((row) => ({
+            ...(row.agent_id === undefined ? {} : { agentId: row.agent_id }),
+            ...(row.model === undefined ? {} : { model: row.model }),
+            ...(row.day === undefined ? {} : { day: row.day }),
+            ...(row.sender === undefined || row.sender === null ? {} : { sender: row.sender }),
+            calls: row.calls,
+            promptTokens: row.prompt_tokens,
+            cachedPromptTokens: row.cached_prompt_tokens,
+            outputTokens: row.output_tokens,
+            estimatedCalls: row.estimated_calls,
+        }))
+    return {
+        buckets,
+        ...(since?.since === null || since?.since === undefined
+            ? {}
+            : { meteredSince: since.since }),
     }
 }
 

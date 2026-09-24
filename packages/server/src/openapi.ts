@@ -92,6 +92,20 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             { code: 501, when: "this server has no provisioner" },
         ],
     },
+    "GET /v1/usage": {
+        summary:
+            "What every agent in scope cost, per model call, grouped by agent, model, day or sender.",
+        statuses: [{ code: 400, when: "an unknown grouping or a date that does not parse" }],
+    },
+    "GET /v1/agents/:id/usage": {
+        summary: "What this agent cost, from the meter.",
+        statuses: [{ code: 400, when: "an unknown grouping or a date that does not parse" }],
+    },
+    "GET /v1/agents/:id/turns": {
+        summary:
+            "Every turn this agent has taken, newest first, across sessions, paged by `before`.",
+        statuses: [{ code: 400, when: "`limit` or `before` is not a positive whole number" }],
+    },
     "GET /v1/templates": {
         summary: "The templates an agent can be created from, and the variables each declares.",
     },

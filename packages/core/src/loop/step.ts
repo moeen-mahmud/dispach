@@ -29,6 +29,24 @@ export interface StepInput {
     readonly context: EventContext
     readonly signal: AbortSignal
     readonly attempt?: number
+    /**
+     * Called once per completed call with what it cost. Optional so a caller that bills nothing (a
+     * test, an eval) needs nothing, and **synchronous and non-throwing by contract**: the meter is
+     * bookkeeping, and a store write that failed must never fail the reply it was counting.
+     */
+    readonly meter?: (usage: StepUsage) => void
+}
+
+/** What one model call cost, handed to `StepInput.meter`. The caller adds who and where. */
+export interface StepUsage {
+    readonly role: string
+    readonly model: string
+    readonly promptTokens: number
+    readonly promptReported: boolean
+    readonly cachedPromptTokens?: number
+    readonly outputTokens: number
+    readonly outputReported: boolean
+    readonly context: EventContext
 }
 
 export interface StepResult {
@@ -172,6 +190,19 @@ export async function runStep(input: StepInput): Promise<StepResult> {
         },
         input.context,
     )
+    // After the stream, including an aborted one: tokens an endpoint produced before a stop are
+    // still billed. A call that threw is not metered, because nothing reports what it consumed.
+    // ponytail: a failed call counts as free. Record it once an endpoint reports usage on errors.
+    input.meter?.({
+        role: input.role.role,
+        model: input.role.config.id,
+        promptTokens,
+        promptReported: promptTokensReported,
+        ...(cachedPromptTokens === undefined ? {} : { cachedPromptTokens }),
+        outputTokens,
+        outputReported: reportedOutputTokens !== undefined,
+        context: input.context,
+    })
 
     return {
         text,

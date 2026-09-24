@@ -141,6 +141,29 @@ Only names the manifest reads are accepted, so a caller cannot write the server'
 `shadowed` lists a name, the server's environment sets the same variable and wins; set it there,
 or unset it there.
 
+
+### What it cost
+
+`GET /v1/usage` sums what the endpoint billed, one row per model call, for every agent your
+credential reaches. Group by `agent`, `model`, `day` and `sender`, and window with `from`/`to`:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "localhost:7420/v1/usage?by=agent,model&from=2026-09-01&to=2026-10-01"
+# {"buckets":[{"agentId":"acme-store","model":"deepseek-v4-pro","calls":2,"promptTokens":6624,
+#   "cachedPromptTokens":3200,"outputTokens":613,"estimatedCalls":0}],"meteredSince":"…"}
+```
+
+Bill from this, **not** from a turn's `promptTokens`. That field is the prompt the turn ended at.
+Measured on the turn above, it read 3,395 against the 6,624 the two calls actually sent. A
+compactor call, which may be a cheaper model, has no turn at all and appears here under its own
+`model`. `estimatedCalls` says how much of a total is our estimate rather than the endpoint's
+figure. `meteredSince` says where the meter starts: turns from before the upgrade are not
+included.
+
+`GET /v1/agents/:id/turns` lists an agent's turns across sessions, newest first; pass `nextBefore`
+back as `before` for the next page.
+
 ---
 
 ## 2. Ask it something

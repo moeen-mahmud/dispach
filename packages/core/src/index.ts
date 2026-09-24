@@ -105,7 +105,7 @@ export {
     type TurnSender,
     trustOfSender,
 } from "./loop/sender.ts"
-export { runStep, type StepInput, type StepResult } from "./loop/step.ts"
+export { runStep, type StepInput, type StepResult, type StepUsage } from "./loop/step.ts"
 export {
     runTurn,
     type ToolRuntime,
@@ -443,6 +443,7 @@ export type {
     LeaseStore,
     MessagePage,
     MessageStore,
+    ModelCallRecord,
     OperatorKeyRecord,
     OperatorKeyStore,
     OutboxStore,
@@ -461,8 +462,12 @@ export type {
     TurnStatus,
     TurnStore,
     UpsertSchedule,
+    UsageBucket,
+    UsageGroup,
+    UsageQuery,
+    UsageStore,
 } from "./store/store.ts"
-export { CAPABILITIES, DEFAULT_KEY_TOUCH_MS } from "./store/store.ts"
+export { CAPABILITIES, DEFAULT_KEY_TOUCH_MS, USAGE_GROUPS } from "./store/store.ts"
 export {
     type ArtifactSink,
     describeArtifact,

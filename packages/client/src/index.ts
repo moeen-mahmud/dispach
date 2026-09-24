@@ -123,8 +123,14 @@ export interface TurnRecordLike {
     readonly turnId: string
     readonly sessionKey: string
     readonly status: string
+    /** What was sent, raw. Always on the wire; declared late, which is why a list needed it. */
+    readonly input: string
     readonly text: string
     readonly steps: number
+    /**
+     * The prompt the turn **ended** at, the last step's: a context-size figure, not what the turn
+     * was billed. `usage()` sums every call.
+     */
     readonly promptTokens: number
     readonly outputTokens: number
     readonly errorCode?: string
@@ -194,6 +200,16 @@ export interface AgentClient {
      * rather than aborting it, so a caller applying a config change retries instead of assuming.
      */
     reload(): Promise<{ readonly id: string; readonly adopted: readonly string[] }>
+    /** What this agent cost, from the per-call meter. */
+    usage(options?: UsageOptions): Promise<UsageReportLike & { readonly id: string }>
+    /**
+     * Every turn this agent has taken, newest first, across sessions. Pass the previous page's
+     * `nextBefore` as `before`.
+     */
+    turns(options?: {
+        readonly limit?: number
+        readonly before?: number
+    }): Promise<{ readonly turns: readonly TurnRecordLike[]; readonly nextBefore?: number }>
     /** The variables this agent's manifest reads, and whether each is set. Never a value. */
     secrets(): Promise<readonly SecretStatusLike[]>
     /**
@@ -653,6 +669,36 @@ export interface SecretsWrittenLike {
     readonly error?: WireError
 }
 
+/** How to slice usage. `by` defaults to `["agent", "model"]` on the server; `[]` is one total. */
+export interface UsageOptions {
+    readonly by?: readonly ("agent" | "model" | "day" | "sender")[]
+    /** Inclusive, ISO-8601. */
+    readonly from?: string
+    /** Exclusive, ISO-8601. */
+    readonly to?: string
+}
+
+/** One group's totals. A grouping field is present exactly when it was asked for. */
+export interface UsageBucketLike {
+    readonly agentId?: string
+    readonly model?: string
+    readonly day?: string
+    /** Absent within a `sender` grouping means the operator's own calls. */
+    readonly sender?: string
+    readonly calls: number
+    readonly promptTokens: number
+    readonly cachedPromptTokens: number
+    readonly outputTokens: number
+    /** Calls where either figure was an estimate. Non-zero means the totals are partly a guess. */
+    readonly estimatedCalls: number
+}
+
+export interface UsageReportLike {
+    readonly buckets: readonly UsageBucketLike[]
+    /** The earliest metered call. Absent when there are none. Earlier turns are not included. */
+    readonly meteredSince?: string
+}
+
 /** How far one credential reaches. Absent fields mean "everything". See `04-SPEC-WIRE.md`. */
 export interface KeyScopeLike {
     readonly agents?: readonly string[]
@@ -697,6 +743,8 @@ export interface DispachClient {
      * A bad answer comes back as a `400` whose `field` names the step to fix.
      */
     createAgent(answers: Readonly<Record<string, string>>): Promise<ProvisionedAgentLike>
+    /** What every agent this credential reaches cost, from the per-call meter. */
+    usage(options?: UsageOptions): Promise<UsageReportLike>
     /** Every template this server can create an agent from, with the variables each declares. */
     templates(): Promise<readonly TemplateLike[]>
     /**
@@ -941,6 +989,18 @@ export function createClient(options: ClientOptions): DispachClient {
                     body: {},
                 }),
 
+            usage: (options) =>
+                json<UsageReportLike & { id: string }>("GET", at(`/usage${usageQuery(options)}`)),
+            turns: (options) => {
+                const params = new URLSearchParams()
+                if (options?.limit !== undefined) params.set("limit", String(options.limit))
+                if (options?.before !== undefined) params.set("before", String(options.before))
+                const suffix = params.size === 0 ? "" : `?${params.toString()}`
+                return json<{ turns: readonly TurnRecordLike[]; nextBefore?: number }>(
+                    "GET",
+                    at(`/turns${suffix}`),
+                )
+            },
             secrets: async () =>
                 (await json<{ secrets: readonly SecretStatusLike[] }>("GET", at("/secrets")))
                     .secrets,
@@ -1104,6 +1164,7 @@ export function createClient(options: ClientOptions): DispachClient {
             json<ProvisionedAgentLike>("POST", "/v1/agents", { body: { answers } }),
         // Unwrapped, because the route wraps it: a list read declared as the wrong shape is how a
         // page crashed to black on `schedules.map is not a function`.
+        usage: (options) => json<UsageReportLike>("GET", `/v1/usage${usageQuery(options)}`),
         templates: async () =>
             (await json<{ templates: readonly TemplateLike[] }>("GET", "/v1/templates")).templates,
         createAgentFromTemplate: (input) =>
@@ -1121,4 +1182,13 @@ export function createClient(options: ClientOptions): DispachClient {
             yield* eventStreamItems(body)
         },
     }
+}
+
+/** `?by=…&from=…&to=…`, or nothing. An empty `by` is sent as `by=` so it means "one total". */
+function usageQuery(options: UsageOptions | undefined): string {
+    const params = new URLSearchParams()
+    if (options?.by !== undefined) params.set("by", options.by.join(","))
+    if (options?.from !== undefined) params.set("from", options.from)
+    if (options?.to !== undefined) params.set("to", options.to)
+    return params.size === 0 ? "" : `?${params.toString()}`
 }

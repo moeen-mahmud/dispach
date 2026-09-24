@@ -842,6 +842,47 @@ ALTER TABLE operator_keys ADD COLUMN scope TEXT;
 ALTER TABLE operator_keys ADD COLUMN expires_at TEXT;
 `,
     },
+    {
+        version: 18,
+        name: "model_calls",
+        /**
+         * One row per model call, which is what an endpoint bills.
+         *
+         * `turns.prompt_tokens` could not be the meter, and the plan that assumed it could was wrong.
+         * It holds the **last** step's prompt (the context a turn ended at), while every step's
+         * prompt is billed, so a five-step turn read as one prompt. And the compactor calls a model
+         * with no turn row at all, possibly a different model at a different price. So this table is
+         * written at `runStep`, the one call every model request passes through, and `turns` is left
+         * exactly as it was.
+         *
+         * **No foreign key to `sessions`, deliberately.** `messages` and `turns` cascade from it, and
+         * `DELETE /sessions/:key` clears a conversation; a cascade here would make clearing a chat
+         * erase what it cost. Keyed by `agent_id` alone, and deleted by `purgeAgent`.
+         *
+         * `*_reported` is `0` when the figure is our estimate. Estimates run 16-20% low on the prompts
+         * that matter (`evals/budget/`), so a bill that mixed the two silently would be wrong in the
+         * direction that loses money. Rows start at upgrade: nothing is backfilled, because the old
+         * figures are the wrong quantity.
+         */
+        sql: `
+CREATE TABLE model_calls (
+    agent_id              TEXT NOT NULL,
+    session_key           TEXT,
+    turn_id               TEXT,
+    role                  TEXT NOT NULL,
+    model                 TEXT NOT NULL,
+    prompt_tokens         INTEGER NOT NULL,
+    prompt_reported       INTEGER NOT NULL,
+    cached_prompt_tokens  INTEGER,
+    output_tokens         INTEGER NOT NULL,
+    output_reported       INTEGER NOT NULL,
+    sender                TEXT,
+    at                    TEXT NOT NULL
+);
+
+CREATE INDEX model_calls_by_agent ON model_calls (agent_id, at);
+`,
+    },
 ]
 
 export interface MigrationReport {
