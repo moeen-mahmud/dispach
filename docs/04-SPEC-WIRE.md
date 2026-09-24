@@ -1099,7 +1099,10 @@ API caller. Where output goes is a property of the request, not the agent.
 **Why no batch endpoint.** Fan-out is the caller's job. A batch endpoint is a queue with
 extra steps, and Dispach is not a queue.
 
-**Why no auth beyond a bearer token.** Dispach is a runtime, not a multi-tenant service.
-Identity, RBAC, and per-user scoping belong to whatever embeds it — VelaOps has Better
-Auth, its own session store, and per-agent `.pem` keys already. Duplicating that here would
-create two sources of truth for authorization, which is worse than none.
+**Why no identity beyond credentials.** Dispach is a runtime, not a multi-tenant service,
+and the control plane above it is where identity lives (decisions 14.1, 14.2 and 14.5). What the
+runtime has is *credentials*: the configured bearer token and operator keys scoped by capability,
+agent and expiry. It has no users. Identity, RBAC and per-user scoping belong to whatever embeds
+it. VelaOps has Better Auth, its own session store and per-agent `.pem` keys already, and a team
+space's members reach the runtime only as opaque participant ids. Duplicating any of that here
+would create two sources of truth for authorisation, which is worse than none.
