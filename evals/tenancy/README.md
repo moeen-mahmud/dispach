@@ -22,8 +22,9 @@ docker run --rm --entrypoint sh -v "$PWD/scripts:/repo/scripts:ro" \
 - **Idle RSS** is the median of five samples a second apart, after ten seconds of quiet, so the
   post-readiness provider refresh is over. **Cold start** is spawn → `/v1/ready` 200, interpreter
   included. **Resume** is `SIGSTOP` for 2 s, then `SIGCONT` → `/v1/health` 200.
-- Resume is an approximation of a platform suspend. A Fly suspend snapshots the whole VM and its
-  restore time is Fly's. What this shows is that the process needs nothing re-established after a
+- Resume is `docker pause`/`unpause` in effect: the cgroup freezer, which is what the control
+  plane's Docker driver does. A platform that snapshots a whole VM has its own restore time, which
+  is the platform's. What this shows is that the process needs nothing re-established after a
   freeze before it serves again.
 
 ## Results — 2026-09-24, the image (`linux/arm64`, 4 vCPU, Node v24.21.0), 3 runs each
@@ -62,36 +63,68 @@ Two levers:
 
 ## What a silo costs per month
 
-Prices as of 2026-09-24, excluding VAT. Fly from [docs.fly.io/about/pricing](https://docs.fly.io/about/pricing/),
-Amsterdam at the 1.0× regional rate: shared-cpu-1x at 256 MB $2.02, 512 MB $3.31. A stopped or
-suspended Machine pays only for rootfs, at $0.15/GB-month, and a volume costs $0.15/GB-month.
-Hetzner from [costgoat.com](https://costgoat.com/pricing/hetzner) (dated 2026-09-05): CX23, 2 vCPU,
-4 GB, IPv4 included, €5.49. Hetzner's own page did not render prices, and other aggregators still
-show the pre-April-2026 €3.99. **Check both before quoting a price.**
+**The control plane is cloud-agnostic** (decision 14.12). It places silos through one `Placer`
+interface, and v0's only driver is Docker, which runs the same on a laptop, an EC2 host or any VM.
+So the cost is decided by a *shape*, not a vendor: many silos packed onto a host, or one VM or task
+per silo. The measurement above is of a process and holds for either.
 
-**Fly, one Machine per silo, autosuspend.** Use 512 MB. The idle silo fits in 256 MB, but a turn has
-no headroom there, and an out-of-memory kill mid-turn is the worst failure available. With the
-image's ~0.7 GB rootfs and a 1 GB volume for `store.db`:
+Sizing: budget **130 MiB per silo** of 1–10 agents (idle 104–120 MiB plus headroom for a turn), and
+keep 0.8 GB of each host for the OS, Docker and turn spikes. **A paused container keeps its memory**,
+so on a packed host suspending saves CPU and not RAM. RAM decides how many silos fit, and every
+silo, awake or not, occupies its slot.
 
-| share of the month the silo is awake | $/silo/month |
-| --- | --- |
-| 100% (never suspends) | $3.46 |
-| 10% (~2.4 h a day) | **$0.58** |
-| 2% (~30 min a day) | **$0.32** |
+### AWS — the target for the hosted product
 
-The formula is `3.31·f + 0.105·(1−f) + 0.15`. The plan's estimate was $0.35–0.50, and the measured
-inputs agree with it at low activity.
+Prices as of 2026-09-24, us-east-1, on-demand, Linux:
 
-**Hetzner, many silos per box, always on.** Allow 160 MiB per silo of 1–10 agents, and keep 0.8 GB
-for the OS, Docker and turn spikes. That gives 20 silos on a CX23: **€0.27/silo/month**, with no
-suspend and no waker. It is cheaper, but a silo shares a kernel with the others rather than getting
-its own VM. That fits the threat model (decision 14.3): a process boundary per tenant, with
-containment as a deployment concern.
+- **EC2**: t4g.medium (2 vCPU, 4 GiB) $0.0336/h = $24.53/mo; t4g.large (8 GiB) $49.06/mo
+  ([Vantage](https://instances.vantage.sh/aws/ec2/t4g.medium)).
+- **Storage and addresses**: gp3 $0.08/GB-month ([AWS](https://aws.amazon.com/ebs/pricing/)); a
+  public IPv4 $0.005/h = $3.65/mo, one per host. That IPv4 price was not re-checked today.
+- **Fargate ARM**: $0.03238 per vCPU-hour and $0.00356 per GB-hour
+  ([AWS](https://aws.amazon.com/fargate/pricing/); its table prints per-second rates under an
+  "hour" heading).
 
-**Verdict: not a negative result.** At pilot scale, a silo costs cents a month on either platform.
-Model tokens are billed through BYOK and dwarf the cost of the silo. Model tokens, not hosting,
-decide the price, which is why `10-BUSINESS.md` §4 sets the price as a base fee plus a charge per
-active agent.
+**EC2 Graviton host, silos packed with the Docker driver: the chosen shape.**
+
+| host | $/month (instance + 20 GB gp3 + IPv4) | silos at 130 MiB | **$/silo/month** |
+| --- | --- | --- | --- |
+| t4g.medium, 4 GiB | $29.78 | 25 | **$1.19** |
+| t4g.large, 8 GiB | $54.31 | 56 | **$0.97** |
+
+- **CPU credits:** t4g instances are burstable, with a 20–30% baseline per vCPU. An idle or paused
+  silo spends nothing, and a turn mostly waits on the model endpoint. A host with many busy silos
+  can run out of credits, though, and in `unlimited` mode that is billed. Watch `CPUCreditBalance`.
+- **Reserved or Savings Plan pricing** takes roughly a third off these figures. It isn't counted
+  here.
+
+**Fargate, one task per silo, for comparison.** The smallest ARM task is 0.25 vCPU and 0.5 GB, which
+comes to $0.009875/h:
+
+- **Always on: $7.21/silo/month.**
+- **Stopped when idle, awake 10%: ~$0.72**, plus EFS for `store.db`, because a task's disk does not
+  survive a stop.
+- **What stopping costs you:** Fargate has no pause, so "suspend" is a stop and a cold start of tens
+  of seconds. A stopped silo also skips a recurring schedule due while it was down (below), unless
+  core gains a boot grace window. Not the chosen shape.
+
+### Reference points
+
+- **Hetzner CX23**, 4 GB, €5.49 with IPv4 ([costgoat.com](https://costgoat.com/pricing/hetzner),
+  dated 2026-09-05; other aggregators still show the pre-April-2026 €3.99): 25 silos at 130 MiB,
+  **€0.22/silo/month**.
+- **A microVM platform that bills a suspended VM only for its disk** (Fly Machines:
+  [$3.31/mo](https://docs.fly.io/about/pricing/) for 512 MB awake, $0.15/GB-month suspended):
+  $0.32–0.58/silo/month at 2–10% awake. This is the one shape where suspending saves memory as well
+  as CPU, at the price of a VM per silo.
+
+**Isolation** is the same in every packed shape: a silo shares a kernel with its neighbours. That
+fits the threat model (decision 14.3): a process boundary per tenant, with containment as a
+deployment concern. A VM per silo is a driver choice, not a runtime change.
+
+**Verdict: not a negative result.** On the AWS shape a silo costs about a dollar a month, and the
+agents inside it cost cents each. Model tokens are billed through BYOK and dwarf both. That is why
+`10-BUSINESS.md` §4 prices the product as a base fee plus a charge per active agent.
 
 ## Suspending safely — measured in the image
 
@@ -107,7 +140,7 @@ the row's `nextRunAt`, jitter included:
 - **Stopped, then started 2 s after `nextWakeAt`**: that occurrence was **skipped** too, because boot
   treats it as downtime.
 
-So a waker that **suspends** can wake at `nextWakeAt` or late, and the schedule fires once. A waker
-that **stops** a Machine must start it **before** `nextWakeAt`, with enough margin for a cold start
-(~0.5 s at 100 agents; allow seconds on a platform). If it starts the Machine late, that occurrence
+So a driver that **pauses** can wake at `nextWakeAt` or late, and the schedule fires once. This is
+the Docker driver. A driver that **stops** a silo, as Fargate would, must start it **before** `nextWakeAt`, with enough margin for a cold start
+(~0.5 s at 100 agents; allow seconds on a platform). If it starts the silo late, that occurrence
 is skipped. An `at` one-shot fires late in both cases.
