@@ -404,8 +404,7 @@ Five things in that file are answers to defaults that bite, and they are comment
 than left to be discovered:
 
 - **`name: dispach`.** Compose names a container `<project>-<service>-<n>` and takes the project
-  from the *directory name*, so this container was `castellan-agent-1` for as long as the checkout
-  kept the pre-rename name — a stale brand with nothing in the tree for `git grep` to find, since
+  from the *directory name*, a stale brand with nothing in the tree for `git grep` to find, since
   the string was never in a file. Set explicitly, it is `dispach-server-1` wherever you clone to.
 - **No `command:` override.** The image's CMD carries `--host 0.0.0.0`; a compose `command:`
   replaces CMD wholesale, so adding one drops the host flag and the process listens on loopback

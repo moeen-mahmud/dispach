@@ -4838,8 +4838,6 @@ one to version, one to transfer.
 
 1. **`npm publish` would have uploaded 2,693 files, 201 MB unpacked.** No build cleaned `dist/`,
    `files: ["dist"]` ships whatever is there, and `dist/` is gitignored so no diff ever showed it.
-   A hundred of those files still imported `@castellan/core` — a package that had not existed for a
-   month. Now 345 files and 9.0 MB, with `rm -rf dist` in every build script.
 2. **`import "dispach"` ran the CLI.** `exports["."]` pointed at the entry with the shebang, so an
    application importing the package got the banner and an exit. The default import is the library
    now; `bin` is not governed by `exports`, so there was never a conflict to resolve.

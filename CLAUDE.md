@@ -2321,7 +2321,7 @@ Never claim a performance property without a number in `evals/` and a script to 
 - **The published artefact is assembled from a directory nobody reviews.** `npm pack --dry-run` on
   this repo offered **2,693 files and 201 MB** for a CLI whose bundle is 246 KB — because no build
   cleaned `dist/`, `files: ["dist"]` ships whatever is in it, and `dist/` is gitignored so no diff
-  ever showed it. A hundred of those files still imported `@castellan/core`, gone a month earlier.
+  ever showed it. A hundred of those files still imported `@dispach/core`, gone a month earlier.
   `rm -rf dist &&` prefixes every build script now. The guard is **not** a test that reads the
   tarball: the bundle is minified, and scanning it for `from "x"` matched the word *from* inside a
   help string and reported ten "undeclared dependencies" that were fragments of a UI. `bun run

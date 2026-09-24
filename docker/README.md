@@ -80,6 +80,6 @@ Image size is re-measured by the CI `docker` job on every push. What CI measures
    image build, and there is no `.git` in the build context for it to act on.
 3. **The compose project name is the directory name.** Compose names a container
    `<project>-<service>-<n>` and derives the project from the checkout directory, so this ran as
-   `castellan-agent-1` long after the rename — a stale brand that `git grep` could never find,
+   `dispach-agent-1` long after the rename — a stale brand that `git grep` could never find,
    because the string was in no file. `name: dispach` in `docker-compose.yml` is the fix, and it is
    the same class as the tracked-filename half of hard rule 3: a name that lives outside the tree.

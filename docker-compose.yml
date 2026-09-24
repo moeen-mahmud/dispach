@@ -17,9 +17,7 @@
 # Most of what follows is a default that would otherwise bite, so each one says which.
 
 # **The project name, because the default is the directory name.** Compose names a container
-# `<project>-<service>-<n>` and takes the project from whatever the checkout happens to be called —
-# so this container was `castellan-agent-1` for as long as the directory kept the old name, with no
-# brand string anywhere in the tree for `git grep` to find. Set explicitly, it is `dispach-server-1`
+# `<project>-<service>-<n>` and takes the project from whatever the checkout happens to be called `dispach-server-1`
 # wherever the repository is cloned to.
 name: dispach
 
