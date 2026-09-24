@@ -699,6 +699,93 @@ export interface UsageStore {
     }>
 }
 
+/** How far a subscription hears: the creating credential's reach. Absent fields mean everything. */
+export interface WebhookScope {
+    readonly agents?: readonly string[]
+    readonly sessionPrefix?: string
+}
+
+/** A subscription as the API reports it. Never the secret. */
+export interface WebhookSubscription {
+    readonly subscriptionId: string
+    readonly url: string
+    /** Event types delivered. See `webhookDeliverable` for what is never in this list. */
+    readonly types: readonly string[]
+    readonly scope?: WebhookScope
+    readonly createdAt: string
+    /** Failed attempts since the last success. Non-zero is what `failing` on the resource means. */
+    readonly consecutiveFailures: number
+    readonly lastError?: string
+    readonly lastSuccessAt?: string
+    readonly lastFailureAt?: string
+    /** Deliveries not yet sent or given up on. */
+    readonly pending: number
+}
+
+export type WebhookDeliveryStatus = "pending" | "inflight" | "sent" | "failed"
+
+export interface WebhookDeliveryRecord {
+    readonly subscriptionId: string
+    /** The `webhook-id` header. Derived from the subscription and the event, stable across retries. */
+    readonly messageId: string
+    readonly agentId: string
+    readonly eventType: string
+    /** The envelope exactly as `GET /v1/events` serves it, serialised once at enqueue. */
+    readonly body: string
+    readonly status: WebhookDeliveryStatus
+    readonly attempts: number
+    /** Recovered from `inflight` by a new process: the receiver may already have it. */
+    readonly uncertain: boolean
+    readonly nextAttemptAt: string
+    readonly lastError?: string
+}
+
+export interface WebhookStore {
+    create(subscription: {
+        readonly subscriptionId: string
+        readonly url: string
+        readonly secret: string
+        readonly types: readonly string[]
+        readonly scope?: WebhookScope
+        readonly createdAt: string
+    }): Promise<WebhookSubscription>
+    list(): Promise<readonly WebhookSubscription[]>
+    get(subscriptionId: string): Promise<WebhookSubscription | undefined>
+    /** For signing only. No route returns it. */
+    secretOf(subscriptionId: string): Promise<string | undefined>
+    /** Deletes its pending deliveries with it. `false` when there was nothing to delete. */
+    delete(subscriptionId: string): Promise<boolean>
+    /** `false` when this `(subscription, message)` pair already exists: an enqueue that ran twice. */
+    enqueue(delivery: {
+        readonly subscriptionId: string
+        readonly messageId: string
+        readonly agentId: string
+        readonly eventType: string
+        readonly body: string
+        readonly at: string
+    }): Promise<boolean>
+    /** Mark up to `limit` due rows for these agents `inflight` and return them. */
+    claimDue(
+        agentIds: readonly string[],
+        now: string,
+        limit: number,
+    ): Promise<readonly WebhookDeliveryRecord[]>
+    markSent(subscriptionId: string, messageId: string, at: string): Promise<void>
+    markRetry(
+        subscriptionId: string,
+        messageId: string,
+        nextAttemptAt: string,
+        error: string,
+        at: string,
+    ): Promise<void>
+    markFailed(subscriptionId: string, messageId: string, error: string, at: string): Promise<void>
+    /** Rows a dead process left `inflight`, back to `pending` with `uncertain` set. Call at boot. */
+    recoverInflight(
+        agentIds: readonly string[],
+        at: string,
+    ): Promise<readonly WebhookDeliveryRecord[]>
+}
+
 /**
  * A namespaced string map.
  *
@@ -1253,6 +1340,8 @@ export interface Store {
     readonly handoffs: HandoffStore
     /** Every model call's tokens: the meter. Keyed by agent; survives a session being cleared. */
     readonly usage: UsageStore
+    /** Outbound webhook subscriptions and what is owed to them. Server-wide, like `operatorKeys`. */
+    readonly webhooks: WebhookStore
     /**
      * Server credentials. The one store here that is not per-agent — see migration 14.
      *

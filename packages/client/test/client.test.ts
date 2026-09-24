@@ -762,6 +762,23 @@ describe("every read is unwrapped the way its route wraps it", () => {
     })
 })
 
+describe("webhooks", () => {
+    test("create returns the secret once; the list is an array without it", async () => {
+        const { client, runtime } = await harness()
+        const created = await client.createWebhook({
+            url: "https://93.184.216.34/hooks",
+            types: ["turn.end"],
+        })
+        expect(created.secret).toStartWith("whsec_")
+        const listed = await client.webhooks()
+        expect(Array.isArray(listed)).toBe(true)
+        expect(JSON.stringify(listed)).not.toContain(created.secret)
+        expect((await client.deleteWebhook(created.subscriptionId)).deleted).toBe(true)
+        expect(await client.webhooks()).toEqual([])
+        await runtime.stop()
+    })
+})
+
 describe("usage and turns", () => {
     test("usage buckets and the turn list are the shapes the server sends", async () => {
         const { client, runtime } = await harness()

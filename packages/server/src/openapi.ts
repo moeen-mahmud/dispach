@@ -43,6 +43,7 @@ import {
     ProvisionBody,
     SecretsBody,
     StopBody,
+    WebhookBody,
 } from "./wire-schemas.ts"
 
 /** One line per route, plus its body when it reads one. The only hand-written half. */
@@ -91,6 +92,25 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             { code: 403, when: "not a loopback bind" },
             { code: 501, when: "this server has no provisioner" },
         ],
+    },
+    "POST /v1/webhooks": {
+        summary: "Subscribe a URL to event types. The signing secret is returned once.",
+        body: WebhookBody,
+        statuses: [
+            { code: 201, when: "created; `secret` is in this response and no other" },
+            {
+                code: 400,
+                when: "a refused URL, an undeliverable type, or agents outside this key's reach",
+            },
+        ],
+    },
+    "GET /v1/webhooks": {
+        summary:
+            "The subscriptions this credential can see, with their delivery health. Never a secret.",
+    },
+    "DELETE /v1/webhooks/:webhookId": {
+        summary: "Delete a subscription and anything it still owed.",
+        statuses: [{ code: 404, when: "no such subscription, or one outside this key's reach" }],
     },
     "GET /v1/usage": {
         summary:

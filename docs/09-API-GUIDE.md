@@ -164,6 +164,33 @@ included.
 `GET /v1/agents/:id/turns` lists an agent's turns across sessions, newest first; pass `nextBefore`
 back as `before` for the next page.
 
+
+### Hear about it without holding a stream open
+
+A webhook POSTs events to your backend, so it does not need an SSE connection per agent:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"url":"https://api.example.com/hooks/agents","types":["turn.end","approval.requested"]}' \
+  localhost:7420/v1/webhooks
+# → 201 {"subscriptionId":"wh_…","secret":"whsec_…", …}   the secret is shown this once
+```
+
+Deliveries follow [Standard Webhooks](https://www.standardwebhooks.com/): verify them with its
+library in your language, keyed by that secret, and dedupe on `webhook-id`, which a retry keeps.
+Checked against the official `standardwebhooks` npm package from a real container.
+
+A receiver on a private network (your backend on the same Docker network, say) needs the operator
+to allow it, in the server's environment and never over the API:
+
+```bash
+DISPACH_WEBHOOK_ALLOW=velacrew-api,172.16.0.0/12
+```
+
+Link-local addresses, where cloud metadata lives, are refused whatever is listed.
+`GET /v1/webhooks` shows each subscription's `failing`, `lastError` and `pending`, so a hook
+nobody is receiving says so.
+
 ---
 
 ## 2. Ask it something

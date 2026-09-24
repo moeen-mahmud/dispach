@@ -343,6 +343,27 @@ export const ProvisionBody = z.object({
     ),
 })
 
+/** `POST /v1/webhooks`. Which types exist is `EVENT_TYPES`'s answer, checked by the route. */
+export const WebhookBody = z.object({
+    url: refuse(z.string().min(1), {
+        code: "webhook_url_invalid",
+        hint: "Send an absolute https:// URL. A receiver on a private network needs the operator to allow it in WEBHOOK_ALLOW.",
+        description:
+            "Where deliveries are POSTed. Checked against every address it resolves to, at subscribe and at every send.",
+    }),
+    types: refuse(z.array(z.string()).min(1), {
+        code: "webhook_types_required",
+        hint: 'Send { "types": ["turn.end", "approval.requested"] }. Any event type except model.chunk; the wire spec lists them.',
+        description: "The event types to deliver. `model.chunk` is not deliverable.",
+    }),
+    agents: refuse(z.array(z.string()).min(1).optional(), {
+        code: "webhook_scope_invalid",
+        hint: "Send agent ids this credential can reach, or leave agents out to hear every agent it can reach.",
+        description:
+            "Narrow the subscription to these agents. It can never hear more than the creating credential reaches.",
+    }),
+})
+
 /** `PUT /v1/agents/:id/secrets`. Which names are allowed is the manifest's answer, not this schema's. */
 export const SecretsBody = z.object({
     values: refuse(

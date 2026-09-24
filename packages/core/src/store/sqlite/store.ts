@@ -56,11 +56,41 @@ import type {
     UsageGroup,
     UsageQuery,
     UsageStore,
+    WebhookDeliveryRecord,
+    WebhookScope,
+    WebhookStore,
+    WebhookSubscription,
 } from "../store.ts"
 import { DEFAULT_KEY_TOUCH_MS } from "../store.ts"
 import type { OpenOptions, SqlDatabase, SqlParam, SqlStatement } from "./driver.ts"
 import { openDatabase } from "./driver.ts"
 import { type MigrationReport, migrate } from "./migrations.ts"
+
+interface WebhookSubscriptionRow {
+    subscription_id: string
+    url: string
+    types: string
+    scope: string | null
+    created_at: string
+    consecutive_failures: number
+    last_error: string | null
+    last_success_at: string | null
+    last_failure_at: string | null
+    pending: number
+}
+
+interface WebhookDeliveryRow {
+    subscription_id: string
+    message_id: string
+    agent_id: string
+    event_type: string
+    body: string
+    status: string
+    attempts: number
+    uncertain: number
+    next_attempt_at: string
+    last_error: string | null
+}
 
 const DEFAULT_PAGE = 50
 
@@ -661,6 +691,7 @@ export class SqliteStore implements Store {
     readonly schedules: ScheduleStore
     readonly handoffs: HandoffStore
     readonly usage: UsageStore
+    readonly webhooks: WebhookStore
     readonly operatorKeys: OperatorKeyStore
     readonly location: string
     /** What `migrate` did at open. Reported by boot rather than logged and forgotten. */
@@ -859,6 +890,76 @@ export class SqliteStore implements Store {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ),
             modelCallDeleteAll: db.prepare("DELETE FROM model_calls WHERE agent_id = ?"),
+            webhookInsert: db.prepare(
+                `INSERT INTO webhook_subscriptions
+                     (subscription_id, url, secret, types, scope, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+            ),
+            webhookList: db.prepare(
+                `SELECT s.*, (SELECT COUNT(*) FROM webhook_deliveries d
+                               WHERE d.subscription_id = s.subscription_id
+                                 AND d.status IN ('pending', 'inflight')) AS pending
+                   FROM webhook_subscriptions s ORDER BY s.created_at, s.subscription_id`,
+            ),
+            webhookGet: db.prepare(
+                `SELECT s.*, (SELECT COUNT(*) FROM webhook_deliveries d
+                               WHERE d.subscription_id = s.subscription_id
+                                 AND d.status IN ('pending', 'inflight')) AS pending
+                   FROM webhook_subscriptions s WHERE s.subscription_id = ?`,
+            ),
+            webhookSecret: db.prepare(
+                "SELECT secret FROM webhook_subscriptions WHERE subscription_id = ?",
+            ),
+            webhookDelete: db.prepare(
+                "DELETE FROM webhook_subscriptions WHERE subscription_id = ?",
+            ),
+            webhookEnqueue: db.prepare(
+                `INSERT OR IGNORE INTO webhook_deliveries
+                     (subscription_id, message_id, agent_id, event_type, body, status,
+                      next_attempt_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+            ),
+            webhookClaim: db.prepare(
+                `UPDATE webhook_deliveries SET status = 'inflight', attempts = attempts + 1, updated_at = ?
+                  WHERE subscription_id = ? AND message_id = ? AND status = 'pending'`,
+            ),
+            webhookDueForAgent: db.prepare(
+                `SELECT * FROM webhook_deliveries
+                  WHERE agent_id = ? AND status = 'pending' AND next_attempt_at <= ?
+                  ORDER BY next_attempt_at, rowid LIMIT ?`,
+            ),
+            webhookSent: db.prepare(
+                `UPDATE webhook_deliveries SET status = 'sent', last_error = NULL, updated_at = ?
+                  WHERE subscription_id = ? AND message_id = ?`,
+            ),
+            webhookRetry: db.prepare(
+                `UPDATE webhook_deliveries
+                    SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?
+                  WHERE subscription_id = ? AND message_id = ?`,
+            ),
+            webhookFailed: db.prepare(
+                `UPDATE webhook_deliveries SET status = 'failed', last_error = ?, updated_at = ?
+                  WHERE subscription_id = ? AND message_id = ?`,
+            ),
+            webhookHealthy: db.prepare(
+                `UPDATE webhook_subscriptions
+                    SET consecutive_failures = 0, last_success_at = ?
+                  WHERE subscription_id = ?`,
+            ),
+            webhookUnhealthy: db.prepare(
+                `UPDATE webhook_subscriptions
+                    SET consecutive_failures = consecutive_failures + 1, last_error = ?,
+                        last_failure_at = ?
+                  WHERE subscription_id = ?`,
+            ),
+            webhookInflightForAgent: db.prepare(
+                "SELECT * FROM webhook_deliveries WHERE agent_id = ? AND status = 'inflight'",
+            ),
+            webhookRecover: db.prepare(
+                `UPDATE webhook_deliveries SET status = 'pending', uncertain = 1, updated_at = ?
+                  WHERE agent_id = ? AND status = 'inflight'`,
+            ),
+            webhookDeleteForAgent: db.prepare("DELETE FROM webhook_deliveries WHERE agent_id = ?"),
             // Both take one agent id and are run once per owned agent inside a transaction, rather
             // than building an `IN (?,?,…)` list. A dynamic arity needs a fresh `prepare` per call
             // shape, which defeats the statement cache for the overwhelmingly common case of one
@@ -1994,6 +2095,124 @@ export class SqliteStore implements Store {
             },
         }
 
+        const webhookRead = (row: WebhookSubscriptionRow): WebhookSubscription => ({
+            subscriptionId: row.subscription_id,
+            url: row.url,
+            types: JSON.parse(row.types) as string[],
+            ...(row.scope === null ? {} : { scope: JSON.parse(row.scope) as WebhookScope }),
+            createdAt: row.created_at,
+            consecutiveFailures: row.consecutive_failures,
+            ...(row.last_error === null ? {} : { lastError: row.last_error }),
+            ...(row.last_success_at === null ? {} : { lastSuccessAt: row.last_success_at }),
+            ...(row.last_failure_at === null ? {} : { lastFailureAt: row.last_failure_at }),
+            pending: row.pending,
+        })
+        const deliveryRead = (row: WebhookDeliveryRow): WebhookDeliveryRecord => ({
+            subscriptionId: row.subscription_id,
+            messageId: row.message_id,
+            agentId: row.agent_id,
+            eventType: row.event_type,
+            body: row.body,
+            status: row.status as WebhookDeliveryRecord["status"],
+            attempts: row.attempts,
+            uncertain: row.uncertain === 1,
+            nextAttemptAt: row.next_attempt_at,
+            ...(row.last_error === null ? {} : { lastError: row.last_error }),
+        })
+        this.webhooks = {
+            create: async (sub) => {
+                q.webhookInsert.run(
+                    sub.subscriptionId,
+                    sub.url,
+                    sub.secret,
+                    JSON.stringify(sub.types),
+                    sub.scope === undefined ? null : JSON.stringify(sub.scope),
+                    sub.createdAt,
+                )
+                const row = q.webhookGet.get<WebhookSubscriptionRow>(sub.subscriptionId)
+                if (row === undefined) {
+                    throw new Error(`webhook "${sub.subscriptionId}" vanished after its insert`)
+                }
+                return webhookRead(row)
+            },
+            list: async () => q.webhookList.all<WebhookSubscriptionRow>().map(webhookRead),
+            get: async (id) => {
+                const row = q.webhookGet.get<WebhookSubscriptionRow>(id)
+                return row === undefined ? undefined : webhookRead(row)
+            },
+            secretOf: async (id) => q.webhookSecret.get<{ secret: string }>(id)?.secret,
+            delete: async (id) => q.webhookDelete.run(id).changes > 0,
+            enqueue: async (d) =>
+                q.webhookEnqueue.run(
+                    d.subscriptionId,
+                    d.messageId,
+                    d.agentId,
+                    d.eventType,
+                    d.body,
+                    d.at,
+                    d.at,
+                    d.at,
+                ).changes > 0,
+            claimDue: async (agentIds, now, limit) =>
+                db.transaction(() => {
+                    const claimed: WebhookDeliveryRecord[] = []
+                    for (const agentId of agentIds) {
+                        if (claimed.length >= limit) break
+                        for (const row of q.webhookDueForAgent.all<WebhookDeliveryRow>(
+                            agentId,
+                            now,
+                            limit - claimed.length,
+                        )) {
+                            if (
+                                q.webhookClaim.run(now, row.subscription_id, row.message_id)
+                                    .changes > 0
+                            ) {
+                                claimed.push({
+                                    ...deliveryRead(row),
+                                    status: "inflight",
+                                    attempts: row.attempts + 1,
+                                })
+                            }
+                        }
+                    }
+                    return claimed
+                }),
+            markSent: async (subscriptionId, messageId, at) => {
+                db.transaction(() => {
+                    q.webhookSent.run(at, subscriptionId, messageId)
+                    q.webhookHealthy.run(at, subscriptionId)
+                })
+            },
+            markRetry: async (subscriptionId, messageId, nextAttemptAt, error, at) => {
+                db.transaction(() => {
+                    q.webhookRetry.run(nextAttemptAt, error, at, subscriptionId, messageId)
+                    q.webhookUnhealthy.run(error, at, subscriptionId)
+                })
+            },
+            markFailed: async (subscriptionId, messageId, error, at) => {
+                db.transaction(() => {
+                    q.webhookFailed.run(error, at, subscriptionId, messageId)
+                    q.webhookUnhealthy.run(error, at, subscriptionId)
+                })
+            },
+            recoverInflight: async (agentIds, at) =>
+                db.transaction(() => {
+                    const recovered: WebhookDeliveryRecord[] = []
+                    for (const agentId of agentIds) {
+                        const rows = q.webhookInflightForAgent.all<WebhookDeliveryRow>(agentId)
+                        q.webhookRecover.run(at, agentId)
+                        recovered.push(
+                            ...rows.map((row) => ({
+                                ...deliveryRead(row),
+                                status: "pending" as const,
+                                uncertain: true,
+                            })),
+                        )
+                    }
+                    return recovered
+                }),
+        }
+
         this.usage = {
             record: async (call) => {
                 q.modelCallInsert.run(
@@ -2039,6 +2258,8 @@ export class SqliteStore implements Store {
                 // Not in the footprint either: what an agent cost is billing history, not something a
                 // person weighs before deleting it. Deleted rather than orphaned, for the same reason.
                 q.modelCallDeleteAll.run(agentId)
+                // Its pending webhook deliveries too; the subscriptions are server-wide and stay.
+                q.webhookDeleteForAgent.run(agentId)
                 // Also not in the footprint, and deleted for the reason migration 15 gives: this
                 // is the table `kv` should have been, so the delete that `kv` could never have is
                 // the whole argument for the column. A state row surviving its agent would make a

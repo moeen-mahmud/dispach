@@ -669,6 +669,22 @@ export interface SecretsWrittenLike {
     readonly error?: WireError
 }
 
+/** A webhook subscription as the server reports it. Never the secret. */
+export interface WebhookLike {
+    readonly subscriptionId: string
+    readonly url: string
+    readonly types: readonly string[]
+    readonly scope?: { readonly agents?: readonly string[]; readonly sessionPrefix?: string }
+    readonly createdAt: string
+    /** True while the last attempt failed. `lastError` says why. */
+    readonly failing: boolean
+    readonly consecutiveFailures: number
+    readonly lastError?: string
+    readonly lastSuccessAt?: string
+    readonly lastFailureAt?: string
+    readonly pending: number
+}
+
 /** How to slice usage. `by` defaults to `["agent", "model"]` on the server; `[]` is one total. */
 export interface UsageOptions {
     readonly by?: readonly ("agent" | "model" | "day" | "sender")[]
@@ -745,6 +761,20 @@ export interface DispachClient {
     createAgent(answers: Readonly<Record<string, string>>): Promise<ProvisionedAgentLike>
     /** What every agent this credential reaches cost, from the per-call meter. */
     usage(options?: UsageOptions): Promise<UsageReportLike>
+    /** The webhook subscriptions this credential can see. */
+    webhooks(): Promise<readonly WebhookLike[]>
+    /**
+     * Subscribe a URL. **The secret comes back exactly once**: store it where the receiver can read
+     * it, and verify deliveries with any Standard Webhooks library.
+     */
+    createWebhook(input: {
+        readonly url: string
+        readonly types: readonly string[]
+        readonly agents?: readonly string[]
+    }): Promise<WebhookLike & { readonly secret: string }>
+    deleteWebhook(
+        subscriptionId: string,
+    ): Promise<{ readonly id: string; readonly deleted: boolean }>
     /** Every template this server can create an agent from, with the variables each declares. */
     templates(): Promise<readonly TemplateLike[]>
     /**
@@ -1165,6 +1195,15 @@ export function createClient(options: ClientOptions): DispachClient {
         // Unwrapped, because the route wraps it: a list read declared as the wrong shape is how a
         // page crashed to black on `schedules.map is not a function`.
         usage: (options) => json<UsageReportLike>("GET", `/v1/usage${usageQuery(options)}`),
+        webhooks: async () =>
+            (await json<{ webhooks: readonly WebhookLike[] }>("GET", "/v1/webhooks")).webhooks,
+        createWebhook: (input) =>
+            json<WebhookLike & { secret: string }>("POST", "/v1/webhooks", { body: input }),
+        deleteWebhook: (subscriptionId) =>
+            json<{ id: string; deleted: boolean }>(
+                "DELETE",
+                `/v1/webhooks/${encodeURIComponent(subscriptionId)}`,
+            ),
         templates: async () =>
             (await json<{ templates: readonly TemplateLike[] }>("GET", "/v1/templates")).templates,
         createAgentFromTemplate: (input) =>

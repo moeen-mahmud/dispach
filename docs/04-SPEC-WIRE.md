@@ -95,6 +95,13 @@ and WebSocket surfaces can return:
 | `usage_group_invalid` | 400 | `?by=` named a grouping other than `agent`, `model`, `day` or `sender`. |
 | `usage_range_invalid` | 400 | `?from=` or `?to=` is not a date. |
 | `turns_page_invalid` | 400 | `?limit=` or `?before=` is not a positive whole number. |
+| `webhook_url_invalid` | 400 | Not an absolute http(s) URL, or it carries credentials. |
+| `webhook_target_refused` | 400 | The URL resolves to an address webhooks may not reach: private, loopback or CGNAT the operator has not allowed, or link-local, which is never allowed. Names the address. |
+| `webhook_target_unresolved` | 400 | The host does not resolve from this server, so it cannot be checked. |
+| `webhook_types_required` | 400 | `types` is missing or empty. |
+| `webhook_type_invalid` | 400 | A type that is not an event, or `model.chunk`, which is one request per token. |
+| `webhook_scope_invalid` | 400 | `agents` names one this credential cannot reach or this server does not hold. |
+| `webhook_not_found` | 404 | No such subscription, or one outside this credential's reach; the two are indistinguishable. |
 | `provision_answer_invalid` | 400 | One answer failed its step's validation, or was not a string. Carries the field. |
 | `provision_unknown_answer` | 400 | A key that is not a question this runtime asks. |
 | `provision_directory_refused` | 400 | `dir` or `dirChoice` over the wire. The sandbox decides; see above. |
@@ -211,6 +218,11 @@ POST /v1/agents            { answers: {step: value, …} }
                          → 201 { id, dir, files[], adopted[] }
 GET  /v1/templates       → { templates: [{ name, description?, vars[], problem? }] }
 
+POST   /v1/webhooks { url, types[], agents? } → 201 { subscriptionId, url, types, scope?, secret, … }
+GET    /v1/webhooks            → { webhooks: [{ subscriptionId, url, types, scope?, failing,
+                                                consecutiveFailures, lastError?, pending, … }] }
+DELETE /v1/webhooks/:webhookId → { id, deleted: true }
+
 GET /v1/usage?by&from&to → { buckets: [{ agentId?, model?, day?, sender?, calls, promptTokens,
                                          cachedPromptTokens, outputTokens, estimatedCalls }],
                              meteredSince? }
@@ -301,6 +313,33 @@ The agent is rendered into memory, written to a staging directory outside the ag
 loaded by the same check `init` runs, and only then renamed into place. A request that fails leaves
 nothing behind. A broken template is **listed** with its `problem` rather than hidden, because an
 operator who put one in place and cannot see it has no way to learn it has a typo.
+
+**Webhooks deliver the event stream to a URL**, for a backend that should not hold an SSE stream
+open per agent. The body is the envelope exactly as `GET /v1/events` serves it. Signing follows
+[Standard Webhooks](https://www.standardwebhooks.com/), so a receiver verifies with an existing
+library:
+
+```
+webhook-id:        msg_…            stable across retries and a resend after a crash: dedupe on it
+webhook-timestamp: 1727180000       Unix seconds of this attempt; reject one far from now
+webhook-signature: v1,<base64 HMAC-SHA256 of "{id}.{timestamp}.{body}", keyed by the secret's base64>
+```
+
+- **Who hears what.** `types` is any event type except `model.chunk`. A subscription hears at most
+  what the key that created it reaches, agents and session prefix both, and `agents` narrows it
+  further. A scoped key sees and deletes only subscriptions inside its reach.
+- **Where it may go.** Every address the host resolves to is checked, at subscribe and before
+  every send. The public internet is allowed. Private, loopback and CGNAT addresses are refused
+  unless the operator lists the hostname or range in the server's `<PREFIX>WEBHOOK_ALLOW`
+  (`velacrew-api, 172.16.0.0/12`), because a self-hosted receiver is usually on the same network.
+  Link-local, where cloud metadata lives, is refused whatever is listed. A redirect is not
+  followed. DNS rebinding is not covered: the check and the connection resolve separately.
+- **Retries.** A non-2xx or a timeout retries at 30 s, 2 min, 10 min, 1 h and 6 h, then the delivery
+  is failed; `410 Gone` and a redirect fail at once. A delivery in flight when a process died is
+  resent under the same `webhook-id` by the next one. The subscription carries `failing`,
+  `consecutiveFailures` and `lastError`, so a hook nobody is receiving says so where you look.
+- **One sender.** Deliveries are sent by the process hosting the agent, so two processes on one
+  store never send the same one.
 
 **Usage is metered per model call, not read off the turn.** `turns.promptTokens` is the prompt the
 turn *ended* at, the last step's, which is a context-size figure: a five-step turn is billed five
@@ -698,6 +737,9 @@ here that the server does not register, or a registered route missing from here,
 | `GET /v1/keys` | `admin` |
 | `POST /v1/keys` | `admin` |
 | `DELETE /v1/keys/:keyId` | `admin` |
+| `POST /v1/webhooks` | `admin` |
+| `GET /v1/webhooks` | `admin` |
+| `DELETE /v1/webhooks/:webhookId` | `admin` |
 
 
 

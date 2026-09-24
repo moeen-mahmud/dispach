@@ -34,6 +34,7 @@ import {
     newKeySecret,
     newRunId,
     newTurnId,
+    newWebhookSecret,
     PERSON_SETTABLE_PATHS,
     parseSettingValue,
     phasesFor,
@@ -51,6 +52,8 @@ import {
     type UsageGroup,
     type UsageQuery,
     VERSION,
+    type WebhookSubscription,
+    webhookDeliverable,
 } from "@dispach/core"
 import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
 import { authorise } from "./auth.ts"
@@ -86,6 +89,7 @@ import {
     parseBody,
     SecretsBody,
     StopBody,
+    WebhookBody,
 } from "./wire-schemas.ts"
 
 /** Bodies larger than this are refused before a channel plugin sees them. */
@@ -1779,6 +1783,129 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * because a per-sender row is identity. `meteredSince` says how far back the meter goes: it
      * starts at the upgrade that added it, and earlier turns are not guessed at.
      */
+    /**
+     * Outbound webhooks. `admin`, and bound to the creating credential's reach.
+     *
+     * A key narrowed to one agent cannot subscribe to the others' events, and sees and deletes only
+     * the subscriptions inside its own reach; an unscoped subscription is visible only to an
+     * unscoped caller. The secret is returned **once**, here, and never again, the same rule as an
+     * operator key's.
+     */
+    router.add(
+        "POST",
+        "/v1/webhooks",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(WebhookBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const input = parsed.value
+
+            const unknown = input.types.filter(
+                (type) =>
+                    !(EVENT_TYPES as readonly string[]).includes(type) || !webhookDeliverable(type),
+            )
+            if (unknown.length > 0) {
+                return fail(
+                    {
+                        code: "webhook_type_invalid",
+                        message: `Cannot deliver ${unknown.join(", ")}.`,
+                        hint: "Any type from the event stream except model.chunk, which is one request per token. The wire spec's event table lists them.",
+                        field: "types",
+                    },
+                    400,
+                )
+            }
+
+            const reach = scopeFilter(context.principal)
+            if (input.agents !== undefined) {
+                const known = new Set([
+                    ...runtime.list().map((agent) => agent.id),
+                    ...(await runtime.store.agentState.list()).map((state) => state.agentId),
+                ])
+                const outside = input.agents.filter(
+                    (id) => !reachesAgent(context.principal, id) || !known.has(id),
+                )
+                if (outside.length > 0) {
+                    return fail(
+                        {
+                            code: "webhook_scope_invalid",
+                            message: `This credential cannot subscribe to ${outside.join(", ")}.`,
+                            hint: "A subscription hears at most what the key creating it reaches, and only agents this server holds. GET /v1/agents lists them.",
+                            field: "agents",
+                        },
+                        400,
+                    )
+                }
+            }
+            const agents = input.agents ?? reach.agentIds
+            const scope = {
+                ...(agents === undefined ? {} : { agents: [...agents] }),
+                ...(reach.sessionPrefix === undefined
+                    ? {}
+                    : { sessionPrefix: reach.sessionPrefix }),
+            }
+
+            try {
+                await runtime.webhooks.check(input.url)
+            } catch (error) {
+                if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                throw error
+            }
+
+            const secret = newWebhookSecret()
+            const created = await runtime.store.webhooks.create({
+                subscriptionId: `wh_${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`,
+                url: input.url,
+                secret,
+                types: [...new Set(input.types)],
+                ...(Object.keys(scope).length === 0 ? {} : { scope }),
+                createdAt: new Date(options.now?.() ?? Date.now()).toISOString(),
+            })
+            await runtime.webhooks.changed()
+            return json({ ...webhookWire(created), secret }, 201)
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/webhooks",
+        async (context) => {
+            const all = await runtime.store.webhooks.list()
+            return json({
+                webhooks: all
+                    .filter((sub) => webhookVisible(context.principal, sub))
+                    .map(webhookWire),
+            })
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/webhooks/:webhookId",
+        async (context) => {
+            const id = context.params.webhookId ?? ""
+            const found = await runtime.store.webhooks.get(id)
+            // Out of reach answers exactly what an imaginary one does.
+            if (found === undefined || !webhookVisible(context.principal, found)) {
+                return fail(
+                    {
+                        code: "webhook_not_found",
+                        message: `No webhook with id "${id}".`,
+                        hint: "GET /v1/webhooks lists the subscriptions this credential can see.",
+                    },
+                    404,
+                )
+            }
+            await runtime.store.webhooks.delete(id)
+            await runtime.webhooks.changed()
+            return json({ id, deleted: true })
+        },
+        { capability: "admin" },
+    )
+
     router.add(
         "GET",
         "/v1/usage",
@@ -3115,6 +3242,30 @@ function secretsTarget(
     const manifestPath = typeof source === "string" ? source : options.resolveAgent?.(id)
     if (manifestPath === undefined) return { kind: "response", response: notFound("agent", id) }
     return { kind: "found", id, manifestPath, admin }
+}
+
+/** A subscription as the wire carries it: never the secret, and `failing` spelled out. */
+function webhookWire(sub: WebhookSubscription): Record<string, unknown> {
+    return { ...sub, failing: sub.consecutiveFailures > 0 }
+}
+
+/**
+ * Whether this caller may see a subscription: its scope must sit inside the caller's reach. An
+ * unscoped subscription is visible only to an unscoped caller, or a key narrowed to one agent could
+ * list, and delete, the operator's server-wide hooks.
+ */
+function webhookVisible(principal: Principal, sub: WebhookSubscription): boolean {
+    const reach = scopeFilter(principal)
+    if (reach.agentIds !== undefined) {
+        const agents = sub.scope?.agents
+        if (agents === undefined || !agents.every((id) => reach.agentIds?.includes(id)))
+            return false
+    }
+    if (reach.sessionPrefix !== undefined) {
+        const prefix = sub.scope?.sessionPrefix
+        if (prefix === undefined || !prefix.startsWith(reach.sessionPrefix)) return false
+    }
+    return true
 }
 
 /** A positive whole-number query parameter: `undefined` when absent, `null` when malformed. */

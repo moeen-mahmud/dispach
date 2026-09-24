@@ -43,6 +43,13 @@ import { handoffTool } from "../team/supervisor.ts"
 import type { ApprovalRequest } from "../tools/execute.ts"
 import { ToolRegistry } from "../tools/registry.ts"
 import type { ScriptRunner, Tool, ToolProvider, ToolProviderFactory } from "../tools/types.ts"
+import { VERSION } from "../version.ts"
+import {
+    EMPTY_ALLOWLIST,
+    parseWebhookAllowlist,
+    type WebhookAllowlist,
+    WebhookDispatcher,
+} from "../webhooks/webhooks.ts"
 import { Agent } from "./agent.ts"
 import { type ChannelFactory, ChannelHub } from "./channels.ts"
 import { claimLeases, LEASE_BEAT_MS } from "./lease.ts"
@@ -248,6 +255,8 @@ export class Runtime {
      */
     readonly plugins: ReadonlyMap<string, readonly LoadedPlugin[]>
     readonly scheduler: Scheduler
+    /** Outbound webhooks. Call `changed()` after writing a subscription. */
+    readonly webhooks: WebhookDispatcher
 
     /**
      * Every tool provider constructed, **by agent id**. Held so `stop` can tell each one to let go.
@@ -347,6 +356,7 @@ export class Runtime {
         channels: ChannelHub
         plugins: ReadonlyMap<string, readonly LoadedPlugin[]>
         scheduler: Scheduler
+        webhooks: WebhookDispatcher
         ownsStore: boolean
         owned: readonly string[]
         declined: readonly LeaseRecord[]
@@ -361,6 +371,7 @@ export class Runtime {
         this.channels = init.channels
         this.plugins = init.plugins
         this.scheduler = init.scheduler
+        this.webhooks = init.webhooks
         this.#ownsStore = init.ownsStore
         this.#owned = [...init.owned]
         this.#declined = [...init.declined]
@@ -573,6 +584,34 @@ export class Runtime {
             run: scheduleRunner({ agents: () => runtime.all(), hub }),
         })
 
+        /**
+         * Outbound webhooks. Listening now costs nothing (enqueueing is a row); sending waits for
+         * `runtime.ready` below. The allowlist is the operator's, from the environment: a malformed
+         * one is a warning and "public only", the safe direction, never a failed boot.
+         */
+        const allowVar = `${BRAND.envPrefix}WEBHOOK_ALLOW`
+        let allow: WebhookAllowlist = EMPTY_ALLOWLIST
+        try {
+            allow = parseWebhookAllowlist((options.env ?? process.env)[allowVar], allowVar)
+        } catch (error) {
+            bus.emit("agent.warning", {
+                code: isHarnessError(error) ? error.code : "webhook_allowlist_invalid",
+                message: error instanceof Error ? error.message : String(error),
+                hint: isHarnessError(error)
+                    ? error.hint
+                    : "Webhooks go to the public internet only until the list is fixed.",
+            })
+        }
+        const webhooks: WebhookDispatcher = new WebhookDispatcher({
+            store: store.webhooks,
+            bus,
+            fetch: options.fetch ?? globalThis.fetch,
+            allow,
+            agents: () => runtime.all().map((agent) => agent.id),
+            userAgent: `${BRAND.name}/${VERSION}`,
+        })
+        await webhooks.attach()
+
         const runtime: Runtime = new Runtime({
             runtimeId,
             bus,
@@ -582,6 +621,7 @@ export class Runtime {
             channels: hub,
             plugins: prepared.plugins,
             scheduler,
+            webhooks,
             ownsStore,
             owned: leases.owned,
             declined: leases.declined,
@@ -674,6 +714,10 @@ export class Runtime {
         })
 
         if (options.startSchedules === true) await scheduler.start()
+
+        // After readiness: sending is network I/O. Recovery first, so a delivery a dead process
+        // left in flight goes out again under the same `webhook-id` and is flagged uncertain.
+        await webhooks.start()
 
         // After readiness, so a timer never delays boot. `unref` because a heartbeat must not be
         // the reason a one-shot command fails to exit — the lease going stale is exactly the
@@ -1217,6 +1261,7 @@ export class Runtime {
         // Before the channels, because a schedule firing mid-shutdown would enqueue a delivery into
         // an outbox that is about to stop draining.
         await this.scheduler.stop()
+        this.webhooks.stop()
         // Before the store closes, because stopping a transport can flush a final delivery and a
         // closed database would turn that into an exception during shutdown.
         await this.channels.stop()

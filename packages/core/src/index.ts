@@ -258,6 +258,15 @@ export {
 export { parseSSE, type SSEEvent } from "./model/sse.ts"
 export { nearest } from "./nearest.ts"
 export {
+    type AddressKind,
+    type AddressVerdict,
+    classifyAddress,
+    classifyIPv4,
+    classifyIPv6,
+    parseIPv4,
+    parseIPv6,
+} from "./net/address.ts"
+export {
     type ApprovalOptions,
     approvalMiddleware,
     type RetryOptions,
@@ -466,6 +475,10 @@ export type {
     UsageGroup,
     UsageQuery,
     UsageStore,
+    WebhookDeliveryRecord,
+    WebhookScope,
+    WebhookStore,
+    WebhookSubscription,
 } from "./store/store.ts"
 export { CAPABILITIES, DEFAULT_KEY_TOUCH_MS, USAGE_GROUPS } from "./store/store.ts"
 export {
@@ -594,6 +607,20 @@ export type {
     WorkspaceWriteTarget,
 } from "./tools/types.ts"
 export { VERSION } from "./version.ts"
+export {
+    checkWebhookTarget,
+    EMPTY_ALLOWLIST,
+    type LookupLike,
+    newWebhookSecret,
+    parseWebhookAllowlist,
+    signWebhook,
+    verifyWebhook,
+    type WebhookAllowlist,
+    WebhookDispatcher,
+    webhookDeliverable,
+    webhookHears,
+    webhookMessageId,
+} from "./webhooks/webhooks.ts"
 export {
     type AuthoringInput,
     BULLET_DENSITY_LIMIT,
