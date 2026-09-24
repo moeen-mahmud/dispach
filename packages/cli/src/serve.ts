@@ -32,6 +32,8 @@ import {
     createClaimTicket,
     serve,
 } from "@dispach/server"
+import { secretStatus, writeSecrets } from "#lib/agent-secrets"
+import { listTemplates, provisionFromTemplate } from "#lib/agent-template"
 import { ambientEnv } from "#lib/ambient"
 import { inContainer } from "#lib/bootstrap"
 import { setChannelCredential, setChannelEnabled, unpairChannel } from "#lib/channel-actions"
@@ -40,7 +42,7 @@ import { claimSignals, onExit } from "#lib/exit"
 import { hostableAgents, manifestForId } from "#lib/lifecycle"
 import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
 import { provisionAgent, provisionSteps } from "#lib/provision"
-import { agentsDir, pluginRoot, storePath } from "#lib/sandbox"
+import { agentsDir, pluginRoot, storePath, templatesDir } from "#lib/sandbox"
 
 export interface ServeOptions {
     /**
@@ -454,7 +456,20 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                     steps: () => provisionSteps({ agentDirBase: agentsDir(env) }),
                     create: (answers) =>
                         provisionAgent({ answers, defaults: { agentDirBase: agentsDir(env) } }),
+                    templates: () => listTemplates(templatesDir(env)),
+                    createFromTemplate: (input) =>
+                        provisionFromTemplate({
+                            ...input,
+                            templatesDir: templatesDir(env),
+                            agentDirBase: agentsDir(env),
+                        }),
                 },
+                /**
+                 * `GET`/`PUT /v1/agents/:id/secrets`. The allowed names come from the agent's own
+                 * manifest inside `writeSecrets`, never from the request; the `.env` write is
+                 * `applySecret`, the same one `config env` uses.
+                 */
+                secrets: { status: secretStatus, write: writeSecrets },
                 /**
                  * The same functions the `channels` command calls, injected for the same reason the
                  * provisioner is: *how* a channel is switched off or re-credentialled is the CLI's —

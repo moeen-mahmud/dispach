@@ -74,6 +74,7 @@ import {
     PhaseBody,
     ProvisionBody,
     parseBody,
+    SecretsBody,
     StopBody,
 } from "./wire-schemas.ts"
 
@@ -210,6 +211,29 @@ export interface HandlerOptions {
      * finding rather than a hypothetical.
      */
     readonly channels?: ChannelAdmin
+    /**
+     * What the CLI injects for `GET` and `PUT /v1/agents/:id/secrets`. Absent answers `501`.
+     *
+     * Injected for `channels`' reason: the values go into the `.env` beside the manifest, and how is
+     * the CLI's (`applySecret`, at `0600`). The **allowed names come from the manifest**, never from
+     * the caller, which is the rule `setCredential` states for one channel, applied to the whole agent.
+     */
+    readonly secrets?: SecretAdmin
+}
+
+/** What the CLI injects for the secrets routes. See `HandlerOptions.secrets`. */
+export interface SecretAdmin {
+    /** Every variable the manifest reads that a caller may set, and whether each is set. Never a value. */
+    status(manifestPath: string): readonly {
+        readonly name: string
+        readonly set: boolean
+        readonly usedBy: readonly string[]
+    }[]
+    /** All or nothing. Throws a `HarnessError` naming the first variable the manifest does not read. */
+    write(
+        manifestPath: string,
+        values: Readonly<Record<string, string>>,
+    ): { readonly written: readonly string[]; readonly shadowed: readonly string[] }
 }
 
 /** What the CLI injects for the channel routes. See `HandlerOptions.channels`. */
@@ -260,6 +284,28 @@ export interface Provisioner {
         readonly dir: string
         readonly files: readonly string[]
     }
+    /** Every template in this server's sandbox, with its variables. A broken one carries `problem`. */
+    templates(): readonly TemplateWire[]
+    /** Create an agent from a template. Throws a `HarnessError`, as `create` does. */
+    createFromTemplate(input: {
+        readonly template: string
+        readonly name: string
+        readonly vars: Readonly<Record<string, string>>
+    }): ReturnType<Provisioner["create"]>
+}
+
+/** One template as the wire carries it. Structural, so `packages/cli` needs no import from here. */
+export interface TemplateWire {
+    readonly name: string
+    readonly description?: string
+    readonly vars: readonly {
+        readonly name: string
+        readonly description?: string
+        readonly required: boolean
+        readonly default?: string
+        readonly secret: boolean
+    }[]
+    readonly problem?: { readonly code: string; readonly message: string; readonly hint: string }
 }
 
 /** One question as the wire carries it. Structural, so `packages/cli` needs no import from here. */
@@ -894,11 +940,45 @@ export function createHandler(options: HandlerOptions): ServerHandler {
              */
             const parsed = parseBody(ProvisionBody, body.value)
             if (!parsed.ok) return fail(parsed.error, 400)
-            const text = parsed.value.answers
+            const { answers, template } = parsed.value
+            /**
+             * Exactly one of the two. Both is refused rather than one silently winning, because a
+             * caller who sent both believes both were applied; neither keeps the refusal a pre-template
+             * client already handles.
+             */
+            if (answers !== undefined && template !== undefined) {
+                return fail(
+                    {
+                        code: "provision_body_ambiguous",
+                        message: "The body has both answers and a template.",
+                        hint: "Send answers to create an agent the way init does, or template with name and vars to create one from a template in this server's sandbox. Not both.",
+                        field: "template",
+                    },
+                    400,
+                )
+            }
+            if (answers === undefined && template === undefined) {
+                return fail(
+                    {
+                        code: "provision_answers_required",
+                        message: "The body has neither answers nor a template.",
+                        hint: 'Send { "answers": { "name": "milo", … } } (GET /v1/provision lists the steps), or { "template": "…", "name": "…", "vars": {…} } (GET /v1/templates lists the templates).',
+                        field: "answers",
+                    },
+                    400,
+                )
+            }
 
             let created: ReturnType<Provisioner["create"]>
             try {
-                created = provision.create(text)
+                created =
+                    template === undefined
+                        ? provision.create(answers ?? {})
+                        : provision.createFromTemplate({
+                              template,
+                              name: parsed.value.name ?? "",
+                              vars: parsed.value.vars ?? {},
+                          })
             } catch (error) {
                 // The implementation knows why far better than this route does, so its hint passes
                 // through rather than being paraphrased.
@@ -942,6 +1022,101 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     },
                     201,
                 )
+            }
+        },
+        { capability: "admin" },
+    )
+
+    /**
+     * The templates an agent can be created from, with the variables each declares.
+     *
+     * `read`, like `GET /v1/provision`: a list of what can be asked for is not a secret, and a
+     * secret variable is reported as one (`secret: true`) with no value, because a template holds
+     * none. A broken template is listed with its `problem` rather than hidden.
+     */
+    router.add(
+        "GET",
+        "/v1/templates",
+        () => json({ templates: options.provision?.templates() ?? [] }),
+        { capability: "read" },
+    )
+
+    /**
+     * Which variables this agent reads, and whether each is set. Never a value.
+     *
+     * Reached for an agent that is **not hosted** as well, deliberately: the commonest reason an
+     * agent is not running is the key it is missing, and that is precisely the agent this route has
+     * to describe. Scope is checked here rather than through `withAgent`, which only knows hosted
+     * agents, and it answers the same 404 an imaginary agent gets.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/secrets",
+        async (context) => {
+            const found = secretsTarget(runtime, options, context)
+            if (found.kind === "response") return found.response
+            return json({ id: found.id, secrets: found.admin.status(found.manifestPath) })
+        },
+        { capability: "admin" },
+    )
+
+    /**
+     * Write an agent's credentials, and apply them.
+     *
+     * **Applied, not just written.** A hosted agent is replaced, so the new value is the one its
+     * next turn uses; an agent that was not running (its key was missing, which is the case this
+     * exists for) is adopted. A stopped agent is written and left stopped, because `stop` is a
+     * durable switch and a credential write is not a request to reverse it. When applying fails the
+     * response is still `200` with an `error`, for provisioning's reason: the values are on disk,
+     * and reporting the request as failed would send somebody to write them again.
+     */
+    router.add(
+        "PUT",
+        "/v1/agents/:id/secrets",
+        async (context) => {
+            const found = secretsTarget(runtime, options, context)
+            if (found.kind === "response") return found.response
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(SecretsBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+
+            let result: ReturnType<SecretAdmin["write"]>
+            try {
+                result = found.admin.write(found.manifestPath, parsed.value.values)
+            } catch (error) {
+                if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                throw error
+            }
+            const written = { id: found.id, written: result.written, shadowed: result.shadowed }
+
+            const hosted = runtime.list().some((agent) => agent.id === found.id)
+            const state = await runtime.store.agentState.get(found.id)
+            if (!hosted && state?.enabled === false) {
+                return json({ ...written, applied: "none", adopted: [], stopped: true })
+            }
+            try {
+                const admitted = hosted
+                    ? await runtime.replace(found.id)
+                    : await runtime.adopt(found.manifestPath)
+                return json({
+                    ...written,
+                    applied: hosted ? "reloaded" : "adopted",
+                    adopted: admitted.map((agent) => agent.id),
+                })
+            } catch (error) {
+                return json({
+                    ...written,
+                    applied: "none",
+                    adopted: [],
+                    error: isHarnessError(error)
+                        ? error.toDetail()
+                        : {
+                              code: "secrets_apply_failed",
+                              message: error instanceof Error ? error.message : String(error),
+                              hint: "The values were written and the agent is not running on them yet. Fix what the message names and reload or start it.",
+                          },
+                })
             }
         },
         { capability: "admin" },
@@ -2813,6 +2988,49 @@ function presentedClaim(request: Request): string | undefined {
     if (!header.startsWith("Bearer ")) return undefined
     const value = header.slice(7)
     return value === "" ? undefined : value
+}
+
+/**
+ * The agent a secrets route acts on, hosted or not, with its manifest.
+ *
+ * Scope first, and the same 404 whether the agent is out of scope or imaginary. A hosted agent's
+ * manifest is its own source; one this process is not hosting is found through `resolveAgent`,
+ * which is the lookup `start` uses.
+ */
+function secretsTarget(
+    runtime: Runtime,
+    options: HandlerOptions,
+    context: RequestContext,
+):
+    | {
+          readonly kind: "found"
+          readonly id: string
+          readonly manifestPath: string
+          readonly admin: SecretAdmin
+      }
+    | { readonly kind: "response"; readonly response: Response } {
+    const id = context.params.id ?? ""
+    if (!reachesAgent(context.principal, id)) {
+        return { kind: "response", response: notFound("agent", id) }
+    }
+    const admin = options.secrets
+    if (admin === undefined) {
+        return {
+            kind: "response",
+            response: fail(
+                {
+                    code: "secrets_not_supported",
+                    message: "This server cannot write an agent's credentials.",
+                    hint: "Credentials go into the .env beside an agent's manifest, and this process was built without a writer for it. Set them where the agent lives, with `config env`, and reload it.",
+                },
+                501,
+            ),
+        }
+    }
+    const source = runtime.sourceOf(id)
+    const manifestPath = typeof source === "string" ? source : options.resolveAgent?.(id)
+    if (manifestPath === undefined) return { kind: "response", response: notFound("agent", id) }
+    return { kind: "found", id, manifestPath, admin }
 }
 
 function withAgent(

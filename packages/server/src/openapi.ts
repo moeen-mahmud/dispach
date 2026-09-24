@@ -41,6 +41,7 @@ import {
     MessageBody,
     PhaseBody,
     ProvisionBody,
+    SecretsBody,
     StopBody,
 } from "./wire-schemas.ts"
 
@@ -82,12 +83,30 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         summary: "The questions creating an agent asks, and whether this server can answer them.",
     },
     "POST /v1/agents": {
-        summary: "Create an agent and adopt it into this host, live.",
+        summary:
+            "Create an agent, from answers or from a template, and adopt it into this host, live.",
         body: ProvisionBody,
         statuses: [
             { code: 201, when: "created; `adopted` is empty with an `error` if it is not running" },
             { code: 403, when: "not a loopback bind" },
             { code: 501, when: "this server has no provisioner" },
+        ],
+    },
+    "GET /v1/templates": {
+        summary: "The templates an agent can be created from, and the variables each declares.",
+    },
+    "GET /v1/agents/:id/secrets": {
+        summary:
+            "Which variables the agent's manifest reads, and whether each is set. Never a value.",
+        statuses: [{ code: 501, when: "this server has no credential writer" }],
+    },
+    "PUT /v1/agents/:id/secrets": {
+        summary: "Write the agent's credentials into its .env and apply them: reload or adopt.",
+        body: SecretsBody,
+        statuses: [
+            { code: 200, when: "written; `applied` says whether the agent is running on them" },
+            { code: 400, when: "a variable the manifest does not read, or an empty value" },
+            { code: 501, when: "this server has no credential writer" },
         ],
     },
     "POST /v1/agents/:id/stop": {

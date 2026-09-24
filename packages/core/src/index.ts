@@ -186,6 +186,16 @@ export {
     settingByPath,
 } from "./manifest/settings.ts"
 export {
+    manifestEnvReferences,
+    parseTemplateSpec,
+    type RenderedTemplate,
+    renderTemplate,
+    TEMPLATE_BUILTINS,
+    type TemplateFile,
+    type TemplateSpec,
+    type TemplateVar,
+} from "./manifest/template.ts"
+export {
     assertApiVersion,
     scanForLiteralSecrets,
     scheduleDeliveryWarnings,

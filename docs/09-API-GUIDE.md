@@ -80,6 +80,67 @@ the name instead and a browser then reported a running agent as not running.
 export A=localhost:7420/v1/agents/milo
 ```
 
+
+---
+
+## 1b. One agent per customer: templates and secrets
+
+`answers` replays the wizard, which suits a person creating one agent. A product creating the same
+agent for every customer wants a **template**: an agent directory the operator writes once under
+the sandbox's `templates/`, plus a `template.yaml` declaring its variables.
+
+```
+~/.dispach/templates/support/
+  template.yaml      # the variables
+  agent.yaml         # id: {{agent.id}}   name: {{agent.name}}
+  workspace/…        # "You work for {{vars.store}}."
+```
+
+```yaml
+# template.yaml
+description: Support agent for one store
+vars:
+  store:  { description: The store's display name }
+  apiKey: { secret: MODEL_API_KEY }        # goes to .env, never into a file
+```
+
+The easiest way to make one is from an agent you already have. Copy its directory, delete its
+`.env`, write `id: {{agent.id}}` and `name: {{agent.name}}` in the manifest, and add a
+`template.yaml`. The `{{USER}}`-style placeholders the workspace already carries are left alone: only
+`{{vars.…}}` and `{{agent.…}}` belong to templates.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/templates
+# {"templates":[{"name":"support","vars":[{"name":"store","required":true,"secret":false}, …]}]}
+
+curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"template":"support","name":"Acme Store","vars":{"store":"Acme","apiKey":"sk-…"}}' \
+  localhost:7420/v1/agents
+# → 201 {"id":"acme-store", …, "adopted":["acme-store"]}
+```
+
+A value is substituted as text in the workspace files and as a quoted string in YAML, so a store
+called `x", tools: {…}` stays a store name and never becomes configuration. A request that fails
+leaves nothing on disk: the agent is validated with the same check `init` runs before it appears
+under its id.
+
+A key can arrive later. `GET /secrets` names the variables the agent's manifest reads, without
+their values. `PUT /secrets` writes them and applies them, reloading a hosted agent or adopting one
+that was waiting for its key:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/agents/acme-store/secrets
+# {"id":"acme-store","secrets":[{"name":"MODEL_API_KEY","set":false,"usedBy":["model.main.apiKeyEnv"]}]}
+
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"values":{"MODEL_API_KEY":"sk-…"}}' localhost:7420/v1/agents/acme-store/secrets
+# {"id":"acme-store","written":["MODEL_API_KEY"],"shadowed":[],"applied":"adopted","adopted":["acme-store"]}
+```
+
+Only names the manifest reads are accepted, so a caller cannot write the server's own token. If
+`shadowed` lists a name, the server's environment sets the same variable and wins; set it there,
+or unset it there.
+
 ---
 
 ## 2. Ask it something

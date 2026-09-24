@@ -194,6 +194,13 @@ export interface AgentClient {
      * rather than aborting it, so a caller applying a config change retries instead of assuming.
      */
     reload(): Promise<{ readonly id: string; readonly adopted: readonly string[] }>
+    /** The variables this agent's manifest reads, and whether each is set. Never a value. */
+    secrets(): Promise<readonly SecretStatusLike[]>
+    /**
+     * Write credentials into the agent's `.env` and apply them: reloaded if hosted, adopted if it was
+     * not running. Only names the manifest reads are accepted, all or nothing.
+     */
+    setSecrets(values: Readonly<Record<string, string>>): Promise<SecretsWrittenLike>
     schedules(): Promise<readonly ScheduleRecord[]>
     /**
      * Arm a schedule. The server validates the expression and the delivery target.
@@ -605,6 +612,47 @@ export interface ProvisionedAgentLike {
     readonly error?: WireError
 }
 
+/** One template, as `GET /v1/templates` lists it. A broken one carries `problem` and no variables. */
+export interface TemplateLike {
+    readonly name: string
+    readonly description?: string
+    readonly vars: readonly {
+        readonly name: string
+        readonly description?: string
+        readonly required: boolean
+        readonly default?: string
+        /** Written to the agent's `.env`, never into a file, and never returned by any route. */
+        readonly secret: boolean
+    }[]
+    readonly problem?: WireError
+}
+
+/** One variable an agent's manifest reads. Whether it is set, never what it is. */
+export interface SecretStatusLike {
+    readonly name: string
+    readonly set: boolean
+    /** The manifest fields that read it. */
+    readonly usedBy: readonly string[]
+}
+
+/**
+ * What `PUT /v1/agents/:id/secrets` answers, `200` whenever the values were written.
+ *
+ * `applied` is the part to read: `reloaded` for a hosted agent, `adopted` for one that was not
+ * running (usually because this key was the thing missing), `none` for a stopped agent or when
+ * applying failed, in which case `error` says why. `shadowed` names values written and overridden
+ * by the server's own environment, which wins by design.
+ */
+export interface SecretsWrittenLike {
+    readonly id: string
+    readonly written: readonly string[]
+    readonly shadowed: readonly string[]
+    readonly applied: "reloaded" | "adopted" | "none"
+    readonly adopted: readonly string[]
+    readonly stopped?: boolean
+    readonly error?: WireError
+}
+
 /** How far one credential reaches. Absent fields mean "everything". See `04-SPEC-WIRE.md`. */
 export interface KeyScopeLike {
     readonly agents?: readonly string[]
@@ -649,6 +697,17 @@ export interface DispachClient {
      * A bad answer comes back as a `400` whose `field` names the step to fix.
      */
     createAgent(answers: Readonly<Record<string, string>>): Promise<ProvisionedAgentLike>
+    /** Every template this server can create an agent from, with the variables each declares. */
+    templates(): Promise<readonly TemplateLike[]>
+    /**
+     * Create an agent from a template and adopt it. The id is derived from `name`. A secret
+     * variable's value goes to the new agent's `.env` and is never returned.
+     */
+    createAgentFromTemplate(input: {
+        readonly template: string
+        readonly name: string
+        readonly vars?: Readonly<Record<string, string>>
+    }): Promise<ProvisionedAgentLike>
     /**
      * Every credential, live and revoked, with the sentence this server says about scope.
      *
@@ -882,6 +941,12 @@ export function createClient(options: ClientOptions): DispachClient {
                     body: {},
                 }),
 
+            secrets: async () =>
+                (await json<{ secrets: readonly SecretStatusLike[] }>("GET", at("/secrets")))
+                    .secrets,
+            setSecrets: (values) =>
+                json<SecretsWrittenLike>("PUT", at("/secrets"), { body: { values } }),
+
             /**
              * Unwrapped, because the route wraps it — and this was declared as a bare array and
              * **never called** until 17.3's panel became the first consumer, at which point the
@@ -1037,6 +1102,12 @@ export function createClient(options: ClientOptions): DispachClient {
             json<OperatorKeyLike>("DELETE", `/v1/keys/${encodeURIComponent(keyId)}`),
         createAgent: (answers) =>
             json<ProvisionedAgentLike>("POST", "/v1/agents", { body: { answers } }),
+        // Unwrapped, because the route wraps it: a list read declared as the wrong shape is how a
+        // page crashed to black on `schedules.map is not a function`.
+        templates: async () =>
+            (await json<{ templates: readonly TemplateLike[] }>("GET", "/v1/templates")).templates,
+        createAgentFromTemplate: (input) =>
+            json<ProvisionedAgentLike>("POST", "/v1/agents", { body: input }),
 
         async *events(opts) {
             const params = new URLSearchParams()

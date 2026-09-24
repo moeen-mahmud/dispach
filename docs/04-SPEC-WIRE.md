@@ -65,7 +65,33 @@ and WebSocket surfaces can return:
 | `provisioning_not_local` | 403 | `POST /v1/agents` with neither a loopback bind nor a credential carrying `admin`. What is refused is a filesystem write on a server that required **no** credential and is reachable from the network — the bind-only version of this refused the safer case, since a token-less loopback server was allowed while an authenticated public one was not. |
 | `request_body_invalid` | 400 | A body failed its schema and the failing field declared no code of its own. Carries the field. |
 | `agent_stop_invalid` | 400 | `stop` was sent a `reason` that is not a string. |
-| `provision_answers_required` | 400 | The body has no `answers` object. |
+| `provision_answers_required` | 400 | The body has neither `answers` nor `template`. |
+| `provision_body_ambiguous` | 400 | The body has both `answers` and `template`. Refused rather than letting one win, because a caller who sent both believes both applied. |
+| `provision_template_invalid` | 400 | `template` is not a string. |
+| `provision_name_required` | 400 | A `template` body with no `name`, or `name` is not a string. The id is derived from it. |
+| `provision_agent_exists` | 400 | An agent directory with the id derived from `name` already exists. Nothing is overwritten. |
+| `template_not_found` | 400 | No template by that name in this server's sandbox. The hint lists the ones there are. |
+| `template_spec_missing` | 400 | The template directory has no `template.yaml`. |
+| `template_spec_invalid` | 400 | `template.yaml` is not valid, or a variable declares a field that does not exist. Carries the field. |
+| `template_secret_default` | 400 | A secret variable declares a default, which would be one credential shared by every agent made from the template. |
+| `template_var_unknown` | 400 | `vars` names a variable the template does not declare. |
+| `template_vars_missing` | 400 | Required variables were not sent. Names all of them at once. |
+| `template_value_invalid` | 400 | A value (or the name) contains a control character, newline included, or is not a string. |
+| `template_placeholder_unknown` | 400 | A file uses `{{vars.x}}` for an undeclared variable, or an `{{agent.x}}` that is not built in. Carries the file and line. |
+| `template_placeholder_placement` | 400 | In a YAML file, a placeholder is not a whole unquoted value. Carries the file and line. |
+| `template_secret_placeholder` | 400 | A file substitutes a secret variable, which goes to `.env` only. |
+| `template_env_file` | 400 | The template ships a `.env`. |
+| `template_symlink` | 400 | The template contains a symbolic link, which would copy whatever it points at. |
+| `template_binary_file` | 400 | The template contains a file that is not text. |
+| `template_manifest_missing` | 400 | The template has no `agent.yaml` at its root. |
+| `template_id_mismatch` | 400 | The rendered manifest's `id` is not the id derived from `name`. The template must say `id: {{agent.id}}`. |
+| `template_secret_unread` | 400 | A secret variable is written to a variable the manifest never reads. |
+| `secrets_not_supported` | 501 | This server was built without a credential writer. |
+| `secrets_values_required` | 400 | `PUT /secrets` with no `values` object. |
+| `secret_value_invalid` | 400 | A value is not a string. |
+| `secret_not_referenced` | 400 | A name the agent's manifest does not read, or the server's own `server.tokenEnv`. Nothing was written. |
+| `secret_value_empty` | 400 | An empty value, which fails a load exactly as a missing one does. Nothing was written. |
+| `secrets_apply_failed` | 200 | Carried in `error` on a successful write when reloading or adopting failed with no code of its own. The values are on disk. |
 | `provision_answer_invalid` | 400 | One answer failed its step's validation, or was not a string. Carries the field. |
 | `provision_unknown_answer` | 400 | A key that is not a question this runtime asks. |
 | `provision_directory_refused` | 400 | `dir` or `dirChoice` over the wire. The sandbox decides; see above. |
@@ -178,7 +204,13 @@ GET  /docs               → a browser reference over it
 
 GET  /v1/provision       → { available, local, allowed, steps[] }
 POST /v1/agents            { answers: {step: value, …} }
+                           | { template, name, vars?: {var: value, …} }
                          → 201 { id, dir, files[], adopted[] }
+GET  /v1/templates       → { templates: [{ name, description?, vars[], problem? }] }
+
+GET /v1/agents/:id/secrets → { id, secrets: [{ name, set, usedBy[] }] }
+PUT /v1/agents/:id/secrets   { values: {NAME: value, …} }
+                         → 200 { id, written[], shadowed[], applied, adopted[], stopped?, error? }
 ```
 
 **Provisioning is one POST, and it ends in an adopt rather than a restart.** The directory is
@@ -225,6 +257,54 @@ field that cannot be submitted is worse than a missing one.
 **`201` with `adopted: []` and an `error` is a success, not a failure.** The agent is on disk either
 way, so a failed adoption is not a failed creation — reporting the request as failed would send
 somebody to create a second copy of an agent that already exists.
+
+**A template is the same agent, many times, with different values.** `answers` replays the terminal
+wizard, which is the right front door for a person and the wrong one for a product creating the
+same agent for its thousandth customer. A template is a directory an operator writes under the
+sandbox's `templates/<name>/`: an agent directory (manifest, workspace, skills) plus a
+`template.yaml` declaring its variables. Templates are written by the operator and never uploaded
+over the API, because a template decides what every agent made from it can do.
+
+```yaml
+# templates/support/template.yaml
+description: Support agent for one store
+vars:
+  store:  { description: The store's display name }   # required: no default
+  tone:   { default: friendly }                          # optional
+  apiKey: { secret: MODEL_API_KEY }                      # written to .env, never into a file
+```
+
+`{{vars.x}}` is substituted in every text file, and `{{agent.id}}` and `{{agent.name}}` are built in:
+the id is the slug of the `name` sent, and the rendered manifest must declare `id: {{agent.id}}`.
+**Nothing else in braces is touched.** The workspace `init` writes already uses `{{UPPER_SNAKE}}` for
+placeholders a *person* fills (`{{USER}}`, `{{RESPONSIBILITIES}}`), so a template can be made from an
+ordinary agent directory and those survive exactly as authored. The rules exist for
+what a value might be, since it may come from the embedder's own customer:
+
+- **In a YAML file a placeholder is a whole unquoted value** (`name: {{agent.name}}`, `- {{vars.tag}}`), and it is
+  rendered as a quoted string. A value spliced into YAML as text could otherwise write the agent's
+  own policy. Anywhere else in a YAML line is `template_placeholder_placement`.
+- **Values are one line.** A control character is refused, newline included.
+- **A secret is never substituted.** Its value goes to the new agent's `.env` at `0600` under the
+  variable it names, which the manifest must read, and no route returns it.
+
+The agent is rendered into memory, written to a staging directory outside the agents directory,
+loaded by the same check `init` runs, and only then renamed into place. A request that fails leaves
+nothing behind. A broken template is **listed** with its `problem` rather than hidden, because an
+operator who put one in place and cannot see it has no way to learn it has a typo.
+
+**Secrets are write-only and named by the manifest.** `GET /secrets` lists the variables the
+agent's manifest reads (as `${NAME}` or through an `*Env` field), whether each is set, and which
+fields use it; never a value. `PUT /secrets` accepts exactly those names, all or nothing. The
+server's own `server.tokenEnv` is never settable, because a caller able to set it could replace the
+credential it is checked against. Both routes work for an agent that is **not hosted**, since the
+commonest reason an agent is not running is the key it is missing.
+
+A write is **applied**: a hosted agent is reloaded, and one that was not running is adopted. A
+stopped agent is written and left stopped, because a credential write is not a request to reverse a
+durable `stop`. When applying fails the response is still `200` with an `error`, since the values are
+on disk. `shadowed` names values written and overridden by the server's own environment, which wins
+by design so a container can configure the agents it runs.
 
 Gated to a **loopback bind or an authenticated credential carrying `admin`**, answering
 `403 provisioning_not_local` otherwise. The route writes files and starts an agent, and a token-less
@@ -563,6 +643,7 @@ here that the server does not register, or a registered route missing from here,
 | `GET /v1/agents/:id/turns/:turnId/stream` | `read` |
 | `GET /v1/events` | `read` |
 | `GET /v1/provision` | `read` |
+| `GET /v1/templates` | `read` |
 | `POST /v1/agents/:id/approvals/:approvalId` | `chat` |
 | `POST /v1/agents/:id/messages` | `chat` |
 | `POST /v1/agents/:id/turns/:turnId/stop` | `chat` |
@@ -576,6 +657,8 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/start` | `admin` |
 | `POST /v1/agents/:id/stop` | `admin` |
+| `GET /v1/agents/:id/secrets` | `admin` |
+| `PUT /v1/agents/:id/secrets` | `admin` |
 | `GET /v1/agents/:id/config` | `admin` |
 | `PATCH /v1/agents/:id/config` | `admin` |
 | `PATCH /v1/agents/:id/channels/:channelId` | `admin` |
