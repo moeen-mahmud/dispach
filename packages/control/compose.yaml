@@ -1,0 +1,43 @@
+# One host: the control plane in a container, its silos beside it on one Docker network.
+#
+#   export DISPACH_CONTROL_TOKEN="$(openssl rand -base64 32)"
+#   export DISPACH_IMAGE=ghcr.io/moeen-mahmud/dispach:<version>     # pin it
+#   docker compose -f packages/control/compose.yaml up -d --build
+#
+# Silos join `dispach-silos` and publish no port: the control plane reaches them by name, and the
+# only way in from outside is the control plane's own port. Put TLS in front of that port (a
+# reverse proxy or a load balancer); it serves plain HTTP.
+
+name: dispach-control
+
+services:
+  control:
+    build:
+      context: ../..
+      dockerfile: packages/control/Dockerfile
+    image: dispach-control:local
+    restart: unless-stopped
+    ports:
+      # Loopback only. Publishing it wider is a deliberate edit, behind TLS.
+      - "127.0.0.1:7600:7600"
+    environment:
+      DISPACH_CONTROL_TOKEN: ${DISPACH_CONTROL_TOKEN:?export DISPACH_CONTROL_TOKEN first}
+      DISPACH_CONTROL_IMAGE: ${DISPACH_IMAGE:-ghcr.io/moeen-mahmud/dispach:latest}
+      DISPACH_CONTROL_NETWORK: dispach-silos
+      # A path on the HOST: the daemon mounts it into each silo, this container never reads it.
+      DISPACH_CONTROL_TEMPLATES: ${DISPACH_TEMPLATES:-}
+      # Names of variables every silo gets. Each one named must also be passed in below.
+      DISPACH_CONTROL_SILO_ENV: ${DISPACH_SILO_ENV:-}
+      DISPACH_WEBHOOK_ALLOW: ${DISPACH_WEBHOOK_ALLOW:-}
+      DISPACH_CONTROL_IDLE_MS: ${DISPACH_IDLE_MS:-60000}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - control-data:/data
+    networks: [silos]
+
+networks:
+  silos:
+    name: dispach-silos
+
+volumes:
+  control-data:

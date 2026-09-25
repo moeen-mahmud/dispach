@@ -8,15 +8,20 @@
  */
 
 import { randomBytes } from "node:crypto"
-import { createServer, type Server } from "node:http"
+import { createServer, type RequestListener, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
+import { Readable } from "node:stream"
+import { gunzipSync, gzipSync } from "node:zlib"
 import type { PlacedSilo, Placer } from "../src/placer.ts"
 import { UNAUTHORIZED } from "../src/server.ts"
 
 export interface FakeSilo {
     readonly name: string
-    readonly server: Server
+    server: Server
     readonly keys: Set<string>
+    /** What the silo's volume holds, as far as backup and restore can tell. */
+    data: string
+    stopped: boolean
     paused: boolean
     idle: boolean
     nextWakeAt?: string
@@ -37,6 +42,8 @@ export class FakePlacer implements Placer {
         const silo: FakeSilo = {
             name,
             keys: new Set([token]),
+            data: `data of ${subject}`,
+            stopped: false,
             paused: false,
             idle: true,
             seen: [],
@@ -48,7 +55,7 @@ export class FakePlacer implements Placer {
                     res.writeHead(status, { "content-type": "application/json" })
                     res.end(JSON.stringify(body))
                 }
-                if (silo.paused) return json(503, { error: { code: "fake_paused" } })
+                if (silo.paused || silo.stopped) return json(503, { error: { code: "fake_down" } })
                 if (path === "/v1/ready")
                     return json(this.neverReady ? 503 : 200, { status: "ready" })
                 if (!silo.keys.has(auth)) {
@@ -81,6 +88,42 @@ export class FakePlacer implements Placer {
         this.silos.set(name, silo)
         this.calls.push(`create ${name}`)
         return { name, baseUrl: await this.address(name) }
+    }
+
+    /** Same volume (keys, data), new container: a new server on a new port. */
+    async recreate(subject: string, _token: string): Promise<PlacedSilo> {
+        const name = `silo-${subject}`
+        const silo = this.#get(name)
+        const handler = silo.server.listeners("request")[0] as RequestListener
+        silo.server.closeAllConnections()
+        await new Promise((resolve) => silo.server.close(resolve))
+        silo.server = createServer(handler)
+        await new Promise<void>((resolve) => silo.server.listen(0, "127.0.0.1", resolve))
+        silo.paused = false
+        silo.stopped = false
+        this.calls.push(`recreate ${name}`)
+        return { name, baseUrl: await this.address(name) }
+    }
+
+    async exportData(name: string): Promise<Readable> {
+        const silo = this.#get(name)
+        this.calls.push(`export ${name} paused=${silo.paused}`)
+        return Readable.from([gzipSync(silo.data)])
+    }
+
+    async importData(name: string, tar: Readable): Promise<void> {
+        const silo = this.#get(name)
+        const chunks: Buffer[] = []
+        for await (const chunk of tar) chunks.push(chunk as Buffer)
+        silo.data = gunzipSync(Buffer.concat(chunks)).toString()
+        silo.stopped = true
+        silo.paused = false
+        this.calls.push(`import ${name}`)
+    }
+
+    async start(name: string): Promise<void> {
+        this.#get(name).stopped = false
+        this.calls.push(`start ${name}`)
     }
 
     async pause(name: string): Promise<void> {

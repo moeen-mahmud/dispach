@@ -52,7 +52,7 @@ import {
 } from "../webhooks/webhooks.ts"
 import { Agent } from "./agent.ts"
 import { type ChannelFactory, ChannelHub } from "./channels.ts"
-import { claimLeases, LEASE_BEAT_MS } from "./lease.ts"
+import { claimLeases, LEASE_BEAT_MS, markRuntimeLive } from "./lease.ts"
 import { reconcileSchedules, scheduleRunner, scheduleRunOfSession } from "./schedules.ts"
 
 export type AgentSource = string | Record<string, unknown>
@@ -373,6 +373,8 @@ export class Runtime {
         options: RuntimeOptions
     }) {
         this.runtimeId = init.runtimeId
+        // Built means live: a lease naming this process's pid and this id is held, not inherited.
+        markRuntimeLive(init.runtimeId, true)
         this.bus = init.bus
         this.boot = init.boot
         this.store = init.store
@@ -1297,6 +1299,7 @@ export class Runtime {
     async stop(reason = "requested"): Promise<void> {
         if (this.#stopped) return
         this.#stopped = true
+        markRuntimeLive(this.runtimeId, false)
         this.bus.emit("runtime.stopping", { reason })
 
         // In-flight turns are deliberately not cancelled here — a turn ends because it finished or

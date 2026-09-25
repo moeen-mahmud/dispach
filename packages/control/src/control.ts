@@ -12,6 +12,7 @@
  */
 
 import { randomBytes } from "node:crypto"
+import type { Readable } from "node:stream"
 import { BRAND } from "./brand.ts"
 import { ControlError, type Placer } from "./placer.ts"
 import type { Silo, SiloStore } from "./store.ts"
@@ -127,21 +128,59 @@ export class ControlPlane {
     async pause(subject: string): Promise<Silo> {
         const silo = this.#find(subject)
         if (silo.status === "paused") return silo
-        const activity = await this.activity(silo)
-        if (!activity.idle || (this.#open.get(subject) ?? 0) > 0) {
-            throw new ControlError({
-                code: "silo_busy",
-                message: `Silo "${subject}" has a turn running, a delivery owed, or a request open.`,
-                hint: "Nothing was paused. Retry when it is idle; the sweep pauses it by itself once it is.",
-                status: 409,
-            })
-        }
-        await this.#suspend(silo, activity)
+        await this.#suspend(silo, await this.#requireIdle(silo))
         return this.#must(subject)
     }
 
     async wake(subject: string): Promise<Silo> {
         return this.ensureAwake(this.#find(subject))
+    }
+
+    /**
+     * Replace the container with the current image and environment, keeping its data. Refused while
+     * busy, for the same reason `pause` is.
+     */
+    async recreate(subject: string): Promise<Silo> {
+        const silo = this.#find(subject)
+        if (silo.status === "running") await this.#requireIdle(silo)
+        const placed = await this.#placer.recreate(subject, silo.token)
+        this.store.setBaseUrl(subject, placed.baseUrl)
+        this.store.setStatus(subject, "running")
+        this.store.touch(subject, this.#iso())
+        await this.#ready(placed.baseUrl, subject)
+        this.#log(`recreated ${subject}`)
+        return this.#must(subject)
+    }
+
+    /**
+     * The silo's data as a tar stream, taken while it is paused — so the copy is crash-consistent —
+     * and left paused afterwards; the next message or schedule wakes it as usual.
+     */
+    async backup(subject: string): Promise<Readable> {
+        const silo = this.#find(subject)
+        if (silo.status === "running") {
+            const activity = await this.#requireIdle(silo)
+            await this.#suspend(silo, activity)
+        }
+        return this.#placer.exportData(silo.name)
+    }
+
+    /**
+     * Replace the silo's data with a backup, then start it. Everything the silo held before is gone,
+     * so a busy silo is refused rather than overwritten mid-turn.
+     */
+    async restore(subject: string, tar: Readable): Promise<Silo> {
+        const silo = this.#find(subject)
+        if (silo.status === "running") await this.#requireIdle(silo)
+        await this.#placer.importData(silo.name, tar)
+        await this.#placer.start(silo.name)
+        const baseUrl = await this.#placer.address(silo.name)
+        this.store.setBaseUrl(subject, baseUrl)
+        this.store.setStatus(subject, "running")
+        this.store.touch(subject, this.#iso())
+        await this.#ready(baseUrl, subject)
+        this.#log(`restored ${subject}`)
+        return this.#must(subject)
     }
 
     /** Removes the silo and **its volume**: every agent, conversation and key in it. */
@@ -266,6 +305,19 @@ export class ControlPlane {
         // Woken early by the margin and kept awake at least `idleMs` by the touch in `ensureAwake`,
         // so the schedule fires inside a running process — the path measured to fire exactly once.
         await this.ensureAwake(silo)
+    }
+
+    async #requireIdle(silo: Silo): Promise<SiloActivity> {
+        const activity = await this.activity(silo)
+        if (!activity.idle || (this.#open.get(silo.subject) ?? 0) > 0) {
+            throw new ControlError({
+                code: "silo_busy",
+                message: `Silo "${silo.subject}" has a turn running, a delivery owed, or a request open.`,
+                hint: "Nothing was done. Retry when it is idle — GET /v1/silos/<subject> shows when it was last active.",
+                status: 409,
+            })
+        }
+        return activity
     }
 
     async #suspend(silo: Silo, activity: SiloActivity): Promise<void> {

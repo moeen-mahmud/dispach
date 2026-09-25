@@ -29,13 +29,15 @@
  * ## Two known imperfections, both deliberate
  *
  * Pids are reused, so a dead lease whose number has been recycled reads as live. The cost is one
- * refusal a person can resolve, against the alternative of two pollers nobody notices.
+ * refusal a person can resolve, against the alternative of two pollers nobody notices. The one
+ * reuse that can be decided exactly is our own pid, which a live holder cannot have.
  *
  * A wedged process — asleep laptop, stopped in a debugger — has a stale heartbeat and a live pid.
  * That is reported as held rather than taken over, because taking it over is exactly how the
  * double-poller gets created.
  */
 
+import { BRAND } from "../brand.ts"
 import { HarnessError } from "../errors.ts"
 import type { LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
 
@@ -56,6 +58,25 @@ export const LEASE_BEAT_MS = 30_000
  * a lease unrecoverable with no way out but editing the database.
  */
 export const LEASE_REUSE_FACTOR = 30
+
+/**
+ * The runtimes alive in **this** process, by id. Two can legitimately share a pid — an embedder can
+ * run several over one store, and the tests do — so "the holder has my pid" means dead only when
+ * the holder is not one of these. Kept on `globalThis` under a registry symbol so two bundled copies
+ * of this module (the `instanceof` hazard in `errors.ts`) still share one set.
+ */
+const LIVE_RUNTIMES: Set<string> = (() => {
+    const key = Symbol.for(`${BRAND.slug}.liveRuntimes`)
+    const registry = globalThis as unknown as Record<symbol, Set<string> | undefined>
+    registry[key] ??= new Set<string>()
+    return registry[key]
+})()
+
+/** Called by a runtime once it is built, and again when it stops. */
+export function markRuntimeLive(runtimeId: string, live: boolean): void {
+    if (live) LIVE_RUNTIMES.add(runtimeId)
+    else LIVE_RUNTIMES.delete(runtimeId)
+}
 
 export interface LeaseOutcome {
     /** Agent ids this runtime holds, and may therefore recover rows for. */
@@ -160,6 +181,14 @@ export async function claimLeases(options: ClaimOptions): Promise<LeaseOutcome> 
         // old and whose process is gone. Every retry for the next ninety seconds was then refused,
         // naming a pid that no longer existed, at exactly the moment someone was fixing the fault.
         if (!alive(lease.pid)) return false
+
+        // **A holder with this process's own pid, and not live in this process, is dead.** It is a
+        // different runtime (checked by the caller); if it is not one this process is running, the
+        // only way it carries our number is that it died and we inherited it. That is not rare, it is every container: the runtime is pid 1,
+        // and a container killed rather than stopped (`docker rm -f`, an out-of-memory kill, a
+        // crash under a restart policy) leaves a lease saying pid 1 — which the replacement, also
+        // pid 1, then found "alive" and refused for the forty-five minutes below. Measured.
+        if (lease.pid === pid && !LIVE_RUNTIMES.has(lease.runtimeId)) return false
 
         // The pid is alive, which is usually the end of it. The heartbeat only settles the case it
         // cannot: a pid recycled by an unrelated program. Below the stale window that is a live

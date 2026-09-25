@@ -4,7 +4,10 @@
 
 import { afterEach, describe, expect, test } from "bun:test"
 import type { AddressInfo } from "node:net"
+import { gunzipSync } from "node:zlib"
+import { BRAND } from "../src/brand.ts"
 import { ControlPlane } from "../src/control.ts"
+import { ControlError, resolveSiloEnv } from "../src/placer.ts"
 import { createControlServer } from "../src/server.ts"
 import { SiloStore } from "../src/store.ts"
 import { FakePlacer } from "./fake.ts"
@@ -56,6 +59,7 @@ async function setup(options: { idleMs?: number; wakeMarginMs?: number } = {}) {
             ).json()) as { secret: string }
         ).secret
     return {
+        base,
         store,
         placer,
         control,
@@ -279,5 +283,83 @@ describe("the sweep", () => {
         expect(body.silos[0]?.query).toBe("/v1/usage?by=model")
         expect(body.failed).toEqual([])
         expect(store.get("b")?.status).toBe("running")
+    })
+})
+
+describe("operator settings reach silos by name", () => {
+    test("names resolve from the environment; a bad name, the token and an unset one are refused", () => {
+        const env = { A_B: "1", DISPACH_WEBHOOK_ALLOW: "10.0.0.0/8" }
+        expect(resolveSiloEnv(" A_B , DISPACH_WEBHOOK_ALLOW,", env, "S")).toEqual(env)
+        expect(resolveSiloEnv(undefined, env, "S")).toEqual({})
+        const code = (list: string) => {
+            try {
+                resolveSiloEnv(list, env, "S")
+                return "accepted"
+            } catch (error) {
+                return error instanceof ControlError ? error.code : "other"
+            }
+        }
+        expect(code("A-B")).toBe("silo_env_invalid")
+        expect(code(BRAND.runtime.tokenEnv)).toBe("silo_env_invalid")
+        expect(code("MISSING")).toBe("silo_env_unset")
+    })
+})
+
+describe("recreate, backup and restore", () => {
+    test("recreate moves the silo to a new container; its keys and data survive", async () => {
+        const { call, mint, store, fake } = await setup()
+        await call("POST", "/v1/silos", { token: TOKEN, body: { subject: "a" } })
+        const key = await mint("a")
+        const before = store.get("a")?.baseUrl
+        const response = await call("POST", "/v1/silos/a/recreate", { token: TOKEN })
+        expect(response.status).toBe(200)
+        expect(store.get("a")?.baseUrl).not.toBe(before)
+        expect((await call("GET", "/silos/a/v1/agents", { token: key })).status).toBe(200)
+        expect(fake("a").data).toBe("data of a")
+    })
+
+    test("a busy silo is neither recreated nor backed up", async () => {
+        const { call, fake, placer, store } = await setup()
+        await call("POST", "/v1/silos", { token: TOKEN, body: { subject: "a" } })
+        fake("a").idle = false
+        for (const [method, path] of [
+            ["POST", "/v1/silos/a/recreate"],
+            ["GET", "/v1/silos/a/backup"],
+        ] as const) {
+            const response = await call(method, path, { token: TOKEN })
+            expect(response.status).toBe(409)
+            expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+                "silo_busy",
+            )
+        }
+        expect(
+            placer.calls.filter((c) => c.startsWith("recreate") || c.startsWith("export")),
+        ).toEqual([])
+        expect(store.get("a")?.status).toBe("running")
+    })
+
+    test("a backup is taken from a paused silo, and restores into another", async () => {
+        const { call, placer, store, fake, mint, base } = await setup()
+        await call("POST", "/v1/silos", { token: TOKEN, body: { subject: "a" } })
+        await call("POST", "/v1/silos", { token: TOKEN, body: { subject: "b" } })
+        const backup = await call("GET", "/v1/silos/a/backup", { token: TOKEN })
+        expect(backup.status).toBe(200)
+        expect(backup.headers.get("content-type")).toBe("application/gzip")
+        const archive = Buffer.from(await backup.arrayBuffer())
+        expect(gunzipSync(archive).toString()).toBe("data of a")
+        // Paused before the copy, and left paused.
+        expect(placer.calls).toContain("export silo-a paused=true")
+        expect(store.get("a")?.status).toBe("paused")
+
+        const restored = await fetch(`${base}/v1/silos/b/backup`, {
+            method: "PUT",
+            headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/gzip" },
+            body: archive,
+        })
+        expect(restored.status).toBe(200)
+        expect(fake("b").data).toBe("data of a")
+        expect(store.get("b")?.status).toBe("running")
+        const key = await mint("b")
+        expect((await call("GET", "/silos/b/v1/agents", { token: key })).status).toBe(200)
     })
 })

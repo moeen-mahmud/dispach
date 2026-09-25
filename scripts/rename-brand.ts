@@ -113,6 +113,8 @@ const inScope: string[] = [
     // The control plane's own copy: it is FSL-licensed and may not import core's, so it carries the
     // brand itself — and is rewritten in full for the same reason core's is.
     join(ROOT, "packages", "control", "src", "brand.ts"),
+    join(ROOT, "packages", "control", "Dockerfile"),
+    join(ROOT, "packages", "control", "compose.yaml"),
     join(ROOT, "docker", "Dockerfile"),
     // The entrypoint carries the state directory, because it links the mounted agent into the
     // sandbox and `<slug>` is half that path. Left out, a rename would leave a script that

@@ -54,6 +54,9 @@ silo, in the runtime's template format (`docs/09-API-GUIDE.md` §1b).
 | `GET /v1/silos/:subject` | operator | One silo |
 | `POST /v1/silos/:subject/pause` | operator | Pause now. `409 silo_busy` while a turn, a delivery or a proxied request is open |
 | `POST /v1/silos/:subject/wake` | operator | Wake now |
+| `POST /v1/silos/:subject/recreate` | operator | New container, current image and `SILO_ENV`, same volume. How an upgrade rolls out. `409` while busy |
+| `GET /v1/silos/:subject/backup` | operator | The silo's data as tar.gz, taken paused (crash-consistent) and left paused. Templates excluded. `409` while busy |
+| `PUT /v1/silos/:subject/backup` | operator | Restore that archive into this silo, **replacing** everything in it, keys included |
 | `DELETE /v1/silos/:subject` | operator | Remove the silo **and its volume**. Irreversible: it holds the silo's only store |
 | `POST /v1/silos/:subject/keys` | operator | Mint a key inside the silo; the body is the runtime's `POST /v1/keys` (label, scope, expiry) |
 | `GET /v1/usage?by=&from=&to=` | operator | Each silo's `GET /v1/usage`, side by side |
@@ -104,6 +107,22 @@ runs in a container on the same network, set `DISPACH_CONTROL_NETWORK` instead, 
 by name with no port published. A driver that *stops* silos rather than pausing them (Fargate) would
 have to start them before `nextWakeAt`, because a runtime that starts after an occurrence skips it.
 
+## Deploy on one host
+
+```bash
+export DISPACH_CONTROL_TOKEN="$(openssl rand -base64 32)"
+export DISPACH_IMAGE=ghcr.io/moeen-mahmud/dispach:<version>      # pin it; a note says so if you do not
+docker compose -f packages/control/compose.yaml up -d --build
+```
+
+The control plane runs in its own container (this package's `Dockerfile`: Node, the Docker CLI,
+`src/`), and drives the host's Docker through its socket. Silos join the `dispach-silos` network and
+publish no port; the control plane's `127.0.0.1:7600` is the only way in, so put TLS in front of it.
+That is also the AWS shape: the same compose file on an EC2 host.
+
+**Operating it:** see `EMBEDDING.md` for what a product's backend calls through a user's life —
+sign-up, agents, messages, webhooks, billing, backup, upgrade, deletion.
+
 ## Configuration
 
 | Variable | Default | |
@@ -111,8 +130,9 @@ have to start them before `nextWakeAt`, because a runtime that starts after an o
 | `DISPACH_CONTROL_TOKEN` | — (required) | The operator token |
 | `DISPACH_CONTROL_HOST` / `_PORT` | `127.0.0.1` / `7600` | Bind |
 | `DISPACH_CONTROL_DB` | `control.db` | SQLite file: one row per silo |
-| `DISPACH_CONTROL_IMAGE` | `ghcr.io/moeen-mahmud/dispach:latest` | Pin a version in production |
-| `DISPACH_CONTROL_TEMPLATES` | — | Host directory of agent templates, mounted read-only |
+| `DISPACH_CONTROL_IMAGE` | `ghcr.io/moeen-mahmud/dispach:latest` | Pin a version in production; roll a new one out with `recreate` |
+| `DISPACH_CONTROL_TEMPLATES` | — | Host directory of agent templates, mounted read-only. A path on the Docker host |
+| `DISPACH_CONTROL_SILO_ENV` | — | Names of variables every silo gets, copied from this process's environment: `DISPACH_WEBHOOK_ALLOW,MODEL_BASE_URL`. Values never in the database, never on a command line; a named one that is unset refuses the boot. Reaches existing silos on `recreate` |
 | `DISPACH_CONTROL_NETWORK` | — | Docker network to attach silos to |
 | `DISPACH_CONTROL_IDLE_MS` | `60000` | Quiet time before an idle silo is paused |
 | `DISPACH_CONTROL_WAKE_MARGIN_MS` | `30000` | How early a silo is woken for a schedule |
@@ -124,6 +144,8 @@ have to start them before `nextWakeAt`, because a runtime that starts after an o
 - **More than one instance.** Single process, one SQLite file. The in-memory "request open" count
   is what stops a pause mid-stream, so two instances would each think the other's streams were
   idle.
+- **Backups on a schedule.** `GET …/backup` is a call to make from cron or your job runner; this
+  process does not keep copies of its own.
 - **Usage without waking.** `GET /v1/usage` wakes paused silos to ask them. A silo's figures cannot
   change while it sleeps, so a snapshot taken at pause is the fix once the silo count makes waking
   costly.

@@ -17,8 +17,12 @@ export const BRAND = {
         image: "ghcr.io/moeen-mahmud/dispach:latest",
         apiVersion: "dispach/v1",
         tokenEnv: "DISPACH_API_TOKEN",
+        /** The runtime's private-receiver allowlist for webhooks — the first thing a silo needs. */
+        webhookAllowEnv: "DISPACH_WEBHOOK_ALLOW",
         port: 7420,
         home: "/home/dispach",
+        /** The image's unprivileged user, which must own `home` after a restore. */
+        user: "dispach",
         templates: "/home/dispach/.dispach/templates",
     },
 } as const

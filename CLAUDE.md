@@ -1253,6 +1253,11 @@ Never claim a performance property without a number in `evals/` and a script to 
   Telegram username is `[A-Za-z0-9_]{5,32}`, so `@ada-lovelace` cannot exist and matching nobody is
   the only possible outcome. Everything downstream was correct behaviour applied to a wrong fact,
   which is the hardest kind of bug to see: nothing failed anywhere.
+- **In a container every runtime is pid 1, so "is the holder's pid alive" answers about itself.** A
+  container killed rather than stopped left a lease saying pid 1, and its replacement refused to
+  serve for 45 minutes because pid 1 was alive. A holder with *our* pid is dead unless it is a
+  runtime live in this process (`markRuntimeLive`); a graceful stop never showed it, because SIGTERM
+  releases the lease. Decision 14.13.
 - **A lease row is a claim, not a fact, and a dead pid outranks a fresh heartbeat.** A boot that
   fails *after* claiming leaves a row seconds old with no process under it, which blocked every
   retry for ninety seconds while naming a pid that no longer existed — at the moment somebody was

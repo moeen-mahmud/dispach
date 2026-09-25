@@ -213,6 +213,28 @@ export function createControlServer(options: ServerOptions): Server {
                 return send(res, 200, view(await control.pause(subject)))
             if (method === "POST" && action === "/wake")
                 return send(res, 200, view(await control.wake(subject)))
+            if (method === "POST" && action === "/recreate") {
+                return send(res, 200, view(await control.recreate(subject)))
+            }
+            if (method === "GET" && action === "/backup") {
+                const tar = await control.backup(subject)
+                res.writeHead(200, {
+                    "content-type": "application/gzip",
+                    "content-disposition": `attachment; filename="${subject}.tar.gz"`,
+                })
+                // A failure after the first byte cannot become a status code, so it breaks the
+                // connection instead: a backup that did not finish must never end cleanly.
+                tar.on("error", (error) => {
+                    process.stderr.write(`backup ${subject}: ${error.message}\n`)
+                    res.destroy(error)
+                })
+                tar.pipe(res)
+                await new Promise((resolve) => res.on("close", resolve))
+                return
+            }
+            if (method === "PUT" && action === "/backup") {
+                return send(res, 200, view(await control.restore(subject, req)))
+            }
             if (method === "DELETE" && action === "") {
                 await control.remove(subject)
                 return send(res, 200, { subject, deleted: true })

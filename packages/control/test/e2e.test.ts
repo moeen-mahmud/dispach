@@ -15,6 +15,7 @@ import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { gunzipSync } from "node:zlib"
 import { BRAND } from "../src/brand.ts"
 import { ControlPlane } from "../src/control.ts"
 import { DockerPlacer } from "../src/placer.ts"
@@ -23,8 +24,8 @@ import { SiloStore } from "../src/store.ts"
 
 const ENABLED = process.env.CONTROL_E2E === "1"
 const TOKEN = "e2e-operator-token"
-const SUBJECTS = [`e2e-a-${process.pid}`, `e2e-b-${process.pid}`] as const
-const [A, B] = SUBJECTS
+const SUBJECTS = [`e2e-a-${process.pid}`, `e2e-b-${process.pid}`, `e2e-c-${process.pid}`] as const
+const [A, B, C] = SUBJECTS
 
 let model: Server
 let control: ControlPlane
@@ -138,7 +139,12 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
         store = await SiloStore.open(":memory:")
         control = new ControlPlane({
             store,
-            placer: new DockerPlacer({ templatesDir: templates }),
+            placer: new DockerPlacer({
+                templatesDir: templates,
+                // The first operator setting a silo needs: its receiver is private, and the runtime
+                // refuses private webhook targets unless the operator names them.
+                siloEnv: { [BRAND.runtime.webhookAllowEnv]: modelHost },
+            }),
             idleMs: 1_000,
             log: () => {},
         })
@@ -159,7 +165,8 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
     })
 
     test("two silos, each with an agent made from a template through the proxy", async () => {
-        for (const subject of SUBJECTS) {
+        // A and B only: C is created empty later, so that what the restore puts in it is provable.
+        for (const subject of [A, B]) {
             const started = performance.now()
             const created = await call("/v1/silos", { token: TOKEN, body: { subject } })
             expect(created.status).toBe(201)
@@ -226,6 +233,106 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
             expect(dockerState(A)).toBe("running")
             record("wakeFirstTokenMs", woken.firstTokenMs)
         }
+    })
+
+    test("an operator setting reaches the silo: a private webhook target is now accepted", async () => {
+        const hook = await call(`/silos/${A}/v1/webhooks`, {
+            token: keys[A] ?? "",
+            body: {
+                url: `http://${process.env.E2E_MODEL_HOST ?? "host.docker.internal"}:9/hook`,
+                types: ["turn.end"],
+            },
+        })
+        expect(hook.status).toBe(201)
+        // Removed again: a subscription to a dead port keeps a retry owed, which keeps the silo
+        // (correctly) busy for everything below that waits on idle.
+        const { subscriptionId } = (await hook.json()) as { subscriptionId: string }
+        await call(`/silos/${A}/v1/webhooks/${subscriptionId}`, {
+            method: "DELETE",
+            token: keys[A] ?? "",
+        })
+        // By name through the environment, never on the command line.
+        const inspected = execFileSync("docker", [
+            "inspect",
+            "--format",
+            "{{json .Config.Env}}",
+            `${BRAND.siloPrefix}${A}`,
+        ]).toString()
+        expect(inspected).toContain(BRAND.runtime.webhookAllowEnv)
+    })
+
+    test("recreate replaces the container and keeps the agents and keys", async () => {
+        const before = execFileSync("docker", [
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            `${BRAND.siloPrefix}${A}`,
+        ]).toString()
+        expect(
+            (await call(`/v1/silos/${A}/recreate`, { method: "POST", token: TOKEN })).status,
+        ).toBe(200)
+        const after = execFileSync("docker", [
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            `${BRAND.siloPrefix}${A}`,
+        ]).toString()
+        expect(after).not.toBe(before)
+        const agents = await call(`/silos/${A}/v1/agents`, { token: keys[A] ?? "" })
+        expect(agents.status).toBe(200)
+        expect(await agents.text()).toContain("helper")
+        expect((await turn(A)).text).toBe("Hello from the mock.")
+    })
+
+    test("a backup of one silo restores into another, agents, history and keys included", async () => {
+        // The turn just before may still owe a delivery; a backup waits for idle rather than
+        // freezing a silo mid-write, so ask until it is.
+        let backup = await call(`/v1/silos/${A}/backup`, { token: TOKEN })
+        for (let i = 0; i < 40 && backup.status === 409; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 250))
+            backup = await call(`/v1/silos/${A}/backup`, { token: TOKEN })
+        }
+        const started = performance.now()
+        expect(backup.status).toBe(200)
+        const archive = Buffer.from(await backup.arrayBuffer())
+        record("backupMs", performance.now() - started)
+        record("backupKb", archive.length / 1024)
+        // The operator's templates are mounted into every silo and are not the user's data.
+        const listing = gunzipSync(archive).toString("latin1")
+        expect(listing).toContain("store.db")
+        expect(listing).not.toContain("template.yaml")
+        expect(store.get(A)?.status).toBe("paused")
+
+        const createdC = await call("/v1/silos", { token: TOKEN, body: { subject: C } })
+        expect(createdC.status).toBe(201)
+        // Empty before the restore — the restore, not the setup, is what puts the agent there.
+        const minted = (await (
+            await call(`/v1/silos/${C}/keys`, { token: TOKEN, body: { label: "c" } })
+        ).json()) as { secret: string }
+        const empty = await call(`/silos/${C}/v1/agents`, { token: minted.secret })
+        expect(await empty.text()).not.toContain("helper")
+        const restoreStarted = performance.now()
+        const restored = await fetch(`${base}/v1/silos/${C}/backup`, {
+            method: "PUT",
+            headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/gzip" },
+            body: archive,
+        })
+        expect(`${restored.status} ${restored.status === 200 ? "" : await restored.text()}`).toBe(
+            "200 ",
+        )
+        record("restoreMs", performance.now() - restoreStarted)
+
+        // The key minted in A lives in A's store, so the restored copy honours it.
+        const agents = await call(`/silos/${C}/v1/agents`, { token: keys[A] ?? "" })
+        expect(agents.status).toBe(200)
+        expect(await agents.text()).toContain("helper")
+        const turns = (await (
+            await call(`/silos/${C}/v1/agents/helper/turns`, { token: keys[A] ?? "" })
+        ).json()) as { turns: unknown[] }
+        expect(turns.turns.length).toBeGreaterThan(0)
+        // Owned by the runtime's user, or the next write would fail.
+        keys[C] = keys[A] ?? ""
+        expect((await turn(C)).text).toBe("Hello from the mock.")
     })
 
     test("delete removes the container and its volume", async () => {

@@ -8,7 +8,7 @@
 
 import { BRAND } from "./brand.ts"
 import { ControlPlane } from "./control.ts"
-import { DockerPlacer } from "./placer.ts"
+import { ControlError, DockerPlacer, resolveSiloEnv } from "./placer.ts"
 import { createControlServer } from "./server.ts"
 import { SiloStore } from "./store.ts"
 
@@ -38,9 +38,28 @@ if (token === undefined) {
     process.exit(1)
 }
 
+let siloEnv: Record<string, string> = {}
+try {
+    siloEnv = resolveSiloEnv(env("SILO_ENV"), process.env, `${BRAND.envPrefix}SILO_ENV`)
+} catch (error) {
+    if (!(error instanceof ControlError)) throw error
+    process.stderr.write(`${error.message}\n  hint: ${error.hint}\n`)
+    process.exit(1)
+}
+
+const image = env("IMAGE") ?? BRAND.runtime.image
+if (image.endsWith(":latest") || !image.includes(":")) {
+    // Said, not refused: `latest` is right on a laptop. On a host it means two silos created a day
+    // apart can run different runtimes, and `recreate` silently upgrades whatever it touches.
+    process.stderr.write(
+        `note: silos run ${image}, which is not pinned.\n  hint: set ${BRAND.envPrefix}IMAGE to a version tag in production, and roll it out with POST /v1/silos/<subject>/recreate.\n`,
+    )
+}
+
 const store = await SiloStore.open(env("DB") ?? "control.db")
 const placer = new DockerPlacer({
-    ...(env("IMAGE") === undefined ? {} : { image: env("IMAGE") as string }),
+    image,
+    siloEnv,
     ...(env("NETWORK") === undefined ? {} : { network: env("NETWORK") as string }),
     ...(env("TEMPLATES") === undefined ? {} : { templatesDir: env("TEMPLATES") as string }),
 })
@@ -57,7 +76,11 @@ const server = createControlServer({ control, token })
 
 server.listen(port, host, () => {
     process.stdout.write(
-        `${BRAND.slug} on http://${host}:${port} · ${store.list().length} silo(s)\n`,
+        `${BRAND.slug} on http://${host}:${port} · ${store.list().length} silo(s)` +
+            (Object.keys(siloEnv).length === 0
+                ? ""
+                : ` · silo env: ${Object.keys(siloEnv).join(", ")}`) +
+            "\n",
     )
     control.start()
 })
