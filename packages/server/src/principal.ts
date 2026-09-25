@@ -91,6 +91,30 @@ export function reachesSession(principal: Principal, sessionKey: string): boolea
     return sessionKey.startsWith(prefix.endsWith("*") ? prefix.slice(0, -1) : prefix)
 }
 
+/**
+ * The same scope, as a filter for a query that aggregates across agents and sessions.
+ *
+ * Derived here, beside `reachesAgent` and `reachesSession`, so the prefix rule (a trailing `*`
+ * ignored) is written once. An aggregate is where an omitted filter leaks quietly: a per-sender
+ * usage row is identity, and a session-scoped key must not read another tenant's senders from a
+ * total it could never have reached turn by turn.
+ */
+export function scopeFilter(principal: Principal): {
+    readonly agentIds?: readonly string[]
+    readonly sessionPrefix?: string
+} {
+    if (principal.kind === "claim") return { agentIds: [] }
+    if (principal.kind !== "key") return {}
+    const agents = principal.scope?.agents
+    const prefix = principal.scope?.sessions
+    return {
+        ...(agents === undefined ? {} : { agentIds: agents }),
+        ...(prefix === undefined
+            ? {}
+            : { sessionPrefix: prefix.endsWith("*") ? prefix.slice(0, -1) : prefix }),
+    }
+}
+
 /** Does this principal narrow anything at all? Used to skip filtering on the common path. */
 export function isScoped(principal: Principal): boolean {
     if (principal.kind !== "key") return false

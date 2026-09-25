@@ -74,6 +74,7 @@ export {
     AbortedError,
     ConfigError,
     type ErrorDetail,
+    GovernorError,
     HarnessError,
     isHarnessError,
     ModelError,
@@ -105,7 +106,7 @@ export {
     type TurnSender,
     trustOfSender,
 } from "./loop/sender.ts"
-export { runStep, type StepInput, type StepResult } from "./loop/step.ts"
+export { runStep, type StepInput, type StepResult, type StepUsage } from "./loop/step.ts"
 export {
     runTurn,
     type ToolRuntime,
@@ -186,6 +187,16 @@ export {
     settingByPath,
 } from "./manifest/settings.ts"
 export {
+    manifestEnvReferences,
+    parseTemplateSpec,
+    type RenderedTemplate,
+    renderTemplate,
+    TEMPLATE_BUILTINS,
+    type TemplateFile,
+    type TemplateSpec,
+    type TemplateVar,
+} from "./manifest/template.ts"
+export {
     assertApiVersion,
     scanForLiteralSecrets,
     scheduleDeliveryWarnings,
@@ -248,6 +259,15 @@ export {
 export { parseSSE, type SSEEvent } from "./model/sse.ts"
 export { nearest } from "./nearest.ts"
 export {
+    type AddressKind,
+    type AddressVerdict,
+    classifyAddress,
+    classifyIPv4,
+    classifyIPv6,
+    parseIPv4,
+    parseIPv6,
+} from "./net/address.ts"
+export {
     type ApprovalOptions,
     approvalMiddleware,
     type RetryOptions,
@@ -289,11 +309,13 @@ export type {
 } from "./plugins/plugin.ts"
 export { satisfies as satisfiesApiRange } from "./plugins/semver.ts"
 export {
+    type AdmittedTurn,
     Agent,
     type AgentCreateOptions,
     type AgentDescription,
     type AgentSendOptions,
     resolveWorkspace,
+    type TurnAdmission,
 } from "./runtime/agent.ts"
 export {
     type ChannelFactory,
@@ -319,6 +341,7 @@ export {
     type DisposeReason,
     defaultStorePath,
     Runtime,
+    type RuntimeActivity,
     type RuntimeOptions,
     type StoreSource,
 } from "./runtime/runtime.ts"
@@ -417,6 +440,7 @@ export type {
     // The scope vocabulary, exported as types because the server enforces it, the CLI mints with
     // it and the client reads it back — three consumers, one definition.
     Capability,
+    DeliveryBacklog,
     DeliveryRecord,
     DeliveryStatus,
     EnqueueDelivery,
@@ -433,6 +457,7 @@ export type {
     LeaseStore,
     MessagePage,
     MessageStore,
+    ModelCallRecord,
     OperatorKeyRecord,
     OperatorKeyStore,
     OutboxStore,
@@ -451,8 +476,16 @@ export type {
     TurnStatus,
     TurnStore,
     UpsertSchedule,
+    UsageBucket,
+    UsageGroup,
+    UsageQuery,
+    UsageStore,
+    WebhookDeliveryRecord,
+    WebhookScope,
+    WebhookStore,
+    WebhookSubscription,
 } from "./store/store.ts"
-export { CAPABILITIES, DEFAULT_KEY_TOUCH_MS } from "./store/store.ts"
+export { CAPABILITIES, DEFAULT_KEY_TOUCH_MS, USAGE_GROUPS } from "./store/store.ts"
 export {
     type ArtifactSink,
     describeArtifact,
@@ -579,6 +612,20 @@ export type {
     WorkspaceWriteTarget,
 } from "./tools/types.ts"
 export { VERSION } from "./version.ts"
+export {
+    checkWebhookTarget,
+    EMPTY_ALLOWLIST,
+    type LookupLike,
+    newWebhookSecret,
+    parseWebhookAllowlist,
+    signWebhook,
+    verifyWebhook,
+    type WebhookAllowlist,
+    WebhookDispatcher,
+    webhookDeliverable,
+    webhookHears,
+    webhookMessageId,
+} from "./webhooks/webhooks.ts"
 export {
     type AuthoringInput,
     BULLET_DENSITY_LIMIT,

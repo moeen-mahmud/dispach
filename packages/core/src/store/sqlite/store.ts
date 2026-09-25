@@ -21,6 +21,7 @@ import type {
     AgentStateStore,
     ArtifactRecord,
     ArtifactStore,
+    DeliveryBacklog,
     DeliveryRecord,
     DeliveryStatus,
     HandoffRecord,
@@ -52,11 +53,45 @@ import type {
     TurnRecord,
     TurnStatus,
     TurnStore,
+    UsageBucket,
+    UsageGroup,
+    UsageQuery,
+    UsageStore,
+    WebhookDeliveryRecord,
+    WebhookScope,
+    WebhookStore,
+    WebhookSubscription,
 } from "../store.ts"
 import { DEFAULT_KEY_TOUCH_MS } from "../store.ts"
-import type { OpenOptions, SqlDatabase, SqlStatement } from "./driver.ts"
+import type { OpenOptions, SqlDatabase, SqlParam, SqlStatement } from "./driver.ts"
 import { openDatabase } from "./driver.ts"
 import { type MigrationReport, migrate } from "./migrations.ts"
+
+interface WebhookSubscriptionRow {
+    subscription_id: string
+    url: string
+    types: string
+    scope: string | null
+    created_at: string
+    consecutive_failures: number
+    last_error: string | null
+    last_success_at: string | null
+    last_failure_at: string | null
+    pending: number
+}
+
+interface WebhookDeliveryRow {
+    subscription_id: string
+    message_id: string
+    agent_id: string
+    event_type: string
+    body: string
+    status: string
+    attempts: number
+    uncertain: number
+    next_attempt_at: string
+    last_error: string | null
+}
 
 const DEFAULT_PAGE = 50
 
@@ -656,6 +691,8 @@ export class SqliteStore implements Store {
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
     readonly handoffs: HandoffStore
+    readonly usage: UsageStore
+    readonly webhooks: WebhookStore
     readonly operatorKeys: OperatorKeyStore
     readonly location: string
     /** What `migrate` did at open. Reported by boot rather than logged and forgotten. */
@@ -842,6 +879,88 @@ export class SqliteStore implements Store {
                 `SELECT * FROM turns WHERE agent_id = ? AND session_key = ?
                   ORDER BY started_at DESC, rowid DESC LIMIT ?`,
             ),
+            turnListForAgent: db.prepare(
+                `SELECT rowid AS row_key, * FROM turns
+                  WHERE agent_id = ? AND rowid < ? AND session_key LIKE ? ESCAPE '\\'
+                  ORDER BY rowid DESC LIMIT ?`,
+            ),
+            modelCallInsert: db.prepare(
+                `INSERT INTO model_calls
+                     (agent_id, session_key, turn_id, role, model, prompt_tokens, prompt_reported,
+                      cached_prompt_tokens, output_tokens, output_reported, sender, at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ),
+            modelCallDeleteAll: db.prepare("DELETE FROM model_calls WHERE agent_id = ?"),
+            webhookInsert: db.prepare(
+                `INSERT INTO webhook_subscriptions
+                     (subscription_id, url, secret, types, scope, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+            ),
+            webhookList: db.prepare(
+                `SELECT s.*, (SELECT COUNT(*) FROM webhook_deliveries d
+                               WHERE d.subscription_id = s.subscription_id
+                                 AND d.status IN ('pending', 'inflight')) AS pending
+                   FROM webhook_subscriptions s ORDER BY s.created_at, s.subscription_id`,
+            ),
+            webhookGet: db.prepare(
+                `SELECT s.*, (SELECT COUNT(*) FROM webhook_deliveries d
+                               WHERE d.subscription_id = s.subscription_id
+                                 AND d.status IN ('pending', 'inflight')) AS pending
+                   FROM webhook_subscriptions s WHERE s.subscription_id = ?`,
+            ),
+            webhookSecret: db.prepare(
+                "SELECT secret FROM webhook_subscriptions WHERE subscription_id = ?",
+            ),
+            webhookDelete: db.prepare(
+                "DELETE FROM webhook_subscriptions WHERE subscription_id = ?",
+            ),
+            webhookEnqueue: db.prepare(
+                `INSERT OR IGNORE INTO webhook_deliveries
+                     (subscription_id, message_id, agent_id, event_type, body, status,
+                      next_attempt_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+            ),
+            webhookClaim: db.prepare(
+                `UPDATE webhook_deliveries SET status = 'inflight', attempts = attempts + 1, updated_at = ?
+                  WHERE subscription_id = ? AND message_id = ? AND status = 'pending'`,
+            ),
+            webhookDueForAgent: db.prepare(
+                `SELECT * FROM webhook_deliveries
+                  WHERE agent_id = ? AND status = 'pending' AND next_attempt_at <= ?
+                  ORDER BY next_attempt_at, rowid LIMIT ?`,
+            ),
+            webhookSent: db.prepare(
+                `UPDATE webhook_deliveries SET status = 'sent', last_error = NULL, updated_at = ?
+                  WHERE subscription_id = ? AND message_id = ?`,
+            ),
+            webhookRetry: db.prepare(
+                `UPDATE webhook_deliveries
+                    SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?
+                  WHERE subscription_id = ? AND message_id = ?`,
+            ),
+            webhookFailed: db.prepare(
+                `UPDATE webhook_deliveries SET status = 'failed', last_error = ?, updated_at = ?
+                  WHERE subscription_id = ? AND message_id = ?`,
+            ),
+            webhookHealthy: db.prepare(
+                `UPDATE webhook_subscriptions
+                    SET consecutive_failures = 0, last_success_at = ?
+                  WHERE subscription_id = ?`,
+            ),
+            webhookUnhealthy: db.prepare(
+                `UPDATE webhook_subscriptions
+                    SET consecutive_failures = consecutive_failures + 1, last_error = ?,
+                        last_failure_at = ?
+                  WHERE subscription_id = ?`,
+            ),
+            webhookInflightForAgent: db.prepare(
+                "SELECT * FROM webhook_deliveries WHERE agent_id = ? AND status = 'inflight'",
+            ),
+            webhookRecover: db.prepare(
+                `UPDATE webhook_deliveries SET status = 'pending', uncertain = 1, updated_at = ?
+                  WHERE agent_id = ? AND status = 'inflight'`,
+            ),
+            webhookDeleteForAgent: db.prepare("DELETE FROM webhook_deliveries WHERE agent_id = ?"),
             // Both take one agent id and are run once per owned agent inside a transaction, rather
             // than building an `IN (?,?,…)` list. A dynamic arity needs a fresh `prepare` per call
             // shape, which defeats the statement cache for the overwhelmingly common case of one
@@ -1280,6 +1399,24 @@ export class SqliteStore implements Store {
                 q.turnList
                     .all<TurnRow>(agentId, sessionKey, options?.limit ?? DEFAULT_PAGE)
                     .map(toTurn),
+            listForAgent: async (agentId, options) => {
+                const limit = options?.limit ?? DEFAULT_PAGE
+                // One extra row says whether there is a next page without a second COUNT query.
+                const rows = q.turnListForAgent.all<TurnRow & { row_key: number }>(
+                    agentId,
+                    options?.before ?? Number.MAX_SAFE_INTEGER,
+                    `${likePrefix(options?.sessionPrefix ?? "")}%`,
+                    limit + 1,
+                )
+                const page = rows.slice(0, limit)
+                const last = page.at(-1)
+                return {
+                    turns: page.map(toTurn),
+                    ...(rows.length > limit && last !== undefined
+                        ? { nextBefore: last.row_key }
+                        : {}),
+                }
+            },
             reapRunning: async (agentIds, reason) => {
                 if (agentIds.length === 0) return []
                 const ts = nowIso()
@@ -1332,6 +1469,34 @@ export class SqliteStore implements Store {
                 })
             },
         }
+
+        /**
+         * One aggregate over a variable-length agent list. The `(agent_id, status, …)` indexes serve
+         * both tables; a process that owes nothing reads two empty ranges.
+         */
+        const backlogOf =
+            (table: "outbox" | "webhook_deliveries") =>
+            async (agentIds: readonly string[]): Promise<DeliveryBacklog> => {
+                if (agentIds.length === 0) return { pending: 0, inflight: 0 }
+                const row = db
+                    .prepare(
+                        `SELECT SUM(status = 'pending') AS pending, SUM(status = 'inflight') AS inflight,
+                            MIN(CASE WHEN status = 'pending' THEN next_attempt_at END) AS soonest
+                       FROM ${table}
+                      WHERE status IN ('pending', 'inflight')
+                        AND agent_id IN (${new Array(agentIds.length).fill("?").join(", ")})`,
+                    )
+                    .get<{
+                        pending: number | null
+                        inflight: number | null
+                        soonest: string | null
+                    }>(...agentIds)
+                return {
+                    pending: row?.pending ?? 0,
+                    inflight: row?.inflight ?? 0,
+                    ...(row?.soonest == null ? {} : { nextAttemptAt: row.soonest }),
+                }
+            }
 
         this.outbox = {
             enqueue: async (deliveries) => {
@@ -1410,6 +1575,7 @@ export class SqliteStore implements Store {
                     )
                     return ids
                 }),
+            backlog: backlogOf("outbox"),
             recoverInflight: async (agentIds, nextAttemptAt) => {
                 if (agentIds.length === 0) return []
                 return db.transaction(() => {
@@ -1959,6 +2125,145 @@ export class SqliteStore implements Store {
             },
         }
 
+        const webhookRead = (row: WebhookSubscriptionRow): WebhookSubscription => ({
+            subscriptionId: row.subscription_id,
+            url: row.url,
+            types: JSON.parse(row.types) as string[],
+            ...(row.scope === null ? {} : { scope: JSON.parse(row.scope) as WebhookScope }),
+            createdAt: row.created_at,
+            consecutiveFailures: row.consecutive_failures,
+            ...(row.last_error === null ? {} : { lastError: row.last_error }),
+            ...(row.last_success_at === null ? {} : { lastSuccessAt: row.last_success_at }),
+            ...(row.last_failure_at === null ? {} : { lastFailureAt: row.last_failure_at }),
+            pending: row.pending,
+        })
+        const deliveryRead = (row: WebhookDeliveryRow): WebhookDeliveryRecord => ({
+            subscriptionId: row.subscription_id,
+            messageId: row.message_id,
+            agentId: row.agent_id,
+            eventType: row.event_type,
+            body: row.body,
+            status: row.status as WebhookDeliveryRecord["status"],
+            attempts: row.attempts,
+            uncertain: row.uncertain === 1,
+            nextAttemptAt: row.next_attempt_at,
+            ...(row.last_error === null ? {} : { lastError: row.last_error }),
+        })
+        this.webhooks = {
+            create: async (sub) => {
+                q.webhookInsert.run(
+                    sub.subscriptionId,
+                    sub.url,
+                    sub.secret,
+                    JSON.stringify(sub.types),
+                    sub.scope === undefined ? null : JSON.stringify(sub.scope),
+                    sub.createdAt,
+                )
+                const row = q.webhookGet.get<WebhookSubscriptionRow>(sub.subscriptionId)
+                if (row === undefined) {
+                    throw new Error(`webhook "${sub.subscriptionId}" vanished after its insert`)
+                }
+                return webhookRead(row)
+            },
+            list: async () => q.webhookList.all<WebhookSubscriptionRow>().map(webhookRead),
+            get: async (id) => {
+                const row = q.webhookGet.get<WebhookSubscriptionRow>(id)
+                return row === undefined ? undefined : webhookRead(row)
+            },
+            secretOf: async (id) => q.webhookSecret.get<{ secret: string }>(id)?.secret,
+            delete: async (id) => q.webhookDelete.run(id).changes > 0,
+            enqueue: async (d) =>
+                q.webhookEnqueue.run(
+                    d.subscriptionId,
+                    d.messageId,
+                    d.agentId,
+                    d.eventType,
+                    d.body,
+                    d.at,
+                    d.at,
+                    d.at,
+                ).changes > 0,
+            claimDue: async (agentIds, now, limit) =>
+                db.transaction(() => {
+                    const claimed: WebhookDeliveryRecord[] = []
+                    for (const agentId of agentIds) {
+                        if (claimed.length >= limit) break
+                        for (const row of q.webhookDueForAgent.all<WebhookDeliveryRow>(
+                            agentId,
+                            now,
+                            limit - claimed.length,
+                        )) {
+                            if (
+                                q.webhookClaim.run(now, row.subscription_id, row.message_id)
+                                    .changes > 0
+                            ) {
+                                claimed.push({
+                                    ...deliveryRead(row),
+                                    status: "inflight",
+                                    attempts: row.attempts + 1,
+                                })
+                            }
+                        }
+                    }
+                    return claimed
+                }),
+            markSent: async (subscriptionId, messageId, at) => {
+                db.transaction(() => {
+                    q.webhookSent.run(at, subscriptionId, messageId)
+                    q.webhookHealthy.run(at, subscriptionId)
+                })
+            },
+            markRetry: async (subscriptionId, messageId, nextAttemptAt, error, at) => {
+                db.transaction(() => {
+                    q.webhookRetry.run(nextAttemptAt, error, at, subscriptionId, messageId)
+                    q.webhookUnhealthy.run(error, at, subscriptionId)
+                })
+            },
+            markFailed: async (subscriptionId, messageId, error, at) => {
+                db.transaction(() => {
+                    q.webhookFailed.run(error, at, subscriptionId, messageId)
+                    q.webhookUnhealthy.run(error, at, subscriptionId)
+                })
+            },
+            backlog: backlogOf("webhook_deliveries"),
+            recoverInflight: async (agentIds, at) =>
+                db.transaction(() => {
+                    const recovered: WebhookDeliveryRecord[] = []
+                    for (const agentId of agentIds) {
+                        const rows = q.webhookInflightForAgent.all<WebhookDeliveryRow>(agentId)
+                        q.webhookRecover.run(at, agentId)
+                        recovered.push(
+                            ...rows.map((row) => ({
+                                ...deliveryRead(row),
+                                status: "pending" as const,
+                                uncertain: true,
+                            })),
+                        )
+                    }
+                    return recovered
+                }),
+        }
+
+        this.usage = {
+            record: async (call) => {
+                q.modelCallInsert.run(
+                    call.agentId,
+                    call.sessionKey ?? null,
+                    call.turnId ?? null,
+                    call.role,
+                    call.model,
+                    call.promptTokens,
+                    call.promptReported ? 1 : 0,
+                    call.cachedPromptTokens ?? null,
+                    call.outputTokens,
+                    call.outputReported ? 1 : 0,
+                    call.sender ?? null,
+                    call.at,
+                )
+            },
+            report: async (query) => usageReport(db, query),
+        }
+
         this.agentFootprint = async (agentId) => footprint(agentId)
 
         this.purgeAgent = async (agentId) =>
@@ -1981,6 +2286,11 @@ export class SqliteStore implements Store {
                 // are already counted. Deleted for the reason inbound keys are — rows keyed to an
                 // agent that no longer exists.
                 q.handoffDeleteAll.run(agentId)
+                // Not in the footprint either: what an agent cost is billing history, not something a
+                // person weighs before deleting it. Deleted rather than orphaned, for the same reason.
+                q.modelCallDeleteAll.run(agentId)
+                // Its pending webhook deliveries too; the subscriptions are server-wide and stay.
+                q.webhookDeleteForAgent.run(agentId)
                 // Also not in the footprint, and deleted for the reason migration 15 gives: this
                 // is the table `kv` should have been, so the delete that `kv` could never have is
                 // the whole argument for the column. A state row surviving its agent would make a
@@ -2016,6 +2326,113 @@ export class SqliteStore implements Store {
         if (this.#closed) return
         this.#closed = true
         this.#db.close()
+    }
+}
+
+/** Escape a LIKE pattern's own metacharacters, so a session prefix matches literally. */
+function likePrefix(prefix: string): string {
+    return prefix.replace(/[\\%_]/g, (char) => `\\${char}`)
+}
+
+/**
+ * The SQL expression for each grouping. A whitelist, and the only way a grouping reaches the query:
+ * the route validates names against `USAGE_GROUPS`, and this map is what turns a name into SQL, so
+ * nothing a caller sent is ever concatenated.
+ */
+const USAGE_COLUMNS: Readonly<Record<UsageGroup, { readonly sql: string; readonly as: string }>> = {
+    agent: { sql: "agent_id", as: "agent_id" },
+    model: { sql: "model", as: "model" },
+    day: { sql: "substr(at, 1, 10)", as: "day" },
+    sender: { sql: "sender", as: "sender" },
+}
+
+interface UsageRow {
+    readonly agent_id?: string
+    readonly model?: string
+    readonly day?: string
+    readonly sender?: string | null
+    readonly calls: number
+    readonly prompt_tokens: number
+    readonly cached_prompt_tokens: number
+    readonly output_tokens: number
+    readonly estimated_calls: number
+}
+
+/**
+ * Totals per group.
+ *
+ * Prepared per call rather than once, because the grouping and the arity of the agent list vary.
+ * ponytail: a fresh prepare per request. Cache by shape if usage becomes a hot path.
+ */
+function usageReport(
+    db: SqlDatabase,
+    query: UsageQuery,
+): { buckets: UsageBucket[]; meteredSince?: string } {
+    if (query.agentIds !== undefined && query.agentIds.length === 0) return { buckets: [] }
+    const where: string[] = []
+    const params: SqlParam[] = []
+    if (query.agentIds !== undefined) {
+        where.push(`agent_id IN (${query.agentIds.map(() => "?").join(", ")})`)
+        params.push(...query.agentIds)
+    }
+    if (query.sessionPrefix !== undefined) {
+        where.push("session_key LIKE ? ESCAPE '\\'")
+        params.push(`${likePrefix(query.sessionPrefix)}%`)
+    }
+    // The window applies to the totals and not to `meteredSince`, which answers "how far back does
+    // this go at all" for whatever the caller may see.
+    const scopeWhere = [...where]
+    const scopeParams = [...params]
+    if (query.from !== undefined) {
+        where.push("at >= ?")
+        params.push(query.from)
+    }
+    if (query.to !== undefined) {
+        where.push("at < ?")
+        params.push(query.to)
+    }
+    const clause = (parts: readonly string[]) =>
+        parts.length === 0 ? "" : `WHERE ${parts.join(" AND ")}`
+    const groups = [...new Set(query.by)].map((name) => USAGE_COLUMNS[name])
+    const select = groups.map((group) => `${group.sql} AS ${group.as}`)
+    const groupBy =
+        groups.length === 0 ? "" : `GROUP BY ${groups.map((group) => group.sql).join(", ")}`
+    const rows = db
+        .prepare(
+            `SELECT ${[
+                ...select,
+                "COUNT(*) AS calls",
+                "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens",
+                "COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens",
+                "COALESCE(SUM(output_tokens), 0) AS output_tokens",
+                "COALESCE(SUM(CASE WHEN prompt_reported = 0 OR output_reported = 0 THEN 1 ELSE 0 END), 0) AS estimated_calls",
+            ].join(", ")}
+               FROM model_calls ${clause(where)} ${groupBy}
+              ${groupBy === "" ? "" : `ORDER BY ${groups.map((group) => group.sql).join(", ")}`}`,
+        )
+        .all<UsageRow>(...params)
+    const since = db
+        .prepare(`SELECT MIN(at) AS since FROM model_calls ${clause(scopeWhere)}`)
+        .get<{ since: string | null }>(...scopeParams)
+    const buckets = rows
+        // An ungrouped report over no rows still returns one all-zero row from the aggregate.
+        .filter((row) => groups.length > 0 || row.calls > 0)
+        .map((row) => ({
+            ...(row.agent_id === undefined ? {} : { agentId: row.agent_id }),
+            ...(row.model === undefined ? {} : { model: row.model }),
+            ...(row.day === undefined ? {} : { day: row.day }),
+            ...(row.sender === undefined || row.sender === null ? {} : { sender: row.sender }),
+            calls: row.calls,
+            promptTokens: row.prompt_tokens,
+            cachedPromptTokens: row.cached_prompt_tokens,
+            outputTokens: row.output_tokens,
+            estimatedCalls: row.estimated_calls,
+        }))
+    return {
+        buckets,
+        ...(since?.since === null || since?.since === undefined
+            ? {}
+            : { meteredSince: since.since }),
     }
 }
 

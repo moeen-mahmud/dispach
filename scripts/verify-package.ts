@@ -19,7 +19,15 @@
  *     bun run verify:package
  */
 
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
+import {
+    existsSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -123,6 +131,24 @@ try {
     const readme = join(work, "node_modules", "dispach", "README.md")
     const readmeBytes = existsSync(readme) ? statSync(readme).size : 0
     check("it ships a readme", readmeBytes > 1000, `${readmeBytes} bytes`)
+
+    /**
+     * Nothing FSL-licensed ships. `packages/control` lives in this tree under a different licence,
+     * and `check-deps` forbids importing it — this is the same line checked at the artefact, where a
+     * copy by any other route (a `files` glob, a bundler following a path) would land.
+     */
+    const installed = join(work, "node_modules", "dispach")
+    const fsl = readdirSync(installed, { recursive: true, encoding: "utf8" }).filter((entry) => {
+        const path = join(installed, entry)
+        if (!statSync(path).isFile() || statSync(path).size > 20e6) return false
+        const text = readFileSync(path, "utf8")
+        return text.includes("Functional Source License") || text.includes("dispach-control")
+    })
+    check(
+        "no control-plane (FSL) code in the tarball",
+        fsl.length === 0,
+        fsl.slice(0, 3).join(", "),
+    )
 
     writeFileSync(
         join(work, "probe.mjs"),

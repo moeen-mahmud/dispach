@@ -19,6 +19,7 @@ import {
     createApprovalRegistry,
     createHandler,
     type Provisioner,
+    type SecretAdmin,
 } from "@dispach/server"
 import { createClient, DispachError, isEvent } from "../src/index.ts"
 import { turnStreamItems } from "../src/stream.ts"
@@ -103,6 +104,8 @@ async function harness(
          * "you did not say what you bound" and the wrong thing for this test to assert against.
          */
         provision?: Provisioner
+        /** The credential writer for the secrets routes. */
+        secrets?: SecretAdmin
     } = {},
 ) {
     const dir = mkdtempSync(join(tmpdir(), "client-test-"))
@@ -126,6 +129,7 @@ async function harness(
         ...(options.provision === undefined
             ? {}
             : { provision: options.provision, origin: { host: "127.0.0.1" } }),
+        ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
     })
 
     /**
@@ -758,6 +762,42 @@ describe("every read is unwrapped the way its route wraps it", () => {
     })
 })
 
+describe("webhooks", () => {
+    test("create returns the secret once; the list is an array without it", async () => {
+        const { client, runtime } = await harness()
+        const created = await client.createWebhook({
+            url: "https://93.184.216.34/hooks",
+            types: ["turn.end"],
+        })
+        expect(created.secret).toStartWith("whsec_")
+        const listed = await client.webhooks()
+        expect(Array.isArray(listed)).toBe(true)
+        expect(JSON.stringify(listed)).not.toContain(created.secret)
+        expect((await client.deleteWebhook(created.subscriptionId)).deleted).toBe(true)
+        expect(await client.webhooks()).toEqual([])
+        await runtime.stop()
+    })
+})
+
+describe("usage and turns", () => {
+    test("usage buckets and the turn list are the shapes the server sends", async () => {
+        const { client, runtime } = await harness()
+        const agent = client.agent("assistant")
+        await (await agent.send("hello")).text()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        const report = await client.usage({ by: ["agent"] })
+        // The kind of value, not just its contents: a wrapped response read as the wrong shape is
+        // how a page crashed on `.map is not a function`.
+        expect(Array.isArray(report.buckets)).toBe(true)
+        expect(report.buckets[0]?.agentId).toBe("assistant")
+        expect((await agent.usage({ by: [] })).buckets[0]?.calls).toBeGreaterThan(0)
+        const page = await agent.turns({ limit: 5 })
+        expect(Array.isArray(page.turns)).toBe(true)
+        expect(page.turns[0]?.input).toBe("hello")
+        await runtime.stop()
+    })
+})
+
 describe("creating an agent", () => {
     /** A provisioner that writes a real manifest, so `Runtime.adopt` has something to adopt. */
     function provisioner(dir: () => string): Provisioner {
@@ -802,8 +842,73 @@ describe("creating an agent", () => {
                     files: ["agent.yaml"],
                 }
             },
+            templates: () => [
+                { name: "support", vars: [{ name: "store", required: true, secret: false }] },
+            ],
+            createFromTemplate: (input) => {
+                const id = input.name.toLowerCase()
+                const target = join(dir(), id)
+                mkdirSync(target, { recursive: true })
+                writeFileSync(join(target, "agent.yaml"), MANIFEST.replace("assistant", id))
+                return {
+                    agentId: id,
+                    manifestPath: join(target, "agent.yaml"),
+                    dir: target,
+                    files: ["agent.yaml"],
+                }
+            },
         }
     }
+
+    test("templates are an array, and one creates an agent that is adopted", async () => {
+        let dir = ""
+        const { client, runtime } = await harness({ provision: provisioner(() => dir) })
+        dir = mkdtempSync(join(tmpdir(), "client-template-"))
+        dirs.push(dir)
+        const templates = await client.templates()
+        // The kind of value, not just its contents: a wrapped response read as a bare array is how
+        // a page crashed on `.map is not a function`.
+        expect(Array.isArray(templates)).toBe(true)
+        expect(templates.map((entry) => entry.name)).toEqual(["support"])
+        const created = await client.createAgentFromTemplate({
+            template: "support",
+            name: "Acme",
+            vars: { store: "Acme" },
+        })
+        expect(created.adopted).toEqual(["acme"])
+        await runtime.stop()
+    })
+
+    test("secrets are an array of names, and a write is applied", async () => {
+        const written = new Map<string, string>()
+        const { client, runtime } = await harness({
+            secrets: {
+                status: () => [
+                    {
+                        name: "MODEL_API_KEY",
+                        set: written.has("MODEL_API_KEY"),
+                        usedBy: ["model.main.apiKeyEnv"],
+                    },
+                ],
+                write: (_path, values) => {
+                    for (const [name, value] of Object.entries(values)) written.set(name, value)
+                    return { written: Object.keys(values), shadowed: [] }
+                },
+            },
+        })
+        const agent = client.agent("assistant")
+        const before = await agent.secrets()
+        expect(Array.isArray(before)).toBe(true)
+        expect(before[0]).toEqual({
+            name: "MODEL_API_KEY",
+            set: false,
+            usedBy: ["model.main.apiKeyEnv"],
+        })
+        const result = await agent.setSecrets({ MODEL_API_KEY: "sk-new" })
+        expect(result.applied).toBe("reloaded")
+        expect((await agent.secrets())[0]?.set).toBe(true)
+        await runtime.stop()
+    })
 
     test("the answers reach the provisioner and the agent is adopted, not restarted", async () => {
         /**
@@ -848,6 +953,10 @@ describe("creating an agent", () => {
          */
         const refusing: Provisioner = {
             steps: () => [],
+            templates: () => [],
+            createFromTemplate: () => {
+                throw new Error("not used here")
+            },
             create: () => {
                 throw new HarnessError({
                     code: "provision_answer_invalid",
@@ -868,6 +977,16 @@ describe("creating an agent", () => {
         expect((caught as DispachError).code).toBe("provision_answer_invalid")
         expect((caught as DispachError).field).toBe("name")
         expect((caught as DispachError).status).toBe(400)
+        await runtime.stop()
+    })
+})
+
+describe("activity", () => {
+    test("is the shape the server sends", async () => {
+        const { client, runtime } = await harness()
+        const activity = await client.activity()
+        expect(activity.idle).toBe(true)
+        expect(activity.deliveries.webhooks.pending).toBe(0)
         await runtime.stop()
     })
 })

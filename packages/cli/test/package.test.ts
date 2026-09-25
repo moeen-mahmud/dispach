@@ -7,8 +7,7 @@
  * layout cannot express and nothing enforced, so the first `npm pack --dry-run` of this repo
  * offered to publish **2,693 files, 201 MB unpacked, 45.6 MB compressed** — because no build ever
  * cleaned `dist/`, `files: ["dist"]` ships whatever is in it, and `dist/` is gitignored so a diff
- * never showed it. A hundred of those files still imported `@castellan/core`, a package that has
- * not existed since the rename a month earlier.
+ * never showed it.
  *
  * Every assertion below is a thing that was wrong once, in a directory nobody looks at.
  */
@@ -156,10 +155,8 @@ describe("what ships in dist", () => {
     test("no file references a package that does not exist", () => {
         if (built === undefined) return
         /**
-         * The 2,693-file finding, as an assertion. A hundred stale chunks from before the rename
-         * were still importing `@castellan/core`; nothing could see them because `dist/` is
-         * gitignored and no test read it as a *set*. `rm -rf dist` in every build script is the fix
-         * and this is what proves the fix is still in the script.
+         * The 2,693-file finding, as an assertion. nothing could see them because `dist/` is
+         * gitignored
          */
         const offenders = built
             .filter((name) => name.endsWith(".js"))

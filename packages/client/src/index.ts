@@ -123,8 +123,14 @@ export interface TurnRecordLike {
     readonly turnId: string
     readonly sessionKey: string
     readonly status: string
+    /** What was sent, raw. Always on the wire; declared late, which is why a list needed it. */
+    readonly input: string
     readonly text: string
     readonly steps: number
+    /**
+     * The prompt the turn **ended** at, the last step's: a context-size figure, not what the turn
+     * was billed. `usage()` sums every call.
+     */
     readonly promptTokens: number
     readonly outputTokens: number
     readonly errorCode?: string
@@ -194,6 +200,23 @@ export interface AgentClient {
      * rather than aborting it, so a caller applying a config change retries instead of assuming.
      */
     reload(): Promise<{ readonly id: string; readonly adopted: readonly string[] }>
+    /** What this agent cost, from the per-call meter. */
+    usage(options?: UsageOptions): Promise<UsageReportLike & { readonly id: string }>
+    /**
+     * Every turn this agent has taken, newest first, across sessions. Pass the previous page's
+     * `nextBefore` as `before`.
+     */
+    turns(options?: {
+        readonly limit?: number
+        readonly before?: number
+    }): Promise<{ readonly turns: readonly TurnRecordLike[]; readonly nextBefore?: number }>
+    /** The variables this agent's manifest reads, and whether each is set. Never a value. */
+    secrets(): Promise<readonly SecretStatusLike[]>
+    /**
+     * Write credentials into the agent's `.env` and apply them: reloaded if hosted, adopted if it was
+     * not running. Only names the manifest reads are accepted, all or nothing.
+     */
+    setSecrets(values: Readonly<Record<string, string>>): Promise<SecretsWrittenLike>
     schedules(): Promise<readonly ScheduleRecord[]>
     /**
      * Arm a schedule. The server validates the expression and the delivery target.
@@ -605,6 +628,111 @@ export interface ProvisionedAgentLike {
     readonly error?: WireError
 }
 
+/** One template, as `GET /v1/templates` lists it. A broken one carries `problem` and no variables. */
+export interface TemplateLike {
+    readonly name: string
+    readonly description?: string
+    readonly vars: readonly {
+        readonly name: string
+        readonly description?: string
+        readonly required: boolean
+        readonly default?: string
+        /** Written to the agent's `.env`, never into a file, and never returned by any route. */
+        readonly secret: boolean
+    }[]
+    readonly problem?: WireError
+}
+
+/** One variable an agent's manifest reads. Whether it is set, never what it is. */
+export interface SecretStatusLike {
+    readonly name: string
+    readonly set: boolean
+    /** The manifest fields that read it. */
+    readonly usedBy: readonly string[]
+}
+
+/**
+ * What `PUT /v1/agents/:id/secrets` answers, `200` whenever the values were written.
+ *
+ * `applied` is the part to read: `reloaded` for a hosted agent, `adopted` for one that was not
+ * running (usually because this key was the thing missing), `none` for a stopped agent or when
+ * applying failed, in which case `error` says why. `shadowed` names values written and overridden
+ * by the server's own environment, which wins by design.
+ */
+export interface SecretsWrittenLike {
+    readonly id: string
+    readonly written: readonly string[]
+    readonly shadowed: readonly string[]
+    readonly applied: "reloaded" | "adopted" | "none"
+    readonly adopted: readonly string[]
+    readonly stopped?: boolean
+    readonly error?: WireError
+}
+
+/** What a delivery queue still owes. `nextAttemptAt` may be in the past: due now. */
+export interface DeliveryBacklogLike {
+    readonly pending: number
+    readonly inflight: number
+    readonly nextAttemptAt?: string
+}
+
+/** `GET /v1/activity`: whether the process may be suspended, and when to wake it. */
+export interface ActivityLike {
+    readonly idle: boolean
+    readonly turnsRunning: number
+    readonly deliveries: {
+        readonly outbox: DeliveryBacklogLike
+        readonly webhooks: DeliveryBacklogLike
+    }
+    readonly nextWakeAt?: string
+}
+
+/** A webhook subscription as the server reports it. Never the secret. */
+export interface WebhookLike {
+    readonly subscriptionId: string
+    readonly url: string
+    readonly types: readonly string[]
+    readonly scope?: { readonly agents?: readonly string[]; readonly sessionPrefix?: string }
+    readonly createdAt: string
+    /** True while the last attempt failed. `lastError` says why. */
+    readonly failing: boolean
+    readonly consecutiveFailures: number
+    readonly lastError?: string
+    readonly lastSuccessAt?: string
+    readonly lastFailureAt?: string
+    readonly pending: number
+}
+
+/** How to slice usage. `by` defaults to `["agent", "model"]` on the server; `[]` is one total. */
+export interface UsageOptions {
+    readonly by?: readonly ("agent" | "model" | "day" | "sender")[]
+    /** Inclusive, ISO-8601. */
+    readonly from?: string
+    /** Exclusive, ISO-8601. */
+    readonly to?: string
+}
+
+/** One group's totals. A grouping field is present exactly when it was asked for. */
+export interface UsageBucketLike {
+    readonly agentId?: string
+    readonly model?: string
+    readonly day?: string
+    /** Absent within a `sender` grouping means the operator's own calls. */
+    readonly sender?: string
+    readonly calls: number
+    readonly promptTokens: number
+    readonly cachedPromptTokens: number
+    readonly outputTokens: number
+    /** Calls where either figure was an estimate. Non-zero means the totals are partly a guess. */
+    readonly estimatedCalls: number
+}
+
+export interface UsageReportLike {
+    readonly buckets: readonly UsageBucketLike[]
+    /** The earliest metered call. Absent when there are none. Earlier turns are not included. */
+    readonly meteredSince?: string
+}
+
 /** How far one credential reaches. Absent fields mean "everything". See `04-SPEC-WIRE.md`. */
 export interface KeyScopeLike {
     readonly agents?: readonly string[]
@@ -649,6 +777,38 @@ export interface DispachClient {
      * A bad answer comes back as a `400` whose `field` names the step to fix.
      */
     createAgent(answers: Readonly<Record<string, string>>): Promise<ProvisionedAgentLike>
+    /** What every agent this credential reaches cost, from the per-call meter. */
+    usage(options?: UsageOptions): Promise<UsageReportLike>
+    /**
+     * Whether the server is idle and when it must next be woken — for whatever suspends it. Needs
+     * the server token or an unscoped operator key.
+     */
+    activity(): Promise<ActivityLike>
+    /** The webhook subscriptions this credential can see. */
+    webhooks(): Promise<readonly WebhookLike[]>
+    /**
+     * Subscribe a URL. **The secret comes back exactly once**: store it where the receiver can read
+     * it, and verify deliveries with any Standard Webhooks library.
+     */
+    createWebhook(input: {
+        readonly url: string
+        readonly types: readonly string[]
+        readonly agents?: readonly string[]
+    }): Promise<WebhookLike & { readonly secret: string }>
+    deleteWebhook(
+        subscriptionId: string,
+    ): Promise<{ readonly id: string; readonly deleted: boolean }>
+    /** Every template this server can create an agent from, with the variables each declares. */
+    templates(): Promise<readonly TemplateLike[]>
+    /**
+     * Create an agent from a template and adopt it. The id is derived from `name`. A secret
+     * variable's value goes to the new agent's `.env` and is never returned.
+     */
+    createAgentFromTemplate(input: {
+        readonly template: string
+        readonly name: string
+        readonly vars?: Readonly<Record<string, string>>
+    }): Promise<ProvisionedAgentLike>
     /**
      * Every credential, live and revoked, with the sentence this server says about scope.
      *
@@ -882,6 +1042,24 @@ export function createClient(options: ClientOptions): DispachClient {
                     body: {},
                 }),
 
+            usage: (options) =>
+                json<UsageReportLike & { id: string }>("GET", at(`/usage${usageQuery(options)}`)),
+            turns: (options) => {
+                const params = new URLSearchParams()
+                if (options?.limit !== undefined) params.set("limit", String(options.limit))
+                if (options?.before !== undefined) params.set("before", String(options.before))
+                const suffix = params.size === 0 ? "" : `?${params.toString()}`
+                return json<{ turns: readonly TurnRecordLike[]; nextBefore?: number }>(
+                    "GET",
+                    at(`/turns${suffix}`),
+                )
+            },
+            secrets: async () =>
+                (await json<{ secrets: readonly SecretStatusLike[] }>("GET", at("/secrets")))
+                    .secrets,
+            setSecrets: (values) =>
+                json<SecretsWrittenLike>("PUT", at("/secrets"), { body: { values } }),
+
             /**
              * Unwrapped, because the route wraps it — and this was declared as a bare array and
              * **never called** until 17.3's panel became the first consumer, at which point the
@@ -1037,6 +1215,23 @@ export function createClient(options: ClientOptions): DispachClient {
             json<OperatorKeyLike>("DELETE", `/v1/keys/${encodeURIComponent(keyId)}`),
         createAgent: (answers) =>
             json<ProvisionedAgentLike>("POST", "/v1/agents", { body: { answers } }),
+        // Unwrapped, because the route wraps it: a list read declared as the wrong shape is how a
+        // page crashed to black on `schedules.map is not a function`.
+        usage: (options) => json<UsageReportLike>("GET", `/v1/usage${usageQuery(options)}`),
+        activity: () => json<ActivityLike>("GET", "/v1/activity"),
+        webhooks: async () =>
+            (await json<{ webhooks: readonly WebhookLike[] }>("GET", "/v1/webhooks")).webhooks,
+        createWebhook: (input) =>
+            json<WebhookLike & { secret: string }>("POST", "/v1/webhooks", { body: input }),
+        deleteWebhook: (subscriptionId) =>
+            json<{ id: string; deleted: boolean }>(
+                "DELETE",
+                `/v1/webhooks/${encodeURIComponent(subscriptionId)}`,
+            ),
+        templates: async () =>
+            (await json<{ templates: readonly TemplateLike[] }>("GET", "/v1/templates")).templates,
+        createAgentFromTemplate: (input) =>
+            json<ProvisionedAgentLike>("POST", "/v1/agents", { body: input }),
 
         async *events(opts) {
             const params = new URLSearchParams()
@@ -1050,4 +1245,13 @@ export function createClient(options: ClientOptions): DispachClient {
             yield* eventStreamItems(body)
         },
     }
+}
+
+/** `?by=…&from=…&to=…`, or nothing. An empty `by` is sent as `by=` so it means "one total". */
+function usageQuery(options: UsageOptions | undefined): string {
+    const params = new URLSearchParams()
+    if (options?.by !== undefined) params.set("by", options.by.join(","))
+    if (options?.from !== undefined) params.set("from", options.from)
+    if (options?.to !== undefined) params.set("to", options.to)
+    return params.size === 0 ? "" : `?${params.toString()}`
 }

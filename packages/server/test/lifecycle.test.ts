@@ -253,3 +253,29 @@ model:
         await runtime.stop()
     })
 })
+
+describe("a scoped key", () => {
+    test("cannot stop or start an agent outside its reach, and gets the unknown-agent 404", async () => {
+        const { runtime, call } = await harness({ token: TOKEN })
+        await runtime.store.agentState.disable("other", new Date().toISOString(), "test")
+        const minted = await call("POST", "/v1/keys", {
+            body: { label: "narrow", scope: { agents: ["other"], can: ["admin"] } },
+        })
+        const narrow = ((await minted.json()) as { secret: string }).secret
+
+        for (const verb of ["stop", "start"]) {
+            const refused = await call("POST", `/v1/agents/assistant/${verb}`, {
+                token: narrow,
+                body: {},
+            })
+            expect(refused.status).toBe(404)
+            expect(((await refused.json()) as { error: { code: string } }).error.code).toBe(
+                "agent_not_found",
+            )
+        }
+        // Still hosted, and no row written.
+        expect(runtime.list().map((agent) => agent.id)).toEqual(["assistant"])
+        expect(await runtime.store.agentState.get("assistant")).toBeUndefined()
+        await runtime.stop()
+    })
+})

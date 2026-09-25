@@ -34,6 +34,7 @@ import {
     newKeySecret,
     newRunId,
     newTurnId,
+    newWebhookSecret,
     PERSON_SETTABLE_PATHS,
     parseSettingValue,
     phasesFor,
@@ -47,7 +48,12 @@ import {
     settingByPath,
     type TurnRecord,
     type TurnSender,
+    USAGE_GROUPS,
+    type UsageGroup,
+    type UsageQuery,
     VERSION,
+    type WebhookSubscription,
+    webhookDeliverable,
 } from "@dispach/core"
 import { type ApprovalRegistry, createApprovalRegistry } from "./approvals.ts"
 import { authorise } from "./auth.ts"
@@ -60,7 +66,14 @@ import {
     originProblem,
     preflightHeaders,
 } from "./origin.ts"
-import { can, isScoped, type Principal, reachesAgent, reachesSession } from "./principal.ts"
+import {
+    can,
+    isScoped,
+    type Principal,
+    reachesAgent,
+    reachesSession,
+    scopeFilter,
+} from "./principal.ts"
 import { claimSpent, fail, forbidden } from "./respond.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
@@ -74,7 +87,9 @@ import {
     PhaseBody,
     ProvisionBody,
     parseBody,
+    SecretsBody,
     StopBody,
+    WebhookBody,
 } from "./wire-schemas.ts"
 
 /** Bodies larger than this are refused before a channel plugin sees them. */
@@ -210,6 +225,29 @@ export interface HandlerOptions {
      * finding rather than a hypothetical.
      */
     readonly channels?: ChannelAdmin
+    /**
+     * What the CLI injects for `GET` and `PUT /v1/agents/:id/secrets`. Absent answers `501`.
+     *
+     * Injected for `channels`' reason: the values go into the `.env` beside the manifest, and how is
+     * the CLI's (`applySecret`, at `0600`). The **allowed names come from the manifest**, never from
+     * the caller, which is the rule `setCredential` states for one channel, applied to the whole agent.
+     */
+    readonly secrets?: SecretAdmin
+}
+
+/** What the CLI injects for the secrets routes. See `HandlerOptions.secrets`. */
+export interface SecretAdmin {
+    /** Every variable the manifest reads that a caller may set, and whether each is set. Never a value. */
+    status(manifestPath: string): readonly {
+        readonly name: string
+        readonly set: boolean
+        readonly usedBy: readonly string[]
+    }[]
+    /** All or nothing. Throws a `HarnessError` naming the first variable the manifest does not read. */
+    write(
+        manifestPath: string,
+        values: Readonly<Record<string, string>>,
+    ): { readonly written: readonly string[]; readonly shadowed: readonly string[] }
 }
 
 /** What the CLI injects for the channel routes. See `HandlerOptions.channels`. */
@@ -260,6 +298,28 @@ export interface Provisioner {
         readonly dir: string
         readonly files: readonly string[]
     }
+    /** Every template in this server's sandbox, with its variables. A broken one carries `problem`. */
+    templates(): readonly TemplateWire[]
+    /** Create an agent from a template. Throws a `HarnessError`, as `create` does. */
+    createFromTemplate(input: {
+        readonly template: string
+        readonly name: string
+        readonly vars: Readonly<Record<string, string>>
+    }): ReturnType<Provisioner["create"]>
+}
+
+/** One template as the wire carries it. Structural, so `packages/cli` needs no import from here. */
+export interface TemplateWire {
+    readonly name: string
+    readonly description?: string
+    readonly vars: readonly {
+        readonly name: string
+        readonly description?: string
+        readonly required: boolean
+        readonly default?: string
+        readonly secret: boolean
+    }[]
+    readonly problem?: { readonly code: string; readonly message: string; readonly hint: string }
 }
 
 /** One question as the wire carries it. Structural, so `packages/cli` needs no import from here. */
@@ -573,6 +633,39 @@ export function createHandler(options: HandlerOptions): ServerHandler {
             return json({ status: "starting", agents: runtime.list().length }, 503)
         },
         { capability: "open" },
+    )
+
+    /**
+     * Whether this process may be suspended, and when it must be woken — for an external waker.
+     *
+     * Not on `/v1/health`: that route is open, and a wake time says when this server's schedules
+     * fire. And unscoped keys only, because "is anything running" is a fact about every agent here,
+     * which a key narrowed to one of them has no business reading. `403`, not `404`: the refusal
+     * says what this credential may do and nothing about what exists.
+     */
+    router.add(
+        "GET",
+        "/v1/activity",
+        async (context) => {
+            const who = context.principal
+            if (
+                who.kind === "key" &&
+                who.scope !== undefined &&
+                (who.scope.agents !== undefined || who.scope.sessions !== undefined)
+            ) {
+                return fail(
+                    {
+                        code: "activity_needs_unscoped_key",
+                        message:
+                            "Activity covers every agent on this server, and this key is scoped.",
+                        hint: "Call this with the server token or an operator key minted with no agents or sessions scope — it is meant for whatever suspends and wakes the process, not for a tenant.",
+                    },
+                    403,
+                )
+            }
+            return json(await runtime.activity(now()))
+        },
+        { capability: "admin" },
     )
 
     // ─── Agents ──────────────────────────────────────────────────────────────────────────
@@ -894,11 +987,45 @@ export function createHandler(options: HandlerOptions): ServerHandler {
              */
             const parsed = parseBody(ProvisionBody, body.value)
             if (!parsed.ok) return fail(parsed.error, 400)
-            const text = parsed.value.answers
+            const { answers, template } = parsed.value
+            /**
+             * Exactly one of the two. Both is refused rather than one silently winning, because a
+             * caller who sent both believes both were applied; neither keeps the refusal a pre-template
+             * client already handles.
+             */
+            if (answers !== undefined && template !== undefined) {
+                return fail(
+                    {
+                        code: "provision_body_ambiguous",
+                        message: "The body has both answers and a template.",
+                        hint: "Send answers to create an agent the way init does, or template with name and vars to create one from a template in this server's sandbox. Not both.",
+                        field: "template",
+                    },
+                    400,
+                )
+            }
+            if (answers === undefined && template === undefined) {
+                return fail(
+                    {
+                        code: "provision_answers_required",
+                        message: "The body has neither answers nor a template.",
+                        hint: 'Send { "answers": { "name": "milo", … } } (GET /v1/provision lists the steps), or { "template": "…", "name": "…", "vars": {…} } (GET /v1/templates lists the templates).',
+                        field: "answers",
+                    },
+                    400,
+                )
+            }
 
             let created: ReturnType<Provisioner["create"]>
             try {
-                created = provision.create(text)
+                created =
+                    template === undefined
+                        ? provision.create(answers ?? {})
+                        : provision.createFromTemplate({
+                              template,
+                              name: parsed.value.name ?? "",
+                              vars: parsed.value.vars ?? {},
+                          })
             } catch (error) {
                 // The implementation knows why far better than this route does, so its hint passes
                 // through rather than being paraphrased.
@@ -947,11 +1074,109 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         { capability: "admin" },
     )
 
+    /**
+     * The templates an agent can be created from, with the variables each declares.
+     *
+     * `read`, like `GET /v1/provision`: a list of what can be asked for is not a secret, and a
+     * secret variable is reported as one (`secret: true`) with no value, because a template holds
+     * none. A broken template is listed with its `problem` rather than hidden.
+     */
+    router.add(
+        "GET",
+        "/v1/templates",
+        () => json({ templates: options.provision?.templates() ?? [] }),
+        { capability: "read" },
+    )
+
+    /**
+     * Which variables this agent reads, and whether each is set. Never a value.
+     *
+     * Reached for an agent that is **not hosted** as well, deliberately: the commonest reason an
+     * agent is not running is the key it is missing, and that is precisely the agent this route has
+     * to describe. Scope is checked here rather than through `withAgent`, which only knows hosted
+     * agents, and it answers the same 404 an imaginary agent gets.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/secrets",
+        async (context) => {
+            const found = secretsTarget(runtime, options, context)
+            if (found.kind === "response") return found.response
+            return json({ id: found.id, secrets: found.admin.status(found.manifestPath) })
+        },
+        { capability: "admin" },
+    )
+
+    /**
+     * Write an agent's credentials, and apply them.
+     *
+     * **Applied, not just written.** A hosted agent is replaced, so the new value is the one its
+     * next turn uses; an agent that was not running (its key was missing, which is the case this
+     * exists for) is adopted. A stopped agent is written and left stopped, because `stop` is a
+     * durable switch and a credential write is not a request to reverse it. When applying fails the
+     * response is still `200` with an `error`, for provisioning's reason: the values are on disk,
+     * and reporting the request as failed would send somebody to write them again.
+     */
+    router.add(
+        "PUT",
+        "/v1/agents/:id/secrets",
+        async (context) => {
+            const found = secretsTarget(runtime, options, context)
+            if (found.kind === "response") return found.response
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(SecretsBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+
+            let result: ReturnType<SecretAdmin["write"]>
+            try {
+                result = found.admin.write(found.manifestPath, parsed.value.values)
+            } catch (error) {
+                if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                throw error
+            }
+            const written = { id: found.id, written: result.written, shadowed: result.shadowed }
+
+            const hosted = runtime.list().some((agent) => agent.id === found.id)
+            const state = await runtime.store.agentState.get(found.id)
+            if (!hosted && state?.enabled === false) {
+                return json({ ...written, applied: "none", adopted: [], stopped: true })
+            }
+            try {
+                const admitted = hosted
+                    ? await runtime.replace(found.id)
+                    : await runtime.adopt(found.manifestPath)
+                return json({
+                    ...written,
+                    applied: hosted ? "reloaded" : "adopted",
+                    adopted: admitted.map((agent) => agent.id),
+                })
+            } catch (error) {
+                return json({
+                    ...written,
+                    applied: "none",
+                    adopted: [],
+                    error: isHarnessError(error)
+                        ? error.toDetail()
+                        : {
+                              code: "secrets_apply_failed",
+                              message: error instanceof Error ? error.message : String(error),
+                              hint: "The values were written and the agent is not running on them yet. Fix what the message names and reload or start it.",
+                          },
+                })
+            }
+        },
+        { capability: "admin" },
+    )
+
     router.add(
         "POST",
         "/v1/agents/:id/stop",
         async (context) => {
             const id = context.params.id ?? ""
+            // These two routes do not go through `withAgent` — `start` acts on an agent nothing is
+            // hosting — so the scope check it would have made is made here, with the same 404.
+            if (!reachesAgent(context.principal, id)) return notFound("agent", id)
             const hosted = runtime.list().some((agent) => agent.id === id)
             const known = await runtime.store.agentState.get(id)
             // Neither hosted nor ever recorded means there is nothing here by that name. A 200 would
@@ -1004,6 +1229,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "/v1/agents/:id/start",
         async (context) => {
             const id = context.params.id ?? ""
+            if (!reachesAgent(context.principal, id)) return notFound("agent", id)
             if (runtime.list().some((agent) => agent.id === id)) {
                 // Already running. Enabled anyway, because a hosted agent with a `disabled` row is a
                 // state a crash between the two writes above can leave behind, and this is the command
@@ -1099,6 +1325,12 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const idempotency = parseIdempotencyKey(context.request)
                 if (idempotency.kind === "error") return fail(idempotency.error, 400)
 
+                // The governor answers now, while there is still a response to put it in. After this
+                // the turn detaches and a refusal would reach nobody. Nothing is recorded for a
+                // refused message — not a turn row, not an idempotency claim — so a retry is clean.
+                const admission = await agent.admit()
+                if (!admission.ok) return fail(admission.error.toDetail(), 429)
+
                 const turnId = newTurnId()
 
                 /**
@@ -1122,6 +1354,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         inputHash: await inputHash(sessionKey, text),
                         now: new Date(),
                     })
+                    if (claim.kind !== "claimed") admission.release()
                     if (claim.kind === "replay") {
                         return json({ turnId: claim.turnId, sessionKey, replayed: true }, 200)
                     }
@@ -1160,6 +1393,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 // turn's lifetime depends on the connection that started it.
                 const work = agent
                     .send(text, {
+                        admission,
                         sessionKey,
                         turnId,
                         source: "api",
@@ -1586,6 +1820,203 @@ export function createHandler(options: HandlerOptions): ServerHandler {
 
     // ─── Turns, continued ────────────────────────────────────────────────────────────────
 
+    /**
+     * What this server's agents cost, from the meter: one row per model call, summed.
+     *
+     * Not `turns.prompt_tokens`, which holds only the last step's prompt and records nothing for a
+     * compactor call (migration 18). Filtered by the caller's scope, agents **and** session prefix,
+     * because a per-sender row is identity. `meteredSince` says how far back the meter goes: it
+     * starts at the upgrade that added it, and earlier turns are not guessed at.
+     */
+    /**
+     * Outbound webhooks. `admin`, and bound to the creating credential's reach.
+     *
+     * A key narrowed to one agent cannot subscribe to the others' events, and sees and deletes only
+     * the subscriptions inside its own reach; an unscoped subscription is visible only to an
+     * unscoped caller. The secret is returned **once**, here, and never again, the same rule as an
+     * operator key's.
+     */
+    router.add(
+        "POST",
+        "/v1/webhooks",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(WebhookBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const input = parsed.value
+
+            const unknown = input.types.filter(
+                (type) =>
+                    !(EVENT_TYPES as readonly string[]).includes(type) || !webhookDeliverable(type),
+            )
+            if (unknown.length > 0) {
+                return fail(
+                    {
+                        code: "webhook_type_invalid",
+                        message: `Cannot deliver ${unknown.join(", ")}.`,
+                        hint: "Any type from the event stream except model.chunk, which is one request per token. The wire spec's event table lists them.",
+                        field: "types",
+                    },
+                    400,
+                )
+            }
+
+            const reach = scopeFilter(context.principal)
+            if (input.agents !== undefined) {
+                const known = new Set([
+                    ...runtime.list().map((agent) => agent.id),
+                    ...(await runtime.store.agentState.list()).map((state) => state.agentId),
+                ])
+                const outside = input.agents.filter(
+                    (id) => !reachesAgent(context.principal, id) || !known.has(id),
+                )
+                if (outside.length > 0) {
+                    return fail(
+                        {
+                            code: "webhook_scope_invalid",
+                            message: `This credential cannot subscribe to ${outside.join(", ")}.`,
+                            hint: "A subscription hears at most what the key creating it reaches, and only agents this server holds. GET /v1/agents lists them.",
+                            field: "agents",
+                        },
+                        400,
+                    )
+                }
+            }
+            const agents = input.agents ?? reach.agentIds
+            const scope = {
+                ...(agents === undefined ? {} : { agents: [...agents] }),
+                ...(reach.sessionPrefix === undefined
+                    ? {}
+                    : { sessionPrefix: reach.sessionPrefix }),
+            }
+
+            try {
+                await runtime.webhooks.check(input.url)
+            } catch (error) {
+                if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                throw error
+            }
+
+            const secret = newWebhookSecret()
+            const created = await runtime.store.webhooks.create({
+                subscriptionId: `wh_${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`,
+                url: input.url,
+                secret,
+                types: [...new Set(input.types)],
+                ...(Object.keys(scope).length === 0 ? {} : { scope }),
+                createdAt: new Date(options.now?.() ?? Date.now()).toISOString(),
+            })
+            await runtime.webhooks.changed()
+            return json({ ...webhookWire(created), secret }, 201)
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/webhooks",
+        async (context) => {
+            const all = await runtime.store.webhooks.list()
+            return json({
+                webhooks: all
+                    .filter((sub) => webhookVisible(context.principal, sub))
+                    .map(webhookWire),
+            })
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/webhooks/:webhookId",
+        async (context) => {
+            const id = context.params.webhookId ?? ""
+            const found = await runtime.store.webhooks.get(id)
+            // Out of reach answers exactly what an imaginary one does.
+            if (found === undefined || !webhookVisible(context.principal, found)) {
+                return fail(
+                    {
+                        code: "webhook_not_found",
+                        message: `No webhook with id "${id}".`,
+                        hint: "GET /v1/webhooks lists the subscriptions this credential can see.",
+                    },
+                    404,
+                )
+            }
+            await runtime.store.webhooks.delete(id)
+            await runtime.webhooks.changed()
+            return json({ id, deleted: true })
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/usage",
+        async (context) => {
+            const query = usageQuery(context.url)
+            if (query.kind === "error") return fail(query.error, 400)
+            const scope = scopeFilter(context.principal)
+            return json(await runtime.store.usage.report({ ...query.value, ...scope }))
+        },
+        { capability: "read" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/agents/:id/usage",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const query = usageQuery(context.url)
+                if (query.kind === "error") return fail(query.error, 400)
+                const prefix = scopeFilter(context.principal).sessionPrefix
+                return json({
+                    id: agent.id,
+                    ...(await runtime.store.usage.report({
+                        ...query.value,
+                        agentIds: [agent.id],
+                        ...(prefix === undefined ? {} : { sessionPrefix: prefix }),
+                    })),
+                })
+            }),
+        { capability: "read" },
+    )
+
+    /**
+     * Every turn this agent has taken, newest first, across sessions.
+     *
+     * Paged by `before`, the store's row key, never a timestamp, which can tie. A session-scoped
+     * key sees its own sessions' turns only.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/turns",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const limit = pageNumber(context.url, "limit")
+                const before = pageNumber(context.url, "before")
+                if (limit === null || before === null) {
+                    return fail(
+                        {
+                            code: "turns_page_invalid",
+                            message: "`limit` and `before` must be positive whole numbers.",
+                            hint: "Pass `before` exactly as the previous page's `nextBefore` returned it, and a `limit` up to 200.",
+                        },
+                        400,
+                    )
+                }
+                const prefix = scopeFilter(context.principal).sessionPrefix
+                const page = await runtime.store.turns.listForAgent(agent.id, {
+                    limit: Math.min(limit ?? 50, 200),
+                    ...(before === undefined ? {} : { before }),
+                    ...(prefix === undefined ? {} : { sessionPrefix: prefix }),
+                })
+                return json({ id: agent.id, ...page })
+            }),
+        { capability: "read" },
+    )
+
     router.add(
         "GET",
         "/v1/agents/:id/turns/:turnId",
@@ -1817,6 +2248,9 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const row = await agent.store.schedules.get(agent.id, sid)
                 if (row === undefined) return notFound("schedule", sid)
 
+                const admission = await agent.admit()
+                if (!admission.ok) return fail(admission.error.toDetail(), 429)
+
                 const runId = newRunId()
                 const sessionKey = scheduleSessionKey(row.sessionMode, row.id, runId)
                 const turnId = newTurnId()
@@ -1831,6 +2265,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 // the stream, and a disconnect never cancels the work.
                 void agent
                     .send(row.task, {
+                        admission,
                         sessionKey,
                         turnId,
                         source: `schedule:${row.id}:manual`,
@@ -2813,6 +3248,126 @@ function presentedClaim(request: Request): string | undefined {
     if (!header.startsWith("Bearer ")) return undefined
     const value = header.slice(7)
     return value === "" ? undefined : value
+}
+
+/**
+ * The agent a secrets route acts on, hosted or not, with its manifest.
+ *
+ * Scope first, and the same 404 whether the agent is out of scope or imaginary. A hosted agent's
+ * manifest is its own source; one this process is not hosting is found through `resolveAgent`,
+ * which is the lookup `start` uses.
+ */
+function secretsTarget(
+    runtime: Runtime,
+    options: HandlerOptions,
+    context: RequestContext,
+):
+    | {
+          readonly kind: "found"
+          readonly id: string
+          readonly manifestPath: string
+          readonly admin: SecretAdmin
+      }
+    | { readonly kind: "response"; readonly response: Response } {
+    const id = context.params.id ?? ""
+    if (!reachesAgent(context.principal, id)) {
+        return { kind: "response", response: notFound("agent", id) }
+    }
+    const admin = options.secrets
+    if (admin === undefined) {
+        return {
+            kind: "response",
+            response: fail(
+                {
+                    code: "secrets_not_supported",
+                    message: "This server cannot write an agent's credentials.",
+                    hint: "Credentials go into the .env beside an agent's manifest, and this process was built without a writer for it. Set them where the agent lives, with `config env`, and reload it.",
+                },
+                501,
+            ),
+        }
+    }
+    const source = runtime.sourceOf(id)
+    const manifestPath = typeof source === "string" ? source : options.resolveAgent?.(id)
+    if (manifestPath === undefined) return { kind: "response", response: notFound("agent", id) }
+    return { kind: "found", id, manifestPath, admin }
+}
+
+/** A subscription as the wire carries it: never the secret, and `failing` spelled out. */
+function webhookWire(sub: WebhookSubscription): Record<string, unknown> {
+    return { ...sub, failing: sub.consecutiveFailures > 0 }
+}
+
+/**
+ * Whether this caller may see a subscription: its scope must sit inside the caller's reach. An
+ * unscoped subscription is visible only to an unscoped caller, or a key narrowed to one agent could
+ * list, and delete, the operator's server-wide hooks.
+ */
+function webhookVisible(principal: Principal, sub: WebhookSubscription): boolean {
+    const reach = scopeFilter(principal)
+    if (reach.agentIds !== undefined) {
+        const agents = sub.scope?.agents
+        if (agents === undefined || !agents.every((id) => reach.agentIds?.includes(id)))
+            return false
+    }
+    if (reach.sessionPrefix !== undefined) {
+        const prefix = sub.scope?.sessionPrefix
+        if (prefix === undefined || !prefix.startsWith(reach.sessionPrefix)) return false
+    }
+    return true
+}
+
+/** A positive whole-number query parameter: `undefined` when absent, `null` when malformed. */
+function pageNumber(url: URL, name: string): number | undefined | null {
+    const raw = url.searchParams.get(name)
+    if (raw === null) return undefined
+    const value = Number(raw)
+    return Number.isSafeInteger(value) && value > 0 ? value : null
+}
+
+/**
+ * `?by=agent,model&from=…&to=…`, validated. `by` defaults to agent and model, which is the split a
+ * bill needs (prices differ per model). A grouping name reaches SQL only through the store's own
+ * whitelist; this refuses anything else by name rather than ignoring it.
+ */
+function usageQuery(
+    url: URL,
+):
+    | { readonly kind: "ok"; readonly value: UsageQuery }
+    | { readonly kind: "error"; readonly error: ErrorDetail } {
+    const rawBy = url.searchParams.get("by")
+    const by = rawBy === null ? ["agent", "model"] : rawBy.split(",").filter((part) => part !== "")
+    const unknown = by.filter((part) => !(USAGE_GROUPS as readonly string[]).includes(part))
+    if (unknown.length > 0) {
+        return {
+            kind: "error",
+            error: {
+                code: "usage_group_invalid",
+                message: `Cannot group usage by ${unknown.join(", ")}.`,
+                hint: `Group by any of ${USAGE_GROUPS.join(", ")}, comma-separated, or pass by= for one total.`,
+                field: "by",
+            },
+        }
+    }
+    const range: { from?: string; to?: string } = {}
+    for (const name of ["from", "to"] as const) {
+        const raw = url.searchParams.get(name)
+        if (raw === null) continue
+        const time = Date.parse(raw)
+        if (Number.isNaN(time)) {
+            return {
+                kind: "error",
+                error: {
+                    code: "usage_range_invalid",
+                    message: `${name} is ${JSON.stringify(raw)}, which is not a date.`,
+                    hint: "Send ISO-8601, like 2026-09-01 or 2026-09-01T00:00:00Z. `from` is inclusive and `to` exclusive, so a month is from=2026-09-01&to=2026-10-01.",
+                    field: name,
+                },
+            }
+        }
+        range[name] = new Date(time).toISOString()
+    }
+    return { kind: "ok", value: { by: by as UsageGroup[], ...range } }
 }
 
 function withAgent(

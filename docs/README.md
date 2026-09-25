@@ -24,6 +24,11 @@ VelaOps is its first consumer, not its owner.
 | `09-API-GUIDE.md` | The agent server walked through, `compose up` to a streamed reply. The *guide*; doc 04 is the contract. |
 | `12-OPENCLAW-CUTOVER.md` | Moving off the runtime this one replaces. |
 
+`10-*.md` and `11-*.md` are private working documents (the business plan and the 0.2.0 plan) and
+are gitignored on purpose, which is why the numbering skips from 09 to 12. Anything they decide that
+the code depends on is recorded in `00-DECISIONS.md`, and a rule that exists only in a private file
+does not bind anybody reading this repo.
+
 `CLAUDE.md` lives at the repo root, not here. It is the standing brief for coding agents.
 
 ## Using these with Claude Code
@@ -44,7 +49,7 @@ subsystems are only testable end-to-end.
 
 ## Status
 
-**Shipped: `dispach@0.1.1`.** Phases 0 through 19 are built, the last being the VelaOps cutover. This section named Phase 3 as the
+**Shipped: `dispach@0.1.3`.** Phases 0 through 19 are built, the last being the VelaOps cutover. This section named Phase 3 as the
 frontier and "everything from Phase 4 on" as design-only for long enough to be actively misleading,
 which is the drift the closing paragraph below warns about — so it is now a pointer rather than a
 second copy of the plan:

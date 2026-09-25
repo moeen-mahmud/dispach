@@ -30,7 +30,7 @@ import type {
 } from "../channels/channel.ts"
 import { Inbox } from "../channels/inbox.ts"
 import { Outbox } from "../channels/outbox.ts"
-import type { ErrorDetail } from "../errors.ts"
+import { type ErrorDetail, GovernorError } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import { endNote } from "../loop/turn-end.ts"
 import type { EnvSource } from "../manifest/env.ts"
@@ -557,6 +557,24 @@ export class ChannelHub {
             await bound.outbox.drain(agentId)
         } catch (cause) {
             stopTyping()
+            // A governor refusal ran nothing, so no loop event reports it — and the person is waiting.
+            // Told in their words rather than the manifest's; the event below carries the field name.
+            if (cause instanceof GovernorError) {
+                await bound.outbox.enqueue({
+                    agentId,
+                    sessionKey: message.sessionKey,
+                    channelId: transport.id,
+                    recipient: message.peerId,
+                    // No turn ran, so no turn id; the enqueuer runs once per refusal.
+                    key: `refused:${Date.now()}`,
+                    ...(message.thread === undefined ? {} : { thread: message.thread }),
+                    text:
+                        cause.code === "agent_at_capacity"
+                            ? "I'm busy with other conversations right now. Please send that again in a moment."
+                            : "I've reached my usage limit for now, so I can't answer that yet. Please try again later.",
+                })
+                await bound.outbox.drain(agentId)
+            }
             // The turn failing is already reported by the loop; what is added here is that it
             // failed *on a channel*, where a person is waiting and will otherwise see silence.
             this.#bus.emit(

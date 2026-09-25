@@ -41,7 +41,9 @@ import {
     MessageBody,
     PhaseBody,
     ProvisionBody,
+    SecretsBody,
     StopBody,
+    WebhookBody,
 } from "./wire-schemas.ts"
 
 /** One line per route, plus its body when it reads one. The only hand-written half. */
@@ -67,6 +69,11 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         summary: "Whether a turn can be served yet.",
         statuses: [{ code: 503, when: "still starting; channels may still be connecting" }],
     },
+    "GET /v1/activity": {
+        summary:
+            "Whether the process is idle, and when it must next be woken. For an external waker.",
+        statuses: [{ code: 403, when: "the key is scoped to agents or sessions" }],
+    },
     "GET /v1/agents": {
         summary: "Every agent this server knows about, hosted or switched off.",
     },
@@ -82,12 +89,63 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         summary: "The questions creating an agent asks, and whether this server can answer them.",
     },
     "POST /v1/agents": {
-        summary: "Create an agent and adopt it into this host, live.",
+        summary:
+            "Create an agent, from answers or from a template, and adopt it into this host, live.",
         body: ProvisionBody,
         statuses: [
             { code: 201, when: "created; `adopted` is empty with an `error` if it is not running" },
             { code: 403, when: "not a loopback bind" },
             { code: 501, when: "this server has no provisioner" },
+        ],
+    },
+    "POST /v1/webhooks": {
+        summary: "Subscribe a URL to event types. The signing secret is returned once.",
+        body: WebhookBody,
+        statuses: [
+            { code: 201, when: "created; `secret` is in this response and no other" },
+            {
+                code: 400,
+                when: "a refused URL, an undeliverable type, or agents outside this key's reach",
+            },
+        ],
+    },
+    "GET /v1/webhooks": {
+        summary:
+            "The subscriptions this credential can see, with their delivery health. Never a secret.",
+    },
+    "DELETE /v1/webhooks/:webhookId": {
+        summary: "Delete a subscription and anything it still owed.",
+        statuses: [{ code: 404, when: "no such subscription, or one outside this key's reach" }],
+    },
+    "GET /v1/usage": {
+        summary:
+            "What every agent in scope cost, per model call, grouped by agent, model, day or sender.",
+        statuses: [{ code: 400, when: "an unknown grouping or a date that does not parse" }],
+    },
+    "GET /v1/agents/:id/usage": {
+        summary: "What this agent cost, from the meter.",
+        statuses: [{ code: 400, when: "an unknown grouping or a date that does not parse" }],
+    },
+    "GET /v1/agents/:id/turns": {
+        summary:
+            "Every turn this agent has taken, newest first, across sessions, paged by `before`.",
+        statuses: [{ code: 400, when: "`limit` or `before` is not a positive whole number" }],
+    },
+    "GET /v1/templates": {
+        summary: "The templates an agent can be created from, and the variables each declares.",
+    },
+    "GET /v1/agents/:id/secrets": {
+        summary:
+            "Which variables the agent's manifest reads, and whether each is set. Never a value.",
+        statuses: [{ code: 501, when: "this server has no credential writer" }],
+    },
+    "PUT /v1/agents/:id/secrets": {
+        summary: "Write the agent's credentials into its .env and apply them: reload or adopt.",
+        body: SecretsBody,
+        statuses: [
+            { code: 200, when: "written; `applied` says whether the agent is running on them" },
+            { code: 400, when: "a variable the manifest does not read, or an empty value" },
+            { code: 501, when: "this server has no credential writer" },
         ],
     },
     "POST /v1/agents/:id/stop": {
@@ -102,7 +160,13 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     "POST /v1/agents/:id/messages": {
         summary: "Start a turn. Returns once accepted; the turn runs detached.",
         body: MessageBody,
-        statuses: [{ code: 202, when: "accepted" }],
+        statuses: [
+            { code: 202, when: "accepted" },
+            {
+                code: 429,
+                when: "over limits.maxConcurrentTurns or limits.tokens; nothing recorded",
+            },
+        ],
     },
     "POST /v1/agents/:id/turns/:turnId/stop": {
         summary: "Cooperatively stop a turn this API started.",
@@ -210,7 +274,10 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             { code: 409, when: "the manifest declares it, so the next boot would re-create it" },
         ],
     },
-    "POST /v1/agents/:id/schedules/:sid/run": { summary: "Fire a schedule now, out of band." },
+    "POST /v1/agents/:id/schedules/:sid/run": {
+        summary: "Fire a schedule now, out of band.",
+        statuses: [{ code: 429, when: "over a governor limit; nothing recorded" }],
+    },
     "GET /v1/agents/:id/tools": { summary: "The resolved catalogue, with trust and phases." },
     "GET /v1/agents/:id/skills": { summary: "What the skills index holds." },
     "GET /v1/agents/:id/context": {

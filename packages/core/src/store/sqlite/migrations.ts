@@ -842,6 +842,104 @@ ALTER TABLE operator_keys ADD COLUMN scope TEXT;
 ALTER TABLE operator_keys ADD COLUMN expires_at TEXT;
 `,
     },
+    {
+        version: 18,
+        name: "model_calls",
+        /**
+         * One row per model call, which is what an endpoint bills.
+         *
+         * `turns.prompt_tokens` could not be the meter, and the plan that assumed it could was wrong.
+         * It holds the **last** step's prompt (the context a turn ended at), while every step's
+         * prompt is billed, so a five-step turn read as one prompt. And the compactor calls a model
+         * with no turn row at all, possibly a different model at a different price. So this table is
+         * written at `runStep`, the one call every model request passes through, and `turns` is left
+         * exactly as it was.
+         *
+         * **No foreign key to `sessions`, deliberately.** `messages` and `turns` cascade from it, and
+         * `DELETE /sessions/:key` clears a conversation; a cascade here would make clearing a chat
+         * erase what it cost. Keyed by `agent_id` alone, and deleted by `purgeAgent`.
+         *
+         * `*_reported` is `0` when the figure is our estimate. Estimates run 16-20% low on the prompts
+         * that matter (`evals/budget/`), so a bill that mixed the two silently would be wrong in the
+         * direction that loses money. Rows start at upgrade: nothing is backfilled, because the old
+         * figures are the wrong quantity.
+         */
+        sql: `
+CREATE TABLE model_calls (
+    agent_id              TEXT NOT NULL,
+    session_key           TEXT,
+    turn_id               TEXT,
+    role                  TEXT NOT NULL,
+    model                 TEXT NOT NULL,
+    prompt_tokens         INTEGER NOT NULL,
+    prompt_reported       INTEGER NOT NULL,
+    cached_prompt_tokens  INTEGER,
+    output_tokens         INTEGER NOT NULL,
+    output_reported       INTEGER NOT NULL,
+    sender                TEXT,
+    at                    TEXT NOT NULL
+);
+
+CREATE INDEX model_calls_by_agent ON model_calls (agent_id, at);
+`,
+    },
+    {
+        version: 19,
+        name: "webhooks",
+        /**
+         * Outbound webhooks: who is listening, and what is owed to them.
+         *
+         * **Their own tables, not the outbox's.** The outbox's design is right (states, backoff,
+         * recovery flagged `uncertain`) and its columns are chunk-shaped (`channel_id`, `recipient`,
+         * `chunk_index`), so a webhook row there would be a message pretending to be a chat reply.
+         *
+         * `message_id` is **derived** from the subscription and the event, never generated: it is
+         * the `webhook-id` a receiver dedupes on, so a retry and a resend after a crash carry the
+         * same one, and `UNIQUE (subscription_id, message_id)` makes an enqueue that runs twice
+         * collide rather than send twice.
+         *
+         * `secret` is stored as itself, because signing needs it. That is every webhook provider's
+         * shape; it is never returned after the create response.
+         *
+         * `scope` is the creating credential's reach (JSON, like `operator_keys.scope`), so a key
+         * narrowed to one agent cannot subscribe to the others' events. Deliveries cascade from their
+         * subscription and carry `agent_id` so `purgeAgent` removes an agent's.
+         */
+        sql: `
+CREATE TABLE webhook_subscriptions (
+    subscription_id       TEXT PRIMARY KEY,
+    url                   TEXT NOT NULL,
+    secret                TEXT NOT NULL,
+    types                 TEXT NOT NULL,
+    scope                 TEXT,
+    created_at            TEXT NOT NULL,
+    consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+    last_error            TEXT,
+    last_success_at       TEXT,
+    last_failure_at       TEXT
+);
+
+CREATE TABLE webhook_deliveries (
+    subscription_id  TEXT NOT NULL
+        REFERENCES webhook_subscriptions (subscription_id) ON DELETE CASCADE,
+    message_id       TEXT NOT NULL,
+    agent_id         TEXT NOT NULL,
+    event_type       TEXT NOT NULL,
+    body             TEXT NOT NULL,
+    status           TEXT NOT NULL CHECK (status IN ('pending', 'inflight', 'sent', 'failed')),
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    uncertain        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at  TEXT NOT NULL,
+    last_error       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    UNIQUE (subscription_id, message_id)
+);
+
+CREATE INDEX webhook_deliveries_due ON webhook_deliveries (status, next_attempt_at);
+CREATE INDEX webhook_deliveries_agent ON webhook_deliveries (agent_id);
+`,
+    },
 ]
 
 export interface MigrationReport {
