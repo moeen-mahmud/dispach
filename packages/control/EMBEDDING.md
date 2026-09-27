@@ -81,7 +81,8 @@ curl -sN -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
   $CP/silos/u_8f3a/v1/agents/assistant/messages
 ```
 
-- **A sleeping silo is woken by this request**, about 60 ms before the first token.
+- **The silo is always on**, so there is no wake to wait for. If you switched suspension on, a paused
+  silo is woken by this request, about 60 ms before the first token.
 - **The turn is not bound to your connection.** A dropped stream loses nothing; reattach with
   `GET …/turns/<turnId>/stream`.
 - **`Idempotency-Key`** makes a retry after a timeout safe.
@@ -109,13 +110,13 @@ curl -s -H "Authorization: Bearer $CONTROL" "$CP/v1/usage?by=agent,model&from=20
 
 This returns every silo's usage, per silo, with `promptTokens`, `cachedPromptTokens` and
 `outputTokens`, and each figure says whether the endpoint reported it or it was estimated. Note
-that this call wakes paused silos to ask them.
+that with suspension on, this call wakes paused silos to ask them.
 
 ## 6. The rest of their life
 
 | When | Call | Note |
 | --- | --- | --- |
-| They go quiet | nothing | Paused after `IDLE_MS`, woken by their next message or schedule |
+| They go quiet | nothing | Always on: channels and schedules keep working. With `SUSPEND=on`, paused after `IDLE_MS` and woken by their next message or schedule |
 | You back up | `GET /v1/silos/u_8f3a/backup` → tar.gz | Pauses the silo for the copy (tens of ms); store it anywhere |
 | You restore | `PUT /v1/silos/u_8f3a/backup` with that file | Replaces everything in the silo, keys included |
 | You upgrade the runtime | bump `DISPACH_IMAGE`, restart the control plane, then `POST /v1/silos/<s>/recreate` per silo | Keeps each silo's data; refused (`409`) while a silo is busy, so retry |

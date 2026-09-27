@@ -44,3 +44,6 @@ local_test/
 # hand-maintained copy is drift waiting to happen.
 packages/cli/README.md
 
+
+# The control plane's default database, if it is started from the repository root.
+control.db*

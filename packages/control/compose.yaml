@@ -29,6 +29,8 @@ services:
       # Names of variables every silo gets. Each one named must also be passed in below.
       DISPACH_CONTROL_SILO_ENV: ${DISPACH_SILO_ENV:-}
       DISPACH_WEBHOOK_ALLOW: ${DISPACH_WEBHOOK_ALLOW:-}
+      # Always-on by default. `on` pauses idle silos, which silences WhatsApp and Telegram long-poll.
+      DISPACH_CONTROL_SUSPEND: ${DISPACH_SUSPEND:-off}
       DISPACH_CONTROL_IDLE_MS: ${DISPACH_IDLE_MS:-60000}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

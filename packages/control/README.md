@@ -2,10 +2,11 @@
 
 The control plane for Dispach silos, in `packages/control` of the Dispach repository. One person signs up
 to your product, and a silo exists for them: a Dispach runtime holding their agents, placed,
-routed, keyed, suspended when idle and woken when a message arrives or a schedule comes due.
+routed, keyed and backed up. **Silos are always on** by default, like any agent a person expects to
+answer; pausing idle ones is an opt-in cost option (`DISPACH_CONTROL_SUSPEND=on`).
 
 A silo is one runtime per user or per team space (decision 14.1 in `docs/00-DECISIONS.md`). This process decides
-where silos run and when they sleep. Everything inside a silo — agents, conversations, who a key
+where silos run (and, if suspension is switched on, when they sleep). Everything inside a silo — agents, conversations, who a key
 may reach — is the silo's own business, asked over `/v1` like any other client. This package
 imports nothing from the runtime, and nothing in the runtime imports it; `bun run check:deps`
 enforces both directions.
@@ -74,6 +75,9 @@ routes, and the operator token is refused by every silo.
   All of this is asserted end to end against the real image (`test/e2e.test.ts`).
 - **A request with no credential never wakes a silo.** It cannot succeed, so it must not cost a silo
   its sleep.
+- **Never paused unless `SUSPEND=on`.** A paused silo holds no live channel connection, so its
+  WhatsApp and Telegram long-poll go deaf until something wakes it. That is why always-on is the
+  default (decision 14.14). With suspension on, the rest of this list applies.
 - **A silo is paused only when it says it is idle.** The runtime's `GET /v1/activity` reports
   whether a turn is running or a delivery is owed. This process adds only what the silo cannot
   know: whether a proxied request is still open (a streaming turn holds its silo awake), and how long
@@ -134,7 +138,8 @@ sign-up, agents, messages, webhooks, billing, backup, upgrade, deletion.
 | `DISPACH_CONTROL_TEMPLATES` | — | Host directory of agent templates, mounted read-only. A path on the Docker host |
 | `DISPACH_CONTROL_SILO_ENV` | — | Names of variables every silo gets, copied from this process's environment: `DISPACH_WEBHOOK_ALLOW,MODEL_BASE_URL`. Values never in the database, never on a command line; a named one that is unset refuses the boot. Reaches existing silos on `recreate` |
 | `DISPACH_CONTROL_NETWORK` | — | Docker network to attach silos to |
-| `DISPACH_CONTROL_IDLE_MS` | `60000` | Quiet time before an idle silo is paused |
+| `DISPACH_CONTROL_SUSPEND` | `off` | `on` pauses idle silos (a cost option). Channels that hold a connection — WhatsApp, Telegram long-poll — do not hear while paused. Anything but `on`/`off` refuses the boot |
+| `DISPACH_CONTROL_IDLE_MS` | `60000` | With `SUSPEND=on`: quiet time before an idle silo is paused |
 | `DISPACH_CONTROL_WAKE_MARGIN_MS` | `30000` | How early a silo is woken for a schedule |
 | `DISPACH_CONTROL_SWEEP_MS` | `5000` | How often the pause/wake pass runs |
 

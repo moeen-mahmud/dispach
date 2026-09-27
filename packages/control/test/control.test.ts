@@ -18,13 +18,17 @@ afterEach(async () => {
     while (cleanups.length > 0) await cleanups.pop()?.()
 })
 
-async function setup(options: { idleMs?: number; wakeMarginMs?: number } = {}) {
+async function setup(
+    options: { idleMs?: number; wakeMarginMs?: number; suspend?: boolean | "default" } = {},
+) {
     let clock = Date.parse("2026-09-24T12:00:00.000Z")
     const store = await SiloStore.open(":memory:")
     const placer = new FakePlacer()
     const control = new ControlPlane({
         store,
         placer,
+        // The sweep tests exercise suspension, so they opt in; the default is asserted separately.
+        ...(options.suspend === "default" ? {} : { suspend: options.suspend ?? true }),
         idleMs: options.idleMs ?? 60_000,
         wakeMarginMs: options.wakeMarginMs ?? 30_000,
         now: () => clock,
@@ -198,6 +202,14 @@ describe("the proxy", () => {
 })
 
 describe("the sweep", () => {
+    test("by default nothing is ever paused: silos are always on", async () => {
+        const { call, control, store, advance } = await setup({ idleMs: 1_000, suspend: "default" })
+        await call("POST", "/v1/silos", { token: TOKEN, body: { subject: "a" } })
+        advance(24 * 60 * 60_000)
+        await control.sweep()
+        expect(store.get("a")?.status).toBe("running")
+    })
+
     test("an idle silo is paused after the quiet period, with the wake time it reported", async () => {
         const { call, control, store, advance, fake } = await setup({ idleMs: 60_000 })
         await call("POST", "/v1/silos", { token: TOKEN, body: { subject: "a" } })

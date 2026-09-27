@@ -30,6 +30,17 @@ function number(name: string, fallback: number): number {
     return value
 }
 
+/** `SUSPEND=on|off`, default off. Anything else refuses the boot rather than guessing. */
+function suspendSetting(): boolean {
+    const raw = env("SUSPEND")
+    if (raw === undefined || raw === "off") return false
+    if (raw === "on") return true
+    process.stderr.write(
+        `${BRAND.envPrefix}SUSPEND=${raw} is not on or off.\n  hint: leave it unset for always-on silos (the default), or set it to "on" to pause idle silos — which silences their WhatsApp and Telegram long-poll channels while they sleep.\n`,
+    )
+    process.exit(1)
+}
+
 const token = env("TOKEN")
 if (token === undefined) {
     process.stderr.write(
@@ -56,6 +67,8 @@ if (image.endsWith(":latest") || !image.includes(":")) {
     )
 }
 
+// Every setting is checked before anything is opened: a refused boot leaves nothing behind.
+const suspend = suspendSetting()
 const store = await SiloStore.open(env("DB") ?? "control.db")
 const placer = new DockerPlacer({
     image,
@@ -66,6 +79,7 @@ const placer = new DockerPlacer({
 const control = new ControlPlane({
     store,
     placer,
+    suspend,
     idleMs: number("IDLE_MS", 60_000),
     wakeMarginMs: number("WAKE_MARGIN_MS", 30_000),
     sweepMs: number("SWEEP_MS", 5_000),

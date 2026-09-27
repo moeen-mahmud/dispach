@@ -145,6 +145,8 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
                 // refuses private webhook targets unless the operator names them.
                 siloEnv: { [BRAND.runtime.webhookAllowEnv]: modelHost },
             }),
+            // Suspension is exercised here, so it is switched on; the product default is off.
+            suspend: true,
             idleMs: 1_000,
             log: () => {},
         })
@@ -182,7 +184,8 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
                 token: keys[subject],
                 body: { template: "e2e", name: "helper", vars: { apiKey: "not-a-real-key" } },
             })
-            expect(agent.status).toBe(201)
+            // The body rides in the assertion, so a refusal says why rather than only that it happened.
+            expect(`${agent.status} ${agent.status === 201 ? "" : await agent.text()}`).toBe("201 ")
         }
     })
 

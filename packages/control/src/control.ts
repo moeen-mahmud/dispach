@@ -28,7 +28,14 @@ export interface SiloActivity {
 export interface ControlOptions {
     readonly store: SiloStore
     readonly placer: Placer
-    /** Quiet time after the last proxied request before an idle silo is paused. */
+    /**
+     * Whether the sweep pauses idle silos at all. **Off by default: the product is always-on**, like
+     * every agent harness a person expects to answer (decision 14.14). A paused silo holds no live
+     * channel connection, so WhatsApp and a Telegram long-poll go deaf while it sleeps. On is a cost
+     * option for a deployment whose silos are reached only through this proxy.
+     */
+    readonly suspend?: boolean
+    /** Quiet time after the last proxied request before an idle silo is paused, when `suspend` is on. */
     readonly idleMs?: number
     /** How long before `nextWakeAt` a paused silo is woken. */
     readonly wakeMarginMs?: number
@@ -54,6 +61,7 @@ export function checkSubject(subject: string): void {
 export class ControlPlane {
     readonly store: SiloStore
     readonly #placer: Placer
+    readonly #suspendIdle: boolean
     readonly #idleMs: number
     readonly #wakeMarginMs: number
     readonly #sweepMs: number
@@ -71,6 +79,7 @@ export class ControlPlane {
     constructor(options: ControlOptions) {
         this.store = options.store
         this.#placer = options.placer
+        this.#suspendIdle = options.suspend ?? false
         this.#idleMs = options.idleMs ?? 60_000
         this.#wakeMarginMs = options.wakeMarginMs ?? 30_000
         this.#sweepMs = options.sweepMs ?? 5_000
@@ -292,6 +301,7 @@ export class ControlPlane {
     }
 
     async #maybeSuspend(silo: Silo, now: number): Promise<void> {
+        if (!this.#suspendIdle) return
         if ((this.#open.get(silo.subject) ?? 0) > 0) return
         if (now - Date.parse(silo.lastActiveAt) < this.#idleMs) return
         const activity = await this.activity(silo)
