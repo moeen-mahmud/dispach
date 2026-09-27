@@ -1072,7 +1072,7 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `model.call` | request sent | `role`, `model`, `promptTokens`, `cached`, `attempt` |
 | `model.chunk` | streaming | `delta`, `kind: text \| reasoning` — emitted only while some subscriber has opted in, per subscriber |
 | `model.retry` | a retryable model failure, before the next attempt | `status`, `attempt`, `delayMs` |
-| `model.result` | response done | `outputTokens`, `promptTokens`, `promptTokensReported`, `finishReason`, `latencyMs` |
+| `model.result` | response done | `outputTokens`, `promptTokens`, `promptTokensReported`, `finishReason`, `latencyMs`, `firstTokenMs?` (to the first streamed output of any kind; absent when nothing streamed) |
 | `tool.call` | before execute | `slug`, `callId`, `argsHash`, `mutating` |
 | `tool.result` | after execute | `slug`, `callId`, `ok`, `latencyMs`, `bytes`, `truncated`, `trust` |
 | `tool.gated` | a call was blocked | `slug`, `callId`, `reason`, `policy` |

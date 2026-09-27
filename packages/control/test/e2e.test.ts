@@ -12,12 +12,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { createServer, type Server } from "node:http"
-import type { AddressInfo } from "node:net"
+import { type AddressInfo, createServer as createNetServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gunzipSync } from "node:zlib"
 import { BRAND } from "../src/brand.ts"
 import { ControlPlane } from "../src/control.ts"
+import { Monitor } from "../src/monitor.ts"
 import { DockerPlacer } from "../src/placer.ts"
 import { createControlServer, UNAUTHORIZED } from "../src/server.ts"
 import { SiloStore } from "../src/store.ts"
@@ -31,6 +32,7 @@ let model: Server
 let control: ControlPlane
 let server: Server
 let store: SiloStore
+let monitor: Monitor
 let base = ""
 let templates = ""
 const keys: Record<string, string> = {}
@@ -137,7 +139,17 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
         )
 
         store = await SiloStore.open(":memory:")
+        // The monitor needs its own address before the server exists, so reserve a port first. Bound
+        // on every interface: the silos reach it from their containers through host.docker.internal.
+        const port = await new Promise<number>((resolve) => {
+            const probe = createNetServer().listen(0, "0.0.0.0", () => {
+                const { port: free } = probe.address() as AddressInfo
+                probe.close(() => resolve(free))
+            })
+        })
+        monitor = new Monitor({ store, hookUrl: `http://${modelHost}:${port}`, log: () => {} })
         control = new ControlPlane({
+            monitor,
             store,
             placer: new DockerPlacer({
                 templatesDir: templates,
@@ -150,9 +162,9 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
             idleMs: 1_000,
             log: () => {},
         })
-        server = createControlServer({ control, token: TOKEN })
-        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
-        base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+        server = createControlServer({ control, token: TOKEN, monitor })
+        await new Promise<void>((resolve) => server.listen(port, "0.0.0.0", resolve))
+        base = `http://127.0.0.1:${port}`
     })
 
     afterAll(async () => {
@@ -224,6 +236,23 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
         }
     })
 
+    test("the monitor hears the real turns, first token included", async () => {
+        // Deliveries are asynchronous: the outbox-style dispatcher polls about once a second.
+        let report:
+            | { overall: { turns: number; firstTokenMs: { p50?: number } }; unmonitored: string[] }
+            | undefined
+        for (let i = 0; i < 40; i += 1) {
+            report = (await (await call("/v1/monitor", { token: TOKEN })).json()) as typeof report
+            if ((report?.overall.turns ?? 0) >= 3 && report?.overall.firstTokenMs.p50 !== undefined)
+                break
+            await new Promise((resolve) => setTimeout(resolve, 250))
+        }
+        expect(report?.unmonitored).toEqual([])
+        expect(report?.overall.turns ?? 0).toBeGreaterThanOrEqual(3)
+        expect(report?.overall.firstTokenMs.p50).toBeDefined()
+        record("monitorFirstTokenP50Ms", report?.overall.firstTokenMs.p50 ?? -1)
+    })
+
     test("an idle silo suspends, and a message wakes it", async () => {
         for (let i = 0; i < 3; i += 1) {
             await new Promise((resolve) => setTimeout(resolve, 1_500))
@@ -271,9 +300,14 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
             "{{.Id}}",
             `${BRAND.siloPrefix}${A}`,
         ]).toString()
-        expect(
-            (await call(`/v1/silos/${A}/recreate`, { method: "POST", token: TOKEN })).status,
-        ).toBe(200)
+        // Refused while the silo still owes a delivery (its monitor events, a moment after each turn),
+        // so ask until it is idle — the same wait an operator's rollout makes.
+        let recreated = await call(`/v1/silos/${A}/recreate`, { method: "POST", token: TOKEN })
+        for (let i = 0; i < 40 && recreated.status === 409; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 250))
+            recreated = await call(`/v1/silos/${A}/recreate`, { method: "POST", token: TOKEN })
+        }
+        expect(recreated.status).toBe(200)
         const after = execFileSync("docker", [
             "inspect",
             "--format",

@@ -8,6 +8,7 @@
 
 import { BRAND } from "./brand.ts"
 import { ControlPlane } from "./control.ts"
+import { type AlertRules, DEFAULT_RULES, Monitor, telegramAlert } from "./monitor.ts"
 import { ControlError, DockerPlacer, resolveSiloEnv } from "./placer.ts"
 import { createControlServer } from "./server.ts"
 import { SiloStore } from "./store.ts"
@@ -69,6 +70,21 @@ if (image.endsWith(":latest") || !image.includes(":")) {
 
 // Every setting is checked before anything is opened: a refused boot leaves nothing behind.
 const suspend = suspendSetting()
+const hookUrl = env("HOOK_URL")
+const rules: AlertRules = {
+    window: number("ALERT_WINDOW", DEFAULT_RULES.window),
+    minTurns: number("ALERT_MIN_TURNS", DEFAULT_RULES.minTurns),
+    nonFinal: number("ALERT_NON_FINAL", DEFAULT_RULES.nonFinal),
+    toolErrors: number("ALERT_TOOL_ERRORS", DEFAULT_RULES.toolErrors),
+}
+const alertToken = env("ALERT_TG_TOKEN")
+const alertChat = env("ALERT_TG_CHAT")
+if ((alertToken === undefined) !== (alertChat === undefined)) {
+    process.stderr.write(
+        `${BRAND.envPrefix}ALERT_TG_TOKEN and ${BRAND.envPrefix}ALERT_TG_CHAT go together.\n  hint: set both to send pilot alerts to a Telegram chat, or neither to write them to stderr.\n`,
+    )
+    process.exit(1)
+}
 const store = await SiloStore.open(env("DB") ?? "control.db")
 const placer = new DockerPlacer({
     image,
@@ -76,7 +92,19 @@ const placer = new DockerPlacer({
     ...(env("NETWORK") === undefined ? {} : { network: env("NETWORK") as string }),
     ...(env("TEMPLATES") === undefined ? {} : { templatesDir: env("TEMPLATES") as string }),
 })
+const monitor =
+    hookUrl === undefined
+        ? undefined
+        : new Monitor({
+              store,
+              hookUrl,
+              rules,
+              ...(alertToken === undefined || alertChat === undefined
+                  ? {}
+                  : { alert: telegramAlert(alertToken, alertChat) }),
+          })
 const control = new ControlPlane({
+    ...(monitor === undefined ? {} : { monitor }),
     store,
     placer,
     suspend,
@@ -86,7 +114,11 @@ const control = new ControlPlane({
 })
 const host = env("HOST") ?? "127.0.0.1"
 const port = number("PORT", 7600)
-const server = createControlServer({ control, token })
+const server = createControlServer({
+    control,
+    token,
+    ...(monitor === undefined ? {} : { monitor }),
+})
 
 server.listen(port, host, () => {
     process.stdout.write(
@@ -97,6 +129,12 @@ server.listen(port, host, () => {
             "\n",
     )
     control.start()
+    if (monitor === undefined) {
+        process.stdout.write(`  monitor off — set ${BRAND.envPrefix}HOOK_URL to turn it on\n`)
+    } else {
+        process.stdout.write(`  monitor on · silos report to ${hookUrl}/hooks/<subject>\n`)
+        void control.watchAll()
+    }
 })
 
 const shutdown = () => {

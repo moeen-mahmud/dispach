@@ -32,6 +32,11 @@ services:
       # Always-on by default. `on` pauses idle silos, which silences WhatsApp and Telegram long-poll.
       DISPACH_CONTROL_SUSPEND: ${DISPACH_SUSPEND:-off}
       DISPACH_CONTROL_IDLE_MS: ${DISPACH_IDLE_MS:-60000}
+      # The pilot monitor. Silos reach this container by name on the silos network; allow that name in
+      # DISPACH_WEBHOOK_ALLOW (above) and list DISPACH_WEBHOOK_ALLOW in DISPACH_SILO_ENV.
+      DISPACH_CONTROL_HOOK_URL: ${DISPACH_HOOK_URL:-}
+      DISPACH_CONTROL_ALERT_TG_TOKEN: ${DISPACH_ALERT_TG_TOKEN:-}
+      DISPACH_CONTROL_ALERT_TG_CHAT: ${DISPACH_ALERT_TG_CHAT:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - control-data:/data

@@ -21,6 +21,7 @@ import {
 } from "node:http"
 import { BRAND } from "./brand.ts"
 import { type ControlPlane, checkSubject } from "./control.ts"
+import type { Monitor } from "./monitor.ts"
 import { ControlError } from "./placer.ts"
 import type { Silo } from "./store.ts"
 
@@ -114,6 +115,8 @@ export const UNAUTHORIZED = {
 
 export interface ServerOptions {
     readonly control: ControlPlane
+    /** The pilot monitor, when `HOOK_URL` is set. Its routes answer 404 without it. */
+    readonly monitor?: Monitor
     /** The operator's token for `/v1/…`. */
     readonly token: string
 }
@@ -147,6 +150,35 @@ export function createControlServer(options: ServerOptions): Server {
                 decodeURIComponent(proxied[1] ?? ""),
                 `${proxied[2] ?? ""}${url.search}`,
             )
+            return
+        }
+
+        // Silos deliver their events here. Open to the network by necessity, verified by signature.
+        const hook = /^\/hooks\/([^/]+)$/.exec(path)
+        if (hook !== null && method === "POST" && options.monitor !== undefined) {
+            const chunks: Buffer[] = []
+            for await (const chunk of req) chunks.push(chunk as Buffer)
+            const header = (name: string) => {
+                const value = req.headers[name]
+                return typeof value === "string" ? value : undefined
+            }
+            await options.monitor.receive(
+                decodeURIComponent(hook[1] ?? ""),
+                {
+                    ...(header("webhook-id") === undefined
+                        ? {}
+                        : { id: header("webhook-id") as string }),
+                    ...(header("webhook-timestamp") === undefined
+                        ? {}
+                        : { timestamp: header("webhook-timestamp") as string }),
+                    ...(header("webhook-signature") === undefined
+                        ? {}
+                        : { signature: header("webhook-signature") as string }),
+                },
+                Buffer.concat(chunks).toString("utf8"),
+            )
+            res.writeHead(204)
+            res.end()
             return
         }
 
@@ -192,6 +224,29 @@ export function createControlServer(options: ServerOptions): Server {
         }
         if (method === "GET" && path === "/v1/silos") {
             send(res, 200, { silos: control.store.list().map(view) })
+            return
+        }
+        if (method === "GET" && (path === "/v1/monitor" || path === "/v1/monitor/failures")) {
+            if (options.monitor === undefined) {
+                throw new ControlError({
+                    code: "monitor_off",
+                    message: "The pilot monitor is not running.",
+                    hint: "Set DISPACH_CONTROL_HOOK_URL to the address silos reach this process at (http://control:7600 on the compose network), and allow that host in the silos' DISPACH_WEBHOOK_ALLOW.",
+                    status: 404,
+                })
+            }
+            const limit = Number(url.searchParams.get("limit") ?? "50")
+            send(
+                res,
+                200,
+                path === "/v1/monitor"
+                    ? options.monitor.report(control.store.list())
+                    : {
+                          failures: options.monitor.failures(
+                              Number.isFinite(limit) && limit > 0 ? limit : 50,
+                          ),
+                      },
+            )
             return
         }
         if (method === "GET" && path === "/v1/usage") {

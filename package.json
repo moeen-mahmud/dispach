@@ -37,6 +37,7 @@
         "eval:skills": "bun scripts/eval-skills.ts",
         "eval:handoff": "bun scripts/eval-handoff.ts",
         "eval:tenancy": "bun scripts/eval-tenancy.ts",
+        "eval:scenarios": "bun scripts/eval-scenarios.ts",
         "bench:schedule": "bun scripts/bench-schedule.ts",
         "prepare": "husky",
         "verify:package": "bun scripts/verify-package.ts",
@@ -52,6 +53,8 @@
         "git-cliff": "2.14.2",
         "husky": "9.1.7",
         "lint-staged": "^16.4.0",
-        "typescript": "^5.9.3"
+        "typescript": "^5.9.3",
+        "yaml": "2.9.0",
+        "zod": "4.4.3"
     }
 }

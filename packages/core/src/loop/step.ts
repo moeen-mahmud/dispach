@@ -113,6 +113,7 @@ export async function runStep(input: StepInput): Promise<StepResult> {
     let cacheSource: string | undefined
     let reportedOutputTokens: number | undefined
     const calls: ToolCallRequest[] = []
+    let firstTokenMs: number | undefined
 
     const stream = input.provider.chat(
         {
@@ -126,6 +127,14 @@ export async function runStep(input: StepInput): Promise<StepResult> {
 
     try {
         for await (const chunk of stream) {
+            // The moment a person (or a client) first sees the reply start: any output, whichever kind
+            // arrives first. Usage and finish frames are bookkeeping, not output.
+            if (
+                firstTokenMs === undefined &&
+                (chunk.type === "text" || chunk.type === "reasoning" || chunk.type === "tool_call")
+            ) {
+                firstTokenMs = Math.round(performance.now() - started)
+            }
             switch (chunk.type) {
                 case "text":
                     text += chunk.delta
@@ -187,6 +196,7 @@ export async function runStep(input: StepInput): Promise<StepResult> {
             promptTokensReported,
             finishReason: finishReason === "" ? (aborted ? "aborted" : "stop") : finishReason,
             latencyMs,
+            ...(firstTokenMs === undefined ? {} : { firstTokenMs }),
         },
         input.context,
     )

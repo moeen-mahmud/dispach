@@ -61,6 +61,9 @@ silo, in the runtime's template format (`docs/09-API-GUIDE.md` §1b).
 | `DELETE /v1/silos/:subject` | operator | Remove the silo **and its volume**. Irreversible: it holds the silo's only store |
 | `POST /v1/silos/:subject/keys` | operator | Mint a key inside the silo; the body is the runtime's `POST /v1/keys` (label, scope, expiry) |
 | `GET /v1/usage?by=&from=&to=` | operator | Each silo's `GET /v1/usage`, side by side |
+| `GET /v1/monitor` | operator | The pilot monitor's rates, overall and per silo, the rules firing, and any silo it is not hearing from |
+| `GET /v1/monitor/failures?limit=` | operator | Turns that did not end `final`, failed tool calls and lost deliveries, newest first: the rows to label |
+| `POST /hooks/:subject` | a silo's signature | Where each silo delivers its monitored events. Open, verified by the subscription's Standard Webhooks signature |
 | `ANY /silos/:subject/v1/…` | a silo key | The silo's own `/v1`, woken first if paused, streamed through |
 
 **Operator** means `Authorization: Bearer $DISPACH_CONTROL_TOKEN`. A silo key is refused on operator
@@ -102,6 +105,34 @@ Waking a paused silo costs about **60 ms** before the first token. An idle silo 
 of RAM, paused or not (`evals/tenancy/`), so on a packed host a pause saves CPU, not
 memory.
 
+## The pilot monitor
+
+Layer 3 of testing an agent: cheap checks on every real turn, and alerts on a falling **rolling rate**,
+never on one failure. On when `DISPACH_CONTROL_HOOK_URL` is set.
+
+- **How it hears:** every silo is subscribed, with its own token, to `turn.end`, `model.result`,
+  `tool.result`, `delivery.failed` and `approval.requested`, delivered to `<HOOK_URL>/hooks/<subject>`.
+  Silos created before it was on are subscribed at start. After a restore the silo is re-subscribed as
+  itself, because an archive carries its source's subscription. A retry keeps its `webhook-id` and is
+  counted once. The silo must be allowed to reach this process: put its host in
+  `DISPACH_WEBHOOK_ALLOW` and name that in `DISPACH_CONTROL_SILO_ENV`.
+- **What it measures, over the last `ALERT_WINDOW` turns:**
+  - the share not ending `final`, and the reasons;
+  - steps p50/max;
+  - duration p50/p95;
+  - **first token p50/p95** (the turn's first model call);
+  - tokens per turn;
+  - the tool error share;
+  - lost deliveries;
+  - approvals requested.
+- **What it alerts on:**
+  - the non-final share above `ALERT_NON_FINAL` and the tool error share above
+    `ALERT_TOOL_ERRORS`. Each rule alerts **once on crossing and once on recovery**, never below
+    `ALERT_MIN_TURNS` turns;
+  - any delivery that exhausted its retries, **at once**, because a lost message is a Sev-1.
+  - Alerts go to a Telegram chat when `ALERT_TG_TOKEN` and `ALERT_TG_CHAT` are set, otherwise to stderr.
+- **Deleting a silo deletes everything recorded about it.**
+
 ## Where silos run
 
 `Placer` (`src/placer.ts`) is the whole of the cloud-agnosticism: create, pause, wake, remove,
@@ -142,6 +173,10 @@ sign-up, agents, messages, webhooks, billing, backup, upgrade, deletion.
 | `DISPACH_CONTROL_IDLE_MS` | `60000` | With `SUSPEND=on`: quiet time before an idle silo is paused |
 | `DISPACH_CONTROL_WAKE_MARGIN_MS` | `30000` | How early a silo is woken for a schedule |
 | `DISPACH_CONTROL_SWEEP_MS` | `5000` | How often the pause/wake pass runs |
+| `DISPACH_CONTROL_HOOK_URL` | — | Where silos reach this process (`http://control:7600` on the compose network). Setting it turns the pilot monitor on |
+| `DISPACH_CONTROL_ALERT_WINDOW` / `_ALERT_MIN_TURNS` | `50` / `20` | Turns a rate is taken over, and the fewest a rate alert fires on |
+| `DISPACH_CONTROL_ALERT_NON_FINAL` / `_ALERT_TOOL_ERRORS` | `0.05` / `0.1` | Rate thresholds |
+| `DISPACH_CONTROL_ALERT_TG_TOKEN` / `_ALERT_TG_CHAT` | — | A Telegram bot token and chat id for alerts. Both or neither |
 
 ## Not in v0, deliberately
 

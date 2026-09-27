@@ -67,6 +67,57 @@ const toSilo = (row: SiloRow): Silo => ({
     ...(row.next_wake_at === null ? {} : { nextWakeAt: row.next_wake_at }),
 })
 
+export interface MonitorEvent {
+    readonly webhookId: string
+    readonly subject: string
+    readonly type: string
+    readonly at: string
+    readonly agentId?: string
+    readonly turnId?: string
+    readonly reason?: string
+    readonly steps?: number
+    readonly durationMs?: number
+    readonly firstTokenMs?: number
+    readonly promptTokens?: number
+    readonly outputTokens?: number
+    readonly ok?: boolean
+    readonly detail?: string
+}
+
+interface MonitorRow {
+    webhook_id: string
+    subject: string
+    type: string
+    at: string
+    agent_id: string | null
+    turn_id: string | null
+    reason: string | null
+    steps: number | null
+    duration_ms: number | null
+    first_token_ms: number | null
+    prompt_tokens: number | null
+    output_tokens: number | null
+    ok: number | null
+    detail: string | null
+}
+
+const toEvent = (row: MonitorRow): MonitorEvent => ({
+    webhookId: row.webhook_id,
+    subject: row.subject,
+    type: row.type,
+    at: row.at,
+    ...(row.agent_id === null ? {} : { agentId: row.agent_id }),
+    ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
+    ...(row.reason === null ? {} : { reason: row.reason }),
+    ...(row.steps === null ? {} : { steps: row.steps }),
+    ...(row.duration_ms === null ? {} : { durationMs: row.duration_ms }),
+    ...(row.first_token_ms === null ? {} : { firstTokenMs: row.first_token_ms }),
+    ...(row.prompt_tokens === null ? {} : { promptTokens: row.prompt_tokens }),
+    ...(row.output_tokens === null ? {} : { outputTokens: row.output_tokens }),
+    ...(row.ok === null ? {} : { ok: row.ok === 1 }),
+    ...(row.detail === null ? {} : { detail: row.detail }),
+})
+
 export class SiloStore {
     readonly #db: Driver
 
@@ -88,6 +139,33 @@ export class SiloStore {
                 last_active_at TEXT NOT NULL,
                 next_wake_at   TEXT
             );
+            -- The monitor's subscription inside each silo: where its signed events come from.
+            CREATE TABLE IF NOT EXISTS hooks (
+                subject         TEXT PRIMARY KEY,
+                subscription_id TEXT NOT NULL,
+                secret          TEXT NOT NULL
+            );
+            -- One row per event a silo delivered. webhook_id is the Standard Webhooks id, which a
+            -- retry keeps, so a redelivery is ignored rather than counted twice.
+            CREATE TABLE IF NOT EXISTS monitor_events (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                webhook_id     TEXT NOT NULL UNIQUE,
+                subject        TEXT NOT NULL,
+                agent_id       TEXT,
+                type           TEXT NOT NULL,
+                turn_id        TEXT,
+                reason         TEXT,
+                steps          INTEGER,
+                duration_ms    INTEGER,
+                first_token_ms INTEGER,
+                prompt_tokens  INTEGER,
+                output_tokens  INTEGER,
+                ok             INTEGER,
+                detail         TEXT,
+                at             TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS monitor_events_type ON monitor_events (type, id);
+            CREATE INDEX IF NOT EXISTS monitor_events_subject ON monitor_events (subject, type, id);
         `)
         return new SiloStore(db)
     }
@@ -135,8 +213,101 @@ export class SiloStore {
         this.#db.prepare("UPDATE silos SET last_active_at = ? WHERE subject = ?").run(at, subject)
     }
 
+    /** The silo's row and everything recorded about it: account deletion is total. */
     delete(subject: string): void {
         this.#db.prepare("DELETE FROM silos WHERE subject = ?").run(subject)
+        this.#db.prepare("DELETE FROM hooks WHERE subject = ?").run(subject)
+        this.#db.prepare("DELETE FROM monitor_events WHERE subject = ?").run(subject)
+    }
+
+    // ─── the monitor's rows ──────────────────────────────────────────────────────────────────
+
+    setHook(subject: string, subscriptionId: string, secret: string): void {
+        this.#db
+            .prepare(
+                "INSERT OR REPLACE INTO hooks (subject, subscription_id, secret) VALUES (?, ?, ?)",
+            )
+            .run(subject, subscriptionId, secret)
+    }
+
+    deleteHook(subject: string): void {
+        this.#db.prepare("DELETE FROM hooks WHERE subject = ?").run(subject)
+    }
+
+    hook(subject: string): { subscriptionId: string; secret: string } | undefined {
+        const row = this.#db
+            .prepare("SELECT subscription_id, secret FROM hooks WHERE subject = ?")
+            .get(subject) as { subscription_id: string; secret: string } | undefined | null
+        return row === undefined || row === null
+            ? undefined
+            : { subscriptionId: row.subscription_id, secret: row.secret }
+    }
+
+    /** False when this webhook id was already recorded — a retry, not a second event. */
+    recordEvent(event: MonitorEvent): boolean {
+        const before = this.#db
+            .prepare("SELECT 1 FROM monitor_events WHERE webhook_id = ?")
+            .get(event.webhookId)
+        if (before !== undefined && before !== null) return false
+        this.#db
+            .prepare(
+                `INSERT INTO monitor_events (webhook_id, subject, agent_id, type, turn_id, reason, steps,
+                   duration_ms, first_token_ms, prompt_tokens, output_tokens, ok, detail, at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+                event.webhookId,
+                event.subject,
+                event.agentId ?? null,
+                event.type,
+                event.turnId ?? null,
+                event.reason ?? null,
+                event.steps ?? null,
+                event.durationMs ?? null,
+                event.firstTokenMs ?? null,
+                event.promptTokens ?? null,
+                event.outputTokens ?? null,
+                event.ok === undefined ? null : event.ok ? 1 : 0,
+                event.detail ?? null,
+                event.at,
+            )
+        return true
+    }
+
+    /** The newest `limit` events of a type, newest first, optionally for one silo. */
+    events(type: string, limit: number, subject?: string): readonly MonitorEvent[] {
+        const rows = (
+            subject === undefined
+                ? this.#db
+                      .prepare(
+                          "SELECT * FROM monitor_events WHERE type = ? ORDER BY id DESC LIMIT ?",
+                      )
+                      .all(type, limit)
+                : this.#db
+                      .prepare(
+                          "SELECT * FROM monitor_events WHERE subject = ? AND type = ? ORDER BY id DESC LIMIT ?",
+                      )
+                      .all(subject, type, limit)
+        ) as MonitorRow[]
+        return rows.map(toEvent)
+    }
+
+    /** Events of a type recorded at or after `since` (an ISO time), optionally for one silo. */
+    eventsSince(type: string, since: string, subject?: string): readonly MonitorEvent[] {
+        const rows = (
+            subject === undefined
+                ? this.#db
+                      .prepare(
+                          "SELECT * FROM monitor_events WHERE type = ? AND at >= ? ORDER BY id",
+                      )
+                      .all(type, since)
+                : this.#db
+                      .prepare(
+                          "SELECT * FROM monitor_events WHERE subject = ? AND type = ? AND at >= ? ORDER BY id",
+                      )
+                      .all(subject, type, since)
+        ) as MonitorRow[]
+        return rows.map(toEvent)
     }
 
     close(): void {

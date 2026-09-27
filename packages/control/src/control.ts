@@ -14,6 +14,7 @@
 import { randomBytes } from "node:crypto"
 import type { Readable } from "node:stream"
 import { BRAND } from "./brand.ts"
+import type { Monitor } from "./monitor.ts"
 import { ControlError, type Placer } from "./placer.ts"
 import type { Silo, SiloStore } from "./store.ts"
 
@@ -45,6 +46,8 @@ export interface ControlOptions {
     readonly now?: () => number
     readonly fetch?: typeof fetch
     readonly log?: (line: string) => void
+    /** Subscribes each new silo to the pilot monitor. */
+    readonly monitor?: Monitor
 }
 
 export function checkSubject(subject: string): void {
@@ -69,6 +72,7 @@ export class ControlPlane {
     readonly #now: () => number
     readonly #fetch: typeof fetch
     readonly #log: (line: string) => void
+    readonly #monitor: Monitor | undefined
     /** Proxied requests still open, per subject. A streaming turn holds its silo awake. */
     readonly #open = new Map<string, number>()
     /** One wake or create in flight per subject; a burst of requests shares it. */
@@ -87,6 +91,7 @@ export class ControlPlane {
         this.#now = options.now ?? Date.now
         this.#fetch = options.fetch ?? globalThis.fetch
         this.#log = options.log ?? ((line) => process.stderr.write(`${line}\n`))
+        this.#monitor = options.monitor
     }
 
     // ─── Lifecycle ──────────────────────────────────────────────────────────────────────────
@@ -120,6 +125,7 @@ export class ControlPlane {
                 this.store.delete(subject)
                 throw error
             }
+            await this.#watch(this.#must(subject))
             return this.#must(subject)
         })()
         this.#pending.set(subject, work)
@@ -188,6 +194,15 @@ export class ControlPlane {
         this.store.setStatus(subject, "running")
         this.store.touch(subject, this.#iso())
         await this.#ready(baseUrl, subject)
+        if (this.#monitor !== undefined) {
+            // The archive may carry another silo's subscription; this one reports as itself.
+            const restored = this.#must(subject)
+            await this.#monitor
+                .reattach(restored, (s, path, init) => this.siloFetch(s, path, init))
+                .catch((error: unknown) =>
+                    this.#log(`monitor: ${subject} not re-subscribed: ${String(error)}`),
+                )
+        }
         this.#log(`restored ${subject}`)
         return this.#must(subject)
     }
@@ -287,6 +302,22 @@ export class ControlPlane {
             }
         } finally {
             this.#sweeping = false
+        }
+    }
+
+    /** Subscribe every silo the monitor is not yet hearing from — silos created before it existed. */
+    async watchAll(): Promise<void> {
+        for (const silo of this.store.list()) await this.#watch(silo)
+    }
+
+    async #watch(silo: Silo): Promise<void> {
+        if (this.#monitor === undefined) return
+        try {
+            const awake = await this.ensureAwake(silo)
+            await this.#monitor.attach(awake, (s, path, init) => this.siloFetch(s, path, init))
+        } catch (error) {
+            // Never fails the silo: an unmonitored silo still serves its user, and the report names it.
+            this.#log(`monitor: ${silo.subject} not subscribed: ${String(error)}`)
         }
     }
 

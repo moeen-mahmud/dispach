@@ -1,0 +1,18 @@
+# The agent under test for the example suite. Endpoint from the environment, like examples/minimal,
+# because the suite's point is to run the same scenarios against whichever model you are about to use.
+apiVersion: dispach/v1
+id: scenario-example
+name: Example assistant
+model:
+  main:
+    id: ${MODEL_ID}
+    baseUrl: ${MODEL_BASE_URL}
+    apiKeyEnv: MODEL_API_KEY
+tools:
+  local: [now]
+  # `scenario` is the runner's mock provider: these two tools exist only for the suite.
+  providers:
+    scenario: {}
+  pinned: [calendar_list_events, email_send]
+limits:
+  maxSteps: 8

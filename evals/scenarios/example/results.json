@@ -1,0 +1,39 @@
+{
+  "measuredAt": "2026-09-27T17:39:17.853Z",
+  "suite": "evals/scenarios/example",
+  "agentModel": "deepseek-v4-pro",
+  "judgeModel": "deepseek-v4-flash",
+  "runs": 2,
+  "threshold": 0.8,
+  "judgeErrors": 0,
+  "results": [
+    {
+      "name": "calendar-today",
+      "passed": 2,
+      "runs": 2,
+      "rate": 1,
+      "failures": []
+    },
+    {
+      "name": "email-send",
+      "passed": 2,
+      "runs": 2,
+      "rate": 1,
+      "failures": []
+    },
+    {
+      "name": "no-tool-needed",
+      "passed": 2,
+      "runs": 2,
+      "rate": 1,
+      "failures": []
+    },
+    {
+      "name": "follow-up",
+      "passed": 2,
+      "runs": 2,
+      "rate": 1,
+      "failures": []
+    }
+  ]
+}

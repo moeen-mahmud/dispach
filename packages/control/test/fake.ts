@@ -25,6 +25,8 @@ export interface FakeSilo {
     paused: boolean
     idle: boolean
     nextWakeAt?: string
+    /** Webhook subscriptions created in it. */
+    readonly webhooks: { url: string; types: string[] }[]
     /** Every path the silo was asked for, with the credential presented. */
     readonly seen: { path: string; auth: string }[]
     /** Resolve to end a held stream. */
@@ -47,6 +49,7 @@ export class FakePlacer implements Placer {
             paused: false,
             idle: true,
             seen: [],
+            webhooks: [],
             server: createServer((req, res) => {
                 const auth = (req.headers.authorization ?? "").replace(/^Bearer /, "")
                 const path = req.url ?? "/"
@@ -66,6 +69,33 @@ export class FakePlacer implements Placer {
                         idle: silo.idle,
                         ...(silo.nextWakeAt === undefined ? {} : { nextWakeAt: silo.nextWakeAt }),
                     })
+                }
+                if (path === "/v1/webhooks" && req.method === "GET") {
+                    return json(200, {
+                        webhooks: silo.webhooks.map((hook, i) => ({
+                            subscriptionId: `wh_${i + 1}`,
+                            url: hook.url,
+                        })),
+                    })
+                }
+                if (path.startsWith("/v1/webhooks/") && req.method === "DELETE") {
+                    const index = Number(path.slice("/v1/webhooks/wh_".length)) - 1
+                    silo.webhooks[index] = { url: "(deleted)", types: [] }
+                    return json(200, { deleted: true })
+                }
+                if (path === "/v1/webhooks" && req.method === "POST") {
+                    let raw = ""
+                    req.on("data", (chunk: Buffer) => {
+                        raw += chunk.toString()
+                    })
+                    req.on("end", () => {
+                        silo.webhooks.push(JSON.parse(raw) as { url: string; types: string[] })
+                        json(201, {
+                            subscriptionId: `wh_${silo.webhooks.length}`,
+                            secret: `whsec_${Buffer.from(`secret-of-${name}`).toString("base64")}`,
+                        })
+                    })
+                    return
                 }
                 if (path === "/v1/keys" && req.method === "POST") {
                     const secret = `k_${randomBytes(8).toString("hex")}`
