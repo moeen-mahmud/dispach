@@ -34,6 +34,7 @@
 
 import type { EventBus } from "../events/bus.ts"
 import type { EnvSource } from "../manifest/env.ts"
+import type { MediaProviderFactory } from "../media/provider.ts"
 import type { ModelTransport } from "../model/transport.ts"
 import type { ChannelFactory } from "../runtime/channels.ts"
 import type { ScriptRunner, ToolProviderFactory } from "../tools/types.ts"
@@ -109,6 +110,11 @@ export interface PluginContext {
      * first model call, after `runtime.ready`.
      */
     defineModelTransport(api: string, transport: ModelTransport): void
+    /**
+     * Register a media provider under the name `media.transcription.provider` or
+     * `media.image.provider` selects. `create` runs at load and must not touch the network.
+     */
+    defineMediaProvider(name: string, factory: MediaProviderFactory): void
     /**
      * Supply the runner for skill scripts.
      *

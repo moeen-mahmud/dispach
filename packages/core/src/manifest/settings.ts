@@ -178,6 +178,17 @@ export const SETTINGS: readonly Setting[] = [
         agentListed: true,
     },
     {
+        // Settable for the reason `channels` is: turning on voice notes or image generation is a
+        // capability request, and init asks nothing about it (like MCP, it is a setting). The key is
+        // an env var *name*; `.env` is protected, so the agent can enable a provider and cannot
+        // supply its secret — which is the person's by construction.
+        path: "media",
+        means: "voice notes and images: {transcription, image}, each {provider: openai|aws, model, apiKeyEnv}",
+        toAgent:
+            "image adds image_generate after a restart; filling in the key variable is the person's",
+        agentListed: true,
+    },
+    {
         path: "server.enabled",
         means: "true | false — serve the HTTP API on 127.0.0.1",
         toAgent: "host and tokenEnv are refused: binding anywhere reachable is not yours to decide",

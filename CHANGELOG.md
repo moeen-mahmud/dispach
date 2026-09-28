@@ -14,9 +14,20 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
 - `model.result` carries `firstTokenMs`.
 
+### Media
+
+- `media.transcription` and `media.image`: `openai` (any `/audio/transcriptions` and `/images/generations` endpoint) is built in; `aws` (Amazon Transcribe, Nova Canvas) comes from `@dispach/media-aws`. Set through settings, the API or `config_set`.
+- `image_generate` saves a PNG under the agent's `media/` and sends it with the reply on Telegram, WhatsApp and Slack.
+- Media calls are metered: `images` and `audioSeconds` in `/v1/usage`, and a `media.result` event.
+
+### Fixes
+
+- A reload onto a manifest the agent cannot be built from now fails and leaves the running agent in place, instead of removing it.
+
 ### Channels
 
 - Microsoft Teams: `type: teams` with `appId`, `passwordEnv` and `tenantId`. Webhook-only; every activity's Bot Framework token is verified. Answers direct messages, and in group chats and channels only when @mentioned, in the thread.
+- Voice notes on Telegram, WhatsApp, Slack and Teams become text before the turn, under a hard timeout; a note that cannot be transcribed gets a reply saying so.
 - Slack: `type: slack` with `appTokenEnv` and `botTokenEnv`. Socket Mode, so no public endpoint. Answers direct messages, and in channels only when @mentioned, in the thread; replies render markdown.
 
 ### Reload

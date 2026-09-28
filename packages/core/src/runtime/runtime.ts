@@ -30,6 +30,7 @@ import { type ManifestHeader, readManifestHeader } from "../manifest/header.ts"
 import { type LoadedManifest, loadManifest, loadManifestFromObject } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
 import type { TeamMemberConfig } from "../manifest/schema.ts"
+import type { MediaProviderFactory } from "../media/provider.ts"
 import type { FetchLike } from "../model/provider.ts"
 import { BUILT_IN_TRANSPORTS, type ModelTransport } from "../model/transport.ts"
 import { agentPluginSupply, type BuiltInPlugins, type LoadedPlugin } from "../plugins/loader.ts"
@@ -157,6 +158,11 @@ export interface RuntimeOptions {
      */
     readonly modelTransports?: Readonly<Record<string, ModelTransport>>
     /**
+     * Media providers beyond the built-in `openai`, by the name `media.*.provider` selects. Supplied
+     * by the host or by a plugin through `defineMediaProvider` — `aws` from media-aws.
+     */
+    readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
+    /**
      * How a skill's script runs. Same shape and same reasoning as `toolProviders`: core starts no
      * processes, so the one package allowed to supplies this.
      *
@@ -241,6 +247,7 @@ export interface RuntimeOptions {
 export interface AgentSupply {
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
     readonly modelTransports: Readonly<Record<string, ModelTransport>>
+    readonly mediaProviders: Readonly<Record<string, MediaProviderFactory>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     readonly middleware: readonly Middleware[]
@@ -825,6 +832,11 @@ export class Runtime {
         return this.#options.toolProviders ?? {}
     }
 
+    /** The media provider factories beyond the built-in `openai`, for the same reason. */
+    get mediaProviderFactories(): Readonly<Record<string, MediaProviderFactory>> {
+        return this.#options.mediaProviders ?? {}
+    }
+
     get ready(): boolean {
         return !this.#stopped && !this.#draining
     }
@@ -1272,8 +1284,23 @@ export class Runtime {
         })
         try {
             for (const entry of prepared.loaded) {
-                const built = await buildRegistry(entry, prepared.supplyFor(entry.manifest.id))
+                const supply = prepared.supplyFor(entry.manifest.id)
+                const built = await buildRegistry(entry, supply)
                 for (const provider of built.providers) await provider.stop?.()
+                // The agent itself, built and discarded, because `Agent.create` refuses things the
+                // manifest's schema accepts — a media provider that does not exist, a workspace file
+                // over its budget. Trialling only the registry let those through; the swap then
+                // disposed the old instance, the rebuild threw, and the agent was simply gone.
+                instantiateAgent({
+                    entry,
+                    supply,
+                    registry: built.registry,
+                    team: prepared.teams.get(entry.manifest.id),
+                    resolveMember: (id) => this.agent(id),
+                    options: this.#options,
+                    bus: new EventBus({ runtimeId: this.runtimeId }),
+                    store: this.store,
+                })
             }
         } finally {
             for (const off of prepared.unwatch.values()) off()
@@ -1820,6 +1847,9 @@ async function prepareAgents(input: {
                     ...(options.modelTransports === undefined
                         ? {}
                         : { modelTransports: options.modelTransports }),
+                    ...(options.mediaProviders === undefined
+                        ? {}
+                        : { mediaProviders: options.mediaProviders }),
                     ...(options.channels === undefined ? {} : { channels: options.channels }),
                     ...(options.scriptRunner === undefined
                         ? {}
@@ -1829,6 +1859,7 @@ async function prepareAgents(input: {
             supplyByAgent.set(agentId, {
                 toolProviders: supply.toolProviders,
                 modelTransports: supply.modelTransports,
+                mediaProviders: supply.mediaProviders,
                 channels: supply.channels,
                 scriptRunner: supply.scriptRunner,
                 middleware: supply.middleware,
@@ -1878,6 +1909,7 @@ async function prepareAgents(input: {
         supplyByAgent.get(agentId) ?? {
             toolProviders: options.toolProviders ?? {},
             modelTransports: options.modelTransports ?? {},
+            mediaProviders: options.mediaProviders ?? {},
             channels: options.channels ?? {},
             scriptRunner: options.scriptRunner,
             middleware: [],
@@ -2058,6 +2090,7 @@ function instantiateAgent(input: {
         ...(supply.middleware.length === 0 ? {} : { middleware: supply.middleware }),
         // Built-in first, so a plugin may replace `chat-completions` — the manifest named it.
         transports: new Map([...BUILT_IN_TRANSPORTS, ...Object.entries(supply.modelTransports)]),
+        mediaProviders: new Map(Object.entries(supply.mediaProviders)),
         // The manifest's live env, not the ambient one: it layers the real environment
         // over any `.env` beside the manifest, which is what the load-time key check
         // validated against. Passing `process.env` here instead is how `validate` and
@@ -2221,6 +2254,7 @@ function buildProviders(
                     config: selection.config,
                     agentId: entry.manifest.id,
                     providers: factories,
+                    mediaProviders: supply.mediaProviders,
                 }),
             )
         } catch (cause) {

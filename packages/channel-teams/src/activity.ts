@@ -39,6 +39,50 @@ export interface TeamsActivity {
         readonly text?: string
     }[]
     readonly channelData?: { readonly tenant?: { readonly id?: string } }
+    readonly attachments?: readonly TeamsAttachment[]
+}
+
+export interface TeamsAttachment {
+    readonly contentType: string
+    readonly contentUrl?: string
+    readonly name?: string
+    /** For a file: `{downloadUrl, fileType}`, the URL pre-signed and short-lived. */
+    readonly content?: { readonly downloadUrl?: string; readonly fileType?: string }
+}
+
+const AUDIO_TYPES: Record<string, string> = {
+    m4a: "audio/mp4",
+    mp4: "audio/mp4",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    webm: "audio/webm",
+    aac: "audio/aac",
+}
+
+/**
+ * The audio an activity carried, and how to fetch it: a shared file comes with a pre-signed
+ * `downloadUrl` that needs no token; an inline `audio/*` attachment's `contentUrl` needs the bot's.
+ */
+export function audioOf(
+    activity: TeamsActivity,
+): { url: string; mimeType: string; signed: boolean } | undefined {
+    for (const attachment of activity.attachments ?? []) {
+        const fileType = attachment.content?.fileType?.toLowerCase()
+        const downloadUrl = attachment.content?.downloadUrl
+        if (
+            attachment.contentType === "application/vnd.microsoft.teams.file.download.info" &&
+            downloadUrl !== undefined &&
+            fileType !== undefined &&
+            AUDIO_TYPES[fileType] !== undefined
+        ) {
+            return { url: downloadUrl, mimeType: AUDIO_TYPES[fileType], signed: true }
+        }
+        if (attachment.contentType.startsWith("audio/") && attachment.contentUrl !== undefined) {
+            return { url: attachment.contentUrl, mimeType: attachment.contentType, signed: false }
+        }
+    }
+    return undefined
 }
 
 const ENTITIES: Record<string, string> = {
@@ -86,7 +130,8 @@ export function toInbound(activity: TeamsActivity): RawInbound | undefined {
     const personal = (activity.conversation.conversationType ?? "personal") === "personal"
     if (!personal && !mentionsBot(activity)) return undefined
     const text = plainText(activity)
-    if (text === "") return undefined
+    // A voice message with no words is still a message; the runtime transcribes it into some.
+    if (text === "" && audioOf(activity) === undefined) return undefined
     const person = activity.from.aadObjectId ?? activity.from.id
     return {
         ...(activity.id === undefined

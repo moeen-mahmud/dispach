@@ -62,6 +62,7 @@ import {
 import type { EventBus } from "../events/bus.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { PluginRef } from "../manifest/schema.ts"
+import type { MediaProviderFactory } from "../media/provider.ts"
 import type { ModelTransport } from "../model/transport.ts"
 import type { ChannelFactory } from "../runtime/channels.ts"
 import type { ScriptRunner, ToolProviderFactory } from "../tools/types.ts"
@@ -112,6 +113,7 @@ export interface LoadPluginsOptions {
 export interface LoadedPlugins {
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
     readonly modelTransports: Readonly<Record<string, ModelTransport>>
+    readonly mediaProviders: Readonly<Record<string, MediaProviderFactory>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     /** In the order they were added: manifest order across plugins, declaration order within one. */
@@ -288,6 +290,7 @@ const SILENT_LOGGER: Logger = {
 export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPlugins> {
     const toolProviders: Record<string, ToolProviderFactory> = {}
     const modelTransports: Record<string, ModelTransport> = {}
+    const mediaProviders: Record<string, MediaProviderFactory> = {}
     const channels: Record<string, ChannelFactory> = {}
     const loaded: LoadedPlugin[] = []
     const middleware: Middleware[] = []
@@ -306,6 +309,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
             channels: Record<string, ChannelFactory>
             toolProviders: Record<string, ToolProviderFactory>
             modelTransports: Record<string, ModelTransport>
+            mediaProviders: Record<string, MediaProviderFactory>
             middleware: Middleware[]
             scriptRunner: ScriptRunner | undefined
             registered: string[]
@@ -313,6 +317,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
             channels: {},
             toolProviders: {},
             modelTransports: {},
+            mediaProviders: {},
             middleware: [],
             scriptRunner: undefined,
             registered: [],
@@ -343,6 +348,10 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
                     staged.modelTransports[api] = transport
                     registered.push(`modelTransport:${api}`)
                 },
+                defineMediaProvider: (name, factory) => {
+                    staged.mediaProviders[name] = factory
+                    registered.push(`mediaProvider:${name}`)
+                },
                 defineScriptRunner: (runner) => {
                     staged.scriptRunner = runner
                     registered.push("scriptRunner")
@@ -371,6 +380,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
             Object.assign(channels, staged.channels)
             Object.assign(toolProviders, staged.toolProviders)
             Object.assign(modelTransports, staged.modelTransports)
+            Object.assign(mediaProviders, staged.mediaProviders)
             middleware.push(...staged.middleware)
             if (staged.scriptRunner !== undefined) scriptRunner = staged.scriptRunner
 
@@ -422,7 +432,16 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
         }
     }
 
-    return { toolProviders, modelTransports, channels, scriptRunner, middleware, loaded, failed }
+    return {
+        toolProviders,
+        modelTransports,
+        mediaProviders,
+        channels,
+        scriptRunner,
+        middleware,
+        loaded,
+        failed,
+    }
 }
 
 /**
@@ -443,6 +462,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
 export interface AgentPluginSupply {
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
     readonly modelTransports: Readonly<Record<string, ModelTransport>>
+    readonly mediaProviders: Readonly<Record<string, MediaProviderFactory>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     readonly middleware: readonly Middleware[]
@@ -466,6 +486,7 @@ export interface AgentPluginSupplyOptions {
     readonly base?: {
         readonly toolProviders?: Readonly<Record<string, ToolProviderFactory>>
         readonly modelTransports?: Readonly<Record<string, ModelTransport>>
+        readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
         readonly channels?: Readonly<Record<string, ChannelFactory>>
         readonly scriptRunner?: ScriptRunner
     }
@@ -479,6 +500,7 @@ export async function agentPluginSupply(
         return {
             toolProviders: base.toolProviders ?? {},
             modelTransports: base.modelTransports ?? {},
+            mediaProviders: base.mediaProviders ?? {},
             channels: base.channels ?? {},
             scriptRunner: base.scriptRunner,
             middleware: [],
@@ -506,6 +528,7 @@ export async function agentPluginSupply(
     return {
         toolProviders: { ...(base.toolProviders ?? {}), ...result.toolProviders },
         modelTransports: { ...(base.modelTransports ?? {}), ...result.modelTransports },
+        mediaProviders: { ...(base.mediaProviders ?? {}), ...result.mediaProviders },
         channels: { ...(base.channels ?? {}), ...result.channels },
         scriptRunner: result.scriptRunner ?? base.scriptRunner,
         middleware: result.middleware,

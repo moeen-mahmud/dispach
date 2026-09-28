@@ -965,6 +965,7 @@ describe("first-party packages use only the public core API", () => {
     const FIRST_PARTY = [
         "channel-teams",
         "channel-slack",
+        "media-aws",
         "channel-telegram",
         "model-bedrock",
         "tools-composio",
@@ -1054,13 +1055,14 @@ describe("every command a hint names exists", () => {
 })
 
 describe("every runtime the CLI builds gets the same model transports", () => {
-    test("a file passing TOOL_PROVIDERS also passes MODEL_TRANSPORTS", () => {
+    test("a file passing TOOL_PROVIDERS also passes MODEL_TRANSPORTS and MEDIA_PROVIDERS", () => {
         // A command that built a runtime without the transports would refuse, as an unknown `api`,
         // a Bedrock agent every other command accepts — the check-only-one-surface-performs shape.
         const offenders = FILES.filter(
             (file) =>
                 /\btoolProviders: TOOL_PROVIDERS\b/.test(file.text) &&
-                !/\bmodelTransports: MODEL_TRANSPORTS\b/.test(file.text),
+                (!/\bmodelTransports: MODEL_TRANSPORTS\b/.test(file.text) ||
+                    !/\bmediaProviders: MEDIA_PROVIDERS\b/.test(file.text)),
         ).map((file) => file.path)
         expect(offenders).toEqual([])
         expect(

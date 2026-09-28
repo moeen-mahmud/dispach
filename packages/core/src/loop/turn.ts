@@ -12,6 +12,7 @@
  * upstream has to remember to catch one.
  */
 
+import { relative } from "node:path"
 import { assembleContext, reassemble, slotReport } from "../context/assemble.ts"
 import type { ContextBlock } from "../context/blocks.ts"
 import { SLOT } from "../context/blocks.ts"
@@ -309,6 +310,14 @@ export interface TurnResult {
     readonly resets?: number
     /** The phase the turn ended in. Absent when the agent declares no phases. */
     readonly phase?: string
+    /** Files tools produced for the reply, absolute paths. Absent when there are none. */
+    readonly attachments?: readonly TurnAttachmentFile[]
+}
+
+/** A file a tool handed to `ToolContext.attach`. */
+export interface TurnAttachmentFile {
+    readonly path: string
+    readonly mimeType: string
 }
 
 /**
@@ -589,6 +598,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
      * long as the peer is the one talking.
      */
     let untrustedSeen = inputTrust === "untrusted"
+    // Files a tool produced for the reply (`image_generate`). Collected across every step, carried
+    // out on the result, and sent by whichever surface delivers the text.
+    const attachments: TurnAttachmentFile[] = []
     let untrustedSource = input.from === undefined ? undefined : senderLabel(input.from)
 
     try {
@@ -1180,6 +1192,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                               deadlineMs: input.limits.toolTimeoutMs,
                               now: tools.now ?? (() => new Date()),
                               actingParticipant: input.participant ?? null,
+                              attach: (file) => {
+                                  attachments.push(file)
+                              },
                           },
                           bus: input.bus,
                           eventContext: stepContext,
@@ -1331,6 +1346,17 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                 ...(cacheSource === undefined ? {} : { cacheSource }),
             },
             durationMs,
+            ...(attachments.length === 0
+                ? {}
+                : {
+                      attachments: attachments.map((file) => ({
+                          path:
+                              input.tools === undefined
+                                  ? file.path
+                                  : relative(input.tools.dir, file.path),
+                          mimeType: file.mimeType,
+                      })),
+                  }),
         },
         context,
     )
@@ -1355,5 +1381,6 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
         // it too — `persist` inside the turn covers a crash mid-turn, and this covers the ordinary path
         // without making the caller subscribe to an event to learn where its own session got to.
         ...(input.phases === undefined ? {} : { phase }),
+        ...(attachments.length === 0 ? {} : { attachments }),
     }
 }

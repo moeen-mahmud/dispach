@@ -16,6 +16,8 @@
  * ends it, because a loop that exits leaves a bot that is running and deaf with nothing saying so.
  */
 
+import { readFile } from "node:fs/promises"
+import { basename } from "node:path"
 import type {
     ChannelHost,
     ChannelLimits,
@@ -24,7 +26,7 @@ import type {
     OutboundMessage,
     SendResult,
 } from "@dispach/core"
-import { type SlackEvent, toInbound } from "./events.ts"
+import { audioFileOf, type SlackEvent, toInbound } from "./events.ts"
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>
 
@@ -74,6 +76,7 @@ export class SlackTransport implements ChannelTransport {
         maxMessageChars: 12_000,
         idempotentSend: false,
         minSendIntervalMs: 1_000,
+        attachments: true,
     }
     readonly #appToken: string
     readonly #botToken: string
@@ -204,9 +207,27 @@ export class SlackTransport implements ChannelTransport {
                 } else if (envelope.type === "disconnect") {
                     socket.close()
                 } else if (envelope.type === "events_api" && envelope.payload?.event) {
+                    const event = envelope.payload.event
                     const bot = envelope.payload.authorizations?.[0]?.user_id
-                    const inbound = toInbound(envelope.payload.event, bot)
-                    if (inbound !== undefined) host.receive(inbound)
+                    const inbound = toInbound(event, bot)
+                    const clip = audioFileOf(event)
+                    const url = clip?.url_private_download
+                    if (inbound === undefined) return
+                    host.receive(
+                        clip === undefined || url === undefined
+                            ? inbound
+                            : {
+                                  ...inbound,
+                                  audio: {
+                                      mimeType: clip.mimetype ?? "audio/webm",
+                                      ...(clip.duration_ms === undefined
+                                          ? {}
+                                          : { durationS: clip.duration_ms / 1000 }),
+                                      ...(clip.size === undefined ? {} : { sizeBytes: clip.size }),
+                                      fetch: (fetchSignal) => this.#download(url, fetchSignal),
+                                  },
+                              },
+                    )
                 }
             })
             // An error event is always followed by close, which is where the outcome is decided.
@@ -218,56 +239,147 @@ export class SlackTransport implements ChannelTransport {
     }
 
     async send(message: OutboundMessage, signal?: AbortSignal): Promise<SendResult> {
-        let response: Response
         try {
-            response = await this.#fetch(`${this.#api}chat.postMessage`, {
-                method: "POST",
-                headers: {
-                    authorization: `Bearer ${this.#botToken}`,
-                    "content-type": "application/json; charset=utf-8",
-                },
-                body: JSON.stringify({
+            if (message.attachment !== undefined) return await this.#sendFile(message, signal)
+            const posted = await this.#web(
+                "chat.postMessage",
+                {
                     channel: message.recipient,
                     // The notification and fallback text; the markdown block is what renders,
                     // and it takes standard markdown where `text` would take Slack's mrkdwn.
                     text: message.text,
                     blocks: [{ type: "markdown", text: message.text }],
                     ...(message.thread === undefined ? {} : { thread_ts: message.thread }),
-                }),
-                ...(signal === undefined ? {} : { signal }),
-            })
+                },
+                signal,
+            )
+            return {
+                ok: true,
+                ...(typeof posted.ts === "string" ? { providerMessageId: posted.ts } : {}),
+            }
         } catch (cause) {
+            if (cause instanceof WebRefused) return cause.result(message.recipient)
             return {
                 ok: false,
                 retryable: true,
                 error: {
                     code: "slack_unreachable",
                     message: `Cannot reach Slack: ${cause instanceof Error ? cause.message : String(cause)}`,
-                    hint: "Allow outbound HTTPS to slack.com. Retried.",
+                    hint: "Allow outbound HTTPS to slack.com and files.slack.com. Retried.",
                 },
             }
         }
-        const body = (await response.json().catch(() => ({}))) as {
-            ok?: boolean
-            ts?: string
-            error?: string
+    }
+
+    /**
+     * An image, through Slack's external upload: ask for an upload URL, send the bytes there, then
+     * share the file into the channel (and thread). Three calls, because `files.upload` is retired.
+     * Needs the bot's `files:write` scope.
+     */
+    async #sendFile(message: OutboundMessage, signal?: AbortSignal): Promise<SendResult> {
+        const attachment = message.attachment as NonNullable<OutboundMessage["attachment"]>
+        const bytes = await readFile(attachment.path)
+        const filename = basename(attachment.path)
+        const ticket = await this.#web(
+            "files.getUploadURLExternal",
+            new URLSearchParams({ filename, length: String(bytes.byteLength) }),
+            signal,
+        )
+        const uploadUrl = ticket.upload_url
+        const fileId = ticket.file_id
+        if (typeof uploadUrl !== "string" || typeof fileId !== "string") {
+            throw new WebRefused(200, "no_upload_url", undefined)
         }
-        if (body.ok === true) {
-            return { ok: true, ...(body.ts === undefined ? {} : { providerMessageId: body.ts }) }
-        }
-        const error = body.error ?? `HTTP ${response.status}`
+        const uploaded = await this.#fetch(uploadUrl, {
+            method: "POST",
+            headers: { "content-type": attachment.mimeType },
+            body: bytes,
+            ...(signal === undefined ? {} : { signal }),
+        })
+        if (!uploaded.ok)
+            throw new WebRefused(uploaded.status, `upload_${uploaded.status}`, undefined)
+        await this.#web(
+            "files.completeUploadExternal",
+            {
+                files: [{ id: fileId, title: filename }],
+                channel_id: message.recipient,
+                ...(message.thread === undefined ? {} : { thread_ts: message.thread }),
+                ...(message.text === "" ? {} : { initial_comment: message.text }),
+            },
+            signal,
+        )
+        return { ok: true, providerMessageId: fileId }
+    }
+
+    /** One Web API call with the bot token. Throws `WebRefused` for Slack's `ok: false`. */
+    async #web(
+        method: string,
+        body: Record<string, unknown> | URLSearchParams,
+        signal?: AbortSignal,
+    ): Promise<Record<string, unknown>> {
+        const response = await this.#fetch(`${this.#api}${method}`, {
+            method: "POST",
+            headers: {
+                authorization: `Bearer ${this.#botToken}`,
+                ...(body instanceof URLSearchParams
+                    ? {}
+                    : { "content-type": "application/json; charset=utf-8" }),
+            },
+            body: body instanceof URLSearchParams ? body : JSON.stringify(body),
+            ...(signal === undefined ? {} : { signal }),
+        })
+        const parsed = (await response.json().catch(() => ({}))) as Record<string, unknown>
+        if (parsed.ok === true) return parsed
         const retryAfter = Number(response.headers.get("retry-after"))
+        throw new WebRefused(
+            response.status,
+            typeof parsed.error === "string" ? parsed.error : `HTTP ${response.status}`,
+            Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined,
+        )
+    }
+
+    /** A voice clip's bytes, with the bot token. Needs the `files:read` scope. */
+    async #download(url: string, signal: AbortSignal): Promise<Uint8Array> {
+        const response = await this.#fetch(url, {
+            method: "GET",
+            headers: { authorization: `Bearer ${this.#botToken}` },
+            signal,
+        })
+        // Without `files:read` Slack answers 200 with its HTML sign-in page rather than refusing.
+        if (
+            !response.ok ||
+            response.headers.get("content-type")?.startsWith("text/html") === true
+        ) {
+            throw new Error(
+                `Slack would not serve the voice clip (${response.status}); the bot token needs the files:read scope`,
+            )
+        }
+        return new Uint8Array(await response.arrayBuffer())
+    }
+}
+
+/** Slack's `ok: false`, carried to the one place that turns it into a `SendResult`. */
+class WebRefused extends Error {
+    readonly status: number
+    readonly code: string
+    readonly retryAfterMs: number | undefined
+    constructor(status: number, code: string, retryAfterMs: number | undefined) {
+        super(code)
+        this.status = status
+        this.code = code
+        this.retryAfterMs = retryAfterMs
+    }
+
+    result(recipient: string): SendResult {
         return {
             ok: false,
-            retryable: response.status === 429 || response.status >= 500 || RETRYABLE.has(error),
-            ...(Number.isFinite(retryAfter) && retryAfter > 0
-                ? { retryAfterMs: retryAfter * 1000 }
-                : {}),
+            retryable: this.status === 429 || this.status >= 500 || RETRYABLE.has(this.code),
+            ...(this.retryAfterMs === undefined ? {} : { retryAfterMs: this.retryAfterMs }),
             error: {
                 code: "slack_send_failed",
-                message: `Slack refused the reply to ${message.recipient}: ${error}.`,
+                message: `Slack refused the reply to ${recipient}: ${this.code}.`,
                 hint:
-                    SEND_HINTS[error] ??
+                    SEND_HINTS[this.code] ??
                     "Slack's own error code is above. Rate limits and server errors are retried; anything else is not.",
             },
         }

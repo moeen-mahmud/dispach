@@ -23,6 +23,7 @@ import {
     loadManifest,
     readManifestHeader,
     resolveCapabilities,
+    resolveMedia,
     resolveRoles,
     resolveWorkspace,
     ruleBudgetFailure,
@@ -32,7 +33,13 @@ import {
 import { ambientEnv } from "#lib/ambient"
 import { describeOrigin, envProvenance } from "#lib/config-env"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import { BUILT_IN_PLUGINS, CHANNELS, MODEL_TRANSPORTS, TOOL_PROVIDERS } from "#lib/providers"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MEDIA_PROVIDERS,
+    MODEL_TRANSPORTS,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { pluginRoot } from "#lib/sandbox"
 import type { ValidateOptions } from "#lib/schema"
 
@@ -67,6 +74,7 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
             base: {
                 toolProviders: TOOL_PROVIDERS,
                 modelTransports: MODEL_TRANSPORTS,
+                mediaProviders: MEDIA_PROVIDERS,
                 channels: CHANNELS,
             },
         })
@@ -119,6 +127,7 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
         const built = await buildRegistry(loaded, {
             toolProviders: supply.toolProviders,
             modelTransports: supply.modelTransports,
+            mediaProviders: supply.mediaProviders,
             channels: supply.channels,
             scriptRunner: supply.scriptRunner,
             middleware: supply.middleware,
@@ -134,6 +143,13 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
                 ...BUILT_IN_TRANSPORTS,
                 ...Object.entries(supply.modelTransports),
             ]),
+        })
+
+        // Media, resolved by the function `Agent.create` calls: an unknown provider, a missing key or
+        // options the provider refuses fail the boot, so they fail here. Opens no socket.
+        resolveMedia(manifest, {
+            env: loaded.env,
+            providers: new Map(Object.entries(supply.mediaProviders)),
         })
 
         // The same check `run` applies, applied here for the same reason it exists at all: a

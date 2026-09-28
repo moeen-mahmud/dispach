@@ -74,14 +74,14 @@ function fakeBaileys(): {
     emit: (update: ConnectionUpdate) => void
     deliver: (upsert: MessagesUpsert) => void
     saveCreds: () => Promise<void>
-    sent: { jid: string; text: string }[]
+    sent: { jid: string; text: string; image?: string }[]
 } {
     const handlers: {
         update?: (update: ConnectionUpdate) => void
         creds?: () => void | Promise<void>
         messages?: (upsert: MessagesUpsert) => void
     } = {}
-    const sent: { jid: string; text: string }[] = []
+    const sent: { jid: string; text: string; image?: string }[] = []
     const state = { connects: 0 }
 
     const socket: WhatsAppSocket = {
@@ -97,7 +97,11 @@ function fakeBaileys(): {
             },
         } as unknown as WhatsAppSocket["ev"],
         sendMessage: async (jid, content) => {
-            sent.push({ jid, text: content.text })
+            sent.push(
+                "text" in content
+                    ? { jid, text: content.text }
+                    : { jid, text: content.caption ?? "", image: content.mimetype },
+            )
             return { key: { id: "WA1" } }
         },
         sendPresenceUpdate: async () => {},
@@ -107,6 +111,7 @@ function fakeBaileys(): {
 
     return {
         api: {
+            download: async () => new Uint8Array([7, 7]),
             connect: async ({ onUpdate, onCreds, onMessages }) => {
                 state.connects += 1
                 socket.ev.on("connection.update", onUpdate)
@@ -865,5 +870,73 @@ describe("deviceName is the bracket of the Linked-devices label", () => {
                 }),
             ).toThrow(/deviceName/)
         }
+    })
+})
+
+describe("media", () => {
+    const base = { key: { remoteJid: "8801711223344@s.whatsapp.net", id: "V1" } }
+
+    test("a voice note arrives as audio with no words, and its bytes come from Baileys on demand", async () => {
+        const fake = fakeBaileys()
+        const { host, received } = recorder()
+        const channel = transport(fake.api)
+        await channel.start(host)
+        await settle()
+        fake.deliver({
+            type: "notify",
+            messages: [
+                {
+                    ...base,
+                    message: {
+                        audioMessage: {
+                            mimetype: "audio/ogg; codecs=opus",
+                            seconds: 4,
+                            fileLength: 1200,
+                        },
+                    },
+                },
+            ],
+        })
+        const raw = received[0] as {
+            text: string
+            audio?: {
+                mimeType: string
+                durationS?: number
+                sizeBytes?: number
+                fetch(signal: AbortSignal): Promise<Uint8Array>
+            }
+        }
+        expect(raw.text).toBe("")
+        expect(raw.audio?.mimeType).toBe("audio/ogg; codecs=opus")
+        expect(raw.audio?.durationS).toBe(4)
+        expect(raw.audio?.sizeBytes).toBe(1200)
+        expect([...((await raw.audio?.fetch(new AbortController().signal)) ?? [])]).toEqual([7, 7])
+        await channel.stop()
+    })
+
+    test("an attachment is sent as an image, captioned by the chunk's text", async () => {
+        const fake = fakeBaileys()
+        const { host } = recorder()
+        const channel = transport(fake.api)
+        await channel.start(host)
+        await settle()
+        const path = join(authDir, "cube.png")
+        writeFileSync(path, new Uint8Array([0x89, 0x50]))
+        const result = await channel.send({
+            channelId: "wa",
+            recipient: "8801711223344",
+            text: "",
+            attachment: { path, mimeType: "image/png" },
+            idempotencyKey: "k1",
+            chunkIndex: 1,
+            chunkTotal: 2,
+        })
+        expect(result.ok).toBe(true)
+        expect(fake.sent[0]).toEqual({
+            jid: "8801711223344@s.whatsapp.net",
+            text: "",
+            image: "image/png",
+        })
+        await channel.stop()
     })
 })

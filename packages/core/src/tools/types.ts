@@ -14,6 +14,7 @@
 
 import type { ConfigError, ErrorDetail } from "../errors.ts"
 import type { ActingParticipant } from "../loop/sender.ts"
+import type { MediaProviderFactory } from "../media/provider.ts"
 import type { Trust } from "./trust.ts"
 
 export type JsonType = "string" | "number" | "integer" | "boolean" | "array" | "object"
@@ -126,6 +127,13 @@ export interface ToolContext {
      */
     readonly deadlineMs: number
     readonly now: () => Date
+    /**
+     * Send a file with the reply: an image a tool generated. `path` is absolute and inside the
+     * agent's directory. Collected across the turn and delivered after the text by whichever surface
+     * delivers it — a channel sends it, the API reports it on `turn.end`. Optional so a plugin's own
+     * fixture keeps compiling; the runtime always supplies it.
+     */
+    readonly attach?: (file: { readonly path: string; readonly mimeType: string }) => void
     /**
      * Who this turn acts for, stamped by the runtime from the surface the turn arrived through, or
      * `null` for a schedule, a peer agent or the operator. Never from model output. An HTTP tool that
@@ -399,6 +407,8 @@ export interface ToolProviderContext {
      * before it is written — the same check the person's editors make (decision 14.24).
      */
     readonly providers?: Readonly<Record<string, ToolProviderFactory>>
+    /** The runtime's media providers, so a `media` edit from `config_set` is checked the same way. */
+    readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
 }
 
 export interface ToolIntent {

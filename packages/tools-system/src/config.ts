@@ -49,6 +49,7 @@ import {
     AGENT_SETTABLE_PATHS,
     editManifest,
     isHarnessError,
+    type MediaProviderFactory,
     parseSettingValue,
     SETTINGS,
     type Tool,
@@ -72,6 +73,8 @@ export interface ConfigOptions {
     readonly file?: string
     /** Provider factories, so a `tools.providers` edit the provider would refuse is refused. */
     readonly providers?: Readonly<Record<string, ToolProviderFactory>>
+    /** Media provider factories, so a `media` edit naming a provider that does not exist is refused. */
+    readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
 }
 
 /**
@@ -331,6 +334,9 @@ export function configSetHandler(options: ConfigOptions): ToolHandler {
                 path: path.split("."),
                 value,
                 ...(options.providers === undefined ? {} : { providers: options.providers }),
+                ...(options.mediaProviders === undefined
+                    ? {}
+                    : { mediaProviders: options.mediaProviders }),
             })
         } catch (cause) {
             // `isHarnessError`, not `instanceof`: this package and core are separate copies in a

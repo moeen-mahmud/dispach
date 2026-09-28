@@ -29,6 +29,7 @@ export type {
     ChannelLimits,
     ChannelStatus,
     ChannelTransport,
+    InboundAudio,
     InboundMessage,
     IssuedChannelInput,
     OutboundMessage,
@@ -208,6 +209,29 @@ export {
     validateManifest,
 } from "./manifest/validate.ts"
 export { setInSource, uncommentInSource } from "./manifest/yaml-edit.ts"
+export {
+    IMAGE_GENERATE,
+    imageGenerateTool,
+    MEDIA_DIR,
+    type MediaUsage,
+} from "./media/image-tool.ts"
+export {
+    type AudioInput,
+    audioExtension,
+    BUILT_IN_MEDIA_PROVIDERS,
+    type GeneratedImage,
+    type ImageRequest,
+    MediaError,
+    type MediaProvider,
+    type MediaProviderContext,
+    type MediaProviderFactory,
+    mediaProviderFor,
+    OPENAI_MEDIA_PROVIDER,
+    type ResolvedMedia,
+    resolveMedia,
+    type Transcript,
+    withDeadline,
+} from "./media/provider.ts"
 export {
     CAPABILITY_REGISTRY,
     type CapabilityEntry,

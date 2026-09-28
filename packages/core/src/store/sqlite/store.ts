@@ -282,6 +282,8 @@ interface DeliveryRow {
     chunk_index: number
     chunk_total: number
     body: string
+    attachment_path: string | null
+    attachment_type: string | null
     status: string
     attempts: number
     next_attempt_at: string
@@ -567,6 +569,14 @@ function toDelivery(row: DeliveryRow): DeliveryRecord {
         chunkIndex: row.chunk_index,
         chunkTotal: row.chunk_total,
         body: row.body,
+        ...(row.attachment_path === null
+            ? {}
+            : {
+                  attachment: {
+                      path: row.attachment_path,
+                      mimeType: row.attachment_type ?? "application/octet-stream",
+                  },
+              }),
         status: row.status as DeliveryStatus,
         attempts: row.attempts,
         nextAttemptAt: row.next_attempt_at,
@@ -893,8 +903,8 @@ export class SqliteStore implements Store {
                 `INSERT OR IGNORE INTO model_calls
                      (agent_id, session_key, turn_id, role, model, prompt_tokens, prompt_reported,
                       cached_prompt_tokens, output_tokens, output_reported, sender, at,
-                      call_id, cache_write_tokens)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                      call_id, cache_write_tokens, images, audio_seconds)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ),
             modelCallDeleteAll: db.prepare("DELETE FROM model_calls WHERE agent_id = ?"),
             webhookInsert: db.prepare(
@@ -1039,9 +1049,9 @@ export class SqliteStore implements Store {
             outboxInsert: db.prepare(
                 `INSERT INTO outbox
                      (agent_id, dedupe_key, group_key, session_key, turn_id, channel_id, recipient,
-                      thread, chunk_index, chunk_total, body, status, next_attempt_at,
-                      created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                      thread, chunk_index, chunk_total, body, attachment_path, attachment_type,
+                      status, next_attempt_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                  ON CONFLICT (agent_id, dedupe_key) DO NOTHING`,
             ),
             outboxById: db.prepare("SELECT * FROM outbox WHERE id = ?"),
@@ -1523,6 +1533,8 @@ export class SqliteStore implements Store {
                             d.chunkIndex,
                             d.chunkTotal,
                             d.body,
+                            d.attachment?.path ?? null,
+                            d.attachment?.mimeType ?? null,
                             // Due immediately unless the caller says otherwise. A first attempt
                             // that waited would add latency to every reply to buy nothing —
                             // backoff starts at the first failure.
@@ -2267,6 +2279,8 @@ export class SqliteStore implements Store {
                     call.at,
                     call.callId ?? null,
                     call.cacheWriteTokens ?? null,
+                    call.images ?? null,
+                    call.audioSeconds ?? null,
                 )
             },
             report: async (query) => usageReport(db, query),
@@ -2364,6 +2378,8 @@ interface UsageRow {
     readonly cached_prompt_tokens: number
     readonly cache_write_tokens: number
     readonly output_tokens: number
+    readonly images: number
+    readonly audio_seconds: number
     readonly estimated_calls: number
 }
 
@@ -2415,6 +2431,8 @@ function usageReport(
                 "COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens",
                 "COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens",
                 "COALESCE(SUM(output_tokens), 0) AS output_tokens",
+                "COALESCE(SUM(images), 0) AS images",
+                "COALESCE(SUM(audio_seconds), 0) AS audio_seconds",
                 "COALESCE(SUM(CASE WHEN prompt_reported = 0 OR output_reported = 0 THEN 1 ELSE 0 END), 0) AS estimated_calls",
             ].join(", ")}
                FROM model_calls ${clause(where)} ${groupBy}
@@ -2437,6 +2455,8 @@ function usageReport(
             cachedPromptTokens: row.cached_prompt_tokens,
             cacheWriteTokens: row.cache_write_tokens,
             outputTokens: row.output_tokens,
+            images: row.images,
+            audioSeconds: row.audio_seconds,
             estimatedCalls: row.estimated_calls,
         }))
     return {

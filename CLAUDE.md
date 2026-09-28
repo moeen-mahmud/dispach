@@ -182,6 +182,8 @@ packages/tools-*/    system (shell, files), Composio, web, MCP (remote servers o
                      never the substrate: decisions 4.7, 14.22)
 packages/model-*/    model transports beyond chat-completions: Bedrock Converse. Its AWS SDK loads on
                      the first model call, never at boot (`bundle.test.ts` holds it)
+packages/media-*/    media providers beyond the built-in openai: Amazon Transcribe and Nova Canvas.
+                     Same lazy-SDK rule, same guard
 packages/control/    the control plane: places, proxies, suspends and wakes one runtime per user.
                      **FSL-1.1, not Apache-2.0.** Imports nothing from the runtime and nothing
                      imports it (`check:deps`); read its own CLAUDE.md before touching it
@@ -1268,6 +1270,11 @@ Never claim a performance property without a number in `evals/` and a script to 
   volume is seeded from the image's own directories and a Kubernetes volume is not. Found only by
   applying the example to a real cluster (k3s in Docker); the example's `layout` init container
   creates the directory first, as the same non-root user.
+- **A reload's trial has to build what the swap builds.** It built the tool registry only, so
+  anything `Agent.create` refuses and the schema accepts — an unknown media provider, a workspace file
+  over budget — passed the trial, the old instance was disposed, the rebuild threw, and the agent was
+  simply gone from a running silo. Found by writing a bad `media` block through `PATCH /config` in the
+  image. The trial calls `instantiateAgent` with a scratch bus and discards it.
 - **A turn held for a reload must not count against the instance it is waiting to leave.** The swap
   waits for the old instance's `inFlight` to reach zero, so a held turn that took a slot there is a turn
   waiting on itself: the reload never lands and the turn never starts, with nothing reporting either.

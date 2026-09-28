@@ -34,6 +34,7 @@ import { readFile, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
 import { isMap, isSeq, parseDocument } from "yaml"
 import { HarnessError, isHarnessError } from "../errors.ts"
+import { type MediaProviderFactory, resolveMedia } from "../media/provider.ts"
 import type { ToolProviderFactory } from "../tools/types.ts"
 import { resolveProviders } from "./providers.ts"
 import { type AgentManifest, AgentManifestSchema } from "./schema.ts"
@@ -64,6 +65,12 @@ export interface ManifestEdit {
      * warning at the next load. Absent skips the check, which is what a caller with no factories has.
      */
     readonly providers?: Readonly<Record<string, ToolProviderFactory>>
+    /**
+     * The media providers the surface can build, so an edit to `media` naming a provider that does
+     * not exist, or options it refuses, is refused before the file is written. A missing key is let
+     * through: enabling a provider and then filling its secret is the intended order.
+     */
+    readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
 }
 
 export interface ManifestEditResult {
@@ -189,6 +196,7 @@ export async function editManifest(edit: ManifestEdit): Promise<ManifestEditResu
     }
     const prepared = prepareManifestEdit(source, edit)
     checkProviders(edit, prepared.manifest)
+    checkMedia(edit, prepared.manifest)
     await writeFile(edit.file, prepared.next, "utf8")
     return { ...prepared, after: edit.value }
 }
@@ -209,6 +217,7 @@ export function editManifestSync(edit: ManifestEdit): ManifestEditResult {
     }
     const prepared = prepareManifestEdit(source, edit)
     checkProviders(edit, prepared.manifest)
+    checkMedia(edit, prepared.manifest)
     writeFileSync(edit.file, prepared.next, "utf8")
     return { ...prepared, after: edit.value }
 }
@@ -311,6 +320,27 @@ function checkProviders(edit: ManifestEdit, manifest: AgentManifest): void {
             )
         }
         void provider.stop?.()
+    }
+}
+
+/**
+ * Build each media section the edit would write, and throw what refuses — except a missing key,
+ * which is the person's next step rather than a mistake. Opens no socket.
+ */
+function checkMedia(edit: ManifestEdit, manifest: AgentManifest): void {
+    if (edit.mediaProviders === undefined || edit.path[0] !== "media") return
+    for (const section of ["transcription", "image"] as const) {
+        const config = manifest.media?.[section]
+        if (config === undefined) continue
+        try {
+            resolveMedia(
+                { ...manifest, media: { [section]: config } },
+                { env: {}, providers: new Map(Object.entries(edit.mediaProviders)) },
+            )
+        } catch (cause) {
+            if (isHarnessError(cause) && cause.code === "media_key_missing") continue
+            throw cause
+        }
     }
 }
 

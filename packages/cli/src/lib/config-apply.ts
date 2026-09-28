@@ -16,7 +16,7 @@ import { dirname, join } from "node:path"
 import { editManifest, HarnessError, manifestValueAt, parseSettingValue } from "@dispach/core"
 import { upsertEnv } from "#lib/dotenv-edit"
 import { telegramHandle } from "#lib/init-flow"
-import { TOOL_PROVIDERS } from "#lib/providers"
+import { MEDIA_PROVIDERS, TOOL_PROVIDERS } from "#lib/providers"
 
 export interface Applied {
     /** One line saying what happened, for whichever surface asked. */
@@ -41,6 +41,7 @@ export async function applySet(manifestPath: string, path: string, raw: string):
         path: path.split("."),
         value,
         providers: TOOL_PROVIDERS,
+        mediaProviders: MEDIA_PROVIDERS,
     })
     return {
         note: `${path} is now ${describe(value)}`,

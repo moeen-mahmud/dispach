@@ -61,6 +61,7 @@ interface PluginContext {
   defineChannel(id: string, factory: ChannelFactory): void
   defineToolProvider(id: string, factory: ToolProviderFactory): void
   defineModelTransport(api: string, transport: ModelTransport): void   // Phase 26c
+  defineMediaProvider(name: string, factory: MediaProviderFactory): void // Phase 26j
   defineScriptRunner(runner: ScriptRunner): void
   use(middleware: Middleware): void          // Phase 9B
 
@@ -290,6 +291,7 @@ interface ChannelLimits {
   readonly maxMessageChars: number
   readonly idempotentSend: boolean
   readonly minSendIntervalMs?: number
+  readonly attachments?: boolean    // send() can carry OutboundMessage.attachment (Phase 26j)
 }
 
 interface ChannelHost {
@@ -440,6 +442,36 @@ Implement one only for a genuinely different wire protocol (Bedrock's Converse; 
 Messages-API adapter). Not for a different vendor on the same protocol: that's a base URL. A
 transport may carry a heavy dependency, since it lives outside core, but it `import()`s it on the
 first call, so boot never pays for it.
+
+### Media provider
+
+**Built in Phase 26j.** Registered with `defineMediaProvider(name, factory)` and selected by
+`media.transcription.provider` or `media.image.provider`:
+
+```ts
+interface MediaProviderFactory {
+  optionsSchema?: ConfigSchema                  // validates media.<section>.options at load
+  create(context: MediaProviderContext): MediaProvider   // no network: runs before ready
+}
+
+interface MediaProvider {
+  transcribe?(audio: AudioInput, signal: AbortSignal): Promise<Transcript>          // {text, durationS?}
+  generateImage?(request: ImageRequest, signal: AbortSignal): Promise<GeneratedImage> // {bytes, mimeType}
+}
+```
+
+One contract with two optional halves, because real backends come in pairs. Core ships `openai`
+(any endpoint with `/audio/transcriptions` and `/images/generations`); `media-aws` registers `aws`
+(Amazon Transcribe streaming, Nova Canvas). An unknown name, a provider lacking the half its
+section needs, or options its schema rejects refuses the load. The runtime owns the deadline and
+the metering, so a provider only answers.
+
+**On a channel.** A transport puts a voice note on `RawInbound.audio` as `{mimeType, durationS?,
+sizeBytes?, fetch(signal)}`: the bytes are fetched only if the note is transcribed, which happens
+after `allowFrom`, so a stranger's audio is never downloaded. A transport that can send a file
+declares `limits.attachments` and reads `OutboundMessage.attachment` (`{path, mimeType}`, with `text`
+as its caption); for one that does not, the outbox names the file in the reply instead. A tool
+produces such a file by calling `ToolContext.attach({path, mimeType})`.
 
 ### Store driver
 

@@ -91,6 +91,9 @@ describe("every model call is metered", () => {
                 cachedPromptTokens: 0,
                 cacheWriteTokens: 0,
                 outputTokens: 15,
+                // Zero rather than absent: a token-only history has no media, which is a measurement.
+                images: 0,
+                audioSeconds: 0,
                 estimatedCalls: 0,
             },
         ])

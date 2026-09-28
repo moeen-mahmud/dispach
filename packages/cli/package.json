@@ -54,6 +54,7 @@
     "devDependencies": {
         "@dispach/channel-telegram": "workspace:*",
         "@dispach/channel-slack": "workspace:*",
+        "@dispach/media-aws": "workspace:*",
         "@dispach/channel-teams": "workspace:*",
         "@dispach/channel-whatsapp": "workspace:*",
         "@dispach/model-bedrock": "workspace:*",

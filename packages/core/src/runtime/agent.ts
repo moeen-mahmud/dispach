@@ -14,6 +14,7 @@
 
 import { statSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
+import type { InboundAudio } from "../channels/channel.ts"
 import { assembleContext, historyReport, slotReport } from "../context/assemble.ts"
 import { type Calibration, UNCALIBRATED } from "../context/budget.ts"
 import { renderCompactionNotice } from "../context/compaction-notice.ts"
@@ -33,7 +34,7 @@ import {
     unknownRetriever,
 } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
-import { newTurnId } from "../loop/ids.ts"
+import { newCallId, newTurnId } from "../loop/ids.ts"
 import { entryPhase, isPhased, unmatchedAllows } from "../loop/phases.ts"
 import { type ActingParticipant, participantOf, type TurnSender } from "../loop/sender.ts"
 import { runStep, type StepUsage } from "../loop/step.ts"
@@ -41,8 +42,16 @@ import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from 
 import type { EnvSource } from "../manifest/env.ts"
 import type { LoadedManifest } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
-import type { AgentManifest } from "../manifest/schema.ts"
+import type { AgentManifest, TranscriptionConfig } from "../manifest/schema.ts"
 import { fallbackWarnings, scheduleDeliveryWarnings } from "../manifest/validate.ts"
+import { imageGenerateTool, type MediaUsage } from "../media/image-tool.ts"
+import {
+    MediaError,
+    type MediaProvider,
+    type MediaProviderFactory,
+    resolveMedia,
+    withDeadline,
+} from "../media/provider.ts"
 import {
     enumerateFiles,
     enumerateSessions,
@@ -173,6 +182,11 @@ export interface AgentCreateOptions extends ResolveRolesOptions {
      * process.
      */
     readonly middleware?: readonly Middleware[]
+    /**
+     * Media providers beyond the built-in `openai`, by the name `media.*.provider` selects: `aws`
+     * from the media-aws plugin. Same shape and reasoning as `transports`.
+     */
+    readonly mediaProviders?: ReadonlyMap<string, MediaProviderFactory>
     /**
      * Ask a person before a call the policy wants confirmed.
      *
@@ -384,6 +398,11 @@ export class Agent {
     /** Absent when the embedder supplied none; then a skill's scripts are never discovered. */
     readonly #scriptRunner: ScriptRunner | undefined
     readonly #middleware: readonly Middleware[]
+    readonly #transcription:
+        | { readonly config: TranscriptionConfig; readonly provider: MediaProvider }
+        | undefined
+    /** Who sent each running turn, so a media call made inside it is billed like its tokens. */
+    readonly #senders = new Map<string, string>()
     /**
      * Slot 2, rendered **lazily and once**.
      *
@@ -423,6 +442,9 @@ export class Agent {
         scriptRunner: ScriptRunner | undefined
         middleware: readonly Middleware[]
         approve: ((request: ApprovalRequest) => Promise<boolean>) | undefined
+        transcription:
+            | { readonly config: TranscriptionConfig; readonly provider: MediaProvider }
+            | undefined
     }) {
         this.id = init.loaded.manifest.id
         this.manifest = init.loaded.manifest
@@ -443,6 +465,7 @@ export class Agent {
         this.skills = init.skills
         this.#scriptRunner = init.scriptRunner
         this.#middleware = init.middleware
+        this.#transcription = init.transcription
 
         const memory = init.loaded.manifest.memory
         if (memory === undefined) {
@@ -656,7 +679,33 @@ export class Agent {
                 pattern: entry.window.pattern ?? "?",
             }))
 
-        return new Agent({
+        // Media, resolved at load like the model roles: an unknown provider or a missing key refuses
+        // the boot, rather than surfacing as a voice note nobody answers.
+        const media = resolveMedia(loaded.manifest, {
+            env: loaded.env,
+            ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+            ...(options.mediaProviders === undefined ? {} : { providers: options.mediaProviders }),
+        })
+        const transcription = media.transcription
+        const imageMedia = media.image
+        // The tool records through the agent, which does not exist yet; it runs only in a turn,
+        // long after `self` is assigned below.
+        let self: Agent | undefined
+        const baseTools = options.tools ?? ToolRegistry.empty()
+        const tools =
+            imageMedia === undefined
+                ? baseTools
+                : baseTools.withTools([
+                      imageGenerateTool({
+                          config: imageMedia.config,
+                          provider: imageMedia.provider,
+                          record: (usage) => {
+                              if (self !== undefined) self.#recordMedia(usage)
+                          },
+                      }),
+                  ])
+
+        const agent = new Agent({
             loaded,
             roles,
             workspace,
@@ -678,13 +727,149 @@ export class Agent {
             ],
             bus,
             store,
-            tools: options.tools ?? ToolRegistry.empty(),
+            tools,
             knowledge,
             skills,
             scriptRunner: options.scriptRunner,
             middleware: options.middleware ?? [],
             approve: options.approve,
+            transcription,
         })
+        self = agent
+        return agent
+    }
+
+    /**
+     * A voice note, as text: downloaded and transcribed under one hard deadline.
+     *
+     * The deadline covers the download as well, because a hung fetch holds the conversation's queue
+     * exactly as a hung transcription does. Throws a `MediaError` with a hint the caller can put in
+     * front of the sender; never returns an empty string.
+     */
+    async transcribe(
+        audio: InboundAudio,
+        options: { readonly sessionKey: string; readonly signal?: AbortSignal },
+    ): Promise<string> {
+        const configured = this.#transcription
+        if (configured === undefined) {
+            throw new MediaError({
+                code: "media_transcription_unconfigured",
+                message: `${this.id} has no transcription configured, so it cannot listen to voice notes.`,
+                hint: "Add media.transcription to the manifest (provider openai or aws) — through config_set, the config command, the settings editor or PATCH /v1/agents/:id/config.",
+                field: "media.transcription",
+            })
+        }
+        const { config, provider } = configured
+        const tooLarge = (bytes: number) =>
+            new MediaError({
+                code: "media_audio_too_large",
+                message: `The voice note is ${Math.round(bytes / 1024)} KB, over the ${Math.round(config.maxBytes / 1024)} KB limit.`,
+                hint: "Raise media.transcription.maxBytes, or send a shorter note. Checked before downloading when the channel reports a size.",
+                field: "media.transcription.maxBytes",
+            })
+        if (audio.sizeBytes !== undefined && audio.sizeBytes > config.maxBytes) {
+            throw tooLarge(audio.sizeBytes)
+        }
+        const started = performance.now()
+        const transcript = await withDeadline(
+            config.timeoutMs,
+            "Transcribing the voice note",
+            async (signal) => {
+                const bytes = await audio.fetch(signal)
+                if (bytes.byteLength > config.maxBytes) throw tooLarge(bytes.byteLength)
+                return (provider.transcribe as NonNullable<MediaProvider["transcribe"]>).call(
+                    provider,
+                    {
+                        bytes,
+                        mimeType: audio.mimeType,
+                        ...(audio.durationS === undefined ? {} : { durationS: audio.durationS }),
+                    },
+                    signal,
+                )
+            },
+            options.signal,
+        )
+        const seconds = transcript.durationS ?? audio.durationS
+        this.#recordMedia({
+            kind: "transcription",
+            provider: config.provider,
+            model: config.model ?? config.provider,
+            latencyMs: Math.round(performance.now() - started),
+            ...(seconds === undefined ? {} : { audioSeconds: seconds }),
+            sessionKey: options.sessionKey,
+        })
+        const text = transcript.text.trim()
+        if (text === "") {
+            throw new MediaError({
+                code: "media_transcript_empty",
+                message: "The voice note transcribed to nothing.",
+                hint: "Usually silence or a very short clip. Nothing is wrong with the configuration.",
+            })
+        }
+        return text
+    }
+
+    /** Whether `transcribe` can do anything. A channel asks before it bothers the sender. */
+    get canTranscribe(): boolean {
+        return this.#transcription !== undefined
+    }
+
+    /**
+     * One media call, written as a `model_calls` row and announced as `media.result`.
+     *
+     * Its tokens are zero and *reported* — nothing was estimated — so it never inflates
+     * `estimatedCalls`; its quantity is `images` or `audioSeconds`. The sender is the turn's, looked
+     * up by id, so a member's images are billed to the member exactly as their tokens are.
+     */
+    #recordMedia(usage: MediaUsage): void {
+        const callId = newCallId()
+        const sender = usage.turnId === undefined ? undefined : this.#senders.get(usage.turnId)
+        this.store.usage
+            .record({
+                agentId: this.id,
+                sessionKey: usage.sessionKey,
+                ...(usage.turnId === undefined ? {} : { turnId: usage.turnId }),
+                role: usage.kind,
+                model: usage.model,
+                promptTokens: 0,
+                promptReported: true,
+                outputTokens: 0,
+                outputReported: true,
+                callId,
+                ...(usage.images === undefined ? {} : { images: usage.images }),
+                ...(usage.audioSeconds === undefined ? {} : { audioSeconds: usage.audioSeconds }),
+                ...(sender === undefined ? {} : { sender }),
+                at: new Date().toISOString(),
+            })
+            .catch((error: unknown) => {
+                this.#bus.emit(
+                    "agent.warning",
+                    {
+                        code: "usage_record_failed",
+                        message: `Recording a media call's usage failed: ${error instanceof Error ? error.message : String(error)}`,
+                        hint: "The result was unaffected; this call is missing from GET /v1/usage. A store that cannot be written is usually full or read-only.",
+                    },
+                    { agentId: this.id, sessionKey: usage.sessionKey },
+                )
+            })
+        this.#bus.emit(
+            "media.result",
+            {
+                callId,
+                kind: usage.kind,
+                provider: usage.provider,
+                model: usage.model,
+                latencyMs: usage.latencyMs,
+                ...(usage.images === undefined ? {} : { images: usage.images }),
+                ...(usage.audioSeconds === undefined ? {} : { audioSeconds: usage.audioSeconds }),
+                ...(sender === undefined ? {} : { sender }),
+            },
+            {
+                agentId: this.id,
+                sessionKey: usage.sessionKey,
+                ...(usage.turnId === undefined ? {} : { turnId: usage.turnId }),
+            },
+        )
     }
 
     /** Default session key for a surface with no natural one, such as the REPL. */
@@ -901,6 +1086,7 @@ export class Agent {
 
         const meter = this.#meter(sessionKey, turnId, options.from?.id)
         const participant = options.participant ?? participantOf(options.from)
+        if (options.from?.id !== undefined) this.#senders.set(turnId, options.from.id)
         const result = await runTurn({
             agentId: this.id,
             meter,
@@ -968,7 +1154,7 @@ export class Agent {
             ...(participant === null ? {} : { participant }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
-        })
+        }).finally(() => this.#senders.delete(turnId))
 
         // Carried per session, not per turn. One turn's observations are a sample of the estimator's
         // bias; the bias itself belongs to the conversation, and a fresh calibration every turn would

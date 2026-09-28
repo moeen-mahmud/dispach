@@ -306,7 +306,8 @@ export function scheduleRunner(options: ScheduleRunnerOptions) {
         // `deliver: "none"` is a real answer rather than a missing one: the reply reaches the event
         // stream and the store, and no channel is involved.
         if (schedule.deliverChannel === undefined || schedule.deliverTo === undefined) return
-        if (result.text.trim() === "") return
+        const attachments = result.attachments ?? []
+        if (result.text.trim() === "" && attachments.length === 0) return
 
         await options.hub.deliver({
             agentId: schedule.agentId,
@@ -315,6 +316,7 @@ export function scheduleRunner(options: ScheduleRunnerOptions) {
             recipient: schedule.deliverTo,
             text: result.text,
             turnId: result.turnId,
+            ...(attachments.length === 0 ? {} : { attachments }),
         })
     }
 }

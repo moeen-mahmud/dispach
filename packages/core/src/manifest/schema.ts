@@ -586,6 +586,62 @@ export const TeamSchema = z
     })
     .strict()
 
+/**
+ * One media capability: which provider does it, with what model, bounded by a hard timeout.
+ *
+ * `provider` names a media provider the way `api` names a model transport — `openai` is built in (any
+ * endpoint speaking `/audio/transcriptions` and `/images/generations`), `aws` comes from the
+ * `media-aws` plugin (Amazon Transcribe, Nova Canvas), and an unknown one refuses the load.
+ */
+const MediaSectionFields = {
+    provider: z.string().min(1),
+    /** Sent to the provider as its model id: `whisper-1`, `gpt-image-1`, `amazon.nova-canvas-v1:0`. */
+    model: z.string().min(1).optional(),
+    /** For `openai`: the endpoint's base URL ending at the version segment. */
+    baseUrl: z.string().min(1).optional(),
+    /** The *name* of an env var. A literal key here fails validation. */
+    apiKeyEnv: z.string().min(1).optional(),
+    /** Provider-specific settings, validated by that provider (for `aws`: `region`, `languageCode`). */
+    options: z.record(z.string(), z.unknown()).optional(),
+}
+
+export const MediaSchema = z
+    .object({
+        /**
+         * Voice notes on channels become text before the turn. The timeout covers the download and
+         * the transcription together and is **hard**: a provider that never answers is abandoned and
+         * the sender is told, because a hung transcription holds that conversation's queue and
+         * silences the person for good.
+         */
+        transcription: z
+            .object({
+                ...MediaSectionFields,
+                timeoutMs: z.number().int().positive().default(60_000),
+                /** A voice note larger than this is refused before it is downloaded. */
+                maxBytes: z
+                    .number()
+                    .int()
+                    .positive()
+                    .default(25 * 1024 * 1024),
+            })
+            .strict()
+            .optional(),
+        /** Declaring it registers the `image_generate` tool; images land in the agent's `media/`. */
+        image: z
+            .object({
+                ...MediaSectionFields,
+                timeoutMs: z.number().int().positive().default(120_000),
+                /** `WIDTHxHEIGHT`, passed to the provider. */
+                size: z
+                    .string()
+                    .regex(/^[0-9]+x[0-9]+$/)
+                    .default("1024x1024"),
+            })
+            .strict()
+            .optional(),
+    })
+    .strict()
+
 export const ScheduleSchema = z
     .object({
         id: slug,
@@ -738,6 +794,7 @@ export const AgentManifestSchema = z
         delivery: DeliverySchema.optional(),
         schedules: z.array(ScheduleSchema).default([]),
         team: TeamSchema.optional(),
+        media: MediaSchema.optional(),
         plugins: z.array(PluginRefSchema).default([]),
         limits: LimitsSchema.prefault({}),
         server: ServerSchema.prefault({}),
@@ -762,6 +819,9 @@ export type DeliveryConfig = z.infer<typeof DeliverySchema>
 export type ScheduleConfig = z.infer<typeof ScheduleSchema>
 export type TeamMemberConfig = z.infer<typeof TeamMemberSchema>
 export type TeamConfig = z.infer<typeof TeamSchema>
+export type MediaConfig = z.infer<typeof MediaSchema>
+export type TranscriptionConfig = NonNullable<MediaConfig["transcription"]>
+export type ImageConfig = NonNullable<MediaConfig["image"]>
 export type PluginRef = z.infer<typeof PluginRefSchema>
 export type LimitsConfig = z.infer<typeof LimitsSchema>
 export type ServerConfig = z.infer<typeof ServerSchema>

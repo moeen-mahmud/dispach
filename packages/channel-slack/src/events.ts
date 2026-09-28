@@ -25,6 +25,25 @@ export interface SlackEvent {
     readonly thread_ts?: string
     readonly channel?: string
     readonly channel_type?: string
+    readonly files?: readonly SlackFile[]
+}
+
+export interface SlackFile {
+    readonly mimetype?: string
+    /** `slack_audio` for a clip recorded in the app. */
+    readonly subtype?: string
+    readonly url_private_download?: string
+    readonly size?: number
+    readonly duration_ms?: number
+}
+
+/** The audio a message carried, if any: a recorded clip, or an audio file shared into the chat. */
+export function audioFileOf(event: SlackEvent): SlackFile | undefined {
+    return event.files?.find(
+        (file) =>
+            file.url_private_download !== undefined &&
+            (file.subtype === "slack_audio" || file.mimetype?.startsWith("audio/") === true),
+    )
 }
 
 /** Slack escapes exactly these three in message text. */
@@ -43,13 +62,17 @@ export function plainText(text: string, botUserId: string | undefined): string {
 
 /** Undefined for anything the agent should not answer. `botUserId` is from the envelope's authorizations. */
 export function toInbound(event: SlackEvent, botUserId?: string): RawInbound | undefined {
-    if (event.subtype !== undefined || event.bot_id !== undefined) return undefined
+    // `file_share` is a person sharing a file — a voice clip among them — and the one subtype that
+    // is still somebody saying something new.
+    if (event.subtype !== undefined && event.subtype !== "file_share") return undefined
+    if (event.bot_id !== undefined) return undefined
     if (event.user === undefined || event.user === botUserId) return undefined
     if (event.channel === undefined || event.ts === undefined) return undefined
     const direct = event.type === "message" && event.channel_type === "im"
     if (!direct && event.type !== "app_mention") return undefined
     const text = plainText(event.text ?? "", botUserId)
-    if (text === "") return undefined
+    // A clip with no words is still a message; the runtime transcribes it into some.
+    if (text === "" && audioFileOf(event) === undefined) return undefined
     const thread = direct ? event.thread_ts : (event.thread_ts ?? event.ts)
     return {
         // Channel plus ts is Slack's own message identity; a mention in a DM arriving as both

@@ -30,6 +30,7 @@
 
 import {
     ConfigError,
+    type MediaProviderFactory,
     type Tool,
     type ToolAvailability,
     type ToolProvider,
@@ -55,6 +56,8 @@ export interface SystemProviderOptions {
     readonly dir: string
     /** The runtime's provider factories, so `config_set` can have a `tools.providers` edit checked. */
     readonly providers?: Readonly<Record<string, ToolProviderFactory>>
+    /** The runtime's media providers, so a `media` edit is checked before it is written. */
+    readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
     /**
      * Extra protected patterns from `tools.providerConfig.protect`.
      *
@@ -97,6 +100,9 @@ export class SystemProvider implements ToolProvider {
             ...configTools({
                 agentDir: options.dir,
                 ...(options.providers === undefined ? {} : { providers: options.providers }),
+                ...(options.mediaProviders === undefined
+                    ? {}
+                    : { mediaProviders: options.mediaProviders }),
             }),
         ]
     }
@@ -185,6 +191,7 @@ export function systemFromConfig(context: ToolProviderContext): SystemProvider {
         env: context.env,
         dir: context.dir,
         ...(context.providers === undefined ? {} : { providers: context.providers }),
+        ...(context.mediaProviders === undefined ? {} : { mediaProviders: context.mediaProviders }),
         ...(Array.isArray(protect) ? { protect: protect.map((entry) => String(entry)) } : {}),
         ...(Array.isArray(writeRoots)
             ? { writeRoots: writeRoots.map((entry) => String(entry)) }

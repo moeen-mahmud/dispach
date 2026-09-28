@@ -1433,7 +1433,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         signal: controller.signal,
                     })
                     .then(async (result) => {
-                        if (deliver.target === undefined || result.text.trim() === "") return
+                        const attachments = result.attachments ?? []
+                        if (
+                            deliver.target === undefined ||
+                            (result.text.trim() === "" && attachments.length === 0)
+                        ) {
+                            return
+                        }
                         await runtime.channels.deliver({
                             agentId: agent.id,
                             sessionKey,
@@ -1441,6 +1447,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                             recipient: deliver.target.to,
                             turnId,
                             text: result.text,
+                            ...(attachments.length === 0 ? {} : { attachments }),
                         })
                     })
                     .catch(() => {
@@ -2438,6 +2445,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         // Refuses a provider config the provider would refuse (an MCP server with a
                         // credential in its URL), rather than writing it and dropping the provider.
                         providers: runtime.toolProviderFactories,
+                        mediaProviders: runtime.mediaProviderFactories,
                     })
                 } catch (error) {
                     if (isHarnessError(error)) return fail(error.toDetail(), 400)

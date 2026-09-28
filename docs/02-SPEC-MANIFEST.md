@@ -797,6 +797,46 @@ The sender is their member id, the handle `allowFrom` matches and the acting par
 (`slack:<id>`). Replies go through `chat.postMessage` as a `markdown` block, so the model's markdown
 renders as written. A token in the wrong slot (`xoxb-` where `xapp-` belongs) is refused at load.
 
+### `media`
+
+```yaml
+media:
+  transcription:                 # voice notes on channels become text before the turn
+    provider: openai             # openai (any /audio/transcriptions endpoint) | aws (media-aws)
+    model: whisper-1
+    baseUrl: https://api.openai.com/v1
+    apiKeyEnv: OPENAI_API_KEY    # a variable name, never a key
+    timeoutMs: 60000             # hard: download and transcription together
+    maxBytes: 26214400           # refused before downloading when the channel reports a size
+  image:                         # declaring it registers the image_generate tool
+    provider: aws
+    model: amazon.nova-canvas-v1:0
+    options: { region: eu-west-1 }
+    size: 1024x1024
+    timeoutMs: 120000
+```
+
+Both sections are optional and each names its own provider, so voice can go to one backend and
+images to another. `aws` takes `options: {region, profile?, languageCode?, sampleRate?}` and the
+default AWS credential chain; Transcribe streaming reads OGG/Opus (Telegram, WhatsApp) and FLAC, so
+Slack's WebM clips and Teams' M4A memos need `openai`.
+
+**A voice note** is transcribed after `allowFrom` and before the turn, framed for the model as
+`[Voice note, transcribed]` and followed by any caption. If no transcription is configured, the
+download or the provider fails, or the deadline passes, the sender gets a short reply saying so and
+`agent.channel.error` carries the cause and its hint. No turn runs. A provider that never answers is
+abandoned at `timeoutMs`, so the conversation is never stuck behind it.
+
+**`image_generate`** takes one argument, `prompt`, saves a PNG under the agent's `media/` and attaches
+it to the reply: Telegram, WhatsApp and Slack send it after the text; on Teams (which shows only
+images at a URL it can fetch) and on any channel without attachments, the reply names the file.
+`turn.end` lists it for an API client. It is `mutating`, so it serialises and is never retried.
+
+Each call is a usage row: `images` or `audioSeconds` in `/v1/usage`, and a `media.result` event with
+its `callId`. `media` is a setting like `channels`: `config_set`, the `config` command, the settings
+editor and `PATCH /v1/agents/:id/config` all write it, and a provider that does not exist is refused
+before anything is written. `init` does not ask about it.
+
 ### `delivery`
 
 ```yaml

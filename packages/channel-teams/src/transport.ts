@@ -28,7 +28,7 @@ import {
     type WebhookDelivery,
     type WebhookOutcome,
 } from "@dispach/core"
-import { type TeamsActivity, tenantOf, toInbound } from "./activity.ts"
+import { audioOf, type TeamsActivity, tenantOf, toInbound } from "./activity.ts"
 import { AuthRefused, type BotFrameworkAuth, type FetchLike, TokenRefused } from "./auth.ts"
 
 export interface TeamsTransportOptions {
@@ -45,7 +45,9 @@ export class TeamsTransport implements ChannelTransport {
     readonly id: string
     readonly type = "teams"
     // Teams caps a message near 28 KB of HTML; 4,000 characters of markdown stays well inside it and
-    // matches how long a single chat message can usefully be.
+    // matches how long a single chat message can usefully be. No attachments: a bot shows an image
+    // only from a URL Teams can fetch, which the silo would have to publish; until it does, the
+    // outbox names the file in the text instead.
     readonly limits: ChannelLimits = { maxMessageChars: 4000, idempotentSend: false }
     readonly #auth: BotFrameworkAuth
     readonly #tenantId: string | undefined
@@ -106,7 +108,19 @@ export class TeamsTransport implements ChannelTransport {
             this.#remember(activity.conversation.id, activity.serviceUrl)
         }
         const inbound = toInbound(activity)
-        if (inbound !== undefined) host.receive(inbound)
+        if (inbound === undefined) return { status: 200 }
+        const audio = audioOf(activity)
+        host.receive(
+            audio === undefined
+                ? inbound
+                : {
+                      ...inbound,
+                      audio: {
+                          mimeType: audio.mimeType,
+                          fetch: (signal) => this.#download(audio.url, audio.signed, signal),
+                      },
+                  },
+        )
         return { status: 200 }
     }
 
@@ -195,6 +209,18 @@ export class TeamsTransport implements ChannelTransport {
                         : "Teams' own words are above. 429 and 5xx are retried; anything else is not.",
             },
         }
+    }
+
+    /** A voice message's bytes: pre-signed URLs as they are, attachment URLs with the bot token. */
+    async #download(url: string, signed: boolean, signal: AbortSignal): Promise<Uint8Array> {
+        const headers: Record<string, string> = signed
+            ? {}
+            : { authorization: `Bearer ${await this.#auth.token(signal)}` }
+        const response = await this.#fetch(url, { method: "GET", headers, signal })
+        if (!response.ok) {
+            throw new Error(`Teams would not serve the voice message (${response.status})`)
+        }
+        return new Uint8Array(await response.arrayBuffer())
     }
 
     #remember(conversationId: string, serviceUrl: string): void {

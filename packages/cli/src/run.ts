@@ -60,6 +60,7 @@ import { offeredCommands } from "#lib/palette"
 import {
     BUILT_IN_PLUGINS,
     CHANNELS,
+    MEDIA_PROVIDERS,
     MODEL_TRANSPORTS,
     scriptRunner,
     TOOL_PROVIDERS,
@@ -296,6 +297,7 @@ export async function runCommand(options: RunOptions): Promise<number> {
             agents: [options.manifestPath],
             toolProviders: TOOL_PROVIDERS,
             modelTransports: MODEL_TRANSPORTS,
+            mediaProviders: MEDIA_PROVIDERS,
             builtInPlugins: BUILT_IN_PLUGINS,
             pluginRoot: pluginRoot(),
             scriptRunner: scriptRunner(),

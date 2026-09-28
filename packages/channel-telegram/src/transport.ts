@@ -12,6 +12,8 @@
  * `stop()`.
  */
 
+import { readFile } from "node:fs/promises"
+import { basename } from "node:path"
 import type {
     ChannelHost,
     ChannelLimits,
@@ -74,6 +76,7 @@ export class TelegramTransport implements ChannelTransport {
         // would convert the outbox's visible `uncertain` flag into a silent duplicate.
         idempotentSend: false,
         minSendIntervalMs: MIN_SEND_INTERVAL_MS,
+        attachments: true,
     }
 
     readonly #api: TelegramApi
@@ -154,14 +157,29 @@ export class TelegramTransport implements ChannelTransport {
     async send(message: OutboundMessage, signal?: AbortSignal): Promise<SendResult> {
         const threadId = threadIdOf(message.thread)
         try {
-            const sent = await this.#api.sendMessage(
-                {
-                    chatId: message.recipient,
-                    text: message.text,
-                    ...(threadId === undefined ? {} : { threadId }),
-                },
-                signal,
-            )
+            const attachment = message.attachment
+            const sent =
+                attachment === undefined
+                    ? await this.#api.sendMessage(
+                          {
+                              chatId: message.recipient,
+                              text: message.text,
+                              ...(threadId === undefined ? {} : { threadId }),
+                          },
+                          signal,
+                      )
+                    : await this.#api.sendPhoto(
+                          {
+                              chatId: message.recipient,
+                              photo: new Blob([await readFile(attachment.path)], {
+                                  type: attachment.mimeType,
+                              }),
+                              filename: basename(attachment.path),
+                              caption: message.text,
+                              ...(threadId === undefined ? {} : { threadId }),
+                          },
+                          signal,
+                      )
             return { ok: true, providerMessageId: String(sent.message_id) }
         } catch (cause) {
             if (cause instanceof TelegramApiError) {
@@ -303,12 +321,34 @@ export class TelegramTransport implements ChannelTransport {
         if (message === undefined) return
 
         // `caption` covers a photo or document sent with text. A media message with no caption
-        // produces nothing — answering "" would be a turn with no input.
+        // produces nothing — answering "" would be a turn with no input — unless it is a voice note,
+        // which the runtime transcribes into one.
         const text = message.text ?? message.caption ?? ""
-        if (text.trim() === "") return
+        const heard = message.voice ?? message.audio
+        if (text.trim() === "" && heard === undefined) return
         if (message.from?.is_bot === true) return
 
-        host.receive(toInbound(message, text))
+        const raw = toInbound(message, text)
+        if (heard === undefined) {
+            host.receive(raw)
+            return
+        }
+        host.receive({
+            ...raw,
+            audio: {
+                // A voice note is OGG/Opus whether or not Telegram says so.
+                mimeType: heard.mime_type ?? "audio/ogg",
+                ...(heard.duration === undefined ? {} : { durationS: heard.duration }),
+                ...(heard.file_size === undefined ? {} : { sizeBytes: heard.file_size }),
+                fetch: async (signal) => {
+                    const file = await this.#api.getFile(heard.file_id, signal)
+                    if (file.file_path === undefined) {
+                        throw new Error("Telegram returned no file path for the voice note")
+                    }
+                    return this.#api.download(file.file_path, signal)
+                },
+            },
+        })
     }
 }
 

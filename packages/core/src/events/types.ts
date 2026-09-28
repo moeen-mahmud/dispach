@@ -358,6 +358,25 @@ export interface EventDataMap {
      * A tool is about to run. `argsHash` rather than the arguments themselves: arguments carry
      * whatever the conversation carried, and an event stream is the wrong place to copy it to.
      */
+    /**
+     * A billable media call: a voice note transcribed or an image generated.
+     *
+     * Its own event rather than a `model.result`, because every consumer of that one reads token
+     * figures and a media call has none; `callId` is the same kind of ledger key and the row lands in
+     * `model_calls` beside the token rows, so `/v1/usage` sums both.
+     */
+    "media.result": {
+        callId: string
+        kind: "transcription" | "image"
+        provider: string
+        model: string
+        latencyMs: number
+        /** Present on an image call. */
+        images?: number
+        /** Present on a transcription whose duration the provider or the channel reported. */
+        audioSeconds?: number
+        sender?: string
+    }
     "tool.call": { slug: string; callId: string; argsHash: string; mutating: boolean }
     "tool.result": {
         slug: string
@@ -563,6 +582,8 @@ export interface EventDataMap {
         steps: number
         tokens: { prompt: number; output: number }
         durationMs: number
+        /** Files this turn produced for the reply, relative to the agent's directory. */
+        attachments?: readonly { path: string; mimeType: string }[]
     }
     error: ErrorDetail & { stack?: string }
 }
@@ -606,6 +627,7 @@ export const EVENT_TYPES = [
     "model.retry",
     "model.fallback",
     "model.result",
+    "media.result",
     "tool.call",
     "tool.result",
     "tool.gated",

@@ -20,10 +20,12 @@ import whatsappPlugin, { whatsappChannel } from "@dispach/channel-whatsapp"
 import type {
     BuiltInPlugins,
     ChannelFactory,
+    MediaProviderFactory,
     ModelTransport,
     ScriptRunner,
     ToolProviderFactory,
 } from "@dispach/core"
+import mediaAwsPlugin, { awsMedia } from "@dispach/media-aws"
 import bedrockPlugin, { bedrockTransport } from "@dispach/model-bedrock"
 import composioPlugin, { composioFromConfig } from "@dispach/tools-composio"
 import mcpPlugin, { mcpFromConfig } from "@dispach/tools-mcp"
@@ -57,6 +59,16 @@ export const MODEL_TRANSPORTS: Readonly<Record<string, ModelTransport>> = {
     // AWS Bedrock. Its SDK loads on an agent's first model call, never at boot, so every command
     // can carry it for free.
     "bedrock-converse": bedrockTransport(),
+}
+
+/**
+ * Media providers beyond the built-in `openai`, by the name `media.*.provider` selects. Passed
+ * beside `MODEL_TRANSPORTS` by every command that builds a runtime, for the same reason, and held by
+ * the same guard in `boundaries.test.ts`.
+ */
+export const MEDIA_PROVIDERS: Readonly<Record<string, MediaProviderFactory>> = {
+    // Amazon Transcribe and Nova Canvas. Both SDKs load on the first media call, never at boot.
+    aws: awsMedia(),
 }
 
 /**
@@ -140,6 +152,7 @@ export const BUILT_IN_PLUGINS: BuiltInPlugins = {
     "@dispach/channel-slack": slackPlugin,
     "@dispach/channel-telegram": telegramPlugin,
     "@dispach/channel-whatsapp": whatsappPlugin,
+    "@dispach/media-aws": mediaAwsPlugin,
     "@dispach/model-bedrock": bedrockPlugin,
     "@dispach/tools-composio": composioPlugin,
     "@dispach/tools-mcp": mcpPlugin,

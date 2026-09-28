@@ -958,6 +958,28 @@ ALTER TABLE model_calls ADD COLUMN cache_write_tokens INTEGER;
 CREATE UNIQUE INDEX model_calls_call_id ON model_calls (call_id);
 `,
     },
+    {
+        version: 21,
+        name: "media",
+        /**
+         * Media calls and attachments (Phase 26j, doc 16 R8).
+         *
+         * A media call is a `model_calls` row rather than a table of its own, so every grouping,
+         * scope and window `/v1/usage` already has applies to it with nothing new: its tokens are
+         * zero and reported, and its quantity is `images` or `audio_seconds`. NULL in both is a
+         * model call, and NULL `audio_seconds` on a transcription row is "not reported" — the same
+         * third state the cache columns keep.
+         *
+         * An outbox row may carry one attachment, a file under the agent's directory sent after the
+         * text chunks of the same reply; `body` is its caption, usually empty.
+         */
+        sql: `
+ALTER TABLE model_calls ADD COLUMN images INTEGER;
+ALTER TABLE model_calls ADD COLUMN audio_seconds REAL;
+ALTER TABLE outbox ADD COLUMN attachment_path TEXT;
+ALTER TABLE outbox ADD COLUMN attachment_type TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

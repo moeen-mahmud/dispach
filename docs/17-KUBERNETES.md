@@ -145,7 +145,9 @@ agents actually use:
 | `api.telegram.org` | 443 | a Telegram channel |
 | `web.whatsapp.com`, `*.whatsapp.net` | 443 | a WhatsApp channel (the socket, then media) |
 | `login.botframework.com`, `login.microsoftonline.com`, `smba.trafficmanager.net` | 443 | a Teams channel: the connector's signing keys, the bot's token, replies. Teams also needs **ingress** to the webhook route |
-| `slack.com`, `wss-primary.slack.com` (`*.slack.com`) | 443 | a Slack channel: the Web API, then the Socket Mode WebSocket. No ingress |
+| `slack.com`, `wss-primary.slack.com`, `files.slack.com` (`*.slack.com`) | 443 | a Slack channel: the Web API, the Socket Mode WebSocket, and voice clips and images. No ingress |
+| `transcribestreaming.<region>.amazonaws.com` | 443 | `media.transcription.provider: aws`. Image generation on `aws` is Bedrock, above |
+| the media `baseUrl` host | 443 | `media.*.provider: openai` (`api.openai.com`, a gateway) |
 | `api.tavily.com`, `api.search.brave.com`, `api.exa.ai` | 443 | `web_search`, whichever backend is configured |
 | any | 443/80 | `web_fetch`, by its nature. Leave it unpinned, or accept that fetches outside the policy fail |
 | `github.com` | 443 | skill catalogues (`sources update`, `skills install`) |

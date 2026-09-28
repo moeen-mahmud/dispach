@@ -61,7 +61,7 @@ function slack() {
     servers.push(server)
     const state = {
         open: (): Response => Response.json({ ok: true, url: `ws://127.0.0.1:${server.port}/` }),
-        post: (): Response => Response.json({ ok: true, ts: "1700.0009" }),
+        post: (_url?: string): Response => Response.json({ ok: true, ts: "1700.0009" }),
     }
     const fetch: FetchLike = async (url, init) => {
         const authorization = new Headers(init.headers).get("authorization") ?? ""
@@ -70,8 +70,18 @@ function slack() {
             expect(authorization).toBe("Bearer xapp-1")
             return state.open()
         }
-        sent.push({ url, authorization, body: JSON.parse(String(init.body)) })
-        return state.post()
+        const body = init.body
+        sent.push({
+            url,
+            authorization,
+            body:
+                typeof body === "string"
+                    ? JSON.parse(body)
+                    : body instanceof URLSearchParams
+                      ? Object.fromEntries(body)
+                      : { bytes: (body as Uint8Array | undefined)?.byteLength ?? 0 },
+        })
+        return state.post(url)
     }
     let envelopes = 0
     const push = (event: SlackEvent) => {
@@ -341,5 +351,86 @@ describe("through a real runtime", () => {
         await runtime.stop()
         expect(turn?.input).toBe("summarise this thread")
         expect(turn?.sessionKey).toBe("slack:C1:1700.0001")
+    })
+})
+
+describe("media", () => {
+    test("a voice clip in a DM arrives as audio, fetched with the bot token only when asked", async () => {
+        const fake = slack()
+        const { host, received } = fakeHost()
+        const transport = transportFor(fake)
+        await transport.start(host)
+        await until(() => fake.sockets.length === 1, "socket")
+        fake.push({
+            type: "message",
+            subtype: "file_share",
+            channel_type: "im",
+            channel: "D1",
+            user: "U1",
+            text: "",
+            ts: "5.1",
+            files: [
+                {
+                    subtype: "slack_audio",
+                    mimetype: "audio/webm",
+                    url_private_download: "https://files.slack.com/clip.webm",
+                    size: 800,
+                    duration_ms: 2500,
+                },
+            ],
+        })
+        await until(() => received.length === 1, "delivery")
+        const audio = received[0]?.audio
+        expect(audio?.mimeType).toBe("audio/webm")
+        expect(audio?.durationS).toBe(2.5)
+        expect(fake.sent).toHaveLength(0)
+        fake.state.post = () =>
+            new Response(new Uint8Array([4, 4]), { headers: { "content-type": "audio/webm" } })
+        expect([...((await audio?.fetch(new AbortController().signal)) ?? [])]).toEqual([4, 4])
+        expect(fake.sent[0]).toMatchObject({
+            url: "https://files.slack.com/clip.webm",
+            authorization: "Bearer xoxb-1",
+        })
+        await transport.stop()
+    })
+
+    test("an image is uploaded externally and shared into the thread", async () => {
+        const fake = slack()
+        fake.state.post = (url = "") =>
+            url.endsWith("files.getUploadURLExternal")
+                ? Response.json({
+                      ok: true,
+                      upload_url: "https://files.slack.com/upload/v1/x",
+                      file_id: "F9",
+                  })
+                : url.includes("/upload/")
+                  ? new Response("OK - 2")
+                  : Response.json({ ok: true })
+        const dir = mkdtempSync(join(tmpdir(), "slack-media-"))
+        const path = join(dir, "cube.png")
+        writeFileSync(path, new Uint8Array([1, 2, 3]))
+        const result = await transportFor(fake).send({
+            channelId: "slack",
+            recipient: "C1",
+            text: "",
+            thread: "1.1",
+            attachment: { path, mimeType: "image/png" },
+            idempotencyKey: "k",
+            chunkIndex: 1,
+            chunkTotal: 2,
+        })
+        expect(result).toEqual({ ok: true, providerMessageId: "F9" })
+        expect(fake.sent.map((entry) => entry.url.split("/").pop())).toEqual([
+            "files.getUploadURLExternal",
+            "x",
+            "files.completeUploadExternal",
+        ])
+        expect(fake.sent[0]?.body).toEqual({ filename: "cube.png", length: "3" })
+        expect(fake.sent[1]?.body).toEqual({ bytes: 3 })
+        expect(fake.sent[2]?.body).toEqual({
+            files: [{ id: "F9", title: "cube.png" }],
+            channel_id: "C1",
+            thread_ts: "1.1",
+        })
     })
 })

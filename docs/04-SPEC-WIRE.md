@@ -250,7 +250,7 @@ DELETE /v1/webhooks/:webhookId → { id, deleted: true }
 
 GET /v1/usage?by&from&to → { buckets: [{ agentId?, model?, day?, sender?, calls, promptTokens,
                                          cachedPromptTokens, cacheWriteTokens, outputTokens,
-                                         estimatedCalls }],
+                                         images, audioSeconds, estimatedCalls }],
                              meteredSince? }
 GET /v1/agents/:id/usage   → { id, buckets[], meteredSince? }
 GET /v1/agents/:id/turns?limit&before → { id, turns[], nextBefore? }
@@ -380,6 +380,10 @@ turn, role, model, prompt, cached, output, sender), and `/usage` sums those. `tu
 - `cacheWriteTokens` sums what calls wrote to a prompt cache (Bedrock and Anthropic report it; nothing else does, and a call that reports nothing adds zero). Each row also carries the call's `callId`, the same id its `model.result` carried, so a biller reconciling events against this table matches them one to one (Phase 26c).
   The estimate runs 16–20% low on tool-heavy prompts (`evals/budget/`), so a non-zero count means
   the total is partly a guess.
+- `images` and `audioSeconds` are media calls: an image `image_generate` produced, seconds of a
+  voice note transcribed. A media call is a row in the same ledger, with its tokens zero and
+  reported, so every grouping applies to it; `model` is the media model and the row's role is
+  `image` or `transcription`. Its `callId` is the one its `media.result` carried (Phase 26j).
 - `meteredSince` is the earliest call on record. The meter starts at the upgrade that added it and
   earlier turns are not backfilled, since their stored figure is the wrong quantity.
 - Filtered by scope, **session prefix included**: a per-sender row is identity. `sender` groups by
@@ -1115,7 +1119,8 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `schedule.skipped` | occurrences passed with nothing running | `scheduleId`, `kind`, `reason`, `missed`, `missedAtLeast` |
 | `schedule.deferred` | a fire arrived mid-run | `scheduleId`, `kind` |
 | `schedule.error` | unreadable schedule, or the turn it started failed | `scheduleId`, `code`, `message`, `hint` |
-| `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs` |
+| `media.result` | a media call finished | `callId` (a ledger key, like `model.result`'s, and on its usage row), `kind` (`transcription` \| `image`), `provider`, `model`, `latencyMs`, `images?`, `audioSeconds?` (when the provider or the channel reported a duration), `sender?` (Phase 26j) |
+| `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs`, `attachments?` (`[{path, mimeType}]`, files a tool produced for the reply, relative to the agent's directory; a channel sends them after the text) |
 | `error` | anything uncaught | `code`, `message`, `hint`, `stack?` |
 
 ### Planned

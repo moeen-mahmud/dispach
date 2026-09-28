@@ -47,8 +47,19 @@ export interface TelegramMessage {
     readonly date: number
     readonly text?: string
     readonly caption?: string
+    /** A voice note recorded in the app: OGG/Opus. */
+    readonly voice?: TelegramAudio
+    /** An audio file sent as music. */
+    readonly audio?: TelegramAudio
     /** Forum topic id. Present only in a supergroup with topics enabled. */
     readonly message_thread_id?: number
+}
+
+export interface TelegramAudio {
+    readonly file_id: string
+    readonly duration?: number
+    readonly mime_type?: string
+    readonly file_size?: number
 }
 
 export interface TelegramUpdate {
@@ -120,8 +131,13 @@ export class TelegramApi {
         try {
             response = await this.#fetch(`${this.#base}/bot${this.#token}/${method}`, {
                 method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify(body ?? {}),
+                // A form carries its own multipart boundary in the content type, so none is set.
+                ...(body instanceof FormData
+                    ? { body }
+                    : {
+                          headers: { "content-type": "application/json" },
+                          body: JSON.stringify(body ?? {}),
+                      }),
                 ...(signal === undefined ? {} : { signal }),
             })
         } catch (cause) {
@@ -183,6 +199,52 @@ export class TelegramApi {
             },
             signal,
         )
+    }
+
+    /** An image, as a photo: Telegram compresses it and shows it inline. */
+    sendPhoto(
+        input: {
+            chatId: string
+            photo: Blob
+            filename: string
+            caption?: string
+            threadId?: number
+        },
+        signal?: AbortSignal,
+    ): Promise<TelegramMessage> {
+        const form = new FormData()
+        form.set("chat_id", input.chatId)
+        form.set("photo", input.photo, input.filename)
+        if (input.caption !== undefined && input.caption !== "") form.set("caption", input.caption)
+        if (input.threadId !== undefined) form.set("message_thread_id", String(input.threadId))
+        return this.call<TelegramMessage>("sendPhoto", form, signal)
+    }
+
+    getFile(fileId: string, signal?: AbortSignal): Promise<{ file_path?: string }> {
+        return this.call<{ file_path?: string }>("getFile", { file_id: fileId }, signal)
+    }
+
+    /**
+     * A file's bytes, from the path `getFile` returned. The token is in this URL too, so the error
+     * names the file and never the URL.
+     */
+    async download(filePath: string, signal?: AbortSignal): Promise<Uint8Array> {
+        const response = await this.#fetch(`${this.#base}/file/bot${this.#token}/${filePath}`, {
+            ...(signal === undefined ? {} : { signal }),
+        })
+        if (!response.ok) {
+            throw new TelegramApiError({
+                message: `Downloading ${filePath} failed with HTTP ${response.status}`,
+                status: response.status,
+                retryable: response.status >= 500,
+                detail: {
+                    code: "telegram_download_failed",
+                    message: `Telegram would not serve ${filePath} (${response.status}).`,
+                    hint: "Bots may download files up to 20 MB; a larger voice note cannot be fetched through the Bot API.",
+                },
+            })
+        }
+        return new Uint8Array(await response.arrayBuffer())
     }
 
     sendChatAction(input: { chatId: string; threadId?: number }): Promise<boolean> {

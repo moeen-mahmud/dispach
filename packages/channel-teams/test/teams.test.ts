@@ -71,8 +71,12 @@ function microsoft(keys: object[]) {
         sent.push({
             url,
             auth: new Headers(init?.headers).get("authorization"),
-            body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+            body:
+                typeof init?.body === "string"
+                    ? (JSON.parse(init.body) as Record<string, unknown>)
+                    : {},
         })
+        if (url.startsWith("https://files.example/")) return new Response(new Uint8Array([9, 9]))
         return reply()
     }
     return {
@@ -351,5 +355,51 @@ describe("through a real runtime", () => {
         const [turn] = (await runtime.store.turns.listForAgent("crew", {})).turns
         await runtime.stop()
         expect(turn?.input).toBe("summarise this thread for Bob")
+    })
+})
+
+describe("voice messages", () => {
+    test("a shared audio file is fetched from its signed URL; an inline one with the bot's token", async () => {
+        const { transport, host, received, bearer, deliver, ms } = setup()
+        await transport.start(host)
+        await deliver(
+            {
+                ...PERSONAL,
+                id: "v1",
+                text: "",
+                attachments: [
+                    {
+                        contentType: "application/vnd.microsoft.teams.file.download.info",
+                        name: "memo.m4a",
+                        content: { downloadUrl: "https://files.example/memo.m4a", fileType: "m4a" },
+                    },
+                ],
+            },
+            bearer(),
+        )
+        await deliver(
+            {
+                ...PERSONAL,
+                id: "v2",
+                text: "",
+                attachments: [
+                    { contentType: "audio/ogg", contentUrl: "https://files.example/inline.ogg" },
+                ],
+            },
+            bearer(),
+        )
+        expect(received.map((message) => message.audio?.mimeType)).toEqual([
+            "audio/mp4",
+            "audio/ogg",
+        ])
+        const signal = new AbortController().signal
+        expect([...((await received[0]?.audio?.fetch(signal)) ?? [])]).toEqual([9, 9])
+        await received[1]?.audio?.fetch(signal)
+        const downloads = ms.sent.filter((entry) => entry.url.startsWith("https://files.example/"))
+        expect(downloads.map((entry) => entry.auth)).toEqual([null, "Bearer bot-token"])
+    })
+
+    test("an image cannot be carried, so the outbox will name it instead", () => {
+        expect(setup().transport.limits.attachments).toBeUndefined()
     })
 })

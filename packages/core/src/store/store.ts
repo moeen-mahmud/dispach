@@ -661,6 +661,10 @@ export interface ModelCallRecord {
     readonly callId?: string
     /** Who sent the turn, when it was not the operator. The key per-member billing groups on. */
     readonly sender?: string
+    /** Images an image call produced. Present only on media rows, whose tokens are zero. */
+    readonly images?: number
+    /** Seconds of audio a transcription processed, when known. */
+    readonly audioSeconds?: number
     readonly at: string
 }
 
@@ -693,6 +697,10 @@ export interface UsageBucket {
     /** Prompt tokens written to a cache. Zero from an endpoint that does not report it. */
     readonly cacheWriteTokens: number
     readonly outputTokens: number
+    /** Images generated. Zero when none were. */
+    readonly images: number
+    /** Seconds of audio transcribed, over the calls that reported a duration. */
+    readonly audioSeconds: number
     /**
      * Calls where either figure was our estimate. Non-zero means the totals are not a measurement,
      * and a caller billing from them should know how much of the number is a guess.
@@ -869,6 +877,12 @@ export interface AgentFootprint {
  */
 export type DeliveryStatus = "pending" | "inflight" | "sent" | "failed"
 
+/** A file sent as its own chunk after the text of a reply. The path is absolute. */
+export interface DeliveryAttachment {
+    readonly path: string
+    readonly mimeType: string
+}
+
 export interface DeliveryRecord {
     readonly id: number
     readonly agentId: string
@@ -891,7 +905,9 @@ export interface DeliveryRecord {
     readonly thread?: string
     readonly chunkIndex: number
     readonly chunkTotal: number
+    /** The text, or an attachment's caption (usually empty). */
     readonly body: string
+    readonly attachment?: DeliveryAttachment
     readonly status: DeliveryStatus
     readonly attempts: number
     /** RFC 3339 UTC. A `pending` row is invisible to `due` until this passes. */
@@ -923,6 +939,7 @@ export interface EnqueueDelivery {
     readonly chunkIndex: number
     readonly chunkTotal: number
     readonly body: string
+    readonly attachment?: DeliveryAttachment
     /**
      * When this row becomes visible to `due`. Defaults to now.
      *

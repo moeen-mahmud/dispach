@@ -16,6 +16,7 @@ import { onExit } from "#lib/exit"
 import {
     BUILT_IN_PLUGINS,
     CHANNELS,
+    MEDIA_PROVIDERS,
     MODEL_TRANSPORTS,
     scriptRunner,
     TOOL_PROVIDERS,
@@ -161,6 +162,7 @@ export async function sessionsCommand(options: SessionsOptions): Promise<number>
         store: options.store ?? storePath(),
         toolProviders: TOOL_PROVIDERS,
         modelTransports: MODEL_TRANSPORTS,
+        mediaProviders: MEDIA_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
         pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),

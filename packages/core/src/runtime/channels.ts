@@ -31,11 +31,11 @@ import type {
 } from "../channels/channel.ts"
 import { Inbox } from "../channels/inbox.ts"
 import { Outbox } from "../channels/outbox.ts"
-import { type ErrorDetail, GovernorError } from "../errors.ts"
+import { type ErrorDetail, GovernorError, isHarnessError } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import { endNote } from "../loop/turn-end.ts"
 import type { EnvSource } from "../manifest/env.ts"
-import type { OutboxStore } from "../store/store.ts"
+import type { DeliveryAttachment, OutboxStore } from "../store/store.ts"
 import type { Agent } from "./agent.ts"
 
 /**
@@ -369,6 +369,8 @@ export class ChannelHub {
         readonly turnId?: string
         readonly key?: string
         readonly thread?: string
+        /** Files the turn produced, sent after the text. See `EnqueueReply.attachments`. */
+        readonly attachments?: readonly DeliveryAttachment[]
     }): Promise<void> {
         const bound = this.#agents.get(input.agentId)
         if (bound === undefined) {
@@ -386,6 +388,9 @@ export class ChannelHub {
             ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
             ...(input.key === undefined ? {} : { key: input.key }),
             ...(input.thread === undefined ? {} : { thread: input.thread }),
+            ...(input.attachments === undefined || input.attachments.length === 0
+                ? {}
+                : { attachments: input.attachments }),
         })
         await bound.outbox.drain(input.agentId)
     }
@@ -524,8 +529,18 @@ export class ChannelHub {
         const agentId = bound.agent.id
         const stopTyping = this.#startTyping(transport, message.peerId, message.thread)
 
+        let input = message.text
+        if (message.audio !== undefined) {
+            const heard = await this.#hear(bound, transport, message)
+            if (heard === undefined) {
+                stopTyping()
+                return
+            }
+            input = heard
+        }
+
         try {
-            const result = await bound.agent.send(message.text, {
+            const result = await bound.agent.send(input, {
                 sessionKey: message.sessionKey,
                 source: transport.id,
                 // The person the channel authenticated, never the conversation: in a group the peer
@@ -551,7 +566,8 @@ export class ChannelHub {
                 durationMs: result.durationMs,
             })
             const text = result.text.trim() === "" ? (note ?? "") : result.text
-            if (text === "") return
+            const attachments = result.attachments ?? []
+            if (text === "" && attachments.length === 0) return
 
             await bound.outbox.enqueue({
                 agentId,
@@ -561,6 +577,7 @@ export class ChannelHub {
                 turnId: result.turnId,
                 ...(message.thread === undefined ? {} : { thread: message.thread }),
                 text,
+                ...(attachments.length === 0 ? {} : { attachments }),
             })
             await bound.outbox.drain(agentId)
         } catch (cause) {
@@ -597,6 +614,68 @@ export class ChannelHub {
                 },
                 { agentId, sessionKey: message.sessionKey },
             )
+        }
+    }
+
+    /**
+     * A voice note as the turn's input, or `undefined` once the sender has been told why not.
+     *
+     * Framed as a transcription, because the model should know it is reading what a machine heard:
+     * a misheard name is then a thing it can ask about rather than a fact. A failure is a reply in
+     * the sender's words and an `agent.channel.error` in the operator's, carrying the hint — never
+     * silence, which is what a hung transcription used to produce for good.
+     */
+    async #hear(
+        bound: Bound,
+        transport: ChannelTransport,
+        message: InboundMessage,
+    ): Promise<string | undefined> {
+        const audio = message.audio
+        if (audio === undefined) return message.text
+        try {
+            const transcript = await bound.agent.transcribe(audio, {
+                sessionKey: message.sessionKey,
+            })
+            const caption = message.text.trim()
+            return `[Voice note, transcribed]\n${transcript}${caption === "" ? "" : `\n\n${caption}`}`
+        } catch (cause) {
+            const code = isHarnessError(cause) ? cause.code : "media_failed"
+            const reply =
+                code === "media_transcription_unconfigured"
+                    ? "I can't listen to voice notes here yet. Could you type that instead?"
+                    : code === "media_timeout"
+                      ? "I couldn't transcribe that voice note in time. Could you send it again, or type it?"
+                      : code === "media_audio_too_large"
+                        ? "That voice note is too long for me to transcribe. Could you send a shorter one, or type it?"
+                        : code === "media_transcript_empty"
+                          ? "I couldn't hear anything in that voice note. Could you try again?"
+                          : "I couldn't transcribe that voice note. Could you type it instead?"
+            await bound.outbox.enqueue({
+                agentId: bound.agent.id,
+                sessionKey: message.sessionKey,
+                channelId: transport.id,
+                recipient: message.peerId,
+                // No turn ran. The provider's id makes a redelivered note collide with this reply.
+                key: `unheard:${message.providerMessageId ?? Date.now()}`,
+                ...(message.thread === undefined ? {} : { thread: message.thread }),
+                text: reply,
+            })
+            await bound.outbox.drain(bound.agent.id)
+            this.#bus.emit(
+                "agent.channel.error",
+                {
+                    channelId: transport.id,
+                    code,
+                    message: `A voice note from ${transport.id} was not transcribed: ${
+                        cause instanceof Error ? cause.message : String(cause)
+                    }`,
+                    hint: isHarnessError(cause)
+                        ? cause.hint
+                        : "The sender was told. The provider's own error is above.",
+                },
+                { agentId: bound.agent.id, sessionKey: message.sessionKey },
+            )
+            return undefined
         }
     }
 

@@ -111,7 +111,13 @@ describe("the built bundle", () => {
      * `api: bedrock-converse` needs — and only on its first model call. Every command carries the
      * transport, so the SDK must be a lazy chunk or every command would pay for it at startup.
      */
-    test("the Bedrock SDK is behind a dynamic import, and still loads", async () => {
+    test.each([
+        // The service's wire target name: in the SDK, and nowhere in the transport that calls it.
+        ["Bedrock", "AmazonBedrockFrontendService"],
+        // An exception name the SDK writes as a string, so minification keeps it; media-aws never
+        // names it. Transcribe is for voice notes only, so paying for it at startup is pure waste.
+        ["Transcribe", "TranscribeStreamingServiceException"],
+    ])("the %s SDK is behind a dynamic import, and still loads", async (_name, MARKER) => {
         if (!existsSync(ENTRY)) return
         const dist = dirname(ENTRY)
         const read = (file: string) => readFileSync(join(dist, file), "utf8")
@@ -125,8 +131,6 @@ describe("the built bundle", () => {
             reached.add(file)
             queue.push(...statics(read(file)))
         }
-        // The service's wire target name: in the SDK, and nowhere in the transport that calls it.
-        const MARKER = "AmazonBedrockFrontendService"
         expect([...reached].filter((file) => read(file).includes(MARKER))).toEqual([])
         const lazy = readdirSync(dist).filter(
             (file) => file.endsWith(".js") && !reached.has(file) && read(file).includes(MARKER),
