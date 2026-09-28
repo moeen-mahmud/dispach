@@ -185,7 +185,7 @@ capabilities:
   nativeTools: false
   strictSchema: false
   thinking: none          # none | anthropic | openai | deepseek
-  promptCache: none       # none | anthropic | openai
+  promptCache: none       # none | anthropic | openai | bedrock
   parallelToolCalls: false
   contextWindow: 32768
   maxOutput: 4096

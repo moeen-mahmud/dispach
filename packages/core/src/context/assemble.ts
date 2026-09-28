@@ -366,11 +366,35 @@ export function assembleContext(input: AssembleInput): AssembledContext {
 
     return {
         blocks,
-        messages: blocks.map((b) => b.message ?? { role: b.role, content: b.content }),
+        messages: messagesOf(blocks),
         totalTokens: blocks.reduce((sum, b) => sum + b.tokens, 0),
         promptBudget,
         droppedMessages,
     }
+}
+
+/**
+ * The messages a set of blocks sends, with the cache breakpoints marked.
+ *
+ * One function for `assembleContext` and `reassemble`, so a middleware that returns blocks cannot
+ * lose the markers. Breakpoint A is the last message of the static slots (identity through examples);
+ * breakpoint B is the active skill. Marked whatever the model's cache protocol, because the marker is
+ * harness metadata: `chat-completions` never sends it, and a transport with an explicit cache protocol
+ * is the one that knows whether to act on it.
+ */
+function messagesOf(blocks: readonly ContextBlock[]): ChatMessage[] {
+    let lastStatic = -1
+    let skill = -1
+    blocks.forEach((b, index) => {
+        if (b.slot <= SLOT.examples) lastStatic = index
+        if (b.slot === SLOT.skill) skill = index
+    })
+    return blocks.map((b, index) => {
+        const message = b.message ?? { role: b.role, content: b.content }
+        return index === lastStatic || index === skill
+            ? { ...message, cacheBreakpoint: true as const }
+            : message
+    })
 }
 
 /**
@@ -402,7 +426,7 @@ export function reassemble(
     )
     return {
         blocks: counted,
-        messages: counted.map((b) => b.message ?? { role: b.role, content: b.content }),
+        messages: messagesOf(counted),
         totalTokens: counted.reduce((sum, b) => sum + b.tokens, 0),
         promptBudget,
         droppedMessages,

@@ -239,8 +239,13 @@ Never claim a performance property without a number in `evals/` and a script to 
   error anywhere.
 - **Pinned blocks must survive every compaction stage including S5.** Anything that must
   always hold lives in slots 0/1, never in history.
-- **Thinking blocks must be replayed with tool results** when `capabilities.thinking !== "none"`,
-  or multi-step reasoning silently degrades with no error.
+- **Signed thinking blocks are replayed with tool results** when `capabilities.thinking` is
+  `anthropic`, or multi-step reasoning silently degrades with no error. This bullet claimed it for
+  three phases before it existed: reasoning was a concatenated string that reached `turns.reasoning`
+  and nothing else. It is built since 26c. A transport emits `thinking_block` chunks, the loop puts
+  them on the assistant call **within the turn only** (never stored; the next turn starts a fresh
+  tool loop), and the transport replays them. `thinking-replay.test.ts` reads the second step's
+  request, because every layer can be right while the value is dropped between them.
 - **`allowFrom` is inbound-only.** It confers nothing on outbound delivery. Conflating these
   produces a confusing "chat not found" class of failure.
 - **A tool result is not automatically trustworthy.** `ToolSpec.trust` separates text the runtime wrote

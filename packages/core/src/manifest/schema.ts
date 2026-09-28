@@ -44,7 +44,7 @@ export const ModelCapabilitiesSchema = z
         nativeTools: z.boolean().optional(),
         strictSchema: z.boolean().optional(),
         thinking: z.enum(["none", "anthropic", "openai", "deepseek"]).optional(),
-        promptCache: z.enum(["none", "anthropic", "openai"]).optional(), // deepseek has no prompt cache, server-side -> refer packages/core/src/model/capabilities.ts
+        promptCache: z.enum(["none", "anthropic", "openai", "bedrock"]).optional(), // deepseek has no prompt cache, server-side -> refer packages/core/src/model/capabilities.ts
         parallelToolCalls: z.boolean().optional(),
         contextWindow: z.number().int().positive().optional(),
         maxOutput: z.number().int().positive().optional(),

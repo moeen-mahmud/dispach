@@ -47,8 +47,12 @@ export interface ModelCapabilities {
      * `context.reserveOutput` has to be generous enough for reasoning plus the reply.
      */
     readonly thinking: "none" | "anthropic" | "openai" | "deepseek"
-    /** Prompt-cache protocol, which determines where breakpoints go. */
-    readonly promptCache: "none" | "anthropic" | "openai"
+    /**
+     * Prompt-cache protocol. Assembly marks breakpoints A and B on every request regardless
+     * (`ChatMessage.cacheBreakpoint`); this says whether the endpoint acts on them. `bedrock` is
+     * Converse's explicit `cachePoint`, placed after each marked message by that transport.
+     */
+    readonly promptCache: "none" | "anthropic" | "openai" | "bedrock"
     readonly parallelToolCalls: boolean
     readonly contextWindow: number
     /** Max completion tokens. Never derive this from the window — see the note above. */

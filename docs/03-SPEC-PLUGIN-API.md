@@ -428,6 +428,13 @@ directly (`RuntimeOptions.modelTransports`), which is how the CLI hands every ag
 `bedrock-converse` without a `plugins:` entry. An unknown `api` refuses the load; so do `options`
 the transport's schema rejects.
 
+Two harness-only fields reach a transport on `ChatMessage` and are its to act on or ignore:
+`cacheBreakpoint: true` marks where the cache-stable prefix ends (after the static slots, and at the
+active skill), and `thinking` carries signed thinking blocks on an assistant call when
+`capabilities.thinking` is `anthropic`. A transport that produces signed thinking emits a
+`{type: "thinking_block", block}` chunk when a block completes, beside the `reasoning` deltas it
+streams; the loop replays them for the rest of the turn. `chat-completions` sends neither field.
+
 Implement one only for a genuinely different wire protocol (Bedrock's Converse; later a native
 Messages-API adapter). Not for a different vendor on the same protocol: that's a base URL. A
 transport may carry a heavy dependency, since it lives outside core, but it `import()`s it on the

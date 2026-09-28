@@ -12,6 +12,7 @@ import type { EventContext } from "../events/types.ts"
 import type {
     ChatMessage,
     ModelProvider,
+    ThinkingBlock,
     ToolCallRequest,
     ToolDefinition,
 } from "../model/provider.ts"
@@ -83,6 +84,8 @@ export interface StepResult {
      * `text` carries it — which is why the dialect gets both and decides which one it reads.
      */
     readonly calls: readonly ToolCallRequest[]
+    /** Signed thinking blocks, in order. Empty from a transport that produces none. */
+    readonly thinking: readonly ThinkingBlock[]
     /** True when the signal fired before the stream finished. */
     readonly aborted: boolean
 }
@@ -113,6 +116,7 @@ export async function runStep(input: StepInput): Promise<StepResult> {
     let cacheSource: string | undefined
     let reportedOutputTokens: number | undefined
     const calls: ToolCallRequest[] = []
+    const thinking: ThinkingBlock[] = []
     let firstTokenMs: number | undefined
 
     const stream = input.provider.chat(
@@ -170,6 +174,9 @@ export async function runStep(input: StepInput): Promise<StepResult> {
                         cacheSource = chunk.cacheSource
                     }
                     break
+                case "thinking_block":
+                    thinking.push(chunk.block)
+                    break
                 case "finish":
                     finishReason = chunk.reason
                     break
@@ -225,6 +232,7 @@ export async function runStep(input: StepInput): Promise<StepResult> {
         outputTokens,
         latencyMs,
         calls,
+        thinking,
         aborted,
     }
 }

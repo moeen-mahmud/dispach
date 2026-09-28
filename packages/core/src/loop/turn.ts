@@ -1079,7 +1079,17 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
             // Tagged here rather than in each dialect: `origin` is a fact about who produced the
             // message, and the loop is the only place that knows. Compaction reads it to tell a tool
             // observation from a human message, which under a text dialect the *role* cannot.
-            const call: ChatMessage = { ...tools.dialect.renderCall(output), origin: "call" }
+            //
+            // Signed thinking rides on the call when the model's family requires it back with the
+            // tool results (decision 14.18). Within the turn only: `history` reaches the store, which
+            // drops the field, and the next turn starts a fresh tool loop that needs none of it.
+            const call: ChatMessage = {
+                ...tools.dialect.renderCall(output),
+                origin: "call",
+                ...(input.role.capabilities.thinking === "anthropic" && step.thinking.length > 0
+                    ? { thinking: step.thinking }
+                    : {}),
+            }
             history.push(call)
             trace.push(call)
             pendingProse = ""
