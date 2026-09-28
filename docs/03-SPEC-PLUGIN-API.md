@@ -484,6 +484,12 @@ interface LocalTool {
 
 In-process functions. Same catalogue, same budget, same phase rules as provider tools.
 
+A **tool provider factory** receives `{ dir, env, config, agentId, providers? }`. `providers` is every
+factory the runtime builds agents with, handed over so a provider whose tools edit the manifest
+(`config_set`) can have a `tools.providers` edit checked by the providers themselves before it is
+written: the same check the TUI, the web app and `PATCH /config` make (decision 14.24). A factory must
+construct without network I/O, which is what makes building one to validate its config safe.
+
 **`ctx.actingParticipant`** is who the turn acts for: `{ id, name?, via: "api" | "channel" }`, or
 `null` for a schedule, a peer agent, a delegation or the operator. Every tool receives it, local and
 provider alike. The runtime stamps it from the surface the turn arrived through; nothing the model

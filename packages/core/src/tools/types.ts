@@ -393,6 +393,12 @@ export interface ToolProviderContext {
     /** `tools.providerConfig`, verbatim. */
     readonly config: Readonly<Record<string, unknown>>
     readonly agentId: string
+    /**
+     * Every provider factory this runtime builds agents with. For a provider whose tools edit the
+     * manifest (`config_set`), so an edit to `tools.providers` is checked by the providers themselves
+     * before it is written — the same check the person's editors make (decision 14.24).
+     */
+    readonly providers?: Readonly<Record<string, ToolProviderFactory>>
 }
 
 export interface ToolIntent {

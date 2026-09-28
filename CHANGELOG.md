@@ -14,6 +14,10 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
 - `model.result` carries `firstTokenMs`.
 
+### Channels
+
+- Microsoft Teams: `type: teams` with `appId`, `passwordEnv` and `tenantId`. Webhook-only; every activity's Bot Framework token is verified. Answers direct messages, and in group chats and channels only when @mentioned, in the thread.
+
 ### Reload
 
 - A reload while a turn is running no longer answers `409`: it is `202 pending`, the running turn finishes on the old settings, and the agent swaps as soon as it is idle (`agent.reloaded`). `PATCH /config`, channel changes and secrets apply the same way.
@@ -64,6 +68,8 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - In the container, a refusal thrown by a bundled package keeps its own code and hint: a public bind with no token said every port was taken.
 - Bedrock: the example model ids exist, and a new account's refusals name the use-case form or account verification.
 - A bad `scope.*` field on `POST /v1/keys` returns its own error code, not `request_body_invalid`.
+- `dispach … | head` no longer prints `uncaught exception: write EPIPE`, or exits 134: a reader that closes early ends the output, and the command keeps its exit code.
+- The agent's `config_set` refuses a provider config the provider would refuse, like every other editor.
 
 ### Control plane (new, `packages/control`, FSL-1.1)
 

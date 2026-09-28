@@ -17,6 +17,13 @@
         "zod": "4.4.3",
       },
     },
+    "packages/channel-teams": {
+      "name": "@dispach/channel-teams",
+      "version": "0.1.0",
+      "dependencies": {
+        "@dispach/core": "workspace:*",
+      },
+    },
     "packages/channel-telegram": {
       "name": "@dispach/channel-telegram",
       "version": "0.1.0",
@@ -45,6 +52,7 @@
         "react": "19.2.8",
       },
       "devDependencies": {
+        "@dispach/channel-teams": "workspace:*",
         "@dispach/channel-telegram": "workspace:*",
         "@dispach/channel-whatsapp": "workspace:*",
         "@dispach/client": "workspace:*",
@@ -293,6 +301,8 @@
     "@commitlint/types": ["@commitlint/types@20.5.0", "", { "dependencies": { "conventional-commits-parser": "^6.3.0", "picocolors": "^1.1.1" } }, "sha512-ZJoS8oSq2CAZEpc/YI9SulLrdiIyXeHb/OGqGrkUP6Q7YV+0ouNAa7GjqRdXeQPncHQIDz/jbCTlHScvYvO/gA=="],
 
     "@conventional-changelog/git-client": ["@conventional-changelog/git-client@2.7.0", "", { "dependencies": { "@simple-libs/child-process-utils": "^1.0.0", "@simple-libs/stream-utils": "^1.2.0", "semver": "^7.5.2" }, "peerDependencies": { "conventional-commits-filter": "^5.0.0", "conventional-commits-parser": "^6.4.0" }, "optionalPeers": ["conventional-commits-filter", "conventional-commits-parser"] }, "sha512-j7A8/LBEQ+3rugMzPXoKYzyUPpw/0CBQCyvtTR7Lmu4olG4yRC/Tfkq79Mr3yuPs0SUitlO2HwGP3gitMJnRFw=="],
+
+    "@dispach/channel-teams": ["@dispach/channel-teams@workspace:packages/channel-teams"],
 
     "@dispach/channel-telegram": ["@dispach/channel-telegram@workspace:packages/channel-telegram"],
 

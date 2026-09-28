@@ -757,6 +757,27 @@ person's by definition — the same rule that floors `writeRoots`. A `config_set
 `tokenEnv` reports that the agent will not start until that variable is set in the `.env`, which only
 a person can write.
 
+#### `teams` — Microsoft Teams, from `@dispach/channel-teams`
+
+```yaml
+channels:
+  - type: teams
+    id: teams
+    appId: 00000000-0000-0000-0000-000000000000    # the Azure Bot's Microsoft App ID (not a secret)
+    passwordEnv: TEAMS_APP_PASSWORD                # its client secret, by env var name (default)
+    tenantId: 11111111-1111-1111-1111-111111111111  # single-tenant bots; also drops other tenants
+    allowFrom: ["*"]                               # or Entra object ids
+```
+
+Webhook only: register the bot's messaging endpoint as `https://<host>/v1/channels/<id>/webhook/<agent>`.
+Every activity's Bot Framework JWT is verified (issuer, audience = `appId`, lifetime, the key's
+channel endorsement, and the signed `serviceUrl` the reply goes to) before a word of it is read.
+The agent answers every message in a personal chat and, in a group chat or a channel, only when it
+is **@mentioned**, replying in that thread, which is its own session. The sender is their Entra
+object id, the handle `allowFrom` matches and the acting participant (`teams:<id>`). Where each
+conversation's replies go is kept beside the agent, so a schedule can deliver to a chat that has
+messaged the bot at least once.
+
 ### `delivery`
 
 ```yaml

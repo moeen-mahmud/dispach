@@ -144,6 +144,7 @@ agents actually use:
 | `backend.composio.dev` | 443 | the Composio tool provider |
 | `api.telegram.org` | 443 | a Telegram channel |
 | `web.whatsapp.com`, `*.whatsapp.net` | 443 | a WhatsApp channel (the socket, then media) |
+| `login.botframework.com`, `login.microsoftonline.com`, `smba.trafficmanager.net` | 443 | a Teams channel: the connector's signing keys, the bot's token, replies. Teams also needs **ingress** to the webhook route |
 | `api.tavily.com`, `api.search.brave.com`, `api.exa.ai` | 443 | `web_search`, whichever backend is configured |
 | any | 443/80 | `web_fetch`, by its nature. Leave it unpinned, or accept that fetches outside the policy fail |
 | `github.com` | 443 | skill catalogues (`sources update`, `skills install`) |

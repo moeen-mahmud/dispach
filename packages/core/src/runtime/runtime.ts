@@ -2220,6 +2220,7 @@ function buildProviders(
                     env: entry.env,
                     config: selection.config,
                     agentId: entry.manifest.id,
+                    providers: factories,
                 }),
             )
         } catch (cause) {

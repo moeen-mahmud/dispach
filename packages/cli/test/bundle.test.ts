@@ -21,7 +21,7 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
-import { VERSION } from "@dispach/core"
+import { BRAND, VERSION } from "@dispach/core"
 import { spawnCaptureAsync } from "#lib/spawn"
 
 const ENTRY = resolve(import.meta.dirname, "..", "dist", "index.js")
@@ -143,6 +143,22 @@ describe("the built bundle", () => {
                 timeoutMs: 30_000,
             })
             expect(result.stderr.trim()).toBe("")
+            expect(result.code).toBe(0)
+        }
+    })
+
+    test("a reader that closes early is not a crash: no EPIPE on stderr, the command's own exit code", async () => {
+        // `dispach … | head` closes the pipe while the command is still writing. Unhandled, each write
+        // after that raised EPIPE into the crash guard, which printed "uncaught exception: write EPIPE"
+        // and sometimes exited 134. `pipefail` so the exit code is node's, not head's.
+        for (let run = 0; run < 3; run += 1) {
+            const result = await spawnCaptureAsync({
+                command: "bash",
+                args: ["-c", `set -o pipefail; node "${ENTRY}" --help | head -c 1 >/dev/null`],
+                env: { ...process.env, [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1" },
+                timeoutMs: 20_000,
+            })
+            expect(result.stderr).not.toContain("EPIPE")
             expect(result.code).toBe(0)
         }
     })
