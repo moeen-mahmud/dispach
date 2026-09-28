@@ -162,6 +162,7 @@ export async function conformance(
     const context: PluginContext = {
         defineChannel: (id) => registered.push(`channel:${id}`),
         defineToolProvider: (id) => registered.push(`toolProvider:${id}`),
+        defineModelTransport: (api) => registered.push(`modelTransport:${api}`),
         defineScriptRunner: () => registered.push("scriptRunner"),
         use: (entry) => registered.push(`middleware:${entry.name}`),
         config,

@@ -62,6 +62,7 @@ import {
 import type { EventBus } from "../events/bus.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { PluginRef } from "../manifest/schema.ts"
+import type { ModelTransport } from "../model/transport.ts"
 import type { ChannelFactory } from "../runtime/channels.ts"
 import type { ScriptRunner, ToolProviderFactory } from "../tools/types.ts"
 import { VERSION } from "../version.ts"
@@ -110,6 +111,7 @@ export interface LoadPluginsOptions {
 
 export interface LoadedPlugins {
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
+    readonly modelTransports: Readonly<Record<string, ModelTransport>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     /** In the order they were added: manifest order across plugins, declaration order within one. */
@@ -285,6 +287,7 @@ const SILENT_LOGGER: Logger = {
  */
 export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPlugins> {
     const toolProviders: Record<string, ToolProviderFactory> = {}
+    const modelTransports: Record<string, ModelTransport> = {}
     const channels: Record<string, ChannelFactory> = {}
     const loaded: LoadedPlugin[] = []
     const middleware: Middleware[] = []
@@ -302,12 +305,14 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
         const staged: {
             channels: Record<string, ChannelFactory>
             toolProviders: Record<string, ToolProviderFactory>
+            modelTransports: Record<string, ModelTransport>
             middleware: Middleware[]
             scriptRunner: ScriptRunner | undefined
             registered: string[]
         } = {
             channels: {},
             toolProviders: {},
+            modelTransports: {},
             middleware: [],
             scriptRunner: undefined,
             registered: [],
@@ -333,6 +338,10 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
                 defineToolProvider: (id, factory) => {
                     staged.toolProviders[id] = factory
                     registered.push(`toolProvider:${id}`)
+                },
+                defineModelTransport: (api, transport) => {
+                    staged.modelTransports[api] = transport
+                    registered.push(`modelTransport:${api}`)
                 },
                 defineScriptRunner: (runner) => {
                     staged.scriptRunner = runner
@@ -361,6 +370,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
             bySpec.set(plugin.name, spec)
             Object.assign(channels, staged.channels)
             Object.assign(toolProviders, staged.toolProviders)
+            Object.assign(modelTransports, staged.modelTransports)
             middleware.push(...staged.middleware)
             if (staged.scriptRunner !== undefined) scriptRunner = staged.scriptRunner
 
@@ -412,7 +422,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
         }
     }
 
-    return { toolProviders, channels, scriptRunner, middleware, loaded, failed }
+    return { toolProviders, modelTransports, channels, scriptRunner, middleware, loaded, failed }
 }
 
 /**
@@ -432,6 +442,7 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
  */
 export interface AgentPluginSupply {
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
+    readonly modelTransports: Readonly<Record<string, ModelTransport>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     readonly middleware: readonly Middleware[]
@@ -454,6 +465,7 @@ export interface AgentPluginSupplyOptions {
     /** What the host registered directly. Plugin registrations layer over these. */
     readonly base?: {
         readonly toolProviders?: Readonly<Record<string, ToolProviderFactory>>
+        readonly modelTransports?: Readonly<Record<string, ModelTransport>>
         readonly channels?: Readonly<Record<string, ChannelFactory>>
         readonly scriptRunner?: ScriptRunner
     }
@@ -466,6 +478,7 @@ export async function agentPluginSupply(
     if (options.refs.length === 0) {
         return {
             toolProviders: base.toolProviders ?? {},
+            modelTransports: base.modelTransports ?? {},
             channels: base.channels ?? {},
             scriptRunner: base.scriptRunner,
             middleware: [],
@@ -492,6 +505,7 @@ export async function agentPluginSupply(
     // wins a key, inside `loadPlugins`.
     return {
         toolProviders: { ...(base.toolProviders ?? {}), ...result.toolProviders },
+        modelTransports: { ...(base.modelTransports ?? {}), ...result.modelTransports },
         channels: { ...(base.channels ?? {}), ...result.channels },
         scriptRunner: result.scriptRunner ?? base.scriptRunner,
         middleware: result.middleware,

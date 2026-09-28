@@ -176,6 +176,7 @@ export type {
 export {
     AgentManifestSchema,
     customRoleNames,
+    DEFAULT_MODEL_API,
     isReservedRole,
     MODEL_ROLES,
 } from "./manifest/schema.ts"
@@ -257,6 +258,12 @@ export {
     windowReport,
 } from "./model/roles.ts"
 export { parseSSE, type SSEEvent } from "./model/sse.ts"
+export {
+    BUILT_IN_TRANSPORTS,
+    CHAT_COMPLETIONS_TRANSPORT,
+    type ModelTransport,
+    type ModelTransportContext,
+} from "./model/transport.ts"
 export { nearest } from "./nearest.ts"
 export {
     type AddressKind,

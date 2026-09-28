@@ -57,7 +57,13 @@ import { agentIdFor, hostToken, liveHostOf } from "#lib/lifecycle"
 import { ENABLE_MOUSE } from "#lib/mouse"
 import { resolveModeFromProcess } from "#lib/output"
 import { offeredCommands } from "#lib/palette"
-import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MODEL_TRANSPORTS,
+    scriptRunner,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { keyValue } from "#lib/render"
 import { priorMessages, reopenNote, resumeNotice } from "#lib/resume"
 import { listAgents, pluginRoot, storePath } from "#lib/sandbox"
@@ -289,6 +295,7 @@ export async function runCommand(options: RunOptions): Promise<number> {
         const runtime = await RuntimeClass.create({
             agents: [options.manifestPath],
             toolProviders: TOOL_PROVIDERS,
+            modelTransports: MODEL_TRANSPORTS,
             builtInPlugins: BUILT_IN_PLUGINS,
             pluginRoot: pluginRoot(),
             scriptRunner: scriptRunner(),

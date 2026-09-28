@@ -31,6 +31,7 @@ import { type LoadedManifest, loadManifest, loadManifestFromObject } from "../ma
 import { resolveProviders } from "../manifest/providers.ts"
 import type { TeamMemberConfig } from "../manifest/schema.ts"
 import type { FetchLike } from "../model/provider.ts"
+import { BUILT_IN_TRANSPORTS, type ModelTransport } from "../model/transport.ts"
 import { agentPluginSupply, type BuiltInPlugins, type LoadedPlugin } from "../plugins/loader.ts"
 import { type Middleware, notify } from "../plugins/middleware.ts"
 import { Scheduler } from "../schedule/scheduler.ts"
@@ -130,6 +131,12 @@ export interface RuntimeOptions {
      */
     readonly toolProviders?: Readonly<Record<string, ToolProviderFactory>>
     /**
+     * Model transports beyond the built-in `chat-completions`, by the name `model.<role>.api`
+     * selects. Same reasoning as `toolProviders`: a protocol needing a dependency core may not carry
+     * (Bedrock's SDK) is supplied by the host, or by a plugin through `defineModelTransport`.
+     */
+    readonly modelTransports?: Readonly<Record<string, ModelTransport>>
+    /**
      * How a skill's script runs. Same shape and same reasoning as `toolProviders`: core starts no
      * processes, so the one package allowed to supplies this.
      *
@@ -213,6 +220,7 @@ export interface RuntimeOptions {
  */
 export interface AgentSupply {
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
+    readonly modelTransports: Readonly<Record<string, ModelTransport>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     readonly middleware: readonly Middleware[]
@@ -1540,6 +1548,9 @@ async function prepareAgents(input: {
                     ...(options.toolProviders === undefined
                         ? {}
                         : { toolProviders: options.toolProviders }),
+                    ...(options.modelTransports === undefined
+                        ? {}
+                        : { modelTransports: options.modelTransports }),
                     ...(options.channels === undefined ? {} : { channels: options.channels }),
                     ...(options.scriptRunner === undefined
                         ? {}
@@ -1548,6 +1559,7 @@ async function prepareAgents(input: {
             })
             supplyByAgent.set(agentId, {
                 toolProviders: supply.toolProviders,
+                modelTransports: supply.modelTransports,
                 channels: supply.channels,
                 scriptRunner: supply.scriptRunner,
                 middleware: supply.middleware,
@@ -1596,6 +1608,7 @@ async function prepareAgents(input: {
     const supplyFor = (agentId: string): AgentSupply =>
         supplyByAgent.get(agentId) ?? {
             toolProviders: options.toolProviders ?? {},
+            modelTransports: options.modelTransports ?? {},
             channels: options.channels ?? {},
             scriptRunner: options.scriptRunner,
             middleware: [],
@@ -1774,6 +1787,8 @@ function instantiateAgent(input: {
         // six debugging rounds.
         ...(runner === undefined ? {} : { scriptRunner: runner }),
         ...(supply.middleware.length === 0 ? {} : { middleware: supply.middleware }),
+        // Built-in first, so a plugin may replace `chat-completions` — the manifest named it.
+        transports: new Map([...BUILT_IN_TRANSPORTS, ...Object.entries(supply.modelTransports)]),
         // The manifest's live env, not the ambient one: it layers the real environment
         // over any `.env` beside the manifest, which is what the load-time key check
         // validated against. Passing `process.env` here instead is how `validate` and

@@ -105,3 +105,43 @@ describe("a provider id that only a plugin supplies", () => {
         await runtime.stop()
     })
 })
+
+describe("a model transport nothing registers", () => {
+    test("validate refuses it, as the runtime does", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "validate-transport-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: validatetransport
+model:
+  main:
+    id: some.model-v1:0
+    api: nobody-speaks-this
+`,
+        )
+        const written: string[] = []
+        const original = process.stdout.write.bind(process.stdout)
+        const originalErr = process.stderr.write.bind(process.stderr)
+        // biome-ignore lint/suspicious/noExplicitAny: capturing output for one call
+        ;(process.stdout as any).write = (chunk: string) => {
+            written.push(String(chunk))
+            return true
+        }
+        // biome-ignore lint/suspicious/noExplicitAny: capturing output for one call
+        ;(process.stderr as any).write = (chunk: string) => {
+            written.push(String(chunk))
+            return true
+        }
+        let code: number
+        try {
+            code = await validateCommand({ manifestPath: join(dir, "agent.yaml"), json: true })
+        } finally {
+            // biome-ignore lint/suspicious/noExplicitAny: restoring
+            ;(process.stdout as any).write = original
+            // biome-ignore lint/suspicious/noExplicitAny: restoring
+            ;(process.stderr as any).write = originalErr
+        }
+        expect(code).not.toBe(0)
+        expect(written.join("")).toContain("model_transport_unknown")
+    })
+})

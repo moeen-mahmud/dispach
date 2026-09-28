@@ -34,6 +34,7 @@
 
 import type { EventBus } from "../events/bus.ts"
 import type { EnvSource } from "../manifest/env.ts"
+import type { ModelTransport } from "../model/transport.ts"
 import type { ChannelFactory } from "../runtime/channels.ts"
 import type { ScriptRunner, ToolProviderFactory } from "../tools/types.ts"
 import type { Middleware } from "./middleware.ts"
@@ -100,6 +101,14 @@ export interface PluginContext {
     defineChannel(id: string, factory: ChannelFactory): void
     /** Register a tool provider under the id `tools.provider` names. */
     defineToolProvider(id: string, factory: ToolProviderFactory): void
+    /**
+     * Register a model transport under the name `model.<role>.api` selects.
+     *
+     * For a wire protocol `chat-completions` does not speak — Bedrock's Converse is the first. The
+     * transport's `create` runs at load and must not touch the network; its first request is the
+     * first model call, after `runtime.ready`.
+     */
+    defineModelTransport(api: string, transport: ModelTransport): void
     /**
      * Supply the runner for skill scripts.
      *

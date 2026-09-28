@@ -17,7 +17,13 @@
 import { loadManifest, Runtime, resolveProviders } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MODEL_TRANSPORTS,
+    scriptRunner,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { pluginRoot } from "#lib/sandbox"
 import { toolsReport, toolsView } from "#lib/session-commands"
 
@@ -140,6 +146,7 @@ async function show(options: ToolsOptions): Promise<number> {
     const runtime = await Runtime.create({
         agents: [options.manifestPath],
         toolProviders: TOOL_PROVIDERS,
+        modelTransports: MODEL_TRANSPORTS,
         builtInPlugins: BUILT_IN_PLUGINS,
         pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),

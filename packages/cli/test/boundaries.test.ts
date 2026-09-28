@@ -1043,3 +1043,19 @@ describe("every command a hint names exists", () => {
         expect(offenders).toEqual([])
     })
 })
+
+describe("every runtime the CLI builds gets the same model transports", () => {
+    test("a file passing TOOL_PROVIDERS also passes MODEL_TRANSPORTS", () => {
+        // A command that built a runtime without the transports would refuse, as an unknown `api`,
+        // a Bedrock agent every other command accepts — the check-only-one-surface-performs shape.
+        const offenders = FILES.filter(
+            (file) =>
+                /\btoolProviders: TOOL_PROVIDERS\b/.test(file.text) &&
+                !/\bmodelTransports: MODEL_TRANSPORTS\b/.test(file.text),
+        ).map((file) => file.path)
+        expect(offenders).toEqual([])
+        expect(
+            FILES.filter((file) => /\btoolProviders: TOOL_PROVIDERS\b/.test(file.text)).length,
+        ).toBeGreaterThan(5)
+    })
+})

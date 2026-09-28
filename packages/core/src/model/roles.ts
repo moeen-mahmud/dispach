@@ -10,15 +10,16 @@
 import { unknownModelRole } from "../errors.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { AgentManifest, ModelRole, ModelRoleConfig } from "../manifest/schema.ts"
-import { customRoleNames, MODEL_ROLES } from "../manifest/schema.ts"
+import { customRoleNames, DEFAULT_MODEL_API, MODEL_ROLES } from "../manifest/schema.ts"
 import {
     type ModelCapabilities,
     resolveCapabilities,
     type WindowProvenance,
     windowProvenance,
 } from "./capabilities.ts"
-import { type ChatCompletionsConfig, createChatCompletionsProvider } from "./chat-completions.ts"
+import type { ChatCompletionsConfig } from "./chat-completions.ts"
 import type { FetchLike, ModelProvider } from "./provider.ts"
+import { BUILT_IN_TRANSPORTS, type ModelTransport, transportFor } from "./transport.ts"
 
 export interface ResolvedRole {
     readonly role: ModelRole
@@ -72,6 +73,11 @@ export interface ResolveRolesOptions {
     readonly onRetry?: NonNullable<ChatCompletionsConfig["onRetry"]>
     readonly onUsageUnsupported?: NonNullable<ChatCompletionsConfig["onUsageUnsupported"]>
     readonly retry?: ChatCompletionsConfig["retry"]
+    /**
+     * Transports by `api` name, the built-in `chat-completions` included. Absent, only the built-in
+     * set exists — which is every caller before plugins could register one.
+     */
+    readonly transports?: ReadonlyMap<string, ModelTransport>
 }
 
 function buildRole(
@@ -81,13 +87,17 @@ function buildRole(
     options: ResolveRolesOptions,
 ): ResolvedRole {
     const capabilities = resolveCapabilities(config.id, config.capabilities)
-    const provider = createChatCompletionsProvider({
-        id: `chat-completions:${configuredAs}`,
-        baseUrl: config.baseUrl,
-        field: `model.${configuredAs}`,
-        ...(config.apiKeyEnv === undefined ? {} : { apiKeyEnv: config.apiKeyEnv }),
-        ...(config.headers === undefined ? {} : { headers: config.headers }),
-        ...(config.streamUsage === undefined ? {} : { streamUsage: config.streamUsage }),
+    const field = `model.${configuredAs}`
+    const { transport, options: transportOptions } = transportFor(
+        config,
+        field,
+        options.transports ?? BUILT_IN_TRANSPORTS,
+    )
+    const provider = transport.create({
+        id: `${config.api ?? DEFAULT_MODEL_API}:${configuredAs}`,
+        field,
+        config,
+        options: transportOptions,
         ...(options.env === undefined ? {} : { env: options.env }),
         ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
         ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),

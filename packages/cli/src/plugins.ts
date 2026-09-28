@@ -59,6 +59,7 @@ import {
     BUILT_IN_PLUGIN_SPECS,
     BUILT_IN_PLUGINS,
     CHANNELS,
+    MODEL_TRANSPORTS,
     scriptRunner,
     TOOL_PROVIDERS,
 } from "#lib/providers"
@@ -91,6 +92,7 @@ async function listCommand(options: PluginsOptions): Promise<number> {
     const runtime = await Runtime.create({
         agents: [options.manifestPath],
         toolProviders: TOOL_PROVIDERS,
+        modelTransports: MODEL_TRANSPORTS,
         builtInPlugins: BUILT_IN_PLUGINS,
         pluginRoot: pluginRoot(options.env),
         scriptRunner: scriptRunner(),

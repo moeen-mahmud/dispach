@@ -53,12 +53,32 @@ export const ModelCapabilitiesSchema = z
     })
     .strict()
 
-export const ModelRoleSchema = z
+/** The transport every manifest used before `api` existed, and the default when it is omitted. */
+export const DEFAULT_MODEL_API = "chat-completions"
+
+const ModelRoleFields = z
     .object({
         /** Sent verbatim as the `model` parameter. */
         id: z.string().min(1),
-        /** Must end at the version segment; the runtime appends `/chat/completions`. */
-        baseUrl: z.string().min(1),
+        /**
+         * Which transport speaks to this model. Omitted, it is `chat-completions` — every manifest
+         * written before this field existed, unchanged. Another value names a transport a plugin
+         * registered with `defineModelTransport` (`bedrock-converse` from the Bedrock package); an
+         * unknown one refuses the load rather than falling back, the same rule as an unknown tool.
+         */
+        api: z.string().min(1).optional(),
+        /**
+         * Transport-specific settings, validated by that transport's own schema at load (for
+         * Bedrock: `region`, `profile`). Never a credential: a transport reads those from its
+         * environment, the way `apiKeyEnv` names a variable rather than holding a key.
+         */
+        options: z.record(z.string(), z.unknown()).optional(),
+        /**
+         * Must end at the version segment; the runtime appends `/chat/completions`. Required for
+         * `chat-completions`; a transport that addresses its endpoint another way (a region) may
+         * omit it.
+         */
+        baseUrl: z.string().min(1).optional(),
         /** The *name* of an env var. A literal key here fails validation. */
         apiKeyEnv: z.string().min(1).optional(),
         temperature: z.number().min(0).max(2).optional(),
@@ -90,6 +110,22 @@ export const ModelRoleSchema = z
         capabilities: ModelCapabilitiesSchema.optional(),
     })
     .strict()
+
+/** `baseUrl` is optional in the shape and required for the transport that cannot work without one. */
+function requireBaseUrl(
+    role: { readonly api?: string | undefined; readonly baseUrl?: string | undefined },
+    ctx: z.RefinementCtx,
+): void {
+    if ((role.api ?? DEFAULT_MODEL_API) === DEFAULT_MODEL_API && role.baseUrl === undefined) {
+        ctx.addIssue({
+            code: "custom",
+            path: ["baseUrl"],
+            message: "baseUrl is required for the chat-completions transport",
+        })
+    }
+}
+
+export const ModelRoleSchema = ModelRoleFields.superRefine(requireBaseUrl)
 
 export const ModelSchema = z
     .object({

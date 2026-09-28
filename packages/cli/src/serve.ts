@@ -40,7 +40,13 @@ import { setChannelCredential, setChannelEnabled, unpairChannel } from "#lib/cha
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
 import { hostableAgents, manifestForId } from "#lib/lifecycle"
-import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MODEL_TRANSPORTS,
+    scriptRunner,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { provisionAgent, provisionSteps } from "#lib/provision"
 import { agentsDir, pluginRoot, storePath, templatesDir } from "#lib/sandbox"
 
@@ -353,6 +359,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         env,
         bus,
         toolProviders: TOOL_PROVIDERS,
+        modelTransports: MODEL_TRANSPORTS,
         builtInPlugins: BUILT_IN_PLUGINS,
         pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),

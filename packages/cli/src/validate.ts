@@ -11,6 +11,7 @@
 import { dirname, isAbsolute, resolve } from "node:path"
 import {
     agentPluginSupply,
+    BUILT_IN_TRANSPORTS,
     brokenChannels,
     buildChannels,
     buildRegistry,
@@ -21,6 +22,7 @@ import {
     loadManifest,
     readManifestHeader,
     resolveCapabilities,
+    resolveRoles,
     resolveWorkspace,
     ruleBudgetFailure,
     scheduleDeliveryWarnings,
@@ -29,7 +31,7 @@ import {
 import { ambientEnv } from "#lib/ambient"
 import { describeOrigin, envProvenance } from "#lib/config-env"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import { BUILT_IN_PLUGINS, CHANNELS, TOOL_PROVIDERS } from "#lib/providers"
+import { BUILT_IN_PLUGINS, CHANNELS, MODEL_TRANSPORTS, TOOL_PROVIDERS } from "#lib/providers"
 import { pluginRoot } from "#lib/sandbox"
 import type { ValidateOptions } from "#lib/schema"
 
@@ -61,7 +63,11 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
             bus: new EventBus({ runtimeId: "validate" }),
             builtIn: BUILT_IN_PLUGINS,
             pluginRoot: pluginRoot(),
-            base: { toolProviders: TOOL_PROVIDERS, channels: CHANNELS },
+            base: {
+                toolProviders: TOOL_PROVIDERS,
+                modelTransports: MODEL_TRANSPORTS,
+                channels: CHANNELS,
+            },
         })
 
         const loaded = loadManifest(options.manifestPath, {
@@ -111,11 +117,23 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
          */
         const built = await buildRegistry(loaded, {
             toolProviders: supply.toolProviders,
+            modelTransports: supply.modelTransports,
             channels: supply.channels,
             scriptRunner: supply.scriptRunner,
             middleware: supply.middleware,
         })
         for (const provider of built.providers) await provider.stop?.()
+
+        // The model roles, resolved the way `Agent.create` resolves them: an unknown `api` or options
+        // its transport refuses is a boot failure, so it is a validation failure too. Building a
+        // provider opens no socket.
+        resolveRoles(manifest, {
+            env: loaded.env,
+            transports: new Map([
+                ...BUILT_IN_TRANSPORTS,
+                ...Object.entries(supply.modelTransports),
+            ]),
+        })
 
         // The same check `run` applies, applied here for the same reason it exists at all: a
         // validator that accepts a manifest the runtime refuses is worse than no validator.

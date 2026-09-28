@@ -382,7 +382,8 @@ function validateBaseUrls(manifest: AgentManifest): ErrorDetail[] {
 
     for (const role of configuredRoles(manifest.model)) {
         const config = manifest.model[role]
-        if (config === undefined) continue
+        // Another transport addresses its endpoint its own way, and validates it itself.
+        if (config?.baseUrl === undefined) continue
         const field = `model.${role}.baseUrl`
 
         let url: URL

@@ -60,6 +60,7 @@ interface PluginContext {
   // registration
   defineChannel(id: string, factory: ChannelFactory): void
   defineToolProvider(id: string, factory: ToolProviderFactory): void
+  defineModelTransport(api: string, transport: ModelTransport): void   // Phase 26c
   defineScriptRunner(runner: ScriptRunner): void
   use(middleware: Middleware): void          // Phase 9B
 
@@ -92,7 +93,6 @@ liability rather than a convenience.
 
 | Point | Status |
 | --- | --- |
-| `defineModelProvider` | Deferred. The chat-completions transport is the only one, and a second implementation is what would tell us what the seam needs. |
 | `defineStore` | Deferred with the Postgres driver (open item O.5). The `Store` interface exists; nothing has needed to register one. |
 | `defineSkillSource` | Deferred. Skill sources resolve through `lib/sources.ts` in the CLI, which is a fetch a person triggers rather than something an agent boots with. |
 | `defineTools` | Deferred. `tools.local` covers the built-ins and a plugin wanting to add tools registers a provider, which is the same capability with a name a manifest can select. |
@@ -399,18 +399,39 @@ that blames its cache forever turns every future typo into a misleading message.
 `whenNotToUse` is not optional. If you have nothing to say, say what the adjacent tool is
 for instead.
 
-### Model provider
+### Model transport
+
+**Built in Phase 26c.** Registered with `defineModelTransport(api, transport)` and selected by
+`model.<role>.api`:
 
 ```ts
-interface ModelProviderSpec {
-  id: string
-  create(config: unknown): ModelProvider
+interface ModelTransport {
+  optionsSchema?: ConfigSchema            // validates model.<role>.options at load
+  create(context: ModelTransportContext): ModelProvider   // no network: runs before ready
+}
+
+interface ModelTransportContext {
+  id: string                              // "<api>:<role>"
+  field: string                           // "model.main", for errors that name a field
+  config: ModelRoleConfig                 // the whole role, id and sampling included
+  options: unknown                        // options after optionsSchema
+  env?: EnvSource
+  fetch?: FetchLike
+  retry?: RetryPolicy
+  onRetry?(info): void                    // emit model.retry through this
+  onUsageUnsupported?(info): void
 }
 ```
 
-Core ships `chat-completions`. Implement this only for a genuinely different wire protocol
-(a native Messages-API adapter, a local in-process runner). Not for a different vendor —
-that's a base URL.
+Core ships `chat-completions`, registered the same way. A host may also supply transports
+directly (`RuntimeOptions.modelTransports`), which is how the CLI hands every agent
+`bedrock-converse` without a `plugins:` entry. An unknown `api` refuses the load; so do `options`
+the transport's schema rejects.
+
+Implement one only for a genuinely different wire protocol (Bedrock's Converse; later a native
+Messages-API adapter). Not for a different vendor on the same protocol: that's a base URL. A
+transport may carry a heavy dependency, since it lives outside core, but it `import()`s it on the
+first call, so boot never pays for it.
 
 ### Store driver
 

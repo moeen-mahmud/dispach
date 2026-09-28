@@ -18,6 +18,7 @@ import whatsappPlugin, { whatsappChannel } from "@dispach/channel-whatsapp"
 import type {
     BuiltInPlugins,
     ChannelFactory,
+    ModelTransport,
     ScriptRunner,
     ToolProviderFactory,
 } from "@dispach/core"
@@ -37,6 +38,15 @@ export const TOOL_PROVIDERS: Readonly<Record<string, ToolProviderFactory>> = {
     // other.
     web: webFromConfig,
 }
+
+/**
+ * Model transports beyond the built-in `chat-completions`, by the name `model.<role>.api` selects.
+ *
+ * Passed by every command that builds a runtime, beside `TOOL_PROVIDERS` — a command that forgot it
+ * would refuse, as an unknown `api`, an agent every other command accepts. `boundaries.test.ts`
+ * holds the pairing.
+ */
+export const MODEL_TRANSPORTS: Readonly<Record<string, ModelTransport>> = {}
 
 /**
  * How a skill's script runs, from the one package allowed to start a process.
