@@ -129,6 +129,8 @@ and WebSocket surfaces can return:
 | `key_scope_sessions_invalid` | 400 | `scope.sessions` is not a string prefix. |
 | `key_scope_can_invalid` | 400 | `scope.can` names something that is not one of the four capabilities. |
 | `key_scope_expires_invalid` | 400 | `scope.expiresIn` is not a positive whole number of seconds. |
+| `key_scope_participant_invalid` | 400 | `scope.participant` is not a non-empty id. |
+| `sender_not_bound_participant` | 403 | A key bound to a participant sent `from` naming someone else, or claiming `kind: "agent"`. Refused rather than corrected, so the caller never believes a turn was attributed as they asked when it was not. Omit `from` and it is filled in. |
 | `key_scope_agent_unknown` | 400 | `scope.agents` names an agent this server does not hold. Refused at mint rather than producing a key that reaches nothing. |
 | `provision_adopt_failed` | — | Returned *inside* a `201`: the agent was written and is not running. |
 | `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting — an embedder over its own agent store. The container has the lookup, and `start` works there. |
@@ -676,6 +678,7 @@ POST /v1/keys  { "label": "web · user_8812",
                  "scope": { "agents":   ["milo"],
                             "sessions": "team_42:*",
                             "can":      ["chat", "read"],
+                            "participant": "user:8812",
                             "expiresIn": 3600 } }
 ```
 
@@ -684,12 +687,23 @@ POST /v1/keys  { "label": "web · user_8812",
 | `agents` | every agent | An id naming no agent is **reported at mint**, never silently matched against nothing. |
 | `sessions` | every session | A prefix; a trailing `*` is accepted and ignored. Not a namespace — `team_4` also matches `team_42:x`. |
 | `can` | all four | An **empty array** is honoured as written: a key that may do nothing is a coherent thing to mint. |
+| `participant` | any sender | The one participant this key speaks for. Every turn it starts, on `POST /messages` or the socket, has `from` set to it; a `from` naming anyone else is `403 sender_not_bound_participant`. It becomes the turn's **acting participant**, which every tool receives (below). |
 | `expiresIn` | never expires | Seconds. Reported back as an absolute `expiresAt`. Enforced in the same query that hides a revoked key, so the two are indistinguishable. |
 
 **This is not an identity system.** No users, teams, orgs or roles — `06-VELAOPS-INTEGRATION.md`
 refuses them in four places and Better Auth stays authoritative for the consumer that needs them. A
 scope supplies *isolation*; `from` on `POST /messages` supplies *attribution*. That pair is the whole
 contribution, and it is enough to build a collaborative app on.
+
+**The acting participant.** Who a turn acts for, handed to every tool as
+`ToolContext.actingParticipant` so an embedder's tool can authorise the person as well as the agent
+(member ∩ agent). Stamped by the runtime from the surface, never from model output:
+
+| Turn | Acting participant |
+| --- | --- |
+| `POST /messages` or the socket with `from.kind: "user"` (or a bound key) | `{ id: from.id, name?, via: "api" }` |
+| a channel message | `{ id: "<channel type>:<sender id>", name?, via: "channel" }`: the person, not the group |
+| `from.kind: "agent"`, a schedule, a delegation, the operator with no `from` | `null` |
 
 **Out of scope answers `404`, never `403`.** A refusal that confirms existence turns a narrow
 credential into a directory of other tenants' agents and sessions, so a caller outside its scope sees

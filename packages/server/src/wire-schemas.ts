@@ -193,6 +193,11 @@ export const KeyScopeBody = z.object({
             hint: 'Send { "can": ["chat", "read"] }. The four are read (every GET), chat (send a message, answer an approval, stop a turn), write (schedules, phase, clearing a session) and admin (keys, provisioning, start/stop/reload). Absent means all four; an empty array means none, and is honoured as written.',
             description: "Capabilities this key may exercise. Absent means all four.",
         }),
+    participant: z.string().min(1).optional().meta({
+        code: "key_scope_participant_invalid",
+        hint: 'Send { "participant": "user:018f…" } — the id this key speaks for. Every turn it starts acts for that participant: a from naming anyone else is refused, and an omitted one is filled in. Omit it for a backend that names senders itself.',
+        description: "The participant every turn this key starts acts for. Absent: any sender.",
+    }),
     expiresIn: z.number().int().positive().optional().meta({
         code: "key_scope_expires_invalid",
         hint: 'Send { "expiresIn": 3600 } — whole seconds from now, as a number. Relative rather than an absolute instant, because that would need the caller and this server to agree about the clock; the response reports the absolute expiresAt this server computed.',
@@ -460,7 +465,10 @@ function metaAt(schema: z.ZodType, path: readonly string[]): Partial<Refusal> | 
     for (const key of path) {
         current = descend(current, key)
         if (current === undefined) break
-        best = readRefusal(current) ?? best
+        // The wrapper first: `z.string().optional().meta({...})` puts the refusal on the optional,
+        // and reading only the unwrapped string lost every such code — all four `scope.*` fields of
+        // `POST /v1/keys` answered `request_body_invalid` while the OpenAPI document named theirs.
+        best = readRefusal(current) ?? readRefusal(unwrap(current)) ?? best
     }
     return best
 }
@@ -484,11 +492,11 @@ function readRefusal(schema: z.ZodType | undefined): Partial<Refusal> | undefine
 function descend(schema: z.ZodType | undefined, key: string): z.ZodType | undefined {
     const inner = unwrap(schema)
     const shape = (inner as unknown as { shape?: Record<string, z.ZodType> } | undefined)?.shape
-    if (shape?.[key] !== undefined) return unwrap(shape[key])
+    if (shape?.[key] !== undefined) return shape[key]
     // A record has one value type for every key, so the key itself does not narrow anything.
     const valueType = (inner as unknown as { def?: { valueType?: z.ZodType } } | undefined)?.def
         ?.valueType
-    return valueType === undefined ? undefined : unwrap(valueType)
+    return valueType
 }
 
 /** `.optional()` and friends wrap the type the metadata is on. */

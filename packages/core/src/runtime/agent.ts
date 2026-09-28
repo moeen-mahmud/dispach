@@ -35,7 +35,7 @@ import {
 import type { EventBus } from "../events/bus.ts"
 import { newTurnId } from "../loop/ids.ts"
 import { entryPhase, isPhased, unmatchedAllows } from "../loop/phases.ts"
-import type { TurnSender } from "../loop/sender.ts"
+import { type ActingParticipant, participantOf, type TurnSender } from "../loop/sender.ts"
 import { runStep, type StepUsage } from "../loop/step.ts"
 import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from "../loop/turn.ts"
 import type { EnvSource } from "../manifest/env.ts"
@@ -224,6 +224,12 @@ export interface AgentSendOptions {
      * channel turn and an operator's own API call all rely on.
      */
     readonly from?: TurnSender
+    /**
+     * Who this turn acts for, when the surface knows better than `from` can say: a channel passes the
+     * peer it authenticated. Absent, it is derived from `from` (`participantOf`). In-process callers
+     * only; the HTTP surface sets `from`, after a bound key has had its say.
+     */
+    readonly participant?: ActingParticipant
     /**
      * Tools for this turn only, beside whatever a skill activates.
      *
@@ -828,6 +834,7 @@ export class Agent {
         const remembered = await this.#recall(input, sessionKey, history)
 
         const meter = this.#meter(sessionKey, turnId, options.from?.id)
+        const participant = options.participant ?? participantOf(options.from)
         const result = await runTurn({
             agentId: this.id,
             meter,
@@ -892,6 +899,7 @@ export class Agent {
             bus: this.#bus,
             source,
             ...(options.from === undefined ? {} : { from: options.from }),
+            ...(participant === null ? {} : { participant }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         })

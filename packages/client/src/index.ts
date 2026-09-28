@@ -741,6 +741,8 @@ export interface KeyScopeLike {
     /** A session-key prefix; a trailing `*` is accepted and ignored. */
     readonly sessions?: string
     readonly can?: readonly ("read" | "chat" | "write" | "admin")[]
+    /** The one participant this key speaks for: every turn it starts acts for them. */
+    readonly participant?: string
 }
 
 /** A credential as a listing shows it. Never the secret — no route returns one twice. */

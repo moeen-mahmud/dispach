@@ -495,7 +495,10 @@ function toKeyScope(raw: string | null): KeyScope | undefined {
         const scope = parsed as KeyScope
         // Every field optional, so an empty object is a legitimate "scoped to nothing in
         // particular" — which is an unscoped key by another name and is reported as one.
-        return scope.agents === undefined && scope.sessions === undefined && scope.can === undefined
+        return scope.agents === undefined &&
+            scope.sessions === undefined &&
+            scope.can === undefined &&
+            scope.participant === undefined
             ? undefined
             : scope
     } catch {

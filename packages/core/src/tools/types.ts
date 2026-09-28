@@ -13,6 +13,7 @@
  */
 
 import type { ConfigError, ErrorDetail } from "../errors.ts"
+import type { ActingParticipant } from "../loop/sender.ts"
 import type { Trust } from "./trust.ts"
 
 export type JsonType = "string" | "number" | "integer" | "boolean" | "array" | "object"
@@ -125,6 +126,15 @@ export interface ToolContext {
      */
     readonly deadlineMs: number
     readonly now: () => Date
+    /**
+     * Who this turn acts for, stamped by the runtime from the surface the turn arrived through, or
+     * `null` for a schedule, a peer agent or the operator. Never from model output. An HTTP tool that
+     * calls an embedder forwards it so the embedder can authorise the person, not only the agent.
+     * Optional so a plugin's own test fixture keeps compiling; absent reads as `null`. The runtime
+     * always sets it, and `acting-participant.test.ts` reads it from a real turn's tool call, because
+     * a field set in one layer and dropped by the next has cost this repo six debugging rounds.
+     */
+    readonly actingParticipant?: ActingParticipant | null
     /**
      * Where a durable note goes, when a workspace declares somewhere for it.
      *

@@ -322,6 +322,7 @@ export function toInbound(message: TelegramMessage, text: string): RawInbound {
         // look like one replayed update.
         providerMessageId: `${message.chat.id}:${message.message_id}`,
         peerId: String(message.chat.id),
+        ...(message.from === undefined ? {} : { senderId: String(message.from.id) }),
         ...(username === undefined ? {} : { senderHandle: `@${username}` }),
         ...(name === "" ? {} : { senderName: name }),
         ...(message.message_thread_id === undefined

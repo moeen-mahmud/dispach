@@ -92,3 +92,31 @@ export function frameSenderInput(input: string, from: TurnSender | undefined): s
     const named = from.name === undefined ? "" : `${from.name}\n`
     return wrapUntrusted(senderLabel(from), `${named}${input}`)
 }
+
+/**
+ * Who a turn acts for, as a tool sees it: the person whose permission an embedder intersects with
+ * the agent's (doc 16 R7).
+ *
+ * **Stamped by the runtime, never read from the model.** It comes from the surface the turn arrived
+ * through: an API sender, or the peer a channel authenticated. Nothing the model writes reaches it,
+ * so an agent told to "act as B" still calls its tools as whoever sent the message. A key bound to
+ * a participant (`KeyScope.participant`) is what stops an API caller claiming someone else.
+ *
+ * `null` when the turn acts for nobody in particular: a schedule, a peer agent, the operator's own
+ * token with no `from`. An embedder tells those apart from a person by the absence, which is why it
+ * is `null` rather than a stand-in value.
+ */
+export interface ActingParticipant {
+    /** The caller's id (`user:018f…`) or `<channel>:<peerId>` (`telegram:12345678`). Opaque here. */
+    readonly id: string
+    /** Decoration for a log line; never an identity. */
+    readonly name?: string
+    /** Which surface vouched for `id`. */
+    readonly via: "api" | "channel"
+}
+
+/** A user sender acts for themselves; a peer agent acts for nobody, whatever it claims. */
+export function participantOf(from: TurnSender | undefined): ActingParticipant | null {
+    if (from === undefined || from.kind !== "user") return null
+    return { id: from.id, ...(from.name === undefined ? {} : { name: from.name }), via: "api" }
+}

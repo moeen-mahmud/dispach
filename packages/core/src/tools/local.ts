@@ -401,6 +401,7 @@ export function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
         signal: overrides.signal ?? new AbortController().signal,
         deadlineMs: overrides.deadlineMs ?? 120_000,
         now: overrides.now ?? (() => new Date()),
+        actingParticipant: overrides.actingParticipant ?? null,
         ...(overrides.writeTarget === undefined ? {} : { writeTarget: overrides.writeTarget }),
         // Listed explicitly, and it was dropped once by being absent from this literal — the fourth
         // time that has happened in this repo (`apiKeyEnv`, `ChatMessage.toolCalls`,

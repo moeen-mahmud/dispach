@@ -38,6 +38,13 @@ export interface RawInbound {
      */
     readonly senderHandle?: string
     readonly senderName?: string
+    /**
+     * The provider's id for the *person*, when it differs from the conversation's: in a Telegram
+     * group `peerId` is the group and this is the member who wrote. It becomes the turn's acting
+     * participant (`telegram:<senderId>`), which an embedder authorises a tool call against — and a
+     * group is not somebody whose permissions exist. Absent means `peerId` already is the person.
+     */
+    readonly senderId?: string
     /** Thread, topic, or forum sub-id. Keeps a forum topic from sharing one session with its group. */
     readonly thread?: string
     readonly text: string

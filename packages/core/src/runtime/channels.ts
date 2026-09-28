@@ -23,6 +23,7 @@ import type {
     ChannelInput,
     ChannelStatus,
     ChannelTransport,
+    InboundMessage,
     IssuedChannelInput,
     RawInbound,
     WebhookDelivery,
@@ -518,7 +519,7 @@ export class ChannelHub {
     async #runTurn(
         bound: Bound,
         transport: ChannelTransport,
-        message: { sessionKey: string; peerId: string; text: string; thread?: string },
+        message: InboundMessage,
     ): Promise<void> {
         const agentId = bound.agent.id
         const stopTyping = this.#startTyping(transport, message.peerId, message.thread)
@@ -527,6 +528,13 @@ export class ChannelHub {
             const result = await bound.agent.send(message.text, {
                 sessionKey: message.sessionKey,
                 source: transport.id,
+                // The person the channel authenticated, never the conversation: in a group the peer
+                // is the group. Keyed by channel *type* so an embedder maps one namespace per provider.
+                participant: {
+                    id: `${message.channelType}:${message.senderId ?? message.peerId}`,
+                    ...(message.senderName === undefined ? {} : { name: message.senderName }),
+                    via: "channel",
+                },
             })
             stopTyping()
 

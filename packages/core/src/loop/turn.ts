@@ -41,7 +41,13 @@ import type { OnMutate } from "../tools/trust.ts"
 import type { DisplacedArtifact, Tool, ToolResult, WorkspaceWriteTarget } from "../tools/types.ts"
 import { newStepId, newTurnId } from "./ids.ts"
 import { allowFor, otherPhases, type PhaseMap } from "./phases.ts"
-import { frameSenderInput, senderLabel, type TurnSender, trustOfSender } from "./sender.ts"
+import {
+    type ActingParticipant,
+    frameSenderInput,
+    senderLabel,
+    type TurnSender,
+    trustOfSender,
+} from "./sender.ts"
 import { runStep, type StepUsage } from "./step.ts"
 
 export interface TurnLimits {
@@ -215,6 +221,8 @@ export interface TurnInput {
      * no sender; a peer agent reaching the API has both.
      */
     readonly from?: TurnSender
+    /** Who the turn acts for, handed to every tool as `ToolContext.actingParticipant`. Absent: nobody. */
+    readonly participant?: ActingParticipant
     /** Caller's cancellation. A disconnect must never be wired to this. */
     readonly signal?: AbortSignal
     readonly turnId?: string
@@ -1171,6 +1179,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                               // the deadline actually in force. Seeded here so the shape is complete.
                               deadlineMs: input.limits.toolTimeoutMs,
                               now: tools.now ?? (() => new Date()),
+                              actingParticipant: input.participant ?? null,
                           },
                           bus: input.bus,
                           eventContext: stepContext,

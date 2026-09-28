@@ -410,6 +410,13 @@ export interface KeyScope {
     readonly sessions?: string
     /** Absent means all four. See `Capability`. */
     readonly can?: readonly Capability[]
+    /**
+     * The one participant this key speaks for (doc 16 R7). A member's front end holds a key bound to
+     * that member, so a turn it starts acts for them and no one else: a `from` naming anybody else
+     * is refused, and an absent one is filled in. Absent means the key may name any sender, which is
+     * what an embedder's own backend holds.
+     */
+    readonly participant?: string
 }
 
 export interface OperatorKeyRecord {

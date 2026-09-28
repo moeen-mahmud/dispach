@@ -99,7 +99,9 @@ export {
     phasesFor,
 } from "./loop/phases.ts"
 export {
+    type ActingParticipant,
     frameSenderInput,
+    participantOf,
     SENDER_KINDS,
     type SenderKind,
     senderLabel,

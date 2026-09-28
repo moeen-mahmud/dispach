@@ -484,6 +484,14 @@ interface LocalTool {
 
 In-process functions. Same catalogue, same budget, same phase rules as provider tools.
 
+**`ctx.actingParticipant`** is who the turn acts for: `{ id, name?, via: "api" | "channel" }`, or
+`null` for a schedule, a peer agent, a delegation or the operator. Every tool receives it, local and
+provider alike. The runtime stamps it from the surface the turn arrived through; nothing the model
+writes reaches it. A tool that calls an embedder's API forwards it (a header, say) so the embedder
+can authorise the person as well as the agent. Optional in the type so a plugin's own test fixture
+keeps compiling, and absent reads as `null`. `04-SPEC-WIRE.md` has the table of which turn gets
+what, and how a key is bound to a participant.
+
 ---
 
 ## Middleware

@@ -14,6 +14,11 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
 - `model.result` carries `firstTokenMs`.
 
+### Acting participant
+
+- Every tool receives `ctx.actingParticipant`: who the turn acts for, from the API sender or the channel's sender, never from the model. `null` for schedules, peer agents and the operator.
+- `POST /v1/keys {"scope": {"participant"}}`: a key that speaks only as that participant. A `from` naming anyone else is `403 sender_not_bound_participant`; an omitted one is filled in.
+
 ### Kubernetes
 
 - `docs/17-KUBERNETES.md` and `examples/kubernetes/silo.yaml`: storage split, read-only root, probes, SIGTERM, egress list.
@@ -45,6 +50,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - A webhook whose receiver does not resolve for a moment (restarting, a DNS blip) is retried, not dropped.
 - In the container, a refusal thrown by a bundled package keeps its own code and hint: a public bind with no token said every port was taken.
 - Bedrock: the example model ids exist, and a new account's refusals name the use-case form or account verification.
+- A bad `scope.*` field on `POST /v1/keys` returns its own error code, not `request_body_invalid`.
 
 ### Control plane (new, `packages/control`, FSL-1.1)
 

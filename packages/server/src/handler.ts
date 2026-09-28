@@ -73,6 +73,7 @@ import {
     reachesAgent,
     reachesSession,
     scopeFilter,
+    senderFor,
 } from "./principal.ts"
 import { claimSpent, fail, forbidden } from "./respond.ts"
 import { Router } from "./router.ts"
@@ -1323,8 +1324,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const deliver = parseDeliver(input.deliver)
                 if (deliver.kind === "error") return fail(deliver.error, 400)
 
-                const from = parseFrom(input.from)
-                if (from.kind === "error") return fail(from.error, 400)
+                const parsedFrom = parseFrom(input.from)
+                if (parsedFrom.kind === "error") return fail(parsedFrom.error, 400)
+                const from = senderFor(context.principal, parsedFrom.from)
+                if (!from.ok) return fail(from.error, 403)
 
                 const idempotency = parseIdempotencyKey(context.request)
                 if (idempotency.kind === "error") return fail(idempotency.error, 400)
@@ -1737,6 +1740,9 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                           ...(scope.agents === undefined ? {} : { agents: scope.agents }),
                           ...(scope.sessions === undefined ? {} : { sessions: scope.sessions }),
                           ...(scope.can === undefined ? {} : { can: scope.can }),
+                          ...(scope.participant === undefined
+                              ? {}
+                              : { participant: scope.participant }),
                       }
 
             const secret = newKeySecret()
