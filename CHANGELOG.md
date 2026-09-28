@@ -14,6 +14,12 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
 - `model.result` carries `firstTokenMs`.
 
+### Kubernetes
+
+- `docs/17-KUBERNETES.md` and `examples/kubernetes/silo.yaml`: storage split, read-only root, probes, SIGTERM, egress list.
+- The store refuses to open on NFS or EFS (`store_on_network_filesystem`); `DISPACH_ALLOW_NETWORK_STORE=1` overrides.
+- `DISPACH_DRAIN_MS`: a stop waits that long for running turns, and `/v1/ready` answers `draining`. Unset, a stop does not wait.
+
 ### Models
 
 - `model.<role>.api` selects a transport (default `chat-completions`); `options` carries its settings. `baseUrl` is required only for chat-completions.
@@ -37,6 +43,8 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `status` in a container no longer says "running in a terminal".
 - A flag with a long placeholder in `--help` no longer runs into its description.
 - A webhook whose receiver does not resolve for a moment (restarting, a DNS blip) is retried, not dropped.
+- In the container, a refusal thrown by a bundled package keeps its own code and hint: a public bind with no token said every port was taken.
+- Bedrock: the example model ids exist, and a new account's refusals name the use-case form or account verification.
 
 ### Control plane (new, `packages/control`, FSL-1.1)
 

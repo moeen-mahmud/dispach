@@ -624,6 +624,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "/v1/ready",
         () => {
             if (runtime.ready) return json({ status: "ready", agents: runtime.list().length })
+            // A drain is the way down, not the way up: `"starting"` would read as a boot to wait for.
+            if (runtime.draining) {
+                return json({ status: "draining", agents: runtime.list().length }, 503)
+            }
             // `"starting"`, not `"stopped"`. A runtime that has not reached readiness is on its way up,
             // and "stopped" is what an orchestrator reads as "give up on this container". The
             // `pending: []` this used to carry was a promise nothing filled: agents load inside

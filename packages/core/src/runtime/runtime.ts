@@ -36,6 +36,7 @@ import { agentPluginSupply, type BuiltInPlugins, type LoadedPlugin } from "../pl
 import { type Middleware, notify } from "../plugins/middleware.ts"
 import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams, type TurnStreamsOptions } from "../store/buffer.ts"
+import { networkStoreRefusal } from "../store/filesystem.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
 import type { DeliveryBacklog, LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
 import { expandTeams } from "../team/expand.ts"
@@ -325,6 +326,7 @@ export class Runtime {
     /** A supervisor's declared members, by supervisor id. Empty for an agent with no team. */
     #teams = new Map<string, readonly TeamMemberConfig[]>()
     #stopped = false
+    #draining = false
     /** False when the caller passed an already-open store, which stays theirs to close. */
     #ownsStore: boolean
     /** Agent ids this runtime holds a lease for — released on stop, refreshed while alive. */
@@ -796,7 +798,32 @@ export class Runtime {
     }
 
     get ready(): boolean {
-        return !this.#stopped
+        return !this.#stopped && !this.#draining
+    }
+
+    /** True from `drain()` until the process stops: `/v1/ready` answers 503 so traffic moves away. */
+    get draining(): boolean {
+        return this.#draining
+    }
+
+    /**
+     * Wait up to `ms` for running turns to finish, before `stop()` — a pod's SIGTERM, where the
+     * orchestrator allows a grace period and SIGKILLs after it. New turns are not refused: a message
+     * a channel already received is better answered than dropped, and the wait is bounded either
+     * way. Resolves with the turns still running at the deadline, which `stop()` then leaves for the
+     * next boot to reap, exactly as without a drain.
+     */
+    async drain(ms: number): Promise<number> {
+        this.#draining = true
+        const running = () => this.all().reduce((sum, agent) => sum + agent.inFlight, 0)
+        const deadline = Date.now() + ms
+        // ponytail: 100 ms poll; an inFlight change event is the upgrade if a drain ever needs precision.
+        while (running() > 0 && Date.now() < deadline) {
+            await new Promise((resolve) =>
+                setTimeout(resolve, Math.min(100, deadline - Date.now())),
+            )
+        }
+        return running()
     }
 
     agent(id: string): Agent {
@@ -2115,6 +2142,8 @@ async function openStore(options: RuntimeOptions): Promise<{ store: Store; ownsS
                 cause,
             })
         }
+        const refusal = networkStoreRefusal(path, options.env ?? process.env)
+        if (refusal !== undefined) throw refusal
     }
 
     return { store: await SqliteStore.open({ path }), ownsStore: true }

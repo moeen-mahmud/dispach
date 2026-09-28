@@ -16,7 +16,7 @@
  */
 
 import { basename, dirname, join, resolve } from "node:path"
-import { BRAND, HarnessError, VERSION } from "@dispach/core"
+import { BRAND, HarnessError, isHarnessError, VERSION } from "@dispach/core"
 import { installRefs } from "#browse"
 import { announce } from "#lib/bootstrap"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
@@ -147,7 +147,7 @@ async function runInit(options: InitOptions): Promise<InitResult> {
         // The files stay on disk — they are inspectable evidence — but the exit is a failure and
         // the loader's own report is printed verbatim. A generated agent that cannot load is this
         // command's bug, and hiding it behind exit 0 would be rule 8's exact shape.
-        if (error instanceof HarnessError) {
+        if (isHarnessError(error)) {
             process.stderr.write(
                 `init wrote ${files.length} files to ${targetDir}, but the result does not load:\n${error.format()}\n`,
             )

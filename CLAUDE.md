@@ -1260,6 +1260,13 @@ Never claim a performance property without a number in `evals/` and a script to 
   Telegram username is `[A-Za-z0-9_]{5,32}`, so `@ada-lovelace` cannot exist and matching nobody is
   the only possible outcome. Everything downstream was correct behaviour applied to a wrong fact,
   which is the hardest kind of bug to see: nothing failed anywhere.
+- **A volume mounted inside another makes the container runtime create the missing parent as root.**
+  The workspaces volume at `~/.dispach/agents` inside the home volume left `~/.dispach` root-owned 0755,
+  where `fsGroup` does not reach, so uid 1000 could not create `store.db` and the pod crash-looped with
+  `store_open_failed`, whose hint talks about Node versions. Docker never shows it, because a named
+  volume is seeded from the image's own directories and a Kubernetes volume is not. Found only by
+  applying the example to a real cluster (k3s in Docker); the example's `layout` init container
+  creates the directory first, as the same non-root user.
 - **In a container every runtime is pid 1, so "is the holder's pid alive" answers about itself.** A
   container killed rather than stopped left a lease saying pid 1, and its replacement refused to
   serve for 45 minutes because pid 1 was alive. A holder with *our* pid is dead unless it is a
@@ -2250,7 +2257,9 @@ Never claim a performance property without a number in `evals/` and a script to 
   rule is not "add a binary test": it is **`instanceof` only where the throw and the catch are in one
   package**, `isHarnessError` (a `Symbol.for` mark, identical across copies by construction)
   everywhere else, and a boundaries test in `packages/server` refusing `instanceof HarnessError`
-  outright because every `catch` there is catching a foreign error. The mark is set in the constructor
+  outright because every `catch` there is catching a foreign error. The CLI has the same guard since
+  26d, after the image printed a public-bind refusal (`server_public_without_token`, whose hint names the
+  token) as `server_bind_failed`, claiming every port in the range was taken. The mark is set in the constructor
   rather than declared as a field: a symbol-keyed field reaches the `.d.ts` and makes the class
   *nominal*, at which point `tsc` reports the same duplication — a real finding, and the wrong place
   to spend it. The guard that works without a bundler imports the built `dist` beside the source, which

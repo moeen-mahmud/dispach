@@ -170,7 +170,8 @@ so it is refused with a hint naming the reason. `OPTIONS` on those paths does no
 
 ```
 GET /v1/health   → 200 { status, version, uptimeMs, agents: number }
-GET /v1/ready    → 200 when every agent has loaded; 503 { status: "starting" } otherwise
+GET /v1/ready    → 200 when every agent has loaded; 503 { status: "starting" } otherwise, and
+                   503 { status: "draining" } once a SIGTERM drain has begun (`DISPACH_DRAIN_MS`)
 ```
 
 ```

@@ -18,7 +18,7 @@
  * asks — and with exactly one agent it does not, because there is nothing to ask.
  */
 
-import { BRAND, HarnessError, VERSION } from "@dispach/core"
+import { BRAND, isHarnessError, VERSION } from "@dispach/core"
 import {
     type BrowseInput,
     type BrowseRow,
@@ -86,7 +86,7 @@ export async function fetchCatalogue(
             say(`${spec.name}: ${result.skills} skills`)
         } catch (error) {
             say(
-                `${spec.name} could not be fetched: ${error instanceof HarnessError ? error.message : String(error)}`,
+                `${spec.name} could not be fetched: ${isHarnessError(error) ? error.message : String(error)}`,
             )
         }
     }

@@ -36,7 +36,7 @@ import { rmSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
 import {
     bm25Selector,
-    HarnessError,
+    isHarnessError,
     loadManifest,
     loadSkills,
     resolveCapabilities,
@@ -105,7 +105,7 @@ export async function findAndInstallSkill(options: FindSkillOptions): Promise<vo
                 })
             } catch (error) {
                 unreachable.push(
-                    `${spec.name} — ${error instanceof HarnessError ? error.message : String(error)}`,
+                    `${spec.name} — ${isHarnessError(error) ? error.message : String(error)}`,
                 )
                 continue
             }
@@ -228,7 +228,7 @@ function brokenBy(
         })
         return undefined
     } catch (error) {
-        return error instanceof HarnessError ? error.message : String(error)
+        return isHarnessError(error) ? error.message : String(error)
     }
 }
 

@@ -14,7 +14,7 @@
 import {
     checkAuthoring,
     type ErrorDetail,
-    HarnessError,
+    isHarnessError,
     loadManifest,
     resolveCapabilities,
     resolveWorkspace,
@@ -115,7 +115,7 @@ export function workspaceCommand(options: WorkspaceOptions): number {
 
         return options.strict === true ? EXIT_FAILURE : EXIT_OK
     } catch (error) {
-        if (options.json === true && error instanceof HarnessError) {
+        if (options.json === true && isHarnessError(error)) {
             process.stdout.write(
                 `${JSON.stringify({ ok: false, error: error.toDetail(), details: error.details }, null, 2)}\n`,
             )

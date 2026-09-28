@@ -1,0 +1,128 @@
+# One silo on Kubernetes: a StatefulSet of one, its Service, and a default-deny NetworkPolicy.
+# docs/17-KUBERNETES.md explains each choice. Replace the <…> placeholders; everything else is the
+# stock image's defaults. Shaped for EKS (EBS + EFS + Pod Identity), and nothing else is EKS-specific.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: silo
+  # EKS Pod Identity: associate an IAM role with this service account
+  # (aws eks create-pod-identity-association). The role grants
+  # bedrock:InvokeModelWithResponseStream on the models the agents use.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: silo
+spec:
+  selector: { app: silo }
+  ports:
+    - { name: http, port: 7420, targetPort: 7420 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: silo
+spec:
+  replicas: 1 # never more: one process, one SQLite file
+  serviceName: silo
+  selector:
+    matchLabels: { app: silo }
+  template:
+    metadata:
+      labels: { app: silo }
+    spec:
+      serviceAccountName: silo
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+      # Mounting the workspaces volume *inside* the home volume makes the container runtime create
+      # the missing parent, ~/.dispach, owned by root with no group write, where fsGroup does not
+      # reach. uid 1000 then cannot create store.db and the pod crash-loops (store_open_failed).
+      # Creating the directory first, as the same non-root user, is enough: it survives on the
+      # volume, so this is a no-op on every start after the first.
+      initContainers:
+        - name: layout
+          image: ghcr.io/moeen-mahmud/dispach:<version>
+          command: [mkdir, -p, /home/dispach/.dispach/agents]
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: home, mountPath: /home/dispach }
+      containers:
+        - name: silo
+          image: ghcr.io/moeen-mahmud/dispach:<version>
+          ports:
+            - { name: http, containerPort: 7420 }
+          env:
+            - name: DISPACH_API_TOKEN
+              valueFrom: { secretKeyRef: { name: silo-token, key: token } }
+            - name: DISPACH_DRAIN_MS # a few seconds under terminationGracePeriodSeconds
+              value: "25000"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          livenessProbe:
+            httpGet: { path: /v1/health, port: http }
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /v1/ready, port: http }
+            periodSeconds: 5
+          volumeMounts:
+            - { name: home, mountPath: /home/dispach } # EBS: holds store.db
+            - { name: workspaces, mountPath: /home/dispach/.dispach/agents } # EFS: shared with the embedder
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: workspaces
+          persistentVolumeClaim: { claimName: <team>-workspaces } # an EFS-backed ReadWriteMany claim
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: home
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: gp3 # a block volume. The store refuses NFS/EFS at start
+        resources:
+          requests: { storage: 10Gi }
+---
+# Default-deny, then only what this silo's agents use (docs/17-KUBERNETES.md §6).
+# A NetworkPolicy matches IPs, not hostnames: for the AWS and SaaS hosts use the CNI's FQDN
+# policies (Cilium's toFQDNs, Calico's domain sets), or an egress proxy. The CIDR rules below are
+# the parts expressible in plain Kubernetes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: silo
+spec:
+  podSelector:
+    matchLabels: { app: silo }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: <embedder-namespace> }
+      ports:
+        - { port: 7420 }
+  egress:
+    - to: # DNS
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to: # EKS Pod Identity agent
+        - ipBlock: { cidr: 169.254.170.23/32 }
+      ports:
+        - { port: 80 }
+    - to: # HTTPS out; narrow with FQDN rules to Bedrock, Composio, Telegram…
+        # A Bedrock VPC interface endpoint has a private IP: add its subnet if you use one.
+        - ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16] }
+      ports:
+        - { port: 443 }

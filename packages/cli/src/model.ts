@@ -36,7 +36,7 @@ import {
     bearerHeaders,
     editManifest,
     endpointUrl,
-    HarnessError,
+    isHarnessError,
     loadManifest,
     modelsUrl,
     windowReport,
@@ -520,7 +520,7 @@ export async function modelCommand(options: ModelOptions): Promise<number> {
         )
         return EXIT_OK
     } catch (error) {
-        if (error instanceof HarnessError) {
+        if (isHarnessError(error)) {
             process.stderr.write(`${error.format()}\n`)
             return EXIT_FAILURE
         }

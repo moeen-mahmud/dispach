@@ -86,6 +86,7 @@ function defaultServerConfig(): ReturnType<typeof AgentManifestSchema.parse>["se
 
 export async function serveCommand(options: ServeOptions): Promise<number> {
     const env = ambientEnv(options.manifestPaths)
+    const drainMs = drainFrom(env)
 
     /**
      * What to host, and what is switched off.
@@ -497,7 +498,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         // The runtime is already up; leaving it running after a failed bind would hold the store
         // open and keep channels polling with nothing serving.
         await runtime.stop("server failed to bind")
-        if (error instanceof HarnessError) throw error
+        if (isHarnessError(error)) throw error
         const looked = attempted.length > 1 ? ` — also tried ${attempted.slice(1).join(", ")}` : ""
         throw new HarnessError({
             code: "server_bind_failed",
@@ -781,6 +782,18 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     const shutdown = async () => {
         if (stopped) return
         stopped = true
+        // Before the server closes, so a readiness probe sees `draining` and a client watching a
+        // turn's stream sees it end.
+        if (drainMs > 0 && runtime.all().some((agent) => agent.inFlight > 0)) {
+            const started = Date.now()
+            process.stdout.write(`draining — waiting up to ${drainMs} ms for running turns\n`)
+            const left = await runtime.drain(drainMs)
+            process.stdout.write(
+                left === 0
+                    ? `drained in ${Date.now() - started} ms\n`
+                    : `${left} turn(s) still running after ${drainMs} ms; the next start marks them interrupted\n`,
+            )
+        }
         await running.stop()
         await runtime.stop("interrupted")
     }
@@ -794,6 +807,26 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     // fault, and the generated service definition restarts only on a crash signal — so a non-zero
     // exit here would be read by the supervisor as "this configuration is broken, stay down".
     return EXIT_OK
+}
+
+/**
+ * `<PREFIX>DRAIN_MS`: how long a stop waits for running turns. Unset is 0, today's behaviour — a
+ * stop never waits. Refused at start when malformed, since a typo found at the first SIGTERM is a
+ * drain that silently did not happen.
+ */
+function drainFrom(env: Record<string, string | undefined>): number {
+    const name = `${BRAND.envPrefix}DRAIN_MS`
+    const raw = env[name]
+    if (raw === undefined || raw === "") return 0
+    if (!/^\d+$/.test(raw)) {
+        throw new HarnessError({
+            code: "serve_drain_invalid",
+            message: `${name} is "${raw}", which is not a number of milliseconds.`,
+            hint: `Set it to a whole number, a few seconds under the orchestrator's grace period — 25000 beside Kubernetes' default terminationGracePeriodSeconds of 30. Unset, a stop does not wait.`,
+            field: name,
+        })
+    }
+    return Number(raw)
 }
 
 /**

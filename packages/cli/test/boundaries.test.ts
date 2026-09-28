@@ -1065,3 +1065,17 @@ describe("every runtime the CLI builds gets the same model transports", () => {
         ).toBeGreaterThan(5)
     })
 })
+
+describe("a typed error keeps its code and hint across packages", () => {
+    // `instanceof HarnessError` asks which copy of core built the error, and the image holds two:
+    // the CLI's source and the dist its bundled siblings carry. Found by a container that refused
+    // a public bind without a token — `server_public_without_token`, whose hint names the token —
+    // and printed `server_bind_failed` saying every port in the range was taken. The server has
+    // the same rule in its own boundaries test; `isHarnessError` reads a mark both copies share.
+    test("no source file tests `instanceof HarnessError`", () => {
+        const offenders = FILES.filter((file) => /instanceof HarnessError\b/.test(file.text)).map(
+            (file) => file.path,
+        )
+        expect(offenders).toEqual([])
+    })
+})

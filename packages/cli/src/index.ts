@@ -20,7 +20,7 @@
  * without a command, reporting failure for the one thing that had worked.
  */
 
-import { HarnessError, VERSION } from "@dispach/core"
+import { HarnessError, isHarnessError, VERSION } from "@dispach/core"
 import { agentsCommand } from "#agents"
 import { browseCommand } from "#browse"
 import { daemonCommand } from "#daemon"
@@ -58,7 +58,7 @@ import { validateCommand } from "#validate"
 import { workspaceCommand } from "#workspace"
 
 function report(error: unknown): number {
-    if (error instanceof HarnessError) {
+    if (isHarnessError(error)) {
         // `format()` prints the code, the field, the hint, and every sub-failure — so a command line
         // with two mistakes in it reports both rather than one at a time.
         process.stderr.write(`${error.format()}\n`)
