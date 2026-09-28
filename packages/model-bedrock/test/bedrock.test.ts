@@ -21,7 +21,7 @@ import {
     toChunks,
 } from "../src/index.ts"
 
-const MODEL = "eu.anthropic.claude-sonnet-4-6-v1:0"
+const MODEL = "eu.anthropic.claude-sonnet-4-6"
 const CONFIG = { id: MODEL, api: "bedrock-converse", options: { region: "eu-west-1" } }
 
 async function* events(list: ConverseStreamOutput[]): AsyncIterable<ConverseStreamOutput> {
@@ -199,6 +199,35 @@ describe("errors", () => {
         )
         expect(noCreds.error.code).toBe("bedrock_credentials_missing")
         expect(noCreds.error.hint).toContain("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+    })
+
+    test("a new account's onboarding refusals name the onboarding step, not the model id or IAM", () => {
+        // Both messages verbatim from a live account, 2026-09-28.
+        const form = classify(
+            {
+                name: "ResourceNotFoundException",
+                message:
+                    "Model use case details have not been submitted for this account. Fill out the Anthropic use case details form before using the model.",
+                $metadata: { httpStatusCode: 404 },
+            },
+            MODEL,
+            "eu-west-1",
+            "model.main",
+        )
+        expect(form.error.hint).toContain("use-case form")
+        const verifying = classify(
+            {
+                name: "AccessDeniedException",
+                message:
+                    "Your account is currently being verified. Verification normally takes less than 2 hours.",
+                $metadata: { httpStatusCode: 403 },
+            },
+            MODEL,
+            "eu-west-2",
+            "model.main",
+        )
+        expect(verifying.error.status).toBe(403)
+        expect(verifying.error.hint).toContain("still verifying")
     })
 
     test("the transport retries before output, reports each retry, and stops on a 403 at once", async () => {

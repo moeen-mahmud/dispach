@@ -594,8 +594,8 @@ function candidateIds(modelId: string): string[] {
 }
 
 /**
- * A Bedrock id as the model name the registry knows: `eu.anthropic.claude-sonnet-4-6-v1:0` is
- * `claude-sonnet-4-6`. Strips a cross-region geography prefix, the vendor prefix and the version
+ * A Bedrock id as the model name the registry knows: `eu.anthropic.claude-sonnet-4-6` and
+ * `eu.anthropic.claude-haiku-4-5-20251001-v1:0` are `claude-sonnet-4-6` and `claude-haiku-4-5-20251001`. Strips a cross-region geography prefix, the vendor prefix and the version
  * suffix; an inference-profile ARN arrives here already cut at its last `/`. Without this every
  * Bedrock Claude id matched nothing and resolved to the conservative 8,192-token row with native
  * tools off — found by writing the first Bedrock template, which had to state its capabilities by

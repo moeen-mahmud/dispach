@@ -94,7 +94,9 @@ export function classify(
             error: new ModelError({
                 code: "model_access_denied",
                 message: `Bedrock refused ${modelId} in ${region}: ${message}`,
-                hint: 'Either the credential is invalid or expired (Bedrock says "security token … invalid"), or it is not allowed to invoke this model. For the second, check the IAM policy grants bedrock:InvokeModelWithResponseStream on the model or inference profile, and that model access is enabled in the Bedrock console for this region. An embedder that revokes credentials as a budget stop lands here on purpose, which is why this never falls back.',
+                hint: /being verified/i.test(message)
+                    ? "The AWS account is new and AWS is still verifying it, which it says takes under two hours. Nothing in the manifest or the IAM policy changes this; retry once the account is verified."
+                    : 'Either the credential is invalid or expired (Bedrock says "security token … invalid"), or it is not allowed to invoke this model. For the second, check the IAM policy grants bedrock:InvokeModelWithResponseStream on the model or inference profile, and that model access is enabled in the Bedrock console for this region. An embedder that revokes credentials as a budget stop lands here on purpose, which is why this never falls back.',
                 field,
                 status: 403,
                 cause: error,
@@ -109,7 +111,9 @@ export function classify(
             error: new ModelError({
                 code: "model_not_found",
                 message: `Bedrock has no model ${modelId} in ${region}: ${message}`,
-                hint: "Check the model id and region together: a cross-region profile id starts with its geography (eu., us., apac., global.), and a base model id needs on-demand access in that exact region.",
+                hint: /use case details/i.test(message)
+                    ? "Anthropic models on Bedrock need a one-time use-case form per AWS account: Bedrock console → Model catalog → an Anthropic model → submit the use case details. It applies about 15 minutes after submission."
+                    : "Check the model id and region together: a cross-region profile id starts with its geography (eu., us., apac., global.), and a base model id needs on-demand access in that exact region.",
                 field,
                 status: 404,
                 cause: error,

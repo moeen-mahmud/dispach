@@ -5,13 +5,13 @@ AWS Bedrock's Converse API as a model transport.
 ```yaml
 model:
   main:
-    id: eu.anthropic.claude-sonnet-4-6-v1:0   # a model id, a cross-region profile, or an ARN
+    id: eu.anthropic.claude-sonnet-4-6        # a model id, a cross-region profile, or an ARN
     api: bedrock-converse
     options:
       region: eu-west-1
       # profile: velacrew                     # a named AWS profile, optionally
     fallbacks:
-      - id: eu.anthropic.claude-haiku-4-5-v1:0
+      - id: eu.anthropic.claude-haiku-4-5-20251001-v1:0
         api: bedrock-converse
         options: { region: eu-west-1 }
 ```

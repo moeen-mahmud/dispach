@@ -4,7 +4,7 @@
  * ```yaml
  * model:
  *   main:
- *     id: eu.anthropic.claude-sonnet-4-6-v1:0     # a model id, a cross-region profile, or an ARN
+ *     id: eu.anthropic.claude-sonnet-4-6          # a model id, a cross-region profile, or an ARN
  *     api: bedrock-converse
  *     options: { region: eu-west-1 }              # and optionally profile
  * ```
