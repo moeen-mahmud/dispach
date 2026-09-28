@@ -711,7 +711,7 @@ function Workspace(props: {
                         ? `${path} saved. The manifest was re-serialised, so its comments have moved — worth a look at the diff.`
                         : undefined
                 }
-                return `${path} was written to the manifest and is not in force yet: ${result.pending?.message ?? "the agent could not be replaced"} It takes effect at the next start.`
+                return `${path} was written to the manifest and is not in force yet: ${result.pending?.message ?? "the agent could not be replaced"}`
             }),
         [write],
     )

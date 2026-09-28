@@ -196,10 +196,17 @@ export interface AgentClient {
      * Re-read the manifest by **replacing** the agent — a new instance, not a mutated one.
      *
      * `adopted` lists everything that came back, which is more than one agent when the target is a
-     * supervisor: a team loads from one manifest as one unit. Answers 409 while a turn is running
-     * rather than aborting it, so a caller applying a config change retries instead of assuming.
+     * supervisor: a team loads from one manifest as one unit. While a turn is running the reload is
+     * `pending` (202): the running turns finish on the old settings and the swap follows, announced
+     * by `agent.reloaded`; `adopted` is then empty.
      */
-    reload(): Promise<{ readonly id: string; readonly adopted: readonly string[] }>
+    reload(): Promise<{
+        readonly id: string
+        readonly adopted: readonly string[]
+        readonly status?: "loaded" | "pending"
+        readonly running?: number
+        readonly holdAfterMs?: number
+    }>
     /** What this agent cost, from the per-call meter. */
     usage(options?: UsageOptions): Promise<UsageReportLike & { readonly id: string }>
     /**
@@ -1042,7 +1049,13 @@ export function createClient(options: ClientOptions): DispachClient {
                 ),
 
             reload: () =>
-                json<{ id: string; adopted: readonly string[] }>("POST", at("/reload"), {
+                json<{
+                    id: string
+                    adopted: readonly string[]
+                    status?: "loaded" | "pending"
+                    running?: number
+                    holdAfterMs?: number
+                }>("POST", at("/reload"), {
                     body: {},
                 }),
 

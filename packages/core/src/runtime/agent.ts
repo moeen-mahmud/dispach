@@ -252,6 +252,15 @@ export interface AdmittedTurn {
 
 export type TurnAdmission = AdmittedTurn | { readonly ok: false; readonly error: GovernorError }
 
+/**
+ * An admission taken while a reload was holding new turns: a promise of the instance that will run
+ * the turn, instead of a slot on this one. Module-private, so nothing outside `Agent` can mint one.
+ *
+ * It does **not** count against the old instance — counting it would stop the old instance ever
+ * reaching idle, which is the moment the swap waits for, and the held turn would wait on itself.
+ */
+const DEFERRED = new WeakMap<AdmittedTurn, Promise<Agent>>()
+
 export interface AgentDescription {
     readonly id: string
     readonly name: string
@@ -712,12 +721,65 @@ export class Agent {
             if (!admission.ok) throw admission.error
             return this.send(input, { ...options, admission })
         }
+        const successor = DEFERRED.get(options.admission)
+        if (successor !== undefined) {
+            // Held by a reload: the turn runs on whichever instance comes out of it, admitted there
+            // under that instance's limits. Every surface holding this object reaches it this way.
+            options.admission.consume()
+            const { admission: _held, ...rest } = options
+            return (await successor).send(input, rest)
+        }
         options.admission.consume()
         try {
             return await this.#send(input, options)
         } finally {
-            this.#inFlight -= 1
+            this.#settle()
         }
+    }
+
+    /**
+     * Mark this instance as being replaced (`Runtime.reload`). Turns already running finish here;
+     * `onIdle` fires the moment none is left. New turns still run here until `holdNewTurns`.
+     */
+    retireInto(successor: Promise<Agent>, onIdle: () => void): void {
+        this.#successor = successor
+        this.#onIdle = onIdle
+    }
+
+    /** From now on a new turn waits for the successor instead of running on this instance. */
+    holdNewTurns(): void {
+        if (this.#successor !== undefined) this.#holding = true
+    }
+
+    /** The reload did not happen: this instance goes on serving as it was. */
+    cancelRetire(): void {
+        this.#successor = undefined
+        this.#onIdle = undefined
+        this.#holding = false
+    }
+
+    #successor: Promise<Agent> | undefined
+    #onIdle: (() => void) | undefined
+    #holding = false
+
+    #settle(): void {
+        this.#inFlight -= 1
+        if (this.#inFlight === 0) this.#onIdle?.()
+    }
+
+    /** New turns this instance handed to a reload rather than running, for `agent.reloaded`. */
+    get heldTurns(): number {
+        return this.#heldTurns
+    }
+    #heldTurns = 0
+
+    #deferred(): TurnAdmission | undefined {
+        const successor = this.#holding ? this.#successor : undefined
+        if (successor === undefined) return undefined
+        this.#heldTurns += 1
+        const ticket: AdmittedTurn = { ok: true, release: () => {}, consume: () => {} }
+        DEFERRED.set(ticket, successor)
+        return ticket
     }
 
     /**
@@ -734,6 +796,8 @@ export class Agent {
      * accepted by checking at turn start.
      */
     async admit(): Promise<TurnAdmission> {
+        const held = this.#deferred()
+        if (held !== undefined) return held
         const quick = this.admitNow()
         if (quick !== undefined) return quick
         // A budget is configured: take the slot first, synchronously, then read the meter.
@@ -764,6 +828,8 @@ export class Agent {
      * as the frame that asked, and a client that stops a turn on that frame relies on it.
      */
     admitNow(): TurnAdmission | undefined {
+        const held = this.#deferred()
+        if (held !== undefined) return held
         if (this.manifest.limits.tokens !== undefined) return undefined
         return this.#takeSlot()
     }
@@ -780,7 +846,7 @@ export class Agent {
             release: () => {
                 if (settled) return
                 settled = true
-                this.#inFlight -= 1
+                this.#settle()
             },
             // Consuming hands the slot to the running turn, whose `finally` gives it back.
             consume: () => {

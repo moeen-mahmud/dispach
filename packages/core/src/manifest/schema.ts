@@ -667,6 +667,13 @@ export const LimitsSchema = z
          */
         maxConcurrentTurns: z.number().int().positive().optional(),
         /**
+         * How long a pending reload lets new turns keep running on the old configuration, in ms,
+         * before they wait for the swap instead. Turns already running always finish on the old one;
+         * this bound is what stops a constantly busy agent postponing a reload forever. 0 holds new
+         * turns at once.
+         */
+        reloadHoldMs: z.number().int().nonnegative().default(30_000),
+        /**
          * Model tokens (prompt + output, every call the meter records) this agent may spend in a
          * rolling window. Checked when a turn **starts**: a turn under the budget runs to its end, so
          * the overshoot is bounded by one turn and stopping mid-work is never the outcome. Absent is

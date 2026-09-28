@@ -70,6 +70,25 @@ export type AgentSource = string | Record<string, unknown>
  */
 export type DisposeReason = "requested" | "replaced" | "stopped"
 
+/** What `Runtime.reload` did: applied now, or waiting for the running turns. */
+export type ReloadOutcome =
+    | { readonly status: "loaded"; readonly adopted: readonly Agent[] }
+    | { readonly status: "pending"; readonly running: number; readonly holdAfterMs: number }
+
+interface PendingReload {
+    readonly outcome: () => ReloadOutcome
+    /** Fail every held turn: the runtime is stopping, or the agent was disposed under the reload. */
+    readonly abandon: (error: HarnessError) => void
+}
+
+function agentNotHosted(id: string): HarnessError {
+    return new HarnessError({
+        code: "reload_agent_gone",
+        message: `The reload of "${id}" did not bring it back, so a turn that waited for it has nothing to run on.`,
+        hint: "The new manifest no longer declares this agent (a team member removed, or the id changed). Send the message again to the agent that replaced it.",
+    })
+}
+
 /**
  * Where sessions live.
  *
@@ -1220,9 +1239,154 @@ export class Runtime {
                     : `This runtime hosts: ${[...this.#agents.keys()].join(", ") || "(none)"}.`,
             })
         }
+        // Loaded in full before the old instance goes, so a manifest broken on disk refuses the
+        // reload and leaves the agent serving. It used to dispose first, and a typo took the agent
+        // down with nothing left to answer.
+        await this.#trial(source)
         await this.dispose(agentId, "replaced")
         return await this.adopt(source)
     }
+
+    /**
+     * Everything `adopt` would check before hosting — manifest, plugins, the tool registry — run and
+     * thrown away. On a bus of its own, so a trial's `plugin.loaded` and warnings are not reported
+     * as if they happened, and with every provider it built stopped again.
+     */
+    async #trial(source: AgentSource): Promise<void> {
+        const prepared = await prepareAgents({
+            sources: [source],
+            options: this.#options,
+            bus: new EventBus({ runtimeId: this.runtimeId }),
+            mark: (_name, work) => work(),
+            markAsync: async (_name, work) => await work(),
+        })
+        try {
+            for (const entry of prepared.loaded) {
+                const built = await buildRegistry(entry, prepared.supplyFor(entry.manifest.id))
+                for (const provider of built.providers) await provider.stop?.()
+            }
+        } finally {
+            for (const off of prepared.unwatch.values()) off()
+        }
+    }
+
+    /**
+     * Apply an agent's manifest again without refusing a running turn (doc 16 R4, decision 14.23).
+     *
+     * Idle: the same as `replace`. Busy: the reload is **pending** — the running turns finish on the
+     * configuration they started with, and the swap happens the moment none is left. New turns keep
+     * running on the old configuration for `limits.reloadHoldMs`, then wait for the swap and start on
+     * the new one, so a constantly busy agent cannot postpone a reload forever. A held turn reaches
+     * the new instance through the admission it was given, whichever surface holds it.
+     *
+     * A second reload while one is pending joins it: the swap reads the manifest as it is then.
+     */
+    async reload(agentId: string): Promise<ReloadOutcome> {
+        const source = this.#sources.get(agentId)
+        if (source === undefined) return { status: "loaded", adopted: await this.replace(agentId) }
+        const already = this.#reloads.get(agentId)
+        if (already !== undefined) return already.outcome()
+
+        const ids = [agentId, ...(this.#teams.get(agentId) ?? []).map((member) => member.id)]
+        const agents = ids.flatMap((id) => {
+            const agent = this.#agents.get(id)
+            return agent === undefined ? [] : [agent]
+        })
+        const running = () => agents.reduce((sum, agent) => sum + agent.inFlight, 0)
+        if (running() === 0) return { status: "loaded", adopted: await this.replace(agentId) }
+
+        // Refused now rather than after the wait: the person asking should hear about a typo while
+        // they are still looking at it, not when the last turn ends.
+        await this.#trial(source)
+
+        const holdMs = this.#agents.get(agentId)?.manifest.limits.reloadHoldMs ?? 30_000
+        const startedAt = Date.now()
+        const settle = new Map<
+            string,
+            { resolve: (agent: Agent) => void; reject: (error: unknown) => void }
+        >()
+        for (const agent of agents) {
+            const successor = new Promise<Agent>((resolve, reject) => {
+                settle.set(agent.id, { resolve, reject })
+            })
+            // A held turn that is never resolved is a hang, so a rejection is always observed.
+            successor.catch(() => {})
+            agent.retireInto(successor, () => {
+                if (running() === 0) void complete()
+            })
+        }
+        const hold = () => {
+            for (const agent of agents) agent.holdNewTurns()
+        }
+        const timer = holdMs === 0 ? undefined : setTimeout(hold, holdMs)
+        timer?.unref?.()
+        if (holdMs === 0) hold()
+
+        const pending: PendingReload = {
+            outcome: () => ({ status: "pending", running: running(), holdAfterMs: holdMs }),
+            abandon: (error) => {
+                if (timer !== undefined) clearTimeout(timer)
+                this.#reloads.delete(agentId)
+                for (const entry of settle.values()) entry.reject(error)
+            },
+        }
+        this.#reloads.set(agentId, pending)
+
+        const complete = async (): Promise<void> => {
+            if (this.#reloads.get(agentId) !== pending) return
+            this.#reloads.delete(agentId)
+            if (timer !== undefined) clearTimeout(timer)
+            // Nothing new may start on the old instance between here and the dispose, or the
+            // dispose would refuse the turn it just admitted.
+            hold()
+            const held = agents.reduce((sum, agent) => sum + agent.heldTurns, 0)
+            const waitedMs = Date.now() - startedAt
+            try {
+                const adopted = await this.replace(agentId)
+                for (const [id, entry] of settle) {
+                    const next = this.#agents.get(id)
+                    if (next === undefined) entry.reject(agentNotHosted(id))
+                    else entry.resolve(next)
+                }
+                this.bus.emit(
+                    "agent.reloaded",
+                    {
+                        ok: true,
+                        adopted: adopted.map((agent) => agent.id),
+                        waitedMs,
+                        held,
+                        disposed: true,
+                    },
+                    { agentId },
+                )
+            } catch (error) {
+                const detail = isHarnessError(error)
+                    ? error.toDetail()
+                    : {
+                          code: "reload_failed",
+                          message: String(error),
+                          hint: "See the runtime log.",
+                      }
+                // A trial that failed leaves the old instance hosted: it resumes, and the held turns
+                // run on it. A failure after the dispose leaves nothing to run them on.
+                const disposed = this.#agents.get(agentId) !== agents[0]
+                for (const agent of agents) {
+                    if (!disposed) agent.cancelRetire()
+                    const entry = settle.get(agent.id)
+                    if (disposed) entry?.reject(error)
+                    else entry?.resolve(agent)
+                }
+                this.bus.emit(
+                    "agent.reloaded",
+                    { ok: false, adopted: [], waitedMs, held, disposed, error: detail },
+                    { agentId },
+                )
+            }
+        }
+        return pending.outcome()
+    }
+
+    #reloads = new Map<string, PendingReload>()
 
     /**
      * Stop hosting one agent — leases, channels, schedules, providers, plugin watchers.
@@ -1255,6 +1419,13 @@ export class Runtime {
         if (!this.#agents.has(agentId)) return
 
         const ids = [agentId, ...(this.#teams.get(agentId) ?? []).map((member) => member.id)]
+        this.#reloads.get(agentId)?.abandon(
+            new HarnessError({
+                code: "reload_abandoned",
+                message: `"${agentId}" was disposed while a reload was waiting for it.`,
+                hint: "A turn held for the reload has nothing to run on. Adopt the agent again and resend it.",
+            }),
+        )
 
         const busy = ids
             .map((id) => this.#agents.get(id))
@@ -1336,6 +1507,15 @@ export class Runtime {
         this.#stopped = true
         markRuntimeLive(this.runtimeId, false)
         this.bus.emit("runtime.stopping", { reason })
+        for (const pending of [...this.#reloads.values()]) {
+            pending.abandon(
+                new HarnessError({
+                    code: "reload_abandoned",
+                    message: "The runtime stopped while a reload was waiting for running turns.",
+                    hint: "A turn held for the reload did not run. The next start loads the manifest as it is on disk.",
+                }),
+            )
+        }
 
         // In-flight turns are deliberately not cancelled here — a turn ends because it finished or
         // because someone stopped it, never because the process was asked to wind down politely.

@@ -13,7 +13,7 @@
  */
 
 import { readFile } from "node:fs/promises"
-import type { Capability as Cap, KeyScope } from "@dispach/core"
+import type { Capability as Cap, KeyScope, ReloadOutcome } from "@dispach/core"
 import {
     type Agent,
     type AgentStateRecord,
@@ -802,14 +802,29 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         (context) =>
             withAgent(runtime, context, async (agent) => {
                 try {
-                    const admitted = await runtime.replace(agent.id)
+                    const outcome = await runtime.reload(agent.id)
+                    // Busy: the running turns finish on the old configuration and the swap follows,
+                    // announced by `agent.reloaded`. 202, because the change is accepted and not yet
+                    // in force — a 409 here used to mean "try again", in a team silo, forever.
+                    if (outcome.status === "pending") {
+                        return json(
+                            {
+                                id: agent.id,
+                                status: "pending",
+                                adopted: [],
+                                running: outcome.running,
+                                holdAfterMs: outcome.holdAfterMs,
+                            },
+                            202,
+                        )
+                    }
                     return json({
                         id: agent.id,
                         status: "loaded",
                         // Every agent that came back, because replacing a supervisor replaces its team:
                         // they load from one manifest as one unit, so a caller holding a list needs to
                         // know the members are new instances too.
-                        adopted: admitted.map((entry) => entry.id),
+                        adopted: outcome.adopted.map((entry) => entry.id),
                     })
                 } catch (error) {
                     // The runtime's own refusals carry the field and the remedy — a team member has no
@@ -1148,12 +1163,22 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 return json({ ...written, applied: "none", adopted: [], stopped: true })
             }
             try {
-                const admitted = hosted
-                    ? await runtime.replace(found.id)
-                    : await runtime.adopt(found.manifestPath)
+                if (hosted) {
+                    const outcome = await runtime.reload(found.id)
+                    // A turn is running: the secret is written and in force once it finishes.
+                    if (outcome.status === "pending") {
+                        return json({ ...written, applied: "pending", adopted: [] })
+                    }
+                    return json({
+                        ...written,
+                        applied: "reloaded",
+                        adopted: outcome.adopted.map((agent) => agent.id),
+                    })
+                }
+                const admitted = await runtime.adopt(found.manifestPath)
                 return json({
                     ...written,
-                    applied: hosted ? "reloaded" : "adopted",
+                    applied: "adopted",
                     adopted: admitted.map((agent) => agent.id),
                 })
             } catch (error) {
@@ -2431,7 +2456,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                  */
                 let applied: ErrorDetail | undefined
                 try {
-                    await runtime.replace(agent.id)
+                    applied = pendingDetail(await runtime.reload(agent.id))
                 } catch (error) {
                     if (!isHarnessError(error)) throw error
                     applied = error.toDetail()
@@ -2528,7 +2553,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
 
                 let applied: ErrorDetail | undefined
                 try {
-                    await runtime.replace(agent.id)
+                    applied = pendingDetail(await runtime.reload(agent.id))
                 } catch (error) {
                     if (!isHarnessError(error)) throw error
                     applied = error.toDetail()
@@ -3839,4 +3864,17 @@ function streamTurn(
             return () => attachment.unsubscribe()
         },
     })
+}
+
+/**
+ * A reload waiting for running turns, as the `pending` a write reports: the file is written and
+ * the change is accepted, and it is in force once those turns finish — not "at the next start".
+ */
+function pendingDetail(outcome: ReloadOutcome): ErrorDetail | undefined {
+    if (outcome.status !== "pending") return undefined
+    return {
+        code: "reload_pending",
+        message: `It applies when the ${outcome.running} running turn(s) finish; they complete on the settings they started with.`,
+        hint: `New turns keep the old settings for ${outcome.holdAfterMs} ms, then wait and start on the new ones. The agent.reloaded event says when it is in force.`,
+    }
 }

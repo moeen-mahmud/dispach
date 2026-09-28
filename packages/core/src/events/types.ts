@@ -114,6 +114,20 @@ export interface EventDataMap {
      * later, `stopped` is 16.3's durable off switch.
      */
     "agent.disposed": { reason: "requested" | "replaced" | "stopped" }
+    /**
+     * A reload that waited for running turns has finished (`Runtime.reload`). `held` is how many new
+     * turns waited for it rather than running on the old configuration. `ok: false` means the new
+     * manifest did not load: `error` says why, and the old instance is still serving unless
+     * `disposed` says otherwise.
+     */
+    "agent.reloaded": {
+        ok: boolean
+        adopted: string[]
+        waitedMs: number
+        held: number
+        disposed: boolean
+        error?: ErrorDetail
+    }
     "agent.warning": ErrorDetail
     /**
      * One plugin registered, with what it cost and what it declared.
@@ -571,6 +585,7 @@ export const EVENT_TYPES = [
     "runtime.stopping",
     "agent.loaded",
     "agent.disposed",
+    "agent.reloaded",
     "agent.warning",
     "plugin.loaded",
     "plugin.slow",

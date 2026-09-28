@@ -127,6 +127,8 @@ export async function adoptOnHost(
 export type ReloadResult =
     | { readonly kind: "reloaded"; readonly pid: number; readonly adopted: readonly string[] }
     | { readonly kind: "busy"; readonly pid: number }
+    /** Accepted while a turn runs: it applies when the running turns finish. */
+    | { readonly kind: "pending"; readonly pid: number; readonly running: number }
     | {
           readonly kind: "failed"
           readonly pid: number
@@ -155,9 +157,15 @@ export async function reloadOnHost(manifestPath: string, store?: string): Promis
         manifestPath,
     )
     if (reply.ok) {
-        const body = reply.body as { adopted?: readonly string[] } | undefined
+        const body = reply.body as
+            | { adopted?: readonly string[]; status?: string; running?: number }
+            | undefined
+        if (body?.status === "pending") {
+            return { kind: "pending", pid: holder.pid, running: body.running ?? 0 }
+        }
         return { kind: "reloaded", pid: holder.pid, adopted: body?.adopted ?? [] }
     }
+    // A host from before reloads could wait answers 409 instead.
     if (reply.status === 409) return { kind: "busy", pid: holder.pid }
     return {
         kind: "failed",

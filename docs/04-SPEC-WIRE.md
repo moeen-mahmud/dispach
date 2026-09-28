@@ -59,7 +59,8 @@ and WebSocket surfaces can return:
 | `web_asset_missing` | 500 | The routes serving the browser surface and the table backing them diverged. A broken build, not a missing file. |
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
-| `agent_turn_in_flight` | 409 | A reload or stop was asked for while a turn is running. It names the count; retry when the turn ends, because aborting one to apply a setting is the worse trade. |
+| `agent_turn_in_flight` | 409 | A stop was asked for while a turn is running. It names the count; retry when the turn ends. A reload no longer answers this: it waits (`reload_pending`). |
+| `reload_pending` | — | Returned *inside* a `200` as `pending`: the manifest was written and applies when the running turns finish. Not an error. |
 | `agent_not_replaceable` | 400 | `reload` on a team member, which has no manifest of its own — replace its supervisor, which reloads the team as one unit. |
 | `provisioning_not_supported` | 501 | This server was built with no provisioner — an embedder over its own agent store. The container has one and is refused by the bind instead. |
 | `provisioning_not_local` | 403 | `POST /v1/agents` with neither a loopback bind nor a credential carrying `admin`. What is refused is a filesystem write on a server that required **no** credential and is reachable from the network — the bind-only version of this refused the safer case, since a token-less loopback server was allowed while an authenticated public one was not. |
@@ -230,7 +231,8 @@ GET /v1/agents/:id       → the above plus dialect, window, tool count, skills 
                            schedule count, warnings[], team? [{ id, task, artifact[] }]
 POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disabledAt, reason? }
 POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }
-POST /v1/agents/:id/reload
+POST /v1/agents/:id/reload        → 200 { id, status: "loaded", adopted[] }
+                                  | 202 { id, status: "pending", running, holdAfterMs, adopted: [] }
 
 GET  /v1/openapi.json    → the generated OpenAPI 3.1 document
 GET  /docs               → a browser reference over it
@@ -457,10 +459,17 @@ behaviour underneath a conversation. Replacing the instance honours that where a
 reload would quietly break it. It returns no diff — that was specified and never built, and a
 report of "what changed" between two instances is a different feature from restarting one.
 
-**Nothing in flight is discarded.** A reload while a turn is running answers
-`409 agent_turn_in_flight` naming the count, rather than aborting it: picking up a setting is not
-worth somebody's half-finished answer, and from a caller's side an aborted turn is
-indistinguishable from the runtime crashing. Retry once the turn ends.
+**Nothing in flight is discarded, and nothing waits on the caller.** A reload while a turn is running
+answers `202 pending` (it was `409 agent_turn_in_flight` until 26g, which in a team silo with a turn
+nearly always running meant a reload nobody could land). The running turns finish on the settings
+they started with, and the swap happens the moment none is left, announced by `agent.reloaded`. New
+turns keep running on the old settings for `limits.reloadHoldMs` (default 30 s), then wait for the
+swap and start on the new ones, so a busy agent cannot postpone a reload forever. A second reload
+while one is pending joins it. The new manifest is loaded in full **before** the old instance goes —
+at the request when a turn is running, and again at the swap — so a manifest broken on disk refuses
+the reload (`400`) and the agent keeps serving. `PATCH /config`, the channel `PATCH` and
+`PUT …/secrets` apply the same way: `applied: false` with `pending.code: "reload_pending"`, or
+`applied: "pending"` for secrets.
 
 This answered `501 reload_not_supported` until 17.1, when `Runtime.replace` (16.2b) made the
 honest version possible. The old refusal's argument was correct about in-place mutation and is
@@ -1071,6 +1080,7 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `plugin.slow` | setup over budget | `name`, `setupMs` |
 | `agent.loaded` | per agent | `tools`, `skills`, `schedules` (the manifest's **declared** count — this fires before reconciliation), `model` |
 | `agent.disposed` | this process stopped hosting an agent, without exiting | `reason` (`requested` \| `replaced` \| `stopped`) |
+| `agent.reloaded` | a reload that waited for running turns has finished | `ok`, `adopted[]`, `waitedMs`, `held` (new turns that waited for it), `disposed`, `error?` — `ok: false` with `disposed: false` means the old instance is still serving |
 | `agent.warning` | a fact true for the whole session, said at load | `code`, `message`, `hint`, `field?` |
 | `agent.channel.status` | connect/disconnect, or a channel now waiting on a person | `channelId`, `channelType`, `status` (`starting` \| `connected` \| `disconnected` \| `error` \| `needs_input`), `detail?`, `input?` (`{kind, payload, issuedAt, expiresAt?}`, present only with `needs_input`) |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |

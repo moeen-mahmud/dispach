@@ -1268,6 +1268,12 @@ Never claim a performance property without a number in `evals/` and a script to 
   volume is seeded from the image's own directories and a Kubernetes volume is not. Found only by
   applying the example to a real cluster (k3s in Docker); the example's `layout` init container
   creates the directory first, as the same non-root user.
+- **A turn held for a reload must not count against the instance it is waiting to leave.** The swap
+  waits for the old instance's `inFlight` to reach zero, so a held turn that took a slot there is a turn
+  waiting on itself: the reload never lands and the turn never starts, with nothing reporting either.
+  The held admission is a promise of the successor instead (`DEFERRED` in `agent.ts`), and `send`
+  follows it — which is also why a channel queue or an HTTP handler holding a *stale* `Agent` reaches
+  the new instance with no change of its own. Revert-checked: counting it deadlocks the hold test.
 - **In a container every runtime is pid 1, so "is the holder's pid alive" answers about itself.** A
   container killed rather than stopped left a lease saying pid 1, and its replacement refused to
   serve for 45 minutes because pid 1 was alive. A holder with *our* pid is dead unless it is a

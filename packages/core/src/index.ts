@@ -350,6 +350,7 @@ export {
     buildRegistry,
     type DisposeReason,
     defaultStorePath,
+    type ReloadOutcome,
     Runtime,
     type RuntimeActivity,
     type RuntimeOptions,

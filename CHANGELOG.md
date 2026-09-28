@@ -14,6 +14,12 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
 - `model.result` carries `firstTokenMs`.
 
+### Reload
+
+- A reload while a turn is running no longer answers `409`: it is `202 pending`, the running turn finishes on the old settings, and the agent swaps as soon as it is idle (`agent.reloaded`). `PATCH /config`, channel changes and secrets apply the same way.
+- `limits.reloadHoldMs` (default 30 s): after it, new turns wait for the swap and run on the new settings.
+- A manifest broken on disk is refused before the old agent is torn down, so it keeps serving.
+
 ### MCP
 
 - `tools.providers.mcp`: tools from remote MCP servers over Streamable HTTP, pinned by name as `<server>__<tool>`. Resolved from a cache at boot, so a server that is down cannot hold startup; `tools --warm` fills it.
