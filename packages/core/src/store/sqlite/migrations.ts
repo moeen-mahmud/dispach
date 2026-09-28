@@ -940,6 +940,24 @@ CREATE INDEX webhook_deliveries_due ON webhook_deliveries (status, next_attempt_
 CREATE INDEX webhook_deliveries_agent ON webhook_deliveries (agent_id);
 `,
     },
+    {
+        version: 20,
+        name: "model_calls_billing",
+        /**
+         * What a biller needs to be idempotent and complete (Phase 26c, doc 16 R6).
+         *
+         * `call_id` is the model call's own identity, the key a ledger debits on: minted once per
+         * call before its retries and fallbacks, so a redelivered `model.result` and a row share it.
+         * UNIQUE, and SQLite lets any number of NULLs through, so rows from before this migration
+         * keep their NULL and stay aggregable. `cache_write_tokens` is NULL when the endpoint
+         * reported no figure — the same third state `cached_prompt_tokens` keeps.
+         */
+        sql: `
+ALTER TABLE model_calls ADD COLUMN call_id TEXT;
+ALTER TABLE model_calls ADD COLUMN cache_write_tokens INTEGER;
+CREATE UNIQUE INDEX model_calls_call_id ON model_calls (call_id);
+`,
+    },
 ]
 
 export interface MigrationReport {

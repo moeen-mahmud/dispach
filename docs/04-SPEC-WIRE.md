@@ -244,7 +244,8 @@ GET    /v1/webhooks            → { webhooks: [{ subscriptionId, url, types, sc
 DELETE /v1/webhooks/:webhookId → { id, deleted: true }
 
 GET /v1/usage?by&from&to → { buckets: [{ agentId?, model?, day?, sender?, calls, promptTokens,
-                                         cachedPromptTokens, outputTokens, estimatedCalls }],
+                                         cachedPromptTokens, cacheWriteTokens, outputTokens,
+                                         estimatedCalls }],
                              meteredSince? }
 GET /v1/agents/:id/usage   → { id, buckets[], meteredSince? }
 GET /v1/agents/:id/turns?limit&before → { id, turns[], nextBefore? }
@@ -371,6 +372,7 @@ turn, role, model, prompt, cached, output, sender), and `/usage` sums those. `tu
   `agent,model`, the split a bill needs because prices differ per model. `by=` alone is one total.
   `from` is inclusive and `to` exclusive, so a month is `from=2026-09-01&to=2026-10-01`.
 - `estimatedCalls` counts calls where either figure was our estimate rather than the endpoint's.
+- `cacheWriteTokens` sums what calls wrote to a prompt cache (Bedrock and Anthropic report it; nothing else does, and a call that reports nothing adds zero). Each row also carries the call's `callId`, the same id its `model.result` carried, so a biller reconciling events against this table matches them one to one (Phase 26c).
   The estimate runs 16–20% low on tool-heavy prompts (`evals/budget/`), so a non-zero count means
   the total is partly a guess.
 - `meteredSince` is the earliest call on record. The meter starts at the upgrade that added it and
@@ -1069,11 +1071,11 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `context.reset` | per S5 firing | `count`, `warning?` |
 | `context.dropped` | history the budget could not fit | `messages`, `budget`, `keptTokens` |
 | `phase.changed` | per `phase_set` that moved | `to`, `tools` (count now visible) |
-| `model.call` | request sent | `role`, `model`, `promptTokens`, `cached`, `attempt` |
+| `model.call` | request sent | `callId`, `role`, `model`, `promptTokens`, `cached` (always false; the cache hit is on `model.result`), `attempt` |
 | `model.chunk` | streaming | `delta`, `kind: text \| reasoning` — emitted only while some subscriber has opted in, per subscriber |
 | `model.retry` | a retryable model failure, before the next attempt | `status`, `attempt`, `delayMs` |
 | `model.fallback` | a call moved to the next model in its role's `fallbacks`, before any output (Phase 26c) | `from`, `to`, `reason` |
-| `model.result` | response done | `outputTokens`, `promptTokens`, `promptTokensReported`, `finishReason`, `latencyMs`, `firstTokenMs?` (to the first streamed output of any kind; absent when nothing streamed) |
+| `model.result` | response done | `outputTokens`, `promptTokens`, `promptTokensReported`, `finishReason`, `latencyMs`, `firstTokenMs?` (to the first streamed output of any kind; absent when nothing streamed), `callId` (the model call's id: minted before its retries and fallbacks, the key a ledger debits on, carried by its usage row; not a tool call's), `model` (the one that answered, after any fallback), `role`, `cachedPromptTokens?`, `cacheWriteTokens?`, `sender?` (Phase 26c) |
 | `tool.call` | before execute | `slug`, `callId`, `argsHash`, `mutating` |
 | `tool.result` | after execute | `slug`, `callId`, `ok`, `latencyMs`, `bytes`, `truncated`, `trust` |
 | `tool.gated` | a call was blocked | `slug`, `callId`, `reason`, `policy` |

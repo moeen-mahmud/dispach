@@ -270,11 +270,15 @@ describe("events the transcript does not own", () => {
                     promptTokens: 10,
                     cached: false,
                     attempt: 1,
+                    callId: "mc_fixture",
                 }),
             },
             {
                 kind: "event",
                 event: ev("model.result", {
+                    callId: "mc_fixture",
+                    model: "m",
+                    role: "main",
                     outputTokens: 5,
                     promptTokens: 10,
                     promptTokensReported: true,
@@ -701,6 +705,9 @@ describe("a multi-step turn reads in the order it happened", () => {
         return {
             kind: "event",
             event: ev("model.result", {
+                callId: "mc_fixture",
+                model: "m",
+                role: "main",
                 outputTokens: 10,
                 promptTokens: 100,
                 promptTokensReported: true,

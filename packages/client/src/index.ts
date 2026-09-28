@@ -722,6 +722,8 @@ export interface UsageBucketLike {
     readonly calls: number
     readonly promptTokens: number
     readonly cachedPromptTokens: number
+    /** Prompt tokens written to a cache (Bedrock, Anthropic). Zero where nothing reports it. */
+    readonly cacheWriteTokens: number
     readonly outputTokens: number
     /** Calls where either figure was an estimate. Non-zero means the totals are partly a guess. */
     readonly estimatedCalls: number

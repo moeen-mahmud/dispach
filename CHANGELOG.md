@@ -14,7 +14,17 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
 - `model.result` carries `firstTokenMs`.
 
+### Models
+
+- `model.<role>.api` selects a transport (default `chat-completions`); `options` carries its settings. `baseUrl` is required only for chat-completions.
+- `model.<role>.fallbacks`: other models tried in order when the endpoint fails before any output. Never on a 4xx the caller caused, never on a 403.
+- Signed thinking is replayed with tool results for Anthropic-family models. It was documented as built and was not.
+- `model.result` carries `callId`, the answering `model`, `role`, `cachedPromptTokens`, `cacheWriteTokens` and `sender`; `model.fallback` is new.
+- `/v1/usage` sums `cacheWriteTokens`. A usage row carries its call's id, and a call recorded twice is one row.
+
 ### Plugins
+
+- `defineModelTransport(api, transport)` registers a model transport.
 
 - **Breaking:** a plugin declares `dispachApi: "^0.2"` to load on 0.2. A plugin still on `^0.1` is refused at boot with `plugin_api_mismatch`, naming the range.
 - A pre-release host is checked as the release it precedes: `0.2.0-pilot.1` satisfies `^0.2`.

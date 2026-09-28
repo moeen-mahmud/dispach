@@ -646,8 +646,12 @@ export interface ModelCallRecord {
     readonly promptReported: boolean
     /** Absent when the endpoint reported no cache figure, which is distinct from a reported zero. */
     readonly cachedPromptTokens?: number
+    /** Prompt tokens written to the cache by this call, when reported. Same third state. */
+    readonly cacheWriteTokens?: number
     readonly outputTokens: number
     readonly outputReported: boolean
+    /** The call's own id. Absent only for a row written before migration 20. */
+    readonly callId?: string
     /** Who sent the turn, when it was not the operator. The key per-member billing groups on. */
     readonly sender?: string
     readonly at: string
@@ -679,6 +683,8 @@ export interface UsageBucket {
     readonly calls: number
     readonly promptTokens: number
     readonly cachedPromptTokens: number
+    /** Prompt tokens written to a cache. Zero from an endpoint that does not report it. */
+    readonly cacheWriteTokens: number
     readonly outputTokens: number
     /**
      * Calls where either figure was our estimate. Non-zero means the totals are not a measurement,

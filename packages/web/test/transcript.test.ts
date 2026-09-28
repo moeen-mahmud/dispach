@@ -52,6 +52,9 @@ const MODEL_RESULT = {
     promptTokensReported: true,
     finishReason: "stop",
     latencyMs: 120,
+    callId: "mc_fixture",
+    model: "gpt-4o-mini",
+    role: "main",
 } as const
 
 function run(items: readonly TurnStreamItem[], from: Transcript = EMPTY): Transcript {

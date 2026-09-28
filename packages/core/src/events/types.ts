@@ -283,8 +283,11 @@ export interface EventDataMap {
         role: "main" | "selector" | "compactor"
         model: string
         promptTokens: number
+        /** Always false: whether a call hits a cache is known only from its usage, on `model.result`. */
         cached: boolean
         attempt: number
+        /** This model call's id, the same one its `model.result` and usage row carry (not a tool call's). */
+        callId: string
     }
     /** Suppressed unless a subscriber opted in — this is per-token and high volume. */
     "model.chunk": { delta: string; kind: "text" | "reasoning" }
@@ -319,6 +322,22 @@ export interface EventDataMap {
          * Absent when nothing streamed: an error before the first chunk, or an empty reply.
          */
         firstTokenMs?: number
+        /**
+         * The model call's id — minted once, before retries and fallbacks, so one call is one id
+         * however many requests it took. The idempotency key a ledger debits on: a redelivered
+         * webhook carries the same one. Not a tool call's `callId`.
+         */
+        callId: string
+        /** The model that answered: the requested one, or the fallback that stood in for it. */
+        model: string
+        /** The manifest role that made the call: `main`, `compactor`, or a named one. */
+        role: string
+        /** Prompt tokens served from cache, when reported. Absent is "not reported", not zero. */
+        cachedPromptTokens?: number
+        /** Prompt tokens written to cache, when reported. */
+        cacheWriteTokens?: number
+        /** Who sent the turn this call belongs to, when it was not the operator. */
+        sender?: string
     }
     /**
      * A tool is about to run. `argsHash` rather than the arguments themselves: arguments carry

@@ -122,6 +122,8 @@ export interface TurnInput {
     readonly agentId: string
     /** Handed to every `runStep` this turn makes. See `StepInput.meter`. */
     readonly meter?: (usage: StepUsage) => void
+    /** Who sent this turn, onto every `model.result` it produces. Absent for the operator. */
+    readonly sender?: string
     readonly sessionKey: string
     readonly input: string
     readonly history: readonly ChatMessage[]
@@ -908,6 +910,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     context: stepContext,
                     signal: link.signal,
                     ...(input.meter === undefined ? {} : { meter: input.meter }),
+                    ...(input.sender === undefined ? {} : { sender: input.sender }),
                 }),
             )
             const step = await callStep({

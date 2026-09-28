@@ -831,6 +831,7 @@ export class Agent {
         const result = await runTurn({
             agentId: this.id,
             meter,
+            ...(options.from?.id === undefined ? {} : { sender: options.from.id }),
             ...(this.#middleware.length === 0 ? {} : { middleware: this.#middleware }),
             sessionKey,
             turnId,
@@ -1513,9 +1514,13 @@ export class Agent {
                     ...(usage.cachedPromptTokens === undefined
                         ? {}
                         : { cachedPromptTokens: usage.cachedPromptTokens }),
+                    ...(usage.cacheWriteTokens === undefined
+                        ? {}
+                        : { cacheWriteTokens: usage.cacheWriteTokens }),
                     outputTokens: usage.outputTokens,
                     outputReported: usage.outputReported,
                     ...(sender === undefined ? {} : { sender }),
+                    callId: usage.callId,
                     at: new Date().toISOString(),
                 })
                 .catch((error: unknown) => {

@@ -155,6 +155,8 @@ export type ChatChunk =
           readonly cachedPromptTokens?: number
           /** Which wire field the figure came from, so a surprising ratio can be traced to its source. */
           readonly cacheSource?: string
+          /** Prompt tokens this call wrote to the cache, when the endpoint says so. Same third state. */
+          readonly cacheWriteTokens?: number
       }
     /**
      * Which model answered, when it was not the one requested: a fallback (`model/fallback.ts`)

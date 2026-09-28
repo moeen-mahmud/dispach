@@ -113,6 +113,7 @@ interface DeltaShape {
         prompt_cache_miss_tokens?: unknown
         /** Anthropic through an OpenAI-shaped shim. Reads are what were served; creation was billed. */
         cache_read_input_tokens?: unknown
+        cache_creation_input_tokens?: unknown
     } | null
 }
 
@@ -335,6 +336,7 @@ function* chunksFromPayload(payload: DeltaShape, calls: ToolCallBuffer): Generat
     const usage = payload.usage
     if (usage !== undefined && usage !== null) {
         const cache = cacheUsage(usage)
+        const written = asNumber(usage.cache_creation_input_tokens)
         yield {
             type: "usage",
             promptTokens: asNumber(usage.prompt_tokens) ?? 0,
@@ -342,6 +344,9 @@ function* chunksFromPayload(payload: DeltaShape, calls: ToolCallBuffer): Generat
             ...(cache === undefined
                 ? {}
                 : { cachedPromptTokens: cache.cached, cacheSource: cache.source }),
+            // Anthropic-compatible endpoints report what the call wrote to the cache; nothing else
+            // does, so absent stays absent rather than a claimed zero.
+            ...(written === undefined ? {} : { cacheWriteTokens: written }),
         }
     }
 

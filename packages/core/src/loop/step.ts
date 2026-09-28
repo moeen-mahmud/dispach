@@ -17,6 +17,7 @@ import type {
     ToolDefinition,
 } from "../model/provider.ts"
 import type { ResolvedRole } from "../model/roles.ts"
+import { newCallId } from "./ids.ts"
 
 export interface StepInput {
     readonly role: ResolvedRole
@@ -30,6 +31,8 @@ export interface StepInput {
     readonly context: EventContext
     readonly signal: AbortSignal
     readonly attempt?: number
+    /** Who sent the turn, carried onto `model.result` for a biller. Absent for the operator. */
+    readonly sender?: string
     /**
      * Called once per completed call with what it cost. Optional so a caller that bills nothing (a
      * test, an eval) needs nothing, and **synchronous and non-throwing by contract**: the meter is
@@ -45,9 +48,12 @@ export interface StepUsage {
     readonly promptTokens: number
     readonly promptReported: boolean
     readonly cachedPromptTokens?: number
+    readonly cacheWriteTokens?: number
     readonly outputTokens: number
     readonly outputReported: boolean
     readonly context: EventContext
+    /** The same id `model.call` and `model.result` carry. */
+    readonly callId: string
 }
 
 export interface StepResult {
@@ -95,14 +101,17 @@ export interface StepResult {
 export async function runStep(input: StepInput): Promise<StepResult> {
     const started = performance.now()
 
+    const callId = newCallId()
     input.bus.emit(
         "model.call",
         {
+            callId,
             role: input.role.role,
             model: input.role.config.id,
             promptTokens: input.promptTokens,
-            // Prompt caching lands with slot 1 and the breakpoint placement it implies; reporting
-            // `false` now is honest, whereas omitting the field would make the event schema move.
+            // Kept false and kept present: whether a call hit a cache is only known once its usage
+            // arrives, which is `model.result.cachedPromptTokens`. Dropping the field would move a
+            // v1 schema.
             cached: false,
             attempt: input.attempt ?? 1,
         },
@@ -116,6 +125,7 @@ export async function runStep(input: StepInput): Promise<StepResult> {
     let promptTokensReported = false
     let cachedPromptTokens: number | undefined
     let cacheSource: string | undefined
+    let cacheWriteTokens: number | undefined
     let reportedOutputTokens: number | undefined
     const calls: ToolCallRequest[] = []
     const thinking: ThinkingBlock[] = []
@@ -176,6 +186,8 @@ export async function runStep(input: StepInput): Promise<StepResult> {
                         cachedPromptTokens = chunk.cachedPromptTokens
                         cacheSource = chunk.cacheSource
                     }
+                    if (chunk.cacheWriteTokens !== undefined)
+                        cacheWriteTokens = chunk.cacheWriteTokens
                     break
                 case "model":
                     model = chunk.id
@@ -210,6 +222,12 @@ export async function runStep(input: StepInput): Promise<StepResult> {
             finishReason: finishReason === "" ? (aborted ? "aborted" : "stop") : finishReason,
             latencyMs,
             ...(firstTokenMs === undefined ? {} : { firstTokenMs }),
+            callId,
+            model,
+            role: input.role.role,
+            ...(cachedPromptTokens === undefined ? {} : { cachedPromptTokens }),
+            ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
+            ...(input.sender === undefined ? {} : { sender: input.sender }),
         },
         input.context,
     )
@@ -223,9 +241,11 @@ export async function runStep(input: StepInput): Promise<StepResult> {
         promptTokens,
         promptReported: promptTokensReported,
         ...(cachedPromptTokens === undefined ? {} : { cachedPromptTokens }),
+        ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
         outputTokens,
         outputReported: reportedOutputTokens !== undefined,
         context: input.context,
+        callId,
     })
 
     return {

@@ -885,10 +885,13 @@ export class SqliteStore implements Store {
                   ORDER BY rowid DESC LIMIT ?`,
             ),
             modelCallInsert: db.prepare(
-                `INSERT INTO model_calls
+                // OR IGNORE: a call recorded twice under one call_id is one row, which is what
+                // makes the id an idempotency key rather than a label.
+                `INSERT OR IGNORE INTO model_calls
                      (agent_id, session_key, turn_id, role, model, prompt_tokens, prompt_reported,
-                      cached_prompt_tokens, output_tokens, output_reported, sender, at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                      cached_prompt_tokens, output_tokens, output_reported, sender, at,
+                      call_id, cache_write_tokens)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ),
             modelCallDeleteAll: db.prepare("DELETE FROM model_calls WHERE agent_id = ?"),
             webhookInsert: db.prepare(
@@ -2259,6 +2262,8 @@ export class SqliteStore implements Store {
                     call.outputReported ? 1 : 0,
                     call.sender ?? null,
                     call.at,
+                    call.callId ?? null,
+                    call.cacheWriteTokens ?? null,
                 )
             },
             report: async (query) => usageReport(db, query),
@@ -2354,6 +2359,7 @@ interface UsageRow {
     readonly calls: number
     readonly prompt_tokens: number
     readonly cached_prompt_tokens: number
+    readonly cache_write_tokens: number
     readonly output_tokens: number
     readonly estimated_calls: number
 }
@@ -2404,6 +2410,7 @@ function usageReport(
                 "COUNT(*) AS calls",
                 "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens",
                 "COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens",
+                "COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens",
                 "COALESCE(SUM(output_tokens), 0) AS output_tokens",
                 "COALESCE(SUM(CASE WHEN prompt_reported = 0 OR output_reported = 0 THEN 1 ELSE 0 END), 0) AS estimated_calls",
             ].join(", ")}
@@ -2425,6 +2432,7 @@ function usageReport(
             calls: row.calls,
             promptTokens: row.prompt_tokens,
             cachedPromptTokens: row.cached_prompt_tokens,
+            cacheWriteTokens: row.cache_write_tokens,
             outputTokens: row.output_tokens,
             estimatedCalls: row.estimated_calls,
         }))
