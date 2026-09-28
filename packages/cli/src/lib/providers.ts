@@ -13,6 +13,7 @@
  * a rendering import costs more than the whole command.
  */
 
+import slackPlugin, { slackChannel } from "@dispach/channel-slack"
 import teamsPlugin, { teamsChannel } from "@dispach/channel-teams"
 import telegramPlugin, { telegramChannel } from "@dispach/channel-telegram"
 import whatsappPlugin, { whatsappChannel } from "@dispach/channel-whatsapp"
@@ -89,6 +90,7 @@ export const CHANNELS: Readonly<Record<string, ChannelFactory>> = {
     // Webhook-only: Teams pushes activities to the runtime's channel route and nothing polls, so a
     // manifest naming it costs nothing until the bot's endpoint is registered (decision 14.25).
     teams: teamsChannel,
+    slack: slackChannel,
     telegram: telegramChannel,
     /**
      * **Bundled, and the two things that costs are stated rather than left to a README.**
@@ -135,6 +137,7 @@ export const CHANNEL_IDS: readonly string[] = Object.keys(CHANNELS)
  */
 export const BUILT_IN_PLUGINS: BuiltInPlugins = {
     "@dispach/channel-teams": teamsPlugin,
+    "@dispach/channel-slack": slackPlugin,
     "@dispach/channel-telegram": telegramPlugin,
     "@dispach/channel-whatsapp": whatsappPlugin,
     "@dispach/model-bedrock": bedrockPlugin,

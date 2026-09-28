@@ -778,6 +778,25 @@ object id, the handle `allowFrom` matches and the acting participant (`teams:<id
 conversation's replies go is kept beside the agent, so a schedule can deliver to a chat that has
 messaged the bot at least once.
 
+#### `slack` — Slack, from `@dispach/channel-slack`
+
+```yaml
+channels:
+  - type: slack
+    id: slack
+    appTokenEnv: SLACK_APP_TOKEN   # xapp-…, scope connections:write (default name)
+    botTokenEnv: SLACK_BOT_TOKEN   # xoxb-…, scope chat:write (default name)
+    allowFrom: ["*"]               # or member ids (U…)
+```
+
+Socket Mode: the app-level token opens a WebSocket that Slack pushes events down, so no public
+endpoint is needed. Enable Socket Mode on the app and subscribe to the bot events `message.im` and
+`app_mention`. The agent answers every direct message and, in a channel or group DM, only when
+**@mentioned**, replying in that thread, which is its own session (`slack:<channel>:<thread ts>`).
+The sender is their member id, the handle `allowFrom` matches and the acting participant
+(`slack:<id>`). Replies go through `chat.postMessage` as a `markdown` block, so the model's markdown
+renders as written. A token in the wrong slot (`xoxb-` where `xapp-` belongs) is refused at load.
+
 ### `delivery`
 
 ```yaml

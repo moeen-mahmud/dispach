@@ -17,6 +17,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 ### Channels
 
 - Microsoft Teams: `type: teams` with `appId`, `passwordEnv` and `tenantId`. Webhook-only; every activity's Bot Framework token is verified. Answers direct messages, and in group chats and channels only when @mentioned, in the thread.
+- Slack: `type: slack` with `appTokenEnv` and `botTokenEnv`. Socket Mode, so no public endpoint. Answers direct messages, and in channels only when @mentioned, in the thread; replies render markdown.
 
 ### Reload
 

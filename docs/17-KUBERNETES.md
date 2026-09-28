@@ -49,8 +49,8 @@ silo runs. Two things to know when it does:
 
 - Workspace files and `agent.yaml` are read when the agent loads, never per turn (the prompt prefix
   is cache-stable on purpose). An edit made from outside takes effect on
-  `POST /v1/agents/:id/reload`, which answers `409` while a turn is running. Applying at the next
-  turn boundary instead is doc 16's R4.
+  `POST /v1/agents/:id/reload`. With turns running it answers `202` and swaps once they finish;
+  running turns keep the settings they started with.
 - The directory name is the agent's address on disk. Its manifest `id` is the address everywhere
   else (API, store, logs). They are usually equal; keep them equal.
 
@@ -145,6 +145,7 @@ agents actually use:
 | `api.telegram.org` | 443 | a Telegram channel |
 | `web.whatsapp.com`, `*.whatsapp.net` | 443 | a WhatsApp channel (the socket, then media) |
 | `login.botframework.com`, `login.microsoftonline.com`, `smba.trafficmanager.net` | 443 | a Teams channel: the connector's signing keys, the bot's token, replies. Teams also needs **ingress** to the webhook route |
+| `slack.com`, `wss-primary.slack.com` (`*.slack.com`) | 443 | a Slack channel: the Web API, then the Socket Mode WebSocket. No ingress |
 | `api.tavily.com`, `api.search.brave.com`, `api.exa.ai` | 443 | `web_search`, whichever backend is configured |
 | any | 443/80 | `web_fetch`, by its nature. Leave it unpinned, or accept that fetches outside the policy fail |
 | `github.com` | 443 | skill catalogues (`sources update`, `skills install`) |

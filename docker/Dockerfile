@@ -63,6 +63,7 @@ COPY packages/web/package.json ./packages/web/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/
 COPY packages/channel-whatsapp/package.json ./packages/channel-whatsapp/
 COPY packages/channel-teams/package.json ./packages/channel-teams/
+COPY packages/channel-slack/package.json ./packages/channel-slack/
 COPY packages/model-bedrock/package.json ./packages/model-bedrock/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/

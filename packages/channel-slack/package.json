@@ -1,0 +1,31 @@
+{
+    "name": "@dispach/channel-slack",
+    "version": "0.1.0",
+    "description": "Slack channel \u2014 Socket Mode over the platform WebSocket, no SDK.",
+    "license": "Apache-2.0",
+    "author": "Moeen Mahmud",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/moeen-mahmud/dispach.git",
+        "directory": "packages/channel-slack"
+    },
+    "type": "module",
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "typecheck": "tsc -p tsconfig.json"
+    },
+    "dependencies": {
+        "@dispach/core": "workspace:*"
+    },
+    "private": true
+}
