@@ -508,12 +508,13 @@ export function toolTimedOut(slug: string, ms: number): ToolError {
 export function toolFailed(slug: string, cause: unknown): ToolError {
     const message = cause instanceof Error ? cause.message : String(cause)
     return new ToolError({
-        code: cause instanceof HarnessError ? cause.code : "tool_failed",
+        // `isHarnessError`, not `instanceof`: a tool provider is a separate package and may carry its
+        // own copy of this class, and a typed error with a hint must not degrade to a generic one.
+        code: isHarnessError(cause) ? cause.code : "tool_failed",
         message: `The tool "${slug}" failed: ${message}`,
-        hint:
-            cause instanceof HarnessError
-                ? cause.hint
-                : "This is the tool's own failure, passed through. The observation the model sees carries this same text, so it can explain or retry with different arguments.",
+        hint: isHarnessError(cause)
+            ? cause.hint
+            : "This is the tool's own failure, passed through. The observation the model sees carries this same text, so it can explain or retry with different arguments.",
         cause,
     })
 }

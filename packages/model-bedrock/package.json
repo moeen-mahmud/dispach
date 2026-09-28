@@ -1,0 +1,32 @@
+{
+    "name": "@dispach/model-bedrock",
+    "version": "0.1.0",
+    "description": "AWS Bedrock Converse as a model transport — IAM credentials, prompt caching, signed thinking.",
+    "license": "Apache-2.0",
+    "author": "Moeen Mahmud",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/moeen-mahmud/dispach.git",
+        "directory": "packages/model-bedrock"
+    },
+    "type": "module",
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "typecheck": "tsc -p tsconfig.json"
+    },
+    "dependencies": {
+        "@aws-sdk/client-bedrock-runtime": "3.1141.0",
+        "@dispach/core": "workspace:*"
+    },
+    "private": true
+}

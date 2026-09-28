@@ -96,3 +96,56 @@ describe("isHarnessError", () => {
         )
     })
 })
+
+describe("errors that cross a plugin boundary keep their code and hint", () => {
+    /**
+     * A model transport and a tool provider are separate packages, and in the shipped CLI each can
+     * carry its own copy of core. Found running the image: the Bedrock transport's
+     * `bedrock_credentials_missing` reached the turn as `turn_failed`, "a bug worth reporting",
+     * because the turn asked `instanceof HarnessError` of this copy.
+     */
+    test("a transport's foreign error ends the turn with its own code and hint", async () => {
+        expect(existsSync(DIST)).toBe(true)
+        const built = (await import(pathToFileURL(DIST).href)) as {
+            readonly ModelError: new (init: {
+                code: string
+                message: string
+                hint: string
+            }) => Error
+        }
+        const { mkdtempSync, writeFileSync } = await import("node:fs")
+        const { tmpdir } = await import("node:os")
+        const { join } = await import("node:path")
+        const { Runtime } = await import("../src/runtime/runtime.ts")
+        const { BRAND } = await import("../src/brand.ts")
+        const dir = mkdtempSync(join(tmpdir(), "foreign-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}\nid: foreign\nmodel:\n  main:\n    id: m\n    api: foreign\n`,
+        )
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            store: ":memory:",
+            env: {},
+            modelTransports: {
+                foreign: {
+                    create: (context) => ({
+                        id: context.id,
+                        // biome-ignore lint/correctness/useYield: throws before yielding, on purpose
+                        async *chat() {
+                            throw new built.ModelError({
+                                code: "bedrock_credentials_missing",
+                                message: "No AWS credentials were found.",
+                                hint: "Set up the AWS default chain.",
+                            })
+                        },
+                    }),
+                },
+            },
+        })
+        const reply = await runtime.agent("foreign").send("hi")
+        await runtime.stop()
+        expect(reply.error?.code).toBe("bedrock_credentials_missing")
+        expect(reply.error?.hint).toBe("Set up the AWS default chain.")
+    })
+})

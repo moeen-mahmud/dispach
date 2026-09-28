@@ -407,6 +407,7 @@ for instead.
 ```ts
 interface ModelTransport {
   optionsSchema?: ConfigSchema            // validates model.<role>.options at load
+  capabilities?(resolved, config): ModelCapabilities      // what this transport makes true
   create(context: ModelTransportContext): ModelProvider   // no network: runs before ready
 }
 

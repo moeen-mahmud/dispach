@@ -179,6 +179,8 @@ packages/server/     HTTP/SSE/WS surface
 packages/client/     typed client for the API — reattach, streams, typed errors
 packages/channel-*/  Telegram. A second channel comes from a plugin, not from here
 packages/tools-*/    system (shell, files), Composio, web. No MCP package exists — see decision 4.7
+packages/model-*/    model transports beyond chat-completions: Bedrock Converse. Its AWS SDK loads on
+                     the first model call, never at boot (`bundle.test.ts` holds it)
 packages/control/    the control plane: places, proxies, suspends and wakes one runtime per user.
                      **FSL-1.1, not Apache-2.0.** Imports nothing from the runtime and nothing
                      imports it (`check:deps`); read its own CLAUDE.md before touching it

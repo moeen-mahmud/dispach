@@ -21,7 +21,7 @@ import type { Displaced } from "../context/compaction/stages.ts"
 import { estimateMessageTokens } from "../context/tokens.ts"
 import {
     type ErrorDetail,
-    HarnessError,
+    isHarnessError,
     toolRepairFailed,
     turnStopped,
     turnTimeout,
@@ -1262,7 +1262,11 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
             error = abortDetail(reason, turnId, input.limits.turnTimeoutMs)
         } else {
             reason = "error"
-            const harness = caught instanceof HarnessError ? caught : undefined
+            // `isHarnessError`, not `instanceof`: a model transport is a separate package (Bedrock's)
+            // carrying its own copy of core, and `instanceof` against this copy turned its typed
+            // error — `bedrock_credentials_missing`, hint and all — into "a bug worth reporting".
+            // Found running the image, where the two copies are real.
+            const harness = isHarnessError(caught) ? caught : undefined
             error = {
                 code: harness?.code ?? "turn_failed",
                 message: caught instanceof Error ? caught.message : String(caught),

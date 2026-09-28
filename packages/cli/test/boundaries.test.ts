@@ -962,7 +962,13 @@ describe("first-party packages use only the public core API", () => {
      * public surface is still caught.
      */
     const PACKAGES = resolve(import.meta.dirname, "..", "..")
-    const FIRST_PARTY = ["channel-telegram", "tools-composio", "tools-system", "tools-web"]
+    const FIRST_PARTY = [
+        "channel-telegram",
+        "model-bedrock",
+        "tools-composio",
+        "tools-system",
+        "tools-web",
+    ]
 
     const EXTERNAL = FIRST_PARTY.flatMap((name) => {
         const dir = join(PACKAGES, name, "src")

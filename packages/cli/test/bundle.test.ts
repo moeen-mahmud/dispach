@@ -105,4 +105,45 @@ describe("the built bundle", () => {
             expect(result.code).toBe(0)
         }
     })
+
+    /**
+     * The same claim for AWS Bedrock's SDK, several megabytes that only an agent on
+     * `api: bedrock-converse` needs — and only on its first model call. Every command carries the
+     * transport, so the SDK must be a lazy chunk or every command would pay for it at startup.
+     */
+    test("the Bedrock SDK is behind a dynamic import, and still loads", async () => {
+        if (!existsSync(ENTRY)) return
+        const dist = dirname(ENTRY)
+        const read = (file: string) => readFileSync(join(dist, file), "utf8")
+        const statics = (source: string) =>
+            [...source.matchAll(/from\s*"\.\/([^"]+\.js)"/g)].map((match) => match[1] ?? "")
+        const reached = new Set<string>()
+        const queue = ["index.js"]
+        while (queue.length > 0) {
+            const file = queue.pop() ?? ""
+            if (reached.has(file)) continue
+            reached.add(file)
+            queue.push(...statics(read(file)))
+        }
+        // The service's wire target name: in the SDK, and nowhere in the transport that calls it.
+        const MARKER = "AmazonBedrockFrontendService"
+        expect([...reached].filter((file) => read(file).includes(MARKER))).toEqual([])
+        const lazy = readdirSync(dist).filter(
+            (file) => file.endsWith(".js") && !reached.has(file) && read(file).includes(MARKER),
+        )
+        expect(lazy.length).toBeGreaterThan(0)
+        for (const file of lazy) {
+            const result = await spawnCaptureAsync({
+                command: "node",
+                args: [
+                    "--input-type=module",
+                    "-e",
+                    `await import(${JSON.stringify(join(dist, file))})`,
+                ],
+                timeoutMs: 30_000,
+            })
+            expect(result.stderr.trim()).toBe("")
+            expect(result.code).toBe(0)
+        }
+    })
 })

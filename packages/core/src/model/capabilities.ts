@@ -589,7 +589,24 @@ function candidateIds(modelId: string): string[] {
         const bareColon = bare.indexOf(":")
         if (bareColon !== -1) candidates.push(bare.slice(0, bareColon))
     }
+    candidates.push(bedrockName(bare ?? modelId))
     return candidates.filter((id): id is string => id !== undefined && id !== "")
+}
+
+/**
+ * A Bedrock id as the model name the registry knows: `eu.anthropic.claude-sonnet-4-6-v1:0` is
+ * `claude-sonnet-4-6`. Strips a cross-region geography prefix, the vendor prefix and the version
+ * suffix; an inference-profile ARN arrives here already cut at its last `/`. Without this every
+ * Bedrock Claude id matched nothing and resolved to the conservative 8,192-token row with native
+ * tools off — found by writing the first Bedrock template, which had to state its capabilities by
+ * hand to boot at all.
+ */
+function bedrockName(id: string): string | undefined {
+    const match =
+        /^(?:(?:us|eu|apac|global|us-gov|ca|jp|au)\.)?(?:anthropic|amazon|meta|mistral|cohere|ai21|deepseek|openai|qwen|writer)\.(.+?)(?:-v\d+(?::\d+)?)?$/.exec(
+            id,
+        )
+    return match?.[1]
 }
 
 /**

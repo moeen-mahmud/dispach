@@ -62,6 +62,7 @@ COPY packages/server/package.json ./packages/server/
 COPY packages/web/package.json ./packages/web/
 COPY packages/channel-telegram/package.json ./packages/channel-telegram/
 COPY packages/channel-whatsapp/package.json ./packages/channel-whatsapp/
+COPY packages/model-bedrock/package.json ./packages/model-bedrock/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
 COPY packages/tools-web/package.json ./packages/tools-web/

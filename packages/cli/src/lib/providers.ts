@@ -22,6 +22,7 @@ import type {
     ScriptRunner,
     ToolProviderFactory,
 } from "@dispach/core"
+import bedrockPlugin, { bedrockTransport } from "@dispach/model-bedrock"
 import composioPlugin, { composioFromConfig } from "@dispach/tools-composio"
 import systemPlugin, { SystemScriptRunner, systemFromConfig } from "@dispach/tools-system"
 import webPlugin, { webFromConfig } from "@dispach/tools-web"
@@ -46,7 +47,11 @@ export const TOOL_PROVIDERS: Readonly<Record<string, ToolProviderFactory>> = {
  * would refuse, as an unknown `api`, an agent every other command accepts. `boundaries.test.ts`
  * holds the pairing.
  */
-export const MODEL_TRANSPORTS: Readonly<Record<string, ModelTransport>> = {}
+export const MODEL_TRANSPORTS: Readonly<Record<string, ModelTransport>> = {
+    // AWS Bedrock. Its SDK loads on an agent's first model call, never at boot, so every command
+    // can carry it for free.
+    "bedrock-converse": bedrockTransport(),
+}
 
 /**
  * How a skill's script runs, from the one package allowed to start a process.
@@ -123,6 +128,7 @@ export const CHANNEL_IDS: readonly string[] = Object.keys(CHANNELS)
 export const BUILT_IN_PLUGINS: BuiltInPlugins = {
     "@dispach/channel-telegram": telegramPlugin,
     "@dispach/channel-whatsapp": whatsappPlugin,
+    "@dispach/model-bedrock": bedrockPlugin,
     "@dispach/tools-composio": composioPlugin,
     "@dispach/tools-system": systemPlugin,
     "@dispach/tools-web": webPlugin,

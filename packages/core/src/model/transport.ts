@@ -13,6 +13,7 @@ import { ConfigError } from "../errors.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import { DEFAULT_MODEL_API, type ModelRoleConfig } from "../manifest/schema.ts"
 import type { ConfigSchema } from "../plugins/plugin.ts"
+import type { ModelCapabilities } from "./capabilities.ts"
 import { type ChatCompletionsConfig, createChatCompletionsProvider } from "./chat-completions.ts"
 import type { FetchLike, ModelProvider } from "./provider.ts"
 
@@ -35,6 +36,14 @@ export interface ModelTransportContext {
 export interface ModelTransport {
     /** Validates `model.<role>.options`. Checked at load, so a bad option refuses the boot. */
     readonly optionsSchema?: ConfigSchema
+    /**
+     * Adjust the capabilities the registry resolved from the model id, for what *this transport*
+     * makes true. The registry describes a model as reached over chat-completions, and some facts
+     * are the transport's: Claude caches its prompt on Bedrock and not on Anthropic's compatible
+     * endpoint. A manifest's explicit `capabilities` still win; a transport should leave a field the
+     * manifest set alone.
+     */
+    capabilities?(resolved: ModelCapabilities, config: ModelRoleConfig): ModelCapabilities
     /** Build the provider. Must not touch the network: this runs before `runtime.ready`. */
     create(context: ModelTransportContext): ModelProvider
 }

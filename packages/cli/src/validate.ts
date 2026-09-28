@@ -128,7 +128,7 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
         // The model roles, resolved the way `Agent.create` resolves them: an unknown `api` or options
         // its transport refuses is a boot failure, so it is a validation failure too. Building a
         // provider opens no socket.
-        resolveRoles(manifest, {
+        const resolvedRoles = resolveRoles(manifest, {
             env: loaded.env,
             transports: new Map([
                 ...BUILT_IN_TRANSPORTS,
@@ -267,12 +267,15 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
                                   `  ${entry.role.padEnd(12)} ${entry.modelId} · window ${entry.window.contextWindow} ${describeWindowSource(entry.window)}\n`,
                           )
                           .join("")}`) +
-                `  capabilities thinking=${capabilities.thinking} promptCache=${capabilities.promptCache} nativeTools=${capabilities.nativeTools} strictSchema=${capabilities.strictSchema}\n` +
+                // The role's capabilities as its transport resolves them, not the bare registry row:
+                // Claude caches on Bedrock and not on the compatible endpoint, and only the transport
+                // knows which one this is.
+                `  capabilities thinking=${resolvedRoles.main.capabilities.thinking} promptCache=${resolvedRoles.main.capabilities.promptCache} nativeTools=${resolvedRoles.main.capabilities.nativeTools} strictSchema=${resolvedRoles.main.capabilities.strictSchema}\n` +
                 // A bare value is what let a false one sit unread for phases: the Claude rows declared
                 // `promptCache: "anthropic"` directly beneath a comment saying they describe the
                 // OpenAI-compatible endpoint, which does not support caching at all. This line is the
                 // field's *only* consumer, so if it does not explain the value nothing does.
-                cacheNote(capabilities.promptCache, manifest.model.main.id) +
+                cacheNote(resolvedRoles.main.capabilities.promptCache, manifest.model.main.id) +
                 `  dialect      ${manifest.tools.dialect}\n` +
                 `  workspace    ${tiers === "" ? "(none)" : tiers}\n` +
                 (knowledge === undefined

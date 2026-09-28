@@ -24,7 +24,8 @@ Write this list somewhere you'll see it during code review:
 | VelaOps concern | Where it stays | Why |
 | --- | --- | --- |
 | Per-agent RSA-3072 `.pem` challenge | `lib/agent-keys.ts` | VelaOps' isolation model, not a runtime concern |
-| LiteLLM virtual keys, budgets, 25% markup | `lib/litellm.ts` | Dispach sees a base URL and a token |
+| LiteLLM virtual keys, budgets, 25% markup | `lib/litellm.ts` | Dispach sees a base URL and a token. **Being replaced by AWS Bedrock** (doc 16): then Dispach sees `api: bedrock-converse` and a region |
+| The container-credentials endpoint that vends each silo's AWS credentials | the engine | Dispach reads the AWS default chain and never a key; who is allowed to spend is IAM's |
 | Traefik labels, subdomain routing | `docker.ts` | Deployment topology |
 | MinIO backup envelopes | `lib/backup.ts` | Storage policy |
 | `velaops-net` DNS assumptions | compose | Network topology |
@@ -135,7 +136,9 @@ format, so this is a generator change rather than a translation layer.
 ```
 openclaw.json                        agent.yaml
 ─────────────────────────────────    ─────────────────────────────
-model: "openclaw/main"            →  model.main.{id,baseUrl,apiKeyEnv}   (LiteLLM base URL)
+model: "openclaw/main"            →  model.main.{id,baseUrl,apiKeyEnv}   (LiteLLM base URL, today)
+                                  →  model.main.{id,api: bedrock-converse,options.region}   (Bedrock)
+agents.defaults.model.fallbacks   →  model.main.fallbacks
 modelByChannel: {telegram: X}     →  channels[].modelOverride
 delivery.channel + to             →  delivery.default + targets
 agents.defaults.bootstrapMaxChars →  context.observationMaxTokens (converted)
@@ -150,7 +153,10 @@ Two things to get right. The **bootstrap caps**: in OpenClaw, raising only the p
 in the direction of correctness — verify `MEMORY.md` actually lands via `GET /v1/agents/:id/context`
 rather than assuming it. And **secrets are env var names, never values**: a manifest carrying a
 literal key fails validation, so the LiteLLM virtual key reaches the container through the
-environment exactly as it does today.
+environment exactly as it does today. On Bedrock there is no key at all: the SDK's default chain
+reads the container-credentials endpoint the engine vends (`AWS_CONTAINER_CREDENTIALS_FULL_URI` +
+`AWS_CONTAINER_AUTHORIZATION_TOKEN`), and a revoked credential ends a turn with a terminal 403 that
+no fallback bypasses, which is what makes it usable as the budget stop.
 
 ### What the engine actually changes
 
@@ -253,7 +259,9 @@ runtime you don't control. That constant disappears.
 Dispach does not replace these, and requests to make it do so should be declined:
 
 - **Identity and auth.** No user model. Better Auth stays authoritative.
-- **Cost control.** No budgets, no markup, no quotas. LiteLLM stays.
+- **Cost control.** No budgets, no markup, no prices. LiteLLM stays until the Bedrock cutover, and
+  after it the budget stop is a revoked credential and per-agent `limits`. Dispach reports usage
+  per call (`callId`, cache read and write) and prices nothing.
 - **Isolation.** No opinion on containers. The `.pem` model stays.
 - **Provisioning.** No agent lifecycle management. That is literally VelaOps.
 - **Persistence beyond its own tables.** Core emits events; the engine subscribes and writes

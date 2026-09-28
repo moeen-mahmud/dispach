@@ -17,6 +17,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 ### Models
 
 - `model.<role>.api` selects a transport (default `chat-completions`); `options` carries its settings. `baseUrl` is required only for chat-completions.
+- AWS Bedrock: `api: bedrock-converse`, `options: {region, profile?}`. Credentials from the AWS default chain (env, container credentials, Pod Identity, instance role), never the manifest. Prompt caching, signed thinking, native tools, cache-read and cache-write usage. AccessDenied is terminal. The SDK loads on the first call.
 - `model.<role>.fallbacks`: other models tried in order when the endpoint fails before any output. Never on a 4xx the caller caused, never on a 403.
 - Signed thinking is replayed with tool results for Anthropic-family models. It was documented as built and was not.
 - `model.result` carries `callId`, the answering `model`, `role`, `cachedPromptTokens`, `cacheWriteTokens` and `sender`; `model.fallback` is new.

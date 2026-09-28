@@ -116,8 +116,10 @@ function buildRole(
     config: ModelRoleConfig,
     options: ResolveRolesOptions,
 ): ResolvedRole {
-    const capabilities = resolveCapabilities(config.id, config.capabilities)
     const field = `model.${configuredAs}`
+    const resolved = resolveCapabilities(config.id, config.capabilities)
+    const { transport } = transportFor(config, field, options.transports ?? BUILT_IN_TRANSPORTS)
+    const capabilities = transport.capabilities?.(resolved, config) ?? resolved
     const primary = providerFor(
         config,
         field,
