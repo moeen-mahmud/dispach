@@ -810,10 +810,19 @@ export class Runtime {
                 providers,
                 slugs: entry?.manifest.tools.pinned ?? [],
                 bus,
+                heal: (slugs) => runtime.#heal(agentId, slugs),
             })
         }
 
         return runtime
+    }
+
+    /**
+     * The tool provider factories this runtime builds agents with, so a surface editing
+     * `tools.providers` can ask the providers themselves whether a config is valid before writing it.
+     */
+    get toolProviderFactories(): Readonly<Record<string, ToolProviderFactory>> {
+        return this.#options.toolProviders ?? {}
     }
 
     get ready(): boolean {
@@ -1161,6 +1170,7 @@ export class Runtime {
                 providers: this.#providersByAgent.get(agent.id) ?? [],
                 slugs: entry.manifest.tools.pinned,
                 bus: this.bus,
+                heal: (slugs) => this.#heal(agent.id, slugs),
             })
         }
 
@@ -1293,7 +1303,23 @@ export class Runtime {
             return agent === undefined ? [] : [agent]
         })
         const running = () => agents.reduce((sum, agent) => sum + agent.inFlight, 0)
-        if (running() === 0) return { status: "loaded", adopted: await this.replace(agentId) }
+        if (running() === 0) {
+            const adopted = await this.replace(agentId)
+            // Announced here too, so a surface watching for a reload it did not ask for — the
+            // runtime's own, after a cache warmed — sees it the same way it sees a waited one.
+            this.bus.emit(
+                "agent.reloaded",
+                {
+                    ok: true,
+                    adopted: adopted.map((agent) => agent.id),
+                    waitedMs: 0,
+                    held: 0,
+                    disposed: true,
+                },
+                { agentId },
+            )
+            return { status: "loaded", adopted }
+        }
 
         // Refused now rather than after the wait: the person asking should hear about a typo while
         // they are still looking at it, not when the last turn ends.
@@ -1387,6 +1413,42 @@ export class Runtime {
     }
 
     #reloads = new Map<string, PendingReload>()
+
+    /**
+     * A refresh has fetched pinned tools this agent loaded without — a server added through settings,
+     * with nothing cached yet. Tools resolve once per instance, so they stay missing until the next
+     * load; this is that load, queued like any reload so it waits for running turns (decision 14.24).
+     *
+     * Once per agent per slug: a slug the provider lists and the registry still cannot resolve (a
+     * schema it refuses) would otherwise reload forever.
+     */
+    #heal(agentId: string, listed: readonly string[]): void {
+        const agent = this.#agents.get(agentId)
+        if (agent === undefined) return
+        const done = this.#healed.get(agentId) ?? new Set<string>()
+        const missing = listed.filter((slug) => !agent.tools.has(slug) && !done.has(slug))
+        if (missing.length === 0) return
+        for (const slug of missing) done.add(slug)
+        this.#healed.set(agentId, done)
+        const root =
+            [...this.#teams].find(([, members]) => members.some((m) => m.id === agentId))?.[0] ??
+            agentId
+        this.reload(root).catch((error: unknown) => {
+            this.bus.emit(
+                "agent.warning",
+                {
+                    code: "tools_heal_failed",
+                    message: `${missing.join(", ")} became available and the reload that would pick them up failed: ${
+                        error instanceof Error ? error.message : String(error)
+                    }`,
+                    hint: `Reload the agent once the manifest loads (POST /v1/agents/${root}/reload), or restart it.`,
+                },
+                { agentId },
+            )
+        })
+    }
+
+    #healed = new Map<string, Set<string>>()
 
     /**
      * Stop hosting one agent — leases, channels, schedules, providers, plugin watchers.
@@ -2043,8 +2105,10 @@ function refreshProviders(input: {
     readonly providers: readonly ToolProvider[]
     readonly slugs: readonly string[]
     readonly bus: EventBus
+    /** Told which pinned slugs the provider can now resolve; the runtime decides whether to reload. */
+    readonly heal?: (slugs: readonly string[]) => void
 }): void {
-    const { agentId, providers, slugs, bus } = input
+    const { agentId, providers, slugs, bus, heal } = input
     for (const provider of providers) {
         // Most providers have nothing to fetch — `system` and `web` resolve from module
         // constants — so this skips them rather than requiring an empty implementation. With
@@ -2054,7 +2118,7 @@ function refreshProviders(input: {
         const from = performance.now()
         void provider
             .refresh(slugs)
-            .then((result) => {
+            .then(async (result) => {
                 bus.emit(
                     "tools.refreshed",
                     {
@@ -2067,6 +2131,19 @@ function refreshProviders(input: {
                     },
                     { agentId },
                 )
+                if (heal === undefined) return
+                // What the provider can resolve *now*, against what the agent pinned: the difference
+                // between the two is a tool the agent loaded without and could have.
+                // Guarded: a throw here would reach the `.catch` below and report a refresh that
+                // succeeded as one that failed.
+                let listed: Set<string>
+                try {
+                    listed = new Set((await provider.list?.()) ?? [])
+                } catch {
+                    return
+                }
+                const available = slugs.filter((slug) => listed.has(slug))
+                if (available.length > 0) heal(available)
             })
             .catch((error: unknown) => {
                 bus.emit(

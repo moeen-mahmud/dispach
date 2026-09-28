@@ -22,6 +22,8 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 
 ### MCP
 
+- MCP servers are configured through settings (TUI, web app, `PATCH /config`). A config the provider refuses — a credential in a URL — is refused before it is written.
+- A server added from settings works with no restart and no warm step: once its cache fills, the agent reloads itself.
 - `tools.providers.mcp`: tools from remote MCP servers over Streamable HTTP, pinned by name as `<server>__<tool>`. Resolved from a cache at boot, so a server that is down cannot hold startup; `tools --warm` fills it.
 - Mutating unless the server marks a tool read-only; output is untrusted. `policyArgs` lets a policy rule reach a proxy tool's inner tool (`deny: ["huly__invoke_tool(delete_*)"]`). `participantHeader` forwards who the turn acts for.
 

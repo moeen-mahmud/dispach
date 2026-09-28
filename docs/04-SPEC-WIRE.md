@@ -1080,7 +1080,7 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `plugin.slow` | setup over budget | `name`, `setupMs` |
 | `agent.loaded` | per agent | `tools`, `skills`, `schedules` (the manifest's **declared** count — this fires before reconciliation), `model` |
 | `agent.disposed` | this process stopped hosting an agent, without exiting | `reason` (`requested` \| `replaced` \| `stopped`) |
-| `agent.reloaded` | a reload that waited for running turns has finished | `ok`, `adopted[]`, `waitedMs`, `held` (new turns that waited for it), `disposed`, `error?` — `ok: false` with `disposed: false` means the old instance is still serving |
+| `agent.reloaded` | a reload finished — at once (`waitedMs: 0`) or after running turns; includes the runtime's own, after a cache warmed | `ok`, `adopted[]`, `waitedMs`, `held` (new turns that waited for it), `disposed`, `error?` — `ok: false` with `disposed: false` means the old instance is still serving |
 | `agent.warning` | a fact true for the whole session, said at load | `code`, `message`, `hint`, `field?` |
 | `agent.channel.status` | connect/disconnect, or a channel now waiting on a person | `channelId`, `channelType`, `status` (`starting` \| `connected` \| `disconnected` \| `error` \| `needs_input`), `detail?`, `input?` (`{kind, payload, issuedAt, expiresAt?}`, present only with `needs_input`) |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |

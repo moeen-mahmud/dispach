@@ -2435,6 +2435,9 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         // rather than guessing, because guessing is how `tools.pinned: "exec"`
                         // becomes a one-character tool list.
                         value: parseSettingValue(parsed.value.value),
+                        // Refuses a provider config the provider would refuse (an MCP server with a
+                        // credential in its URL), rather than writing it and dropping the provider.
+                        providers: runtime.toolProviderFactories,
                     })
                 } catch (error) {
                     if (isHarnessError(error)) return fail(error.toDetail(), 400)

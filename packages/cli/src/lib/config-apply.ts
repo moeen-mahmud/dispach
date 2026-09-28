@@ -16,6 +16,7 @@ import { dirname, join } from "node:path"
 import { editManifest, HarnessError, manifestValueAt, parseSettingValue } from "@dispach/core"
 import { upsertEnv } from "#lib/dotenv-edit"
 import { telegramHandle } from "#lib/init-flow"
+import { TOOL_PROVIDERS } from "#lib/providers"
 
 export interface Applied {
     /** One line saying what happened, for whichever surface asked. */
@@ -33,7 +34,14 @@ export function envPathOf(manifestPath: string): string {
 
 export async function applySet(manifestPath: string, path: string, raw: string): Promise<Applied> {
     const value = parseSettingValue(raw)
-    const result = await editManifest({ file: manifestPath, path: path.split("."), value })
+    // The binary's providers, so a `tools.providers` edit the provider itself would refuse is refused
+    // here — the TUI editor and `config set` both land on this line.
+    const result = await editManifest({
+        file: manifestPath,
+        path: path.split("."),
+        value,
+        providers: TOOL_PROVIDERS,
+    })
     return {
         note: `${path} is now ${describe(value)}`,
         reflowed: result.reflowed,

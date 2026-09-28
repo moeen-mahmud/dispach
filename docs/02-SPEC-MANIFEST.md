@@ -483,6 +483,12 @@ resolves from `.dispach/mcp.cache.json` and contacts no server, so a server that
 `runtime.ready`; `tools --warm` fills a cold cache, and the post-ready refresh keeps it current. A
 server's refusal (`isError`) reaches the model as a failed call carrying the server's own words.
 
+**Configured through settings, not `init`.** `tools.providers` and `tools.pinned` are settings on the
+TUI editor, the web app and `PATCH /v1/agents/:id/config`. A value the provider refuses (a malformed
+server, a credential in a URL) is refused **before** it is written, with the provider's own error.
+Adding a server and pinning its tools needs no `tools --warm`: the agent loads without them, the
+post-ready refresh fetches them, and the agent reloads itself once to pick them up (`agent.reloaded`).
+
 **A proxy tool is only as narrow as the server makes it.** Measured on `@firfi/huly-mcp` 0.52.6: in
 its default proxy mode `TOOLS=list_issues` adds `list_issues` to the listing and **does not stop**
 `invoke_tool` dispatching `delete_issue`. Only `HULY_TOOL_MODE=native` with `TOOLS` enforces the

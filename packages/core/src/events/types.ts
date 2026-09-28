@@ -115,7 +115,8 @@ export interface EventDataMap {
      */
     "agent.disposed": { reason: "requested" | "replaced" | "stopped" }
     /**
-     * A reload that waited for running turns has finished (`Runtime.reload`). `held` is how many new
+     * A reload has finished (`Runtime.reload`) — at once when the agent was idle (`waitedMs: 0`), or
+     * after the running turns when it was not. `held` is how many new
      * turns waited for it rather than running on the old configuration. `ok: false` means the new
      * manifest did not load: `error` says why, and the old instance is still serving unless
      * `disposed` says otherwise.

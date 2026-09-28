@@ -31,10 +31,12 @@
 
 import { readFileSync, writeFileSync } from "node:fs"
 import { readFile, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
 import { isMap, isSeq, parseDocument } from "yaml"
-import { HarnessError } from "../errors.ts"
+import { HarnessError, isHarnessError } from "../errors.ts"
+import type { ToolProviderFactory } from "../tools/types.ts"
 import { resolveProviders } from "./providers.ts"
-import { AgentManifestSchema } from "./schema.ts"
+import { type AgentManifest, AgentManifestSchema } from "./schema.ts"
 import { validateSchedules } from "./validate.ts"
 import { setInSource, uncommentInSource } from "./yaml-edit.ts"
 
@@ -55,6 +57,13 @@ export interface ManifestEdit {
      * at the end of the file. Returning `undefined` falls through to the round-trip.
      */
     readonly fallback?: (source: string) => string | undefined
+    /**
+     * The provider factories the surface can build, so an edit to `tools.providers` is refused when a
+     * provider would refuse its own config — a malformed MCP server, a credential in its URL. Without
+     * this the writer checks only the schema, writes the file, and the provider is dropped with a
+     * warning at the next load. Absent skips the check, which is what a caller with no factories has.
+     */
+    readonly providers?: Readonly<Record<string, ToolProviderFactory>>
 }
 
 export interface ManifestEditResult {
@@ -179,6 +188,7 @@ export async function editManifest(edit: ManifestEdit): Promise<ManifestEditResu
         throw manifestEditUnreadable(edit.file, cause)
     }
     const prepared = prepareManifestEdit(source, edit)
+    checkProviders(edit, prepared.manifest)
     await writeFile(edit.file, prepared.next, "utf8")
     return { ...prepared, after: edit.value }
 }
@@ -198,6 +208,7 @@ export function editManifestSync(edit: ManifestEdit): ManifestEditResult {
         throw manifestEditUnreadable(edit.file, cause)
     }
     const prepared = prepareManifestEdit(source, edit)
+    checkProviders(edit, prepared.manifest)
     writeFileSync(edit.file, prepared.next, "utf8")
     return { ...prepared, after: edit.value }
 }
@@ -264,6 +275,43 @@ function manifestEditUnreadable(file: string, cause: unknown): HarnessError {
         hint: "Check the path and file permissions. Nothing was written.",
         cause,
     })
+}
+
+/**
+ * Build each provider from the config the edit would write, and throw what one refuses.
+ *
+ * Construction touches no network (hard rule 4 holds for providers at boot, and this is the same
+ * call), so this is cheap and has no side effect beyond what a provider owns, which is stopped at
+ * once. The provider's own error is rethrown rather than paraphrased: its hint names the fix.
+ */
+function checkProviders(edit: ManifestEdit, manifest: AgentManifest): void {
+    const factories = edit.providers
+    if (factories === undefined || !edit.path.join(".").startsWith("tools.provider")) return
+    for (const selection of resolveProviders(manifest.tools).selections) {
+        const factory = factories[selection.id]
+        if (factory === undefined) {
+            throw manifestEditInvalid(
+                edit.path.join("."),
+                `no tool provider called "${selection.id}" is available here. Available: ${Object.keys(factories).join(", ") || "(none)"}.`,
+            )
+        }
+        let provider: ReturnType<ToolProviderFactory>
+        try {
+            provider = factory({
+                dir: dirname(edit.file),
+                env: {},
+                config: selection.config,
+                agentId: manifest.id,
+            })
+        } catch (cause) {
+            if (isHarnessError(cause)) throw cause
+            throw manifestEditInvalid(
+                edit.path.join("."),
+                `the ${selection.id} provider refused its config: ${cause instanceof Error ? cause.message : String(cause)}`,
+            )
+        }
+        void provider.stop?.()
+    }
 }
 
 function manifestEditInvalid(path: string, detail: string): HarnessError {
