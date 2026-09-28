@@ -56,7 +56,7 @@ silo, in the runtime's template format (`docs/09-API-GUIDE.md` §1b).
 | `POST /v1/silos/:subject/pause` | operator | Pause now. `409 silo_busy` while a turn, a delivery or a proxied request is open |
 | `POST /v1/silos/:subject/wake` | operator | Wake now |
 | `POST /v1/silos/:subject/recreate` | operator | New container, current image and `SILO_ENV`, same volume. How an upgrade rolls out. `409` while busy |
-| `GET /v1/silos/:subject/backup` | operator | The silo's data as tar.gz, taken paused (crash-consistent) and left paused. Templates excluded. `409` while busy |
+| `GET /v1/silos/:subject/backup` | operator | The silo's data as tar.gz, taken paused (crash-consistent). Woken again once the archive is read, unless suspend is on. Templates excluded. `409` while busy |
 | `PUT /v1/silos/:subject/backup` | operator | Restore that archive into this silo, **replacing** everything in it, keys included |
 | `DELETE /v1/silos/:subject` | operator | Remove the silo **and its volume**. Irreversible: it holds the silo's only store |
 | `POST /v1/silos/:subject/keys` | operator | Mint a key inside the silo; the body is the runtime's `POST /v1/keys` (label, scope, expiry) |

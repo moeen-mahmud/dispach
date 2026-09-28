@@ -374,4 +374,17 @@ describe("recreate, backup and restore", () => {
         const key = await mint("b")
         expect((await call("GET", "/silos/b/v1/agents", { token: key })).status).toBe(200)
     })
+
+    test("with suspending off, a backed-up silo is running again once the archive is read", async () => {
+        // Always on is the product: a silo left paused by the nightly backup hears no channel.
+        const { call, placer, store } = await setup({ suspend: "default" })
+        await call("POST", "/v1/silos", { token: TOKEN, body: { subject: "a" } })
+        const backup = await call("GET", "/v1/silos/a/backup", { token: TOKEN })
+        await backup.arrayBuffer()
+        expect(placer.calls).toContain("export silo-a paused=true")
+        for (let i = 0; i < 50 && store.get("a")?.status !== "running"; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        expect(store.get("a")?.status).toBe("running")
+    })
 })

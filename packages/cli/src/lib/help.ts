@@ -27,7 +27,9 @@ function flagLine(flag: FlagSpec): string {
         flag.placeholder === undefined ? `--${flag.name}` : `--${flag.name} <${flag.placeholder}>`
     const forms = flag.short === undefined ? long : `-${flag.short}, ${long}`
     const trailer = flag.defaultHelp === undefined ? "" : ` (default ${flag.defaultHelp})`
-    return `  ${forms.padEnd(FLAG_COLUMN)}${flag.help}${trailer}`
+    // At least one space, always: a placeholder long enough to fill the column ran straight into its
+    // description (`--telegram-allow <@handle>who may message it`).
+    return `  ${forms.padEnd(FLAG_COLUMN - 1)} ${flag.help}${trailer}`
 }
 
 const SESSION_KEY_NOTE = `Session keys are {channel}:{peerId}[:{thread}] | A bare word is refused, because outbound

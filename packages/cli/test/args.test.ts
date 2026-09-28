@@ -309,6 +309,23 @@ describe("help text cannot drift from the parser", () => {
     test("a value-taking flag shows its placeholder", () => {
         expect(helpText(COMMANDS.find((c) => c.name === "sessions"))).toContain("--limit <n>")
     })
+
+    test("a flag's forms never run into its description, however long the placeholder", () => {
+        // `--telegram-allow <@handle>who may message it` was the first reading of this.
+        for (const spec of COMMANDS) {
+            for (const flag of flagsFor(spec)) {
+                const forms =
+                    flag.placeholder === undefined
+                        ? `--${flag.name}`
+                        : `--${flag.name} <${flag.placeholder}>`
+                const line = helpText(spec)
+                    .split("\n")
+                    .find((row) => row.includes(`${forms} `) || row.endsWith(forms))
+                expect(line).toBeDefined()
+                expect(line?.includes(`${forms}${flag.help}`)).toBe(false)
+            }
+        }
+    })
 })
 
 // Kept honest about what `parse` can return: a new kind must be handled everywhere.

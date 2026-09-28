@@ -23,6 +23,7 @@ VelaOps is its first consumer, not its owner.
 | `08-MEMORY.md` | How memory is stored, retrieved, and injected — Phase 6 through 6.5, with the numbers. |
 | `09-API-GUIDE.md` | The agent server walked through, `compose up` to a streamed reply. The *guide*; doc 04 is the contract. |
 | `12-OPENCLAW-CUTOVER.md` | Moving off the runtime this one replaces. |
+| `13-QA.md` | The manual QA pass before a release reaches anyone: upgrade, CLI, server, channels, API, control plane, numbers. |
 
 `10-*.md` and `11-*.md` are private working documents (the business plan and the 0.2.0 plan) and
 are gitignored on purpose, which is why the numbering skips from 09 to 12. Anything they decide that

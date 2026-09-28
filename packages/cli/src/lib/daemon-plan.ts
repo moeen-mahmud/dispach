@@ -288,13 +288,14 @@ export function summariseStatus(agentId: string, facts: ServiceFacts): StatusRep
             ...(facts.uptimeMs === undefined ? {} : { note: `up ${duration(facts.uptimeMs)}` }),
         })
     } else if (facts.leasePid !== undefined) {
-        // launchd knows nothing, but something holds the lease — a `serve` in a terminal. Worth
-        // saying plainly: "not installed" alone would read as "nothing is running", which is the
-        // opposite of the truth and is exactly the confusion slot 2 was fixed for.
+        // launchd knows nothing, but something holds the lease — a `serve` in a terminal, or a
+        // container's own entrypoint. Worth saying plainly: "not installed" alone would read as
+        // "nothing is running", which is the opposite of the truth and is exactly the confusion slot
+        // 2 was fixed for. "In a terminal" was the first wording and was wrong in every container.
         rows.push({
             label: "state",
-            value: `running in a terminal · pid ${facts.leasePid}`,
-            note: "not installed as a service",
+            value: `running · pid ${facts.leasePid}`,
+            note: "a serve process, not an installed service",
         })
     }
     // No `else`. With nothing running the headline already carries the state, and repeating it as

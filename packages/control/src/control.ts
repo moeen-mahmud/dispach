@@ -168,16 +168,29 @@ export class ControlPlane {
     }
 
     /**
-     * The silo's data as a tar stream, taken while it is paused — so the copy is crash-consistent —
-     * and left paused afterwards; the next message or schedule wakes it as usual.
+     * The silo's data as a tar stream, taken while it is paused — so the copy is crash-consistent.
+     *
+     * Afterwards it is left paused only when suspending is on, where the next message or schedule
+     * wakes it. With suspending off nothing would: a Telegram long-poll or a WhatsApp socket cannot
+     * wake a frozen process, so a nightly backup left every channel deaf until somebody used the
+     * web app. So a silo this call paused is woken once the archive has been read or abandoned.
      */
     async backup(subject: string): Promise<Readable> {
         const silo = this.#find(subject)
-        if (silo.status === "running") {
+        const pausedHere = silo.status === "running"
+        if (pausedHere) {
             const activity = await this.#requireIdle(silo)
             await this.#suspend(silo, activity)
         }
-        return this.#placer.exportData(silo.name)
+        const tar = await this.#placer.exportData(silo.name)
+        if (pausedHere && !this.#suspendIdle) {
+            tar.once("close", () => {
+                this.wake(subject).catch((error: unknown) =>
+                    this.#log(`backup: ${subject} not woken afterwards: ${String(error)}`),
+                )
+            })
+        }
+        return tar
     }
 
     /**
