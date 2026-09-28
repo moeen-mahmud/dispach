@@ -409,6 +409,14 @@ export class WebhookDispatcher {
                 ...(this.#options.lookup === undefined ? {} : { lookup: this.#options.lookup }),
             })
         } catch (error) {
+            // A name that does not resolve *right now* is a receiver restarting or a DNS blip, not a
+            // refusal: nothing was sent, so retrying it probes nothing. Failing it outright lost the
+            // event — found live, a receiver container stopped for twelve seconds and the turn it
+            // missed never arrived. It takes the ordinary backoff and gives up the ordinary way.
+            if (error instanceof HarnessError && error.code === "webhook_target_unresolved") {
+                await this.#retryOrFail(row, messageOf(error), false)
+                return
+            }
             // Permanent, and not retried: a URL that now resolves somewhere refused stays refused,
             // and retrying a refusal is how a checker becomes a scanner on a timer.
             await store.markFailed(row.subscriptionId, row.messageId, messageOf(error), at)
@@ -455,6 +463,15 @@ export class WebhookDispatcher {
         } finally {
             clearTimeout(timer)
         }
+        await this.#retryOrFail(row, failure, permanent)
+    }
+
+    async #retryOrFail(
+        row: WebhookDeliveryRecord,
+        failure: string,
+        permanent: boolean,
+    ): Promise<void> {
+        const store = this.#options.store
         if (permanent || row.attempts > this.#backoff.length) {
             await store.markFailed(row.subscriptionId, row.messageId, failure, this.#iso())
             return

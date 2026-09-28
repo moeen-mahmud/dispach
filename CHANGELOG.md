@@ -25,6 +25,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - WhatsApp's library loads only when a WhatsApp channel starts.
 - `status` in a container no longer says "running in a terminal".
 - A flag with a long placeholder in `--help` no longer runs into its description.
+- A webhook whose receiver does not resolve for a moment (restarting, a DNS blip) is retried, not dropped.
 
 ### Control plane (new, `packages/control`, FSL-1.1)
 
