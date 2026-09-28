@@ -668,7 +668,7 @@ describe("a plugin-supplied channel loads under serve", () => {
     // The semver **range** this plugin claims, checked against the host's. A mismatch is a loud
     // load failure rather than a silent rollback, which is the one thing the runtime this replaces
     // got wrong badly enough to be worth copying the opposite of.
-    dispachApi: "^0.1",
+    dispachApi: "^0.2",
     setup(context) {
         context.defineChannel("smoke", (channel) => ({
             id: channel.id,

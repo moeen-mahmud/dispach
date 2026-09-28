@@ -14,6 +14,49 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
 - `model.result` carries `firstTokenMs`.
 
+### Plugins
+
+- **Breaking:** a plugin declares `dispachApi: "^0.2"` to load on 0.2. A plugin still on `^0.1` is refused at boot with `plugin_api_mismatch`, naming the range.
+- A pre-release host is checked as the release it precedes: `0.2.0-pilot.1` satisfies `^0.2`.
+
+### Fixes
+
+- A container killed rather than stopped no longer blocks its replacement for 45 minutes on a dead pid-1 lease.
+- WhatsApp's library loads only when a WhatsApp channel starts.
+- `status` in a container no longer says "running in a terminal".
+- A flag with a long placeholder in `--help` no longer runs into its description.
+
+### Control plane (new, `packages/control`, FSL-1.1)
+
+- Places one runtime per user (Docker), proxies `/silos/:subject/v1/…` with the silo's own keys, and creates, recreates, backs up, restores and deletes silos.
+- Always on: `DISPACH_CONTROL_SUSPEND=on` pauses idle silos as a cost option, and is off by default. A backup no longer leaves a silo paused when suspend is off.
+- The pilot monitor (`DISPACH_CONTROL_HOOK_URL`): rolling rates per silo, `GET /v1/monitor` and `/v1/monitor/failures`, and rate alerts to Telegram.
+
+### Tooling
+
+- `bun run eval:scenarios`: a real agent and model, mocked tools, and a calibrated judge.
+- A tag with a `-` publishes a pre-release: npm `next`, a GitHub pre-release, no Homebrew formula, and no `latest` image tag.
+
+
+## 0.2.0-pilot.1 — 2026-09-28
+
+A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
+
+### Runtime API
+
+- Agent templates: `GET /v1/templates` and `POST /v1/agents {"template", "vars"}`. Secret vars go to `.env`, never into a file.
+- Per-agent secrets: `GET`/`PUT /v1/agents/:id/secrets`. Names only on the way out; a `PUT` adopts an agent waiting for its key.
+- Every model call is metered: `GET /v1/usage` (by agent, model, day, sender) and `GET /v1/agents/:id/turns`.
+- Outbound webhooks, signed with Standard Webhooks: `POST`/`GET`/`DELETE /v1/webhooks`. A private receiver needs `DISPACH_WEBHOOK_ALLOW`.
+- `limits.maxConcurrentTurns` and `limits.tokens`: over either, a turn is refused with `429`, never cut off.
+- `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
+- `model.result` carries `firstTokenMs`.
+
+### Plugins
+
+- **Breaking:** a plugin declares `dispachApi: "^0.2"` to load on 0.2. A plugin still on `^0.1` is refused at boot with `plugin_api_mismatch`, naming the range.
+- A pre-release host is checked as the release it precedes: `0.2.0-pilot.1` satisfies `^0.2`.
+
 ### Fixes
 
 - A container killed rather than stopped no longer blocks its replacement for 45 minutes on a dead pid-1 lease.

@@ -33,7 +33,7 @@ function workspace(): string {
         `export default {
   name: "metrics",
   version: "0.2.0",
-  dispachApi: "^0.1",
+  dispachApi: "^0.2",
   setup(ctx) {
     ctx.defineToolProvider("metrics", () => ({
       id: "metrics",

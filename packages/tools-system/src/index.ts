@@ -100,7 +100,7 @@ export const VERSION = "0.1.0"
 export default {
     name: "system",
     version: VERSION,
-    dispachApi: "^0.1",
+    dispachApi: "^0.2",
     permissions: [
         { kind: "exec", commands: ["*"] },
         { kind: "fs", paths: ["<workspace>"], mode: "write" },

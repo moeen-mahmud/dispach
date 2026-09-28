@@ -65,7 +65,7 @@ export const VERSION = "0.1.0"
 export default {
     name: "composio",
     version: VERSION,
-    dispachApi: "^0.1",
+    dispachApi: "^0.2",
     permissions: [
         { kind: "network", hosts: ["backend.composio.dev"] },
         { kind: "env", vars: ["COMPOSIO_API_KEY"] },

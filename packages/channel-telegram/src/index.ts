@@ -124,7 +124,7 @@ export const VERSION = "0.1.0"
 export default {
     name: "telegram",
     version: VERSION,
-    dispachApi: "^0.1",
+    dispachApi: "^0.2",
     permissions: [
         { kind: "network", hosts: ["api.telegram.org"] },
         // The default. A manifest naming a different `tokenEnv` is declaring a variable this list

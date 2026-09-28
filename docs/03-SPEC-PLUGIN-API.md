@@ -16,7 +16,7 @@ import type { Plugin, PluginContext } from "@dispach/core"
 export default {
   name: "telegram",
   version: "0.1.0",
-  dispachApi: "^0.1",
+  dispachApi: "^0.2",
   permissions: [
     { kind: "network", hosts: ["api.telegram.org"] },
     { kind: "env", vars: ["TELEGRAM_BOT_TOKEN"] },

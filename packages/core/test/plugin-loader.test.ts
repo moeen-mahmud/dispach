@@ -30,7 +30,7 @@ function plugin(overrides: Partial<Plugin> = {}): Plugin {
     return {
         name: "fixture",
         version: "1.0.0",
-        dispachApi: "^0.1",
+        dispachApi: "^0.2",
         setup: () => {},
         ...overrides,
     }
@@ -144,7 +144,7 @@ describe("the version gate", () => {
     })
 
     test("a satisfied range loads", async () => {
-        const result = await load(["p"], { builtIn: { p: plugin({ dispachApi: "^0.1" }) } })
+        const result = await load(["p"], { builtIn: { p: plugin({ dispachApi: "^0.2" }) } })
         expect(result.loaded.length).toBe(1)
     })
 })

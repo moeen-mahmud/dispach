@@ -75,7 +75,7 @@ export const VERSION = "0.1.0"
 export default {
     name: "web",
     version: VERSION,
-    dispachApi: "^0.1",
+    dispachApi: "^0.2",
     permissions: [
         // Any host the agent is pointed at, which is the honest declaration for a fetch tool. The
         // guard that matters is not this list: `web_fetch` refuses a private address outright and

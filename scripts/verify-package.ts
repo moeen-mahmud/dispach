@@ -118,7 +118,16 @@ try {
 
     process.stdout.write("using it\n")
     const cli = run(join(work, "node_modules", ".bin", "dispach"), ["--version"], work).trim()
-    check("the bin runs", /^\d+\.\d+\.\d+$/.test(cli), cli)
+    // The exact version being released, not a shape: `^\d+\.\d+\.\d+$` refused the first
+    // pre-release (`0.2.0-pilot.1`) whose bin was working perfectly.
+    const expected = (
+        JSON.parse(readFileSync(join(CLI, "package.json"), "utf8")) as { version: string }
+    ).version
+    check(
+        "the bin runs",
+        cli === expected,
+        `${cli}${cli === expected ? "" : ` (expected ${expected})`}`,
+    )
 
     /**
      * A readme, and a non-empty one.
