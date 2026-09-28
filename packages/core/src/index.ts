@@ -553,6 +553,7 @@ export {
     hashArgs,
     planIntents,
 } from "./tools/execute.ts"
+export { parametersFromJsonSchema, type SchemaConversion } from "./tools/json-schema.ts"
 export {
     LOCAL_PROVIDER_ID,
     LOCAL_TOOL_SLUGS,

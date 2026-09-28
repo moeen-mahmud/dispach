@@ -14,6 +14,11 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
 - `model.result` carries `firstTokenMs`.
 
+### MCP
+
+- `tools.providers.mcp`: tools from remote MCP servers over Streamable HTTP, pinned by name as `<server>__<tool>`. Resolved from a cache at boot, so a server that is down cannot hold startup; `tools --warm` fills it.
+- Mutating unless the server marks a tool read-only; output is untrusted. `policyArgs` lets a policy rule reach a proxy tool's inner tool (`deny: ["huly__invoke_tool(delete_*)"]`). `participantHeader` forwards who the turn acts for.
+
 ### Acting participant
 
 - Every tool receives `ctx.actingParticipant`: who the turn acts for, from the API sender or the channel's sender, never from the model. `null` for schedules, peer agents and the operator.

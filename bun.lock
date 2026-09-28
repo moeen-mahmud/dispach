@@ -52,6 +52,7 @@
         "@dispach/model-bedrock": "workspace:*",
         "@dispach/server": "workspace:*",
         "@dispach/tools-composio": "workspace:*",
+        "@dispach/tools-mcp": "workspace:*",
         "@dispach/tools-system": "workspace:*",
         "@dispach/tools-web": "workspace:*",
         "@types/react": "19.2.18",
@@ -108,6 +109,13 @@
     },
     "packages/tools-composio": {
       "name": "@dispach/tools-composio",
+      "version": "0.1.0",
+      "dependencies": {
+        "@dispach/core": "workspace:*",
+      },
+    },
+    "packages/tools-mcp": {
+      "name": "@dispach/tools-mcp",
       "version": "0.1.0",
       "dependencies": {
         "@dispach/core": "workspace:*",
@@ -301,6 +309,8 @@
     "@dispach/server": ["@dispach/server@workspace:packages/server"],
 
     "@dispach/tools-composio": ["@dispach/tools-composio@workspace:packages/tools-composio"],
+
+    "@dispach/tools-mcp": ["@dispach/tools-mcp@workspace:packages/tools-mcp"],
 
     "@dispach/tools-system": ["@dispach/tools-system@workspace:packages/tools-system"],
 

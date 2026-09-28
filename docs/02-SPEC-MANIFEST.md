@@ -447,6 +447,48 @@ put the security fields out of reach; and two edits are refused whatever the pol
 A guard the agent can switch off on request is not a guard. Everything else, including `onMutate:
 confirm`, is settable.
 
+### The `mcp` provider
+
+Tools from remote MCP servers over **Streamable HTTP**, from `@dispach/tools-mcp`. Registered by the
+`dispach` binary and the container, so a manifest needs no `plugins:` entry.
+
+```yaml
+tools:
+  providers:
+    mcp:
+      servers:
+        huly:
+          url: http://127.0.0.1:3000/mcp
+          headersEnv: { Authorization: HULY_MCP_AUTH }   # header → env var NAME, never a value
+          participantHeader: X-Acting-Participant        # the person the turn acts for
+          policyArgs: { invoke_tool: toolName }          # what a policy rule matches, per tool
+          timeoutMs: 30000                                # default
+  pinned: [huly__search_tools, huly__get_tool_schema, huly__invoke_tool]
+  policy:
+    deny: ["huly__invoke_tool(delete_*)"]
+```
+
+| Field | Notes |
+| --- | --- |
+| `servers.<name>` | Lowercase letters, digits and hyphens. It prefixes every tool: `<name>__<tool>`, the separator being two underscores because a native tool name may not contain a dot. |
+| `url` | `http` or `https`. A URL carrying a credential is refused; put it in `headersEnv`. stdio is not supported: give the server an HTTP front. |
+| `headersEnv` | Header name → the variable holding its value, from the environment the agent loaded with. A missing variable fails the call that needs it, naming the variable. |
+| `participantHeader` | Sent with every call as the turn's acting participant id, and absent for a schedule, a peer agent or the operator, which is how the server tells the two apart. |
+| `policyArgs` | Tool name → the argument a `tools.policy` rule matches. For a proxy tool (`invoke_tool(toolName, arguments)`) this is the inner tool's name, so a rule can reach the call the proxy would make. |
+
+Tools are **pinned by name** like every other provider's, never exposed wholesale, so a server adding
+a tool changes nothing until a manifest pins it. A tool is **mutating unless the server annotates it
+`readOnlyHint: true`**, and its output is **untrusted**, so the write gate and the fence apply. Boot
+resolves from `.dispach/mcp.cache.json` and contacts no server, so a server that is down cannot hold
+`runtime.ready`; `tools --warm` fills a cold cache, and the post-ready refresh keeps it current. A
+server's refusal (`isError`) reaches the model as a failed call carrying the server's own words.
+
+**A proxy tool is only as narrow as the server makes it.** Measured on `@firfi/huly-mcp` 0.52.6: in
+its default proxy mode `TOOLS=list_issues` adds `list_issues` to the listing and **does not stop**
+`invoke_tool` dispatching `delete_issue`. Only `HULY_TOOL_MODE=native` with `TOOLS` enforces the
+list (`Unknown tool: delete_issue`, and no `invoke_tool` at all). With proxy mode, a `policy.deny`
+rule on `invoke_tool` is the guard.
+
 ### Tools that exist and were not enabled
 
 A provider named in `tools.providers` with nothing pinned from it is a **normal and deliberate**

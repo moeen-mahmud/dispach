@@ -24,11 +24,15 @@ import type {
 } from "@dispach/core"
 import bedrockPlugin, { bedrockTransport } from "@dispach/model-bedrock"
 import composioPlugin, { composioFromConfig } from "@dispach/tools-composio"
+import mcpPlugin, { mcpFromConfig } from "@dispach/tools-mcp"
 import systemPlugin, { SystemScriptRunner, systemFromConfig } from "@dispach/tools-system"
 import webPlugin, { webFromConfig } from "@dispach/tools-web"
 
 export const TOOL_PROVIDERS: Readonly<Record<string, ToolProviderFactory>> = {
     composio: composioFromConfig,
+    // Somebody else's tools, over Streamable HTTP (decision 14.22). A manifest names the servers and
+    // pins their tools; nothing is reached before readiness, so a server that is down cannot hold boot.
+    mcp: (context) => mcpFromConfig(context),
     // Registered, not implied. Naming `system` here means the binary *can* supply shell access; a
     // manifest still has to select the provider and pin `exec` before an agent has any. Availability
     // and grant are separate on purpose — the same separation that keeps `tools.local` opt-in.
@@ -130,6 +134,7 @@ export const BUILT_IN_PLUGINS: BuiltInPlugins = {
     "@dispach/channel-whatsapp": whatsappPlugin,
     "@dispach/model-bedrock": bedrockPlugin,
     "@dispach/tools-composio": composioPlugin,
+    "@dispach/tools-mcp": mcpPlugin,
     "@dispach/tools-system": systemPlugin,
     "@dispach/tools-web": webPlugin,
 }

@@ -966,6 +966,7 @@ describe("first-party packages use only the public core API", () => {
         "channel-telegram",
         "model-bedrock",
         "tools-composio",
+        "tools-mcp",
         "tools-system",
         "tools-web",
     ]

@@ -59,6 +59,7 @@
         "@dispach/core": "workspace:*",
         "@dispach/server": "workspace:*",
         "@dispach/tools-composio": "workspace:*",
+        "@dispach/tools-mcp": "workspace:*",
         "@dispach/tools-system": "workspace:*",
         "@dispach/tools-web": "workspace:*",
         "@types/react": "19.2.18",

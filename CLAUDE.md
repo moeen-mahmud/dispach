@@ -178,7 +178,8 @@ packages/cli/        `dispach` binary — lib/ plumbing, components/ Ink, pure r
 packages/server/     HTTP/SSE/WS surface
 packages/client/     typed client for the API — reattach, streams, typed errors
 packages/channel-*/  Telegram. A second channel comes from a plugin, not from here
-packages/tools-*/    system (shell, files), Composio, web. No MCP package exists — see decision 4.7
+packages/tools-*/    system (shell, files), Composio, web, MCP (remote servers over Streamable HTTP — a provider,
+                     never the substrate: decisions 4.7, 14.22)
 packages/model-*/    model transports beyond chat-completions: Bedrock Converse. Its AWS SDK loads on
                      the first model call, never at boot (`bundle.test.ts` holds it)
 packages/control/    the control plane: places, proxies, suspends and wakes one runtime per user.
