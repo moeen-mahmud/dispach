@@ -12,6 +12,7 @@ import { isAbsolute, resolve } from "node:path"
 import { BRAND } from "../brand.ts"
 import { STAGE_ORDER, type StageName } from "../context/compaction/stages.ts"
 import { apiVersionMismatch, type ErrorDetail, HarnessError } from "../errors.ts"
+import { resolveCapabilities } from "../model/capabilities.ts"
 import { parseSchedule } from "../schedule/kinds.ts"
 import { planWorkspace, type WorkspaceFileRef } from "../workspace/load.ts"
 import { planSoul } from "../workspace/soul.ts"
@@ -554,6 +555,45 @@ const UNSUPPORTED_SECTIONS: readonly { key: string; feature: string; phase: stri
  * agent, the schedule fired correctly every 15 minutes and every send came back `Bad Request: chat
  * not found`. It cannot be an error, because `@somechannel` is a legitimate target.
  */
+/**
+ * A fallback smaller than the model it stands in for.
+ *
+ * The primary's capabilities, dialect and window govern the whole turn, fallback or not — the prompt
+ * was assembled for them before anyone knew the primary would fail. So a fallback with a smaller
+ * window can be sent a prompt it refuses, and one without native tools a native catalogue it cannot
+ * read. Warned rather than refused: the fallback exists for an outage, and it may well be the right
+ * trade to have a smaller model answer than none.
+ */
+export function fallbackWarnings(manifest: AgentManifest): ErrorDetail[] {
+    const found: ErrorDetail[] = []
+    for (const role of configuredRoles(manifest.model)) {
+        const config = manifest.model[role]
+        if (config?.fallbacks === undefined) continue
+        const primary = resolveCapabilities(config.id, config.capabilities)
+        for (const [index, entry] of config.fallbacks.entries()) {
+            const field = `model.${role}.fallbacks.${index}`
+            const theirs = resolveCapabilities(entry.id, entry.capabilities)
+            if (theirs.contextWindow < primary.contextWindow) {
+                found.push({
+                    code: "model_fallback_smaller",
+                    message: `${field} (${entry.id}) has a ${theirs.contextWindow.toLocaleString("en-US")}-token window, smaller than ${config.id}'s ${primary.contextWindow.toLocaleString("en-US")}.`,
+                    hint: "Prompts are assembled for the primary's window, so a long session can overflow the fallback. Pick a fallback at least as large, or set model.<role>.capabilities.contextWindow to the smaller figure.",
+                    field,
+                })
+            }
+            if (primary.nativeTools && !theirs.nativeTools) {
+                found.push({
+                    code: "model_fallback_no_native_tools",
+                    message: `${field} (${entry.id}) is not known to support native tool calls, and ${config.id} is.`,
+                    hint: "Under the native dialect the fallback is sent a tools parameter it may not read. Pick a fallback with native tools, or declare capabilities.nativeTools on it if the registry is wrong.",
+                    field,
+                })
+            }
+        }
+    }
+    return found
+}
+
 export function scheduleDeliveryWarnings(manifest: AgentManifest): ErrorDetail[] {
     const found: ErrorDetail[] = []
     const typeOf = new Map(manifest.channels.map((channel) => [channel.id, channel.type]))

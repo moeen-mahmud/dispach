@@ -86,6 +86,8 @@ export interface StepResult {
     readonly calls: readonly ToolCallRequest[]
     /** Signed thinking blocks, in order. Empty from a transport that produces none. */
     readonly thinking: readonly ThinkingBlock[]
+    /** The model that answered: the requested one, or the fallback that stood in for it. */
+    readonly model: string
     /** True when the signal fired before the stream finished. */
     readonly aborted: boolean
 }
@@ -117,6 +119,7 @@ export async function runStep(input: StepInput): Promise<StepResult> {
     let reportedOutputTokens: number | undefined
     const calls: ToolCallRequest[] = []
     const thinking: ThinkingBlock[] = []
+    let model = input.role.config.id
     let firstTokenMs: number | undefined
 
     const stream = input.provider.chat(
@@ -174,6 +177,9 @@ export async function runStep(input: StepInput): Promise<StepResult> {
                         cacheSource = chunk.cacheSource
                     }
                     break
+                case "model":
+                    model = chunk.id
+                    break
                 case "thinking_block":
                     thinking.push(chunk.block)
                     break
@@ -212,7 +218,8 @@ export async function runStep(input: StepInput): Promise<StepResult> {
     // ponytail: a failed call counts as free. Record it once an endpoint reports usage on errors.
     input.meter?.({
         role: input.role.role,
-        model: input.role.config.id,
+        // The model that answered, so a fallback's call is billed under its own id.
+        model,
         promptTokens,
         promptReported: promptTokensReported,
         ...(cachedPromptTokens === undefined ? {} : { cachedPromptTokens }),
@@ -233,6 +240,7 @@ export async function runStep(input: StepInput): Promise<StepResult> {
         latencyMs,
         calls,
         thinking,
+        model,
         aborted,
     }
 }

@@ -17,6 +17,7 @@ import {
     buildRegistry,
     describeWindowSource,
     EventBus,
+    fallbackWarnings,
     HarnessError,
     loadKnowledge,
     loadManifest,
@@ -154,6 +155,7 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
             ...built.registry.warnings,
             ...channelFindings,
             ...scheduleDeliveryWarnings(manifest),
+            ...fallbackWarnings(manifest),
             ...(ruleFailure === undefined ? [] : [ruleFailure.toDetail()]),
         ]
 

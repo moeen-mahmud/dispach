@@ -199,6 +199,7 @@ export {
 } from "./manifest/template.ts"
 export {
     assertApiVersion,
+    fallbackWarnings,
     scanForLiteralSecrets,
     scheduleDeliveryWarnings,
     type ValidateOptions,

@@ -156,6 +156,11 @@ export type ChatChunk =
           /** Which wire field the figure came from, so a surprising ratio can be traced to its source. */
           readonly cacheSource?: string
       }
+    /**
+     * Which model answered, when it was not the one requested: a fallback (`model/fallback.ts`)
+     * emits this before its first chunk. Absent, the requested model answered.
+     */
+    | { readonly type: "model"; readonly id: string }
     /** A signed thinking block, once complete. The `reasoning` deltas still stream beside it. */
     | { readonly type: "thinking_block"; readonly block: ThinkingBlock }
     | { readonly type: "finish"; readonly reason: string }

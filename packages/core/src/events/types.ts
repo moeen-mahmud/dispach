@@ -289,6 +289,11 @@ export interface EventDataMap {
     /** Suppressed unless a subscriber opted in — this is per-token and high volume. */
     "model.chunk": { delta: string; kind: "text" | "reasoning" }
     "model.retry": { status: number; attempt: number; delayMs: number }
+    /**
+     * A call moved from a failing model to the next in its role's `fallbacks`, before any output.
+     * `reason` is the error code or status (`model_unreachable`, `HTTP 503`).
+     */
+    "model.fallback": { from: string; to: string; reason: string }
     "model.result": {
         outputTokens: number
         promptTokens: number
@@ -564,6 +569,7 @@ export const EVENT_TYPES = [
     "model.call",
     "model.chunk",
     "model.retry",
+    "model.fallback",
     "model.result",
     "tool.call",
     "tool.result",

@@ -160,6 +160,7 @@ Three roles. `main` required; `selector` and `compactor` fall back to `main`.
 | `headers` | map | Extra headers. Values may use `${ENV_VAR}`. |
 | `streamUsage` | bool | Ask for token usage in a streamed response. **On by default**; set `false` to stop asking. |
 | `capabilities` | object | Override the shipped registry. See below. |
+| `fallbacks` | list of roles | Tried in order when this role's model fails in a way that is the endpoint's: unreachable, a 5xx, or 408/429 once its retries are spent. Only before the first chunk. **Never on another 4xx, and never on a 403**, which an embedder may use as its budget stop. Each entry is a whole role (`id`, `api`, `baseUrl` or `options`, `apiKeyEnv`), so a fallback can be another provider. The primary's capabilities, dialect and window govern the turn; a smaller fallback is a warning. The answering model is reported in `model.fallback` and billed under its own id (Phase 26c). |
 
 `streamUsage` sends `stream_options: {include_usage: true}`, which is an OpenAI extension rather than
 part of `/chat/completions`, so an endpoint that does not know it may reject the whole request. It was

@@ -42,7 +42,7 @@ import type { EnvSource } from "../manifest/env.ts"
 import type { LoadedManifest } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
 import type { AgentManifest } from "../manifest/schema.ts"
-import { scheduleDeliveryWarnings } from "../manifest/validate.ts"
+import { fallbackWarnings, scheduleDeliveryWarnings } from "../manifest/validate.ts"
 import {
     enumerateFiles,
     enumerateSessions,
@@ -654,6 +654,7 @@ export class Agent {
                 // is a check the two disagree about, and this one is about a schedule that fires
                 // perfectly and reaches nobody — the surface where nothing else would say so.
                 ...scheduleDeliveryWarnings(loaded.manifest),
+                ...fallbackWarnings(loaded.manifest),
                 // Same function `validate` calls. A deliverability check only one of them performs
                 // is a check the two disagree about, and this one is about a schedule that fires
                 // perfectly and reaches nobody — the surface where nothing else would say so.

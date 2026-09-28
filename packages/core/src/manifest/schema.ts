@@ -125,7 +125,20 @@ function requireBaseUrl(
     }
 }
 
-export const ModelRoleSchema = ModelRoleFields.superRefine(requireBaseUrl)
+/** One `fallbacks` entry: a complete role of its own, minus a chain of its own. */
+const ModelFallbackSchema = ModelRoleFields.superRefine(requireBaseUrl)
+
+export const ModelRoleSchema = ModelRoleFields.extend({
+    /**
+     * Tried in order when this role's model fails in a way that is the endpoint's rather than the
+     * request's — unreachable, a 5xx, or 408/429 once its retries are spent — and only before the
+     * first chunk. Never on a 4xx the caller caused and never on a 403, which an embedder may use as
+     * its budget stop. Each entry is a whole role (id, api, baseUrl or options, key), so a fallback
+     * can be another provider entirely. The primary's capabilities, dialect and window still apply:
+     * a fallback is a stand-in for the same job, and `validate` warns when one is smaller.
+     */
+    fallbacks: z.array(ModelFallbackSchema).min(1).optional(),
+}).superRefine(requireBaseUrl)
 
 export const ModelSchema = z
     .object({

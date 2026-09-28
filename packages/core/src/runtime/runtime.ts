@@ -1798,6 +1798,9 @@ function instantiateAgent(input: {
         onRetry: (info) => {
             bus.emit("model.retry", info, { agentId: entry.manifest.id })
         },
+        onFallback: (info) => {
+            bus.emit("model.fallback", info, { agentId: entry.manifest.id })
+        },
         // A warning rather than a log line, because the agent keeps working and the only
         // visible consequence is that every pressure figure stays `estimated` — carrying
         // the estimator's measured 16-20% low bias, forever, with nothing saying so.

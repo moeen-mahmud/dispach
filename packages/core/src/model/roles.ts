@@ -18,6 +18,7 @@ import {
     windowProvenance,
 } from "./capabilities.ts"
 import type { ChatCompletionsConfig } from "./chat-completions.ts"
+import { type FallbackInfo, withFallbacks } from "./fallback.ts"
 import type { FetchLike, ModelProvider } from "./provider.ts"
 import { BUILT_IN_TRANSPORTS, type ModelTransport, transportFor } from "./transport.ts"
 
@@ -78,23 +79,24 @@ export interface ResolveRolesOptions {
      * set exists — which is every caller before plugins could register one.
      */
     readonly transports?: ReadonlyMap<string, ModelTransport>
+    /** A call moved from a failing model to the next in its role's `fallbacks`. */
+    readonly onFallback?: (info: FallbackInfo) => void
 }
 
-function buildRole(
-    role: ModelRole,
-    configuredAs: ModelRole,
+/** One configuration's provider, through its transport. Shared by a role and its fallbacks. */
+function providerFor(
     config: ModelRoleConfig,
+    field: string,
+    id: string,
     options: ResolveRolesOptions,
-): ResolvedRole {
-    const capabilities = resolveCapabilities(config.id, config.capabilities)
-    const field = `model.${configuredAs}`
+): ModelProvider {
     const { transport, options: transportOptions } = transportFor(
         config,
         field,
         options.transports ?? BUILT_IN_TRANSPORTS,
     )
-    const provider = transport.create({
-        id: `${config.api ?? DEFAULT_MODEL_API}:${configuredAs}`,
+    return transport.create({
+        id,
         field,
         config,
         options: transportOptions,
@@ -106,6 +108,41 @@ function buildRole(
             : { onUsageUnsupported: options.onUsageUnsupported }),
         ...(options.retry === undefined ? {} : { retry: options.retry }),
     })
+}
+
+function buildRole(
+    role: ModelRole,
+    configuredAs: ModelRole,
+    config: ModelRoleConfig,
+    options: ResolveRolesOptions,
+): ResolvedRole {
+    const capabilities = resolveCapabilities(config.id, config.capabilities)
+    const field = `model.${configuredAs}`
+    const primary = providerFor(
+        config,
+        field,
+        `${config.api ?? DEFAULT_MODEL_API}:${configuredAs}`,
+        options,
+    )
+    const provider =
+        config.fallbacks === undefined
+            ? primary
+            : withFallbacks(
+                  primary.id,
+                  [
+                      { model: config.id, provider: primary },
+                      ...config.fallbacks.map((entry, index) => ({
+                          model: entry.id,
+                          provider: providerFor(
+                              entry,
+                              `${field}.fallbacks.${index}`,
+                              `${entry.api ?? DEFAULT_MODEL_API}:${configuredAs}:fallback${index}`,
+                              options,
+                          ),
+                      })),
+                  ],
+                  options.onFallback,
+              )
 
     return {
         role,
