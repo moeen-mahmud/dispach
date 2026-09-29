@@ -10,7 +10,7 @@
  * only the download replaced.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -27,6 +27,14 @@ import {
     removeSource,
 } from "#lib/sources"
 import { sourcesCommand } from "#sources"
+
+/**
+ * 30 s, not bun's default 5. Every case writes fresh files and then `stat`s them, and on-access malware
+ * scanning (measured: ESET on macOS) blocks that `stat` until the new file is scanned — 2 to 6 s, once a
+ * run, at whichever test got there first. The code was never slow; the default timeout was a wall-clock
+ * assertion. A real hang still fails, just later.
+ */
+setDefaultTimeout(30_000)
 
 const dirs: string[] = []
 let home = ""
