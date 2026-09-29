@@ -15,6 +15,7 @@
  * in a log file.
  */
 
+import { dirname } from "node:path"
 import {
     AgentManifestSchema,
     BRAND,
@@ -39,7 +40,7 @@ import { inContainer } from "#lib/bootstrap"
 import { setChannelCredential, setChannelEnabled, unpairChannel } from "#lib/channel-actions"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
-import { hostableAgents, manifestForId } from "#lib/lifecycle"
+import { claimHostLease, HOST_LEASE, hostableAgents, manifestForId } from "#lib/lifecycle"
 import {
     BUILT_IN_PLUGINS,
     CHANNELS,
@@ -49,7 +50,15 @@ import {
     TOOL_PROVIDERS,
 } from "#lib/providers"
 import { provisionAgent, provisionSteps } from "#lib/provision"
-import { agentsDir, pluginRoot, storePath, templatesDir } from "#lib/sandbox"
+import {
+    agentsDir,
+    insideSandbox,
+    pluginRoot,
+    readHostToken,
+    storePath,
+    templatesDir,
+    writeHostToken,
+} from "#lib/sandbox"
 
 export interface ServeOptions {
     /**
@@ -249,7 +258,19 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     // `.env` beside the manifest is layered in by `loadManifest`. With no manifest at all there is
     // no agent env to layer, so the process environment is the only source there is — which is the
     // service unit's shape, where the variable comes from the unit definition.
-    const token = loaded === undefined ? env[config.tokenEnv] : loaded.env[config.tokenEnv]
+    const own = loaded === undefined ? env[config.tokenEnv] : loaded.env[config.tokenEnv]
+    // A sandbox host serves with the sandbox's token, not the first manifest's (QA 0.2.0: every
+    // other agent's `run`, `stop` and `start` sent its own and got 401). An export still wins —
+    // that is how a container is configured. With no file yet, the token this host would have used
+    // becomes the sandbox's, so nothing that authenticates today stops working.
+    const exported = env[config.tokenEnv]
+    const inSandbox = manifests.every((entry) => insideSandbox(dirname(entry.path), env))
+    let token = own
+    if (inSandbox && (exported === undefined || exported === "")) {
+        const shared = readHostToken(agentsDir(env))
+        if (shared !== undefined) token = shared
+        else if (own !== undefined && own !== "") writeHostToken(agentsDir(env), own)
+    }
 
     // Set by the generated service definition and by nothing else, so this is a fact rather than a
     // guess. `ppid === 1` would also be true of any orphaned process, and getting it wrong means
@@ -563,6 +584,13 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
      * and this is the whole mechanism behind `stop <agent>`: one process hosts several agents, so
      * stopping one has to be a request naming it rather than a signal to the process.
      */
+    // Claimed before the address is published, so `publish` puts the address on it too.
+    const hostLease =
+        runtime.owned.length === 0 &&
+        (await claimHostLease(runtime.store.leases, {
+            runtimeId: runtime.runtimeId,
+            mode: asDaemon ? "daemon" : "terminal",
+        }))
     await runtime.publishAddress(running.url)
 
     const agents = runtime.list()
@@ -839,6 +867,9 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
             )
         }
         await running.stop()
+        if (hostLease) {
+            await runtime.store.leases.release(HOST_LEASE, runtime.runtimeId).catch(() => {})
+        }
         await runtime.stop("interrupted")
     }
     onExit(shutdown)

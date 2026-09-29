@@ -11,6 +11,11 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `tools --warm` no longer stops at a provider it cannot warm (the default `composio: {}` without a key), and still fails when a pinned tool is left uncovered.
 - `config edit` fits a 40-row terminal; the init summary no longer runs "Background service" into its value; the Teams status names its real webhook path.
 - The manifest spec now says that recurring schedules fire up to a tenth of their interval late, the same amount every time.
+- Every agent in the sandbox now shares one host token, in `agents/.api-token`. `run`, `stop` and `start` used to get a 401 for every agent but the first. On upgrade, the file takes the token the host was already using.
+- A room member can no longer write an agent's private memory: `memory_write` refuses in any turn that cannot read that memory. The space writer's notes still go to the space.
+- `status` finds a server hosting zero agents; it used to say nothing was running.
+- An unfilled starter skill is never selected; `skills validate` still names it.
+- A stand-in is told that saving a note is queued for approval like any other change.
 
 ### Runtime API
 

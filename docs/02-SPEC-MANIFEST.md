@@ -957,7 +957,7 @@ Load order is manifest order; middleware composes outermost-first. A plugin whos
 | `enabled` | false | Library use needs no server, so the **schema** default is off. **`init` writes `true`** since 0.1.2 — an always-on server is the product and the TUI and web UI are views onto it, so it stopped being a question; `--server none` is the opt-out. The two defaults answer different questions: this one is "what does an embedder get when the block is absent", and that one is "what does a generated agent get". |
 | `port` | 7420 | |
 | `host` | `127.0.0.1` | Binds loopback by default. Public binding is explicit. |
-| `tokenEnv` | `DISPACH_API_TOKEN` | Bearer token env var name. Server refuses to start on a non-loopback host without a token. |
+| `tokenEnv` | `DISPACH_API_TOKEN` | Bearer token env var name. Server refuses to start on a non-loopback host without a token. For an agent in the sandbox, the token is the sandbox's, in `agents/.api-token`: one host serves every agent there. `init` writes the same value into each `.env`, an exported variable still wins, and on upgrade the file takes the token the host was already using. |
 | `allowedOrigins` | `[]` | Origins a browser may call from, written in full (`https://app.example.com`). **No wildcard.** Only widens what is already allowed. |
 | `allowedHosts` | `[]` | Extra `Host` values a **loopback** bind will answer to. Ignored on a public bind. |
 

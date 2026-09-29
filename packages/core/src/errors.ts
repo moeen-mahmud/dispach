@@ -733,6 +733,15 @@ export function workspaceNotEditable(name: string, editable: string): ToolError 
     })
 }
 
+export function privateMemoryRefused(): ToolError {
+    return new ToolError({
+        code: "memory_private_refused",
+        message:
+            "This conversation cannot write to your private memory: it is a room or a stand-in, and private notes are for the person you work for.",
+        hint: "Nothing was saved. If it is worth keeping, say so in the reply and let the person you work for save it in their own conversation. A team note goes to the space through the space writer.",
+    })
+}
+
 export function artifactUnavailable(): ToolError {
     return new ToolError({
         code: "artifact_unavailable",

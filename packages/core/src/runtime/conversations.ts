@@ -683,7 +683,7 @@ export class ConversationHub {
                 source: `room:${message.conversationId}`,
                 from,
                 participant: { id: message.authorId, via: "api", onBehalfOf: owner },
-                runtimeNote: `You are standing in for ${ownerName}, who is away, answering ${senderName} as ${ownerName}'s agent. You cannot commit ${ownerName} to anything: whatever would change something is queued for ${ownerName} to approve, and you should say so plainly.`,
+                runtimeNote: `You are standing in for ${ownerName}, who is away, answering ${senderName} as ${ownerName}'s agent. You cannot commit ${ownerName} to anything: whatever would change something is queued for ${ownerName} to approve — saving a note included, whatever your permissions say — and you should say so plainly.`,
                 deferMutations: async (call) => {
                     const action = await this.#store.deferAction({
                         id: `da_${randomUUID().replaceAll("-", "").slice(0, 20)}`,

@@ -21,13 +21,14 @@ import { dirname } from "node:path"
 import {
     BRAND,
     type LeaseRecord,
+    type LeaseStore,
     loadManifest,
     processAlive,
     readManifestHeader,
     SqliteStore,
 } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
-import { listAgents, storePath } from "#lib/sandbox"
+import { agentsDir, insideSandbox, listAgents, readHostToken, storePath } from "#lib/sandbox"
 
 /** An agent the sandbox holds, with the durable switch resolved. */
 export interface HostableAgent {
@@ -194,6 +195,29 @@ export async function anyLiveHost(store?: string): Promise<LeaseRecord | undefin
 }
 
 /** Every live lease, for the commands that report on the whole sandbox. */
+/**
+ * The lease a host holds while it serves no agent (QA 0.2.0).
+ *
+ * Every command finds a host through the lease table, and a lease was only ever an agent's — so a
+ * `serve` hosting nothing was up, bound and invisible: `status` said nothing was running and `init`
+ * went looking for a host to start. `~` because no agent id may begin with one, so this can never
+ * be mistaken for an agent's row.
+ */
+export const HOST_LEASE = "~host"
+
+/** Take `HOST_LEASE`, over a row whose process is gone. False when another live host holds it. */
+export async function claimHostLease(
+    leases: LeaseStore,
+    input: { readonly runtimeId: string; readonly mode: LeaseRecord["mode"] },
+): Promise<boolean> {
+    const claim = { agentId: HOST_LEASE, pid: process.pid, now: new Date().toISOString(), ...input }
+    const first = await leases.claim(claim)
+    if (first.ok) return true
+    // Our own pid on somebody else's row is a container's previous life: every runtime is pid 1.
+    if (first.held.pid !== process.pid && processAlive(first.held.pid)) return false
+    return (await leases.claim({ ...claim, stealFrom: first.held.runtimeId })).ok
+}
+
 export async function liveHosts(store?: string): Promise<readonly LeaseRecord[]> {
     return (
         (await withStore(
@@ -206,15 +230,6 @@ export async function liveHosts(store?: string): Promise<readonly LeaseRecord[]>
     )
 }
 
-/**
- * The credential a running host will want, best effort.
- *
- * The manifest's live env is the authority — that is where `serve` itself read the token from — so
- * this loads it. When the load fails it falls back to the process environment under the brand's
- * default variable, because the common reason for a failed load is a missing *model* key and
- * refusing to stop an agent over that would be absurd. A wrong or absent token is not silent: the
- * request comes back `401` and the caller says which variable to set.
- */
 /**
  * The agent id a manifest declares, without loading it.
  *
@@ -229,14 +244,32 @@ export function agentIdFor(manifestPath: string | undefined): string {
         : (readManifestHeader(manifestPath).id ?? "")
 }
 
+/**
+ * The credential a running host will want, best effort: an export first, then — for a sandbox
+ * agent — the sandbox's own (`readHostToken`, the one `serve` uses there), then the agent's `.env`.
+ *
+ * When the load fails it falls back to the process environment under the brand's default variable,
+ * because the common reason for a failed load is a missing *model* key and refusing to stop an
+ * agent over that would be absurd. A wrong or absent token is not silent: the request comes back
+ * `401` and the caller says which variable to set.
+ */
 export function hostToken(manifestPath: string): string | undefined {
+    const env = ambientEnv([manifestPath])
     const fallback = process.env[`${BRAND.envPrefix}API_TOKEN`]
+    const shared =
+        manifestPath !== "" && insideSandbox(dirname(manifestPath), env)
+            ? readHostToken(agentsDir(env))
+            : undefined
     try {
-        const loaded = loadManifest(manifestPath, { env: ambientEnv([manifestPath]) })
-        const configured = loaded.env[loaded.manifest.server.tokenEnv]
+        const loaded = loadManifest(manifestPath, { env })
+        const tokenEnv = loaded.manifest.server.tokenEnv
+        const exported = env[tokenEnv]
+        if (exported !== undefined && exported !== "") return exported
+        if (shared !== undefined) return shared
+        const configured = loaded.env[tokenEnv]
         return configured === undefined || configured === "" ? fallback : configured
     } catch {
-        return fallback === "" ? undefined : fallback
+        return shared ?? (fallback === "" ? undefined : fallback)
     }
 }
 

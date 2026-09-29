@@ -15,10 +15,11 @@
  * real home directory when that is set.
  */
 
-import { existsSync, readdirSync, statSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join, resolve, sep } from "node:path"
 import { BRAND, HarnessError, nearest, readManifestHeader } from "@dispach/core"
+import { readDotEnv } from "#lib/ambient"
 import { readEnv } from "#lib/env"
 
 export function sandboxRoot(
@@ -97,6 +98,59 @@ export function logPaths(
 ): { readonly out: string; readonly err: string } {
     const dir = join(sandboxRoot(env), "logs")
     return { out: join(dir, `${agentId}.out.log`), err: join(dir, `${agentId}.err.log`) }
+}
+
+/**
+ * The one token a sandbox's host serves with, beside the agents it serves (QA 0.2.0).
+ *
+ * One process hosts every agent in the sandbox, so it has one token — and it used to be the first
+ * manifest's, while each `init` wrote a fresh random one into its own agent's `.env`. So `run`,
+ * `stop` and `start` for any agent but the alphabetically first sent a token the host had never
+ * heard of and got `401`. The token is the sandbox's now: `serve` and `hostToken` both read this
+ * file for a manifest inside the sandbox, and `init` writes the same value into each new `.env`.
+ *
+ * Under the agents directory rather than the root because that is the path a test can redirect
+ * (`QuestionDefaults.agentDirBase`), and a dotfile so `listAgents` never mistakes it for an agent.
+ * An exported variable still wins over it everywhere — that is how a container is configured.
+ */
+export function hostTokenPath(agentsBase: string): string {
+    return join(agentsBase, ".api-token")
+}
+
+export function readHostToken(agentsBase: string): string | undefined {
+    try {
+        const token = readFileSync(hostTokenPath(agentsBase), "utf8").trim()
+        return token === "" ? undefined : token
+    } catch {
+        return undefined
+    }
+}
+
+export function writeHostToken(agentsBase: string, token: string): void {
+    mkdirSync(agentsBase, { recursive: true })
+    writeFileSync(hostTokenPath(agentsBase), `${token}\n`, { encoding: "utf8", mode: 0o600 })
+}
+
+/**
+ * The sandbox token, created on first need. With no file yet, the first agent that already has a
+ * token donates it — that is the one a running host was started with, so adopting it keeps every
+ * client that works today working. Only a sandbox with no token anywhere gets a new one.
+ */
+export function sharedHostToken(agentsBase: string, mint: () => string): string {
+    const existing = readHostToken(agentsBase)
+    if (existing !== undefined) return existing
+    let entries: string[] = []
+    try {
+        entries = readdirSync(agentsBase).sort()
+    } catch {
+        // No sandbox yet: nothing to adopt.
+    }
+    const adopted = entries
+        .map((ref) => readDotEnv(join(agentsBase, ref))[`${BRAND.envPrefix}API_TOKEN`])
+        .find((token) => token !== undefined && token !== "")
+    const token = adopted ?? mint()
+    writeHostToken(agentsBase, token)
+    return token
 }
 
 /**

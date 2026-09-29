@@ -219,6 +219,31 @@ describe("activation", () => {
         return load(dir, { maxActive })
     }
 
+    test("an unfilled scaffold is never selected, however well its placeholder matches (QA 0.2.0)", () => {
+        const dir = root()
+        const scaffold = (description: string) => {
+            mkdirSync(join(dir, "starter"), { recursive: true })
+            writeFileSync(
+                join(dir, "starter", "SKILL.md"),
+                `---\nname: starter\ndescription: ${description}\n---\n\nReplace everything below with the steps.\n`,
+            )
+        }
+        scaffold(
+            "Replace this description with what the skill does, naming file formats, tool names, the error they are looking at.",
+        )
+        write(dir, "beta", "Unrelated.")
+        write(dir, "gamma", "Unrelated.")
+        write(dir, "delta", "Unrelated.")
+        const input = "which tool names this error in the file formats"
+        const ask = () =>
+            activateSkills({ input, catalogue: catalogueOf(dir), style: DEFAULT_PROMPT_STYLE })
+        expect(ask().active).toEqual([])
+
+        // The same words, written by a person, are selected — so the refusal is the scaffold's.
+        scaffold("Names the tool behind an error in unusual file formats.")
+        expect(ask().active.map((skill) => skill.name)).toEqual(["starter"])
+    })
+
     test("the body is read on activation, not at scan time", () => {
         const dir = root()
         write(dir, "alpha", "The alpha procedure body.")

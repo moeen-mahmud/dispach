@@ -29,6 +29,7 @@ import {
     modelWindowFamily,
     modelWindowUnknown,
     phaseAllowUnmatched,
+    privateMemoryRefused,
     tokenBudgetExhausted,
     toolGatedAfterFirstUse,
     turnsAtCapacity,
@@ -1290,9 +1291,18 @@ export class Agent {
             ...(options.runtimeNote === undefined ? {} : { runtimeNote: options.runtimeNote }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
+            // A turn that may not read private memory may not write it either (QA 0.2.0): the
+            // generated `policy.allow` names `memory_write`, so any room member could otherwise
+            // put words into the agent's own notes. The space writer's notes are the team's.
             ...((await this.store.conversations.spaceWriter()) === `agent:${this.id}`
                 ? { writeNote: (text: string) => this.#writeSpaceNote(text) }
-                : {}),
+                : plan.private
+                  ? {}
+                  : {
+                        writeNote: async () => {
+                            throw privateMemoryRefused()
+                        },
+                    }),
         }).finally(() => this.#senders.delete(turnId))
 
         // Carried per session, not per turn. One turn's observations are a sample of the estimator's
