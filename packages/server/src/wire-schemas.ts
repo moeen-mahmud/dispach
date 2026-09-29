@@ -349,6 +349,73 @@ export const ProvisionBody = z.object({
 })
 
 /** `POST /v1/webhooks`. Which types exist is `EVENT_TYPES`'s answer, checked by the route. */
+const participantId = (field: string) =>
+    refuse(z.string().trim().min(1), {
+        code: "participant_id_invalid",
+        hint: 'A participant id as your system knows the person, e.g. "user:018f…". Agents are "agent:<agentId>".',
+        description: `The participant id${field === "" ? "" : ` (${field})`}.`,
+    })
+
+export const ParticipantBody = z.object({
+    id: participantId(""),
+    name: annotate(z.string().min(1).optional(), "A display name, shown to agents beside the id."),
+    role: refuse(z.enum(["admin", "member"]).optional(), {
+        code: "participant_role_invalid",
+        hint: 'Either "admin" (may assign agents to members) or "member". Omitted is "member".',
+        description: 'What the participant may do: "admin" also assigns agents.',
+    }),
+})
+
+export const ConversationBody = z.object({
+    kind: refuse(z.enum(["room", "dm"]), {
+        code: "conversation_kind_invalid",
+        hint: '"dm" is one human and one agent and is always answered; "room" is anyone, and an agent answers only when mentioned.',
+        description: "A room or a direct conversation.",
+    }),
+    members: refuse(z.array(z.string().trim().min(1)).min(1), {
+        code: "conversation_members_required",
+        hint: 'Participant ids: registered humans, and agents as "agent:<agentId>".',
+        description: "Who is in it.",
+    }),
+    title: annotate(
+        z.string().min(1).optional(),
+        "A name for a room, for the embedder's own listing.",
+    ),
+})
+
+export const MembersBody = z.object({
+    add: refuse(z.array(z.string().trim().min(1)).optional(), {
+        code: "conversation_members_required",
+        hint: "Participant ids to add.",
+        description: "Participant ids to add.",
+    }),
+    remove: refuse(z.array(z.string().trim().min(1)).optional(), {
+        code: "conversation_members_required",
+        hint: "Participant ids to remove.",
+        description: "Participant ids to remove.",
+    }),
+})
+
+export const ConversationMessageBody = z.object({
+    text: refuse(z.string().trim().min(1), {
+        code: "message_text_required",
+        hint: 'Send { "text": "…" }.',
+        description: "What was said.",
+    }),
+    mentions: refuse(z.array(z.string().trim().min(1)).optional(), {
+        code: "conversation_mention_unknown",
+        hint: 'Member participant ids this message addresses, e.g. ["agent:crew"]. In a room only a mentioned agent answers.',
+        description: "Members this addresses. In a room, the agents that answer.",
+    }),
+    authorId: refuse(z.string().trim().min(1).optional(), {
+        code: "conversation_author_required",
+        hint: "Who said it. A key bound to a participant fills this in and may name no one else; an unbound key must name the author.",
+        description: "The human member who said it. Filled in from a participant-bound key.",
+    }),
+})
+
+export const AssigneeBody = z.object({ participantId: participantId("assignee") })
+
 export const WebhookBody = z.object({
     url: refuse(z.string().min(1), {
         code: "webhook_url_invalid",

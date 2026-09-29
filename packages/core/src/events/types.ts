@@ -577,6 +577,31 @@ export interface EventDataMap {
      * schedule in the process.
      */
     "schedule.error": { scheduleId: string; code: string; message: string; hint: string }
+    /** A message in a room or DM, a human's or an agent's (Phase 27). The room as the embedder shows it. */
+    "conversation.message": {
+        conversationId: string
+        messageId: string
+        authorId: string
+        origin: "human" | "agent"
+        text: string
+        mentions: string[]
+        hop: number
+        turnId?: string
+    }
+    /**
+     * An agent a message addressed did not answer it: the hop ceiling (`limits.maxHops`) was reached,
+     * the governor refused the turn, or the turn failed. `detail` is the sentence.
+     */
+    "conversation.skipped": {
+        conversationId: string
+        messageId: string
+        reason: "hop_limit" | "refused" | "failed"
+        detail: string
+        hop: number
+        ceiling: number
+    }
+    /** An admin recorded who an agent works for. */
+    "agent.assigned": { participantId: string; assignedBy?: string }
     "turn.end": {
         reason: TurnEndReason
         steps: number
@@ -646,6 +671,9 @@ export const EVENT_TYPES = [
     "schedule.skipped",
     "schedule.deferred",
     "schedule.error",
+    "conversation.message",
+    "conversation.skipped",
+    "agent.assigned",
     "turn.end",
     "error",
 ] as const satisfies readonly EventType[]

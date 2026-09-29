@@ -37,8 +37,13 @@ import { VERSION } from "@dispach/core"
 import { z } from "zod"
 import {
     ApprovalBody,
+    AssigneeBody,
+    ConversationBody,
+    ConversationMessageBody,
     KeyBody,
+    MembersBody,
     MessageBody,
+    ParticipantBody,
     PhaseBody,
     ProvisionBody,
     SecretsBody,
@@ -109,6 +114,46 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             },
         ],
     },
+    "POST /v1/participants": {
+        summary: "Register a human participant under the embedder's own id. No account is stored.",
+        body: ParticipantBody,
+        statuses: [{ code: 201, when: "registered, or updated if the id existed" }],
+    },
+    "GET /v1/participants": { summary: "The registered human participants." },
+    "DELETE /v1/participants/:participantId": {
+        summary: "Remove a participant and their conversation memberships.",
+    },
+    "POST /v1/conversations": {
+        summary: "Create a room or a DM among participants and agents (agent:<id>).",
+        body: ConversationBody,
+        statuses: [
+            { code: 201, when: "created" },
+            { code: 403, when: "a participant-bound key creating a conversation it is not in" },
+        ],
+    },
+    "GET /v1/conversations": { summary: "The conversations this credential can see." },
+    "GET /v1/conversations/:conversationId": { summary: "One conversation and its members." },
+    "PATCH /v1/conversations/:conversationId/members": {
+        summary: "Add or remove members of a room.",
+        body: MembersBody,
+    },
+    "POST /v1/conversations/:conversationId/messages": {
+        summary:
+            "Post a human member's message. In a room only the mentioned agents answer; in a DM the agent always does. Their replies arrive as conversation.message.",
+        body: ConversationMessageBody,
+        statuses: [
+            { code: 202, when: "logged; the turns it starts run behind the response" },
+            { code: 403, when: "a participant-bound key naming another author" },
+        ],
+    },
+    "GET /v1/conversations/:conversationId/messages": {
+        summary: "The conversation's log, oldest first, after a sequence number.",
+    },
+    "PUT /v1/agents/:id/assignee": {
+        summary: "Record which member an agent works for. An admin participant's act.",
+        body: AssigneeBody,
+    },
+    "DELETE /v1/agents/:id/assignee": { summary: "Clear an agent's assignment." },
     "GET /v1/webhooks": {
         summary:
             "The subscriptions this credential can see, with their delivery health. Never a secret.",

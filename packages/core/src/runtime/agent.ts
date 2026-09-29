@@ -36,7 +36,13 @@ import {
 import type { EventBus } from "../events/bus.ts"
 import { newCallId, newTurnId } from "../loop/ids.ts"
 import { entryPhase, isPhased, unmatchedAllows } from "../loop/phases.ts"
-import { type ActingParticipant, participantOf, type TurnSender } from "../loop/sender.ts"
+import {
+    type ActingParticipant,
+    frameSenderInput,
+    participantOf,
+    type TurnSender,
+    trustOfSender,
+} from "../loop/sender.ts"
 import { runStep, type StepUsage } from "../loop/step.ts"
 import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from "../loop/turn.ts"
 import type { EnvSource } from "../manifest/env.ts"
@@ -807,6 +813,26 @@ export class Agent {
             })
         }
         return text
+    }
+
+    /**
+     * Put something said in a conversation into a session's history without answering it — how a
+     * room message reaches an agent it did not address, so that agent has read the room when it is
+     * next mentioned. Framed exactly as a turn's input would be, and tainted when untrusted, so the
+     * memory index refuses it just as it refuses a peer's turn input.
+     */
+    async observe(
+        input: string,
+        options: { readonly sessionKey: string; readonly from: TurnSender },
+    ): Promise<void> {
+        await this.store.sessions.ensure(this.id, options.sessionKey)
+        await this.store.messages.append(this.id, options.sessionKey, [
+            {
+                role: "user",
+                content: frameSenderInput(input, options.from),
+                ...(trustOfSender(options.from) === "untrusted" ? { tainted: true } : {}),
+            },
+        ])
     }
 
     /** Whether `transcribe` can do anything. A channel asks before it bothers the sender. */

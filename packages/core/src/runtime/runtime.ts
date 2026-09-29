@@ -55,6 +55,7 @@ import {
 } from "../webhooks/webhooks.ts"
 import { Agent } from "./agent.ts"
 import { type ChannelFactory, ChannelHub } from "./channels.ts"
+import { ConversationHub } from "./conversations.ts"
 import { claimLeases, LEASE_BEAT_MS, markRuntimeLive } from "./lease.ts"
 import { reconcileSchedules, scheduleRunner, scheduleRunOfSession } from "./schedules.ts"
 
@@ -286,6 +287,8 @@ export class Runtime {
     readonly streams: TurnStreams
     /** Channel bindings and the delivery queue. Empty when no agent configures a channel. */
     readonly channels: ChannelHub
+    /** Rooms and DMs among participants and agents (Phase 27). */
+    readonly conversations: ConversationHub
     /**
      * What each agent's `plugins:` loaded, by agent id, in manifest order.
      *
@@ -399,6 +402,7 @@ export class Runtime {
         store: Store
         streams: TurnStreams
         channels: ChannelHub
+        conversations: ConversationHub
         plugins: ReadonlyMap<string, readonly LoadedPlugin[]>
         scheduler: Scheduler
         webhooks: WebhookDispatcher
@@ -416,6 +420,7 @@ export class Runtime {
         this.store = init.store
         this.streams = init.streams
         this.channels = init.channels
+        this.conversations = init.conversations
         this.plugins = init.plugins
         this.scheduler = init.scheduler
         this.webhooks = init.webhooks
@@ -606,6 +611,13 @@ export class Runtime {
         )
 
         const hub = new ChannelHub({ bus, outboxStore: store.outbox })
+        // Reads the runtime's own map lazily, for the reason the scheduler's closures below do: the
+        // agents hosted now, not the ones this boot loaded.
+        const conversations: ConversationHub = new ConversationHub({
+            store: store.conversations,
+            bus,
+            agent: (id) => runtime.all().find((agent) => agent.id === id),
+        })
 
         /**
          * Built before the runtime so it can be handed in, and it arms nothing until `start()`.
@@ -666,6 +678,7 @@ export class Runtime {
             store,
             streams,
             channels: hub,
+            conversations,
             plugins: prepared.plugins,
             scheduler,
             webhooks,

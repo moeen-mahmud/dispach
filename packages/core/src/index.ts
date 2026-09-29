@@ -358,6 +358,15 @@ export {
     type ChannelHubOptions,
 } from "./runtime/channels.ts"
 export {
+    AGENT_PARTICIPANT,
+    agentOf,
+    agentParticipant,
+    ConversationHub,
+    type ConversationHubOptions,
+    mentionsIn,
+    roomSessionKey,
+} from "./runtime/conversations.ts"
+export {
     claimLeases,
     LEASE_BEAT_MS,
     LEASE_STALE_MS,
@@ -472,9 +481,14 @@ export type {
     AgentFootprint,
     AgentStateRecord,
     AgentStateStore,
+    AssignmentRecord,
     // The scope vocabulary, exported as types because the server enforces it, the CLI mints with
     // it and the client reads it back — three consumers, one definition.
     Capability,
+    ConversationKind,
+    ConversationMessageRecord,
+    ConversationRecord,
+    ConversationStore,
     DeliveryBacklog,
     DeliveryRecord,
     DeliveryStatus,
@@ -496,6 +510,7 @@ export type {
     OperatorKeyRecord,
     OperatorKeyStore,
     OutboxStore,
+    ParticipantRecord,
     RuntimeMode,
     ScheduleFired,
     ScheduleOrigin,

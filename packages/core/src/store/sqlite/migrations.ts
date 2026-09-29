@@ -980,6 +980,60 @@ ALTER TABLE outbox ADD COLUMN attachment_path TEXT;
 ALTER TABLE outbox ADD COLUMN attachment_type TEXT;
 `,
     },
+    {
+        version: 22,
+        name: "conversations",
+        /**
+         * Participants, conversations, their messages and agent assignments (Phase 27).
+         *
+         * Server-wide rather than keyed by agent: a room holds several agents, and a person is a
+         * participant of the silo, not of one agent. An agent is a participant implicitly
+         * (`agent:<id>`) and has no row here; `purgeAgent` removes its memberships and its
+         * assignment. A room's text reaches each member agent through its own `room:<id>` session,
+         * so the history, compaction and memory an agent already has apply with nothing new — this
+         * log is the room as the embedder shows it.
+         */
+        sql: `
+CREATE TABLE participants (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL CHECK (kind IN ('human')),
+    name       TEXT,
+    role       TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE conversations (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL CHECK (kind IN ('room', 'dm')),
+    title      TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE conversation_members (
+    conversation_id TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    participant_id  TEXT NOT NULL,
+    PRIMARY KEY (conversation_id, participant_id)
+);
+CREATE INDEX conversation_members_by_participant ON conversation_members (participant_id);
+CREATE TABLE conversation_messages (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT NOT NULL UNIQUE,
+    conversation_id TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    author_id       TEXT NOT NULL,
+    origin          TEXT NOT NULL CHECK (origin IN ('human', 'agent')),
+    text            TEXT NOT NULL,
+    mentions        TEXT NOT NULL,
+    hop             INTEGER NOT NULL,
+    turn_id         TEXT,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX conversation_messages_by_conversation ON conversation_messages (conversation_id, seq);
+CREATE TABLE agent_assignments (
+    agent_id       TEXT PRIMARY KEY,
+    participant_id TEXT NOT NULL,
+    assigned_by    TEXT,
+    assigned_at    TEXT NOT NULL
+);
+`,
+    },
 ]
 
 export interface MigrationReport {

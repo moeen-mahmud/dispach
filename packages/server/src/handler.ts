@@ -18,6 +18,8 @@ import {
     type Agent,
     type AgentStateRecord,
     type AnyEvent,
+    agentOf,
+    type ConversationRecord,
     type ErrorDetail,
     EVENT_TYPES,
     editManifest,
@@ -81,10 +83,15 @@ import { sseResponse } from "./sse.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
 import {
     ApprovalBody,
+    AssigneeBody,
     ChannelPatchBody,
     ConfigBody,
+    ConversationBody,
+    ConversationMessageBody,
     KeyBody,
+    MembersBody,
     MessageBody,
+    ParticipantBody,
     PhaseBody,
     ProvisionBody,
     parseBody,
@@ -740,8 +747,22 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 // says which is which.
                 const schedules = await agent.store.schedules.list(agent.id)
                 const team = runtime.team(agent.id)
+                // Who it works for, when an admin recorded it (Phase 27): the person accountable for
+                // what it is asked to do.
+                const assignment = await runtime.store.conversations.assignment(agent.id)
                 return json({
                     ...summary(runtime, agent),
+                    ...(assignment === undefined
+                        ? {}
+                        : {
+                              assignedTo: {
+                                  participantId: assignment.participantId,
+                                  ...(assignment.assignedBy === undefined
+                                      ? {}
+                                      : { assignedBy: assignment.assignedBy }),
+                                  assignedAt: assignment.assignedAt,
+                              },
+                          }),
                     dialect: agent.describe().dialect,
                     window: agent.window,
                     tools: agent.tools.size,
@@ -1990,6 +2011,326 @@ export function createHandler(options: HandlerOptions): ServerHandler {
             await runtime.webhooks.changed()
             return json({ id, deleted: true })
         },
+        { capability: "admin" },
+    )
+
+    /**
+     * Participants, rooms and DMs (Phase 27).
+     *
+     * **A bound key speaks only as its participant, and sees only its own conversations.** The same
+     * rule `senderFor` applies to a turn's sender, applied to a room's author: a key minted with
+     * `scope.participant` posts as that participant and no other, and a conversation it is not a
+     * member of answers 404, the same 404 as one that does not exist. An agent scope applies too: a
+     * key must reach every agent in a conversation to see it at all.
+     */
+    const boundParticipant = (principal: Principal): string | undefined =>
+        principal.kind === "key" ? principal.scope?.participant : undefined
+    const seesConversation = (principal: Principal, conversation: ConversationRecord): boolean => {
+        const bound = boundParticipant(principal)
+        if (bound !== undefined && !conversation.members.includes(bound)) return false
+        return conversation.members.every((member) => {
+            const agentId = agentOf(member)
+            return agentId === undefined || reachesAgent(principal, agentId)
+        })
+    }
+    const conversationNotFound = (id: string) =>
+        fail(
+            {
+                code: "conversation_not_found",
+                message: `No conversation "${id}".`,
+                hint: "GET /v1/conversations lists the ones this credential can see.",
+            },
+            404,
+        )
+    const withConversation = async (
+        context: RequestContext,
+        work: (conversation: ConversationRecord) => Promise<Response>,
+    ): Promise<Response> => {
+        const id = context.params.conversationId ?? ""
+        const conversation = await runtime.store.conversations.get(id)
+        if (conversation === undefined || !seesConversation(context.principal, conversation)) {
+            return conversationNotFound(id)
+        }
+        return work(conversation)
+    }
+    const refusedBy = (error: unknown): Response => {
+        if (!isHarnessError(error)) throw error
+        return fail(error.toDetail(), error.code.endsWith("_not_found") ? 404 : 400)
+    }
+
+    router.add(
+        "POST",
+        "/v1/participants",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(ParticipantBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            try {
+                const input = parsed.value
+                return json(
+                    await runtime.conversations.registerParticipant({
+                        id: input.id,
+                        ...(input.name === undefined ? {} : { name: input.name }),
+                        ...(input.role === undefined ? {} : { role: input.role }),
+                    }),
+                    201,
+                )
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/participants",
+        async () => json({ participants: await runtime.store.conversations.participants() }),
+        { capability: "read" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/participants/:participantId",
+        async (context) => {
+            const id = context.params.participantId ?? ""
+            const deleted = await runtime.store.conversations.deleteParticipant(id)
+            if (!deleted) {
+                return fail(
+                    {
+                        code: "participant_not_found",
+                        message: `No participant "${id}".`,
+                        hint: "GET /v1/participants lists them.",
+                    },
+                    404,
+                )
+            }
+            return json({ id, deleted: true })
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "POST",
+        "/v1/conversations",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(ConversationBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const bound = boundParticipant(context.principal)
+            // A bound key creates only conversations it is in; otherwise it would make rooms it
+            // cannot read, and a stranger's room is not somebody's to start.
+            if (bound !== undefined && !parsed.value.members.includes(bound)) {
+                return fail(
+                    {
+                        code: "conversation_creator_not_member",
+                        message: `This key speaks for ${bound}, who is not among the members.`,
+                        hint: `Include "${bound}" in members. A backend creating rooms for others needs a key minted without scope.participant.`,
+                        field: "members",
+                    },
+                    403,
+                )
+            }
+            const outside = parsed.value.members
+                .map((member) => agentOf(member))
+                .filter(
+                    (id): id is string => id !== undefined && !reachesAgent(context.principal, id),
+                )
+            if (outside.length > 0) {
+                return fail(
+                    {
+                        code: "conversation_member_unknown",
+                        message: `No participant "agent:${outside[0]}".`,
+                        hint: "That agent is not hosted here. GET /v1/agents lists the ones that are.",
+                        field: "members",
+                    },
+                    400,
+                )
+            }
+            try {
+                return json(
+                    await runtime.conversations.create({
+                        kind: parsed.value.kind,
+                        members: parsed.value.members,
+                        ...(parsed.value.title === undefined ? {} : { title: parsed.value.title }),
+                    }),
+                    201,
+                )
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/conversations",
+        async (context) => {
+            const all = await runtime.store.conversations.list()
+            return json({
+                conversations: all.filter((conversation) =>
+                    seesConversation(context.principal, conversation),
+                ),
+            })
+        },
+        { capability: "read" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/conversations/:conversationId",
+        (context) => withConversation(context, async (conversation) => json(conversation)),
+        { capability: "read" },
+    )
+
+    router.add(
+        "PATCH",
+        "/v1/conversations/:conversationId/members",
+        (context) =>
+            withConversation(context, async (conversation) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(MembersBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                try {
+                    return json(
+                        await runtime.conversations.setMembers(
+                            conversation.id,
+                            parsed.value.add ?? [],
+                            parsed.value.remove ?? [],
+                        ),
+                    )
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    router.add(
+        "POST",
+        "/v1/conversations/:conversationId/messages",
+        (context) =>
+            withConversation(context, async (conversation) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(ConversationMessageBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const bound = boundParticipant(context.principal)
+                const claimed = parsed.value.authorId
+                if (bound !== undefined && claimed !== undefined && claimed !== bound) {
+                    return fail(
+                        {
+                            code: "sender_not_bound_participant",
+                            message: `This key speaks for ${bound}, and the message names ${claimed}.`,
+                            hint: `Omit authorId (it is filled in), or send "${bound}". A backend that posts for others needs a key minted without scope.participant.`,
+                            field: "authorId",
+                        },
+                        403,
+                    )
+                }
+                const authorId = bound ?? claimed
+                if (authorId === undefined) {
+                    return fail(
+                        {
+                            code: "conversation_author_required",
+                            message: "A message needs an author.",
+                            hint: "Send authorId, the human member who said it. A key bound to a participant fills it in.",
+                            field: "authorId",
+                        },
+                        400,
+                    )
+                }
+                try {
+                    const message = await runtime.conversations.post({
+                        conversationId: conversation.id,
+                        authorId,
+                        text: parsed.value.text,
+                        ...(parsed.value.mentions === undefined
+                            ? {}
+                            : { mentions: parsed.value.mentions }),
+                    })
+                    return json(message, 202)
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "chat" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/conversations/:conversationId/messages",
+        (context) =>
+            withConversation(context, async (conversation) => {
+                const after = Number(context.url.searchParams.get("after") ?? 0)
+                const limit = Number(context.url.searchParams.get("limit") ?? 200)
+                const messages = await runtime.store.conversations.messages(conversation.id, {
+                    after: Number.isFinite(after) && after > 0 ? after : 0,
+                    limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 500) : 200,
+                })
+                return json({
+                    conversationId: conversation.id,
+                    messages,
+                    ...(messages.length === 0 ? {} : { nextAfter: messages.at(-1)?.seq }),
+                })
+            }),
+        { capability: "read" },
+    )
+
+    router.add(
+        "PUT",
+        "/v1/agents/:id/assignee",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(AssigneeBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const bound = boundParticipant(context.principal)
+                // Assigning is an admin participant's act; a member's key cannot assign agents,
+                // themselves included. An unbound key is the embedder's own backend.
+                if (bound !== undefined) {
+                    const by = await runtime.store.conversations.participant(bound)
+                    if (by?.role !== "admin") {
+                        return fail(
+                            {
+                                code: "assignment_requires_admin",
+                                message: `${bound} is not an admin participant.`,
+                                hint: 'Only a participant registered with role "admin" assigns agents to members.',
+                            },
+                            403,
+                        )
+                    }
+                }
+                try {
+                    return json(
+                        await runtime.conversations.assign({
+                            agentId: agent.id,
+                            participantId: parsed.value.participantId,
+                            ...(bound === undefined ? {} : { assignedBy: bound }),
+                        }),
+                    )
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/agents/:id/assignee",
+        (context) =>
+            withAgent(runtime, context, async (agent) =>
+                json({
+                    id: agent.id,
+                    unassigned: await runtime.store.conversations.unassign(agent.id),
+                }),
+            ),
         { capability: "admin" },
     )
 

@@ -740,6 +740,32 @@ substantially fewer tokens than the equivalent in-context skill in multi-domain 
 Handoff failure is a typed result, not an exception. The supervisor decides whether to
 retry, reassign, or surface it.
 
+### Rooms and DMs (Phase 27)
+
+Handoffs are one agent directing another. A **conversation** is several people and several agents
+talking, the shape a team space needs. `runtime/conversations.ts` owns it.
+
+```
+POST /v1/conversations/:id/messages (a human member)
+  → one row in the conversation log  → conversation.message
+  → for each member agent, serialised per (agent, conversation):
+       addressed?  agent.send(text, { session "room:<id>", from: {…, room} })  → its reply is a message
+       not?        agent.observe(text, …)   — appended to that session's history, no turn
+```
+
+- **Participants** are the embedder's: humans registered by id (`admin` or `member`), no account
+  stored; agents are `agent:<id>` implicitly. A key bound to a participant (`scope.participant`)
+  posts only as them and sees only their conversations.
+- **Addressed** means a `mentions` entry in a room, or any human message in a DM. An agent's reply
+  mentions others as `@id`.
+- **The loop guard is a hop count.** A human's message is hop 0; each agent reply is one more. An
+  agent past the addressed agent's `limits.maxHops` is read and not answered, and
+  `conversation.skipped` says why.
+- **Room text is untrusted to every agent**, a human's included — `TurnSender.room` makes
+  `trustOfSender` say so — so a mutating call from a room needs a `policy.allow` rule or an
+  approval. A DM between one human and their agent keeps the old, trusted behaviour.
+- An agent's own history, compaction and memory apply unchanged, because a room is a session.
+
 ---
 
 ## CLI

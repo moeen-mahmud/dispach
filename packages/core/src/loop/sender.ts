@@ -55,6 +55,13 @@ export interface TurnSender {
     /** A human-facing name, for the prompt's frame and for a listing. Decoration, not identity. */
     readonly name?: string
     readonly kind: SenderKind
+    /**
+     * The conversation this was said in, when it was a room (Phase 27). Stamped by the runtime, never
+     * accepted from a client — the wire schema strips it. Room text is **untrusted** to every agent
+     * that reads it, a human's included: a room is several people's text, and the write gate is what
+     * holds. A mutating call from a room therefore needs a `policy.allow` rule or an approval.
+     */
+    readonly room?: string
 }
 
 /**
@@ -65,7 +72,7 @@ export interface TurnSender {
  * assembled before.
  */
 export function trustOfSender(from: TurnSender | undefined): Trust {
-    return from?.kind === "agent" ? "untrusted" : "trusted"
+    return from?.kind === "agent" || from?.room !== undefined ? "untrusted" : "trusted"
 }
 
 /**
@@ -75,7 +82,9 @@ export function trustOfSender(from: TurnSender | undefined): Trust {
  * naming `agent:ops-bot` — and a name is attacker-supplied in exactly the case that matters.
  */
 export function senderLabel(from: TurnSender): string {
-    return `${from.kind} ${from.id}`
+    return from.room === undefined
+        ? `${from.kind} ${from.id}`
+        : `${from.kind} ${from.id} in room ${from.room}`
 }
 
 /**

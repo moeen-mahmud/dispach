@@ -14,6 +14,13 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `GET /v1/activity` for a waker: idle or not, and when the next schedule is due.
 - `model.result` carries `firstTokenMs`.
 
+### Rooms
+
+- Participants, rooms and DMs over `/v1/participants` and `/v1/conversations`. In a room an agent answers only when mentioned; in a DM, always. Each room message is a `conversation.message` event and a row in the conversation's log.
+- Agents replying to each other stop at `limits.maxHops` (default 4), with `conversation.skipped` saying why.
+- Room text is untrusted to every agent, so a mutating call from a room needs a `policy.allow` rule or an approval.
+- A key bound to a participant posts only as them and sees only their conversations. An admin participant can assign an agent to a member; `GET /v1/agents/:id` shows it.
+
 ### Media
 
 - `media.transcription` and `media.image`: `openai` (any `/audio/transcriptions` and `/images/generations` endpoint) is built in; `aws` (Amazon Transcribe, Nova Canvas) comes from `@dispach/media-aws`. Set through settings, the API or `config_set`.

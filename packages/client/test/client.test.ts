@@ -779,6 +779,39 @@ describe("webhooks", () => {
     })
 })
 
+describe("conversations", () => {
+    test("participants, conversations and the message log are the shapes the server sends", async () => {
+        const { client, runtime } = await harness()
+        const agentId = (await client.agents())[0]?.id ?? ""
+        await client.registerParticipant({ id: "user:ada", role: "admin" })
+        const participants = await client.participants()
+        expect(Array.isArray(participants)).toBe(true)
+        expect(participants.map((p) => p.id)).toEqual(["user:ada"])
+
+        const room = await client.createConversation({
+            kind: "room",
+            members: ["user:ada", `agent:${agentId}`],
+        })
+        expect(Array.isArray(room.members)).toBe(true)
+        const listed = await client.conversations()
+        expect(Array.isArray(listed)).toBe(true)
+        expect((await client.conversation(room.id)).id).toBe(room.id)
+
+        // No mention, so no agent answers: the log holds exactly what was posted.
+        const posted = await client.postMessage(room.id, { text: "hello", authorId: "user:ada" })
+        expect(posted.hop).toBe(0)
+        const log = await client.conversationMessages(room.id)
+        expect(Array.isArray(log.messages)).toBe(true)
+        expect(log.messages.map((m) => m.text)).toEqual(["hello"])
+        expect(log.nextAfter).toBe(posted.seq)
+
+        const assigned = await client.agent(agentId).assign("user:ada")
+        expect(assigned.participantId).toBe("user:ada")
+        expect((await client.agent(agentId).unassign()).unassigned).toBe(true)
+        await runtime.stop()
+    })
+})
+
 describe("usage and turns", () => {
     test("usage buckets and the turn list are the shapes the server sends", async () => {
         const { client, runtime } = await harness()

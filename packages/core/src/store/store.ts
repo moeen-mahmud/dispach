@@ -616,6 +616,83 @@ export interface AgentStateRecord {
  * `OperatorKeyStore.revoke` does — the interesting timestamp is when it stopped, not when somebody
  * last asked again.
  */
+/**
+ * A human the embedder registered (Phase 27). Dispach stores no account: `id` is the embedder's own,
+ * the one a key's `scope.participant` names, and the embedder authenticated whoever holds that key.
+ * An agent is a participant too, implicitly, as `agent:<agentId>`; it needs no row.
+ */
+export interface ParticipantRecord {
+    readonly id: string
+    readonly kind: "human"
+    readonly name?: string
+    /** `admin` may assign agents to members. Nothing else differs. */
+    readonly role: "admin" | "member"
+    readonly createdAt: string
+}
+
+export type ConversationKind = "room" | "dm"
+
+export interface ConversationRecord {
+    readonly id: string
+    readonly kind: ConversationKind
+    readonly title?: string
+    /** Participant ids: humans as registered, agents as `agent:<id>`. */
+    readonly members: readonly string[]
+    readonly createdAt: string
+}
+
+export interface ConversationMessageRecord {
+    readonly id: string
+    readonly conversationId: string
+    readonly authorId: string
+    /** Stamped by the runtime from who posted, never from the body. */
+    readonly origin: "human" | "agent"
+    readonly text: string
+    /** Participant ids this message addresses. */
+    readonly mentions: readonly string[]
+    /**
+     * How many agent replies deep this message is: 0 for a human's, one more than its trigger for an
+     * agent's. The loop guard's whole state — structural, so two agents of one kind are caught.
+     */
+    readonly hop: number
+    /** The turn that produced it, for an agent's message. */
+    readonly turnId?: string
+    /** Monotonic within the store; `after` in a listing. */
+    readonly seq: number
+    readonly createdAt: string
+}
+
+/** Who an agent works for, recorded by an admin. The human stays accountable for what it is asked. */
+export interface AssignmentRecord {
+    readonly agentId: string
+    readonly participantId: string
+    readonly assignedBy?: string
+    readonly assignedAt: string
+}
+
+export interface ConversationStore {
+    upsertParticipant(record: ParticipantRecord): Promise<ParticipantRecord>
+    participant(id: string): Promise<ParticipantRecord | undefined>
+    participants(): Promise<readonly ParticipantRecord[]>
+    deleteParticipant(id: string): Promise<boolean>
+    create(record: ConversationRecord): Promise<ConversationRecord>
+    get(id: string): Promise<ConversationRecord | undefined>
+    list(): Promise<readonly ConversationRecord[]>
+    setMembers(
+        id: string,
+        add: readonly string[],
+        remove: readonly string[],
+    ): Promise<ConversationRecord>
+    append(message: Omit<ConversationMessageRecord, "seq">): Promise<ConversationMessageRecord>
+    messages(
+        conversationId: string,
+        options?: { readonly after?: number; readonly limit?: number },
+    ): Promise<readonly ConversationMessageRecord[]>
+    assign(record: AssignmentRecord): Promise<AssignmentRecord>
+    assignment(agentId: string): Promise<AssignmentRecord | undefined>
+    unassign(agentId: string): Promise<boolean>
+}
+
 export interface AgentStateStore {
     /** `undefined` when nothing has ever been recorded, which means enabled. */
     get(agentId: string): Promise<AgentStateRecord | undefined>
@@ -1380,6 +1457,8 @@ export interface Store {
      * would have made "stopped" a fact that disappeared the moment the host did.
      */
     readonly agentState: AgentStateStore
+    /** Participants, rooms and DMs, their messages, and agent assignments (Phase 27). Server-wide. */
+    readonly conversations: ConversationStore
     readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore

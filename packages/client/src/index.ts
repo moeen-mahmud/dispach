@@ -330,6 +330,9 @@ export interface AgentClient {
      * passes none on purpose.
      */
     start(): Promise<AgentLifecycleState>
+    /** Record which member this agent works for. An admin participant's act (Phase 27). */
+    assign(participantId: string): Promise<AssignmentLike>
+    unassign(): Promise<{ readonly id: string; readonly unassigned: boolean }>
 }
 
 /** What `stop` and `start` report back. */
@@ -694,6 +697,43 @@ export interface ActivityLike {
     readonly nextWakeAt?: string
 }
 
+/** A human the embedder registered (Phase 27). Agents are participants too, as `agent:<id>`. */
+export interface ParticipantLike {
+    readonly id: string
+    readonly kind: "human"
+    readonly name?: string
+    readonly role: "admin" | "member"
+    readonly createdAt: string
+}
+
+export interface ConversationLike {
+    readonly id: string
+    readonly kind: "room" | "dm"
+    readonly title?: string
+    readonly members: readonly string[]
+    readonly createdAt: string
+}
+
+export interface ConversationMessageLike {
+    readonly id: string
+    readonly conversationId: string
+    readonly authorId: string
+    readonly origin: "human" | "agent"
+    readonly text: string
+    readonly mentions: readonly string[]
+    readonly hop: number
+    readonly turnId?: string
+    readonly seq: number
+    readonly createdAt: string
+}
+
+export interface AssignmentLike {
+    readonly agentId: string
+    readonly participantId: string
+    readonly assignedBy?: string
+    readonly assignedAt: string
+}
+
 /** A webhook subscription as the server reports it. Never the secret. */
 export interface WebhookLike {
     readonly subscriptionId: string
@@ -795,6 +835,44 @@ export interface DispachClient {
      * the server token or an unscoped operator key.
      */
     activity(): Promise<ActivityLike>
+    /** Registered human participants. */
+    participants(): Promise<readonly ParticipantLike[]>
+    registerParticipant(input: {
+        readonly id: string
+        readonly name?: string
+        readonly role?: "admin" | "member"
+    }): Promise<ParticipantLike>
+    /** The rooms and DMs this credential can see. */
+    conversations(): Promise<readonly ConversationLike[]>
+    createConversation(input: {
+        readonly kind: "room" | "dm"
+        readonly members: readonly string[]
+        readonly title?: string
+    }): Promise<ConversationLike>
+    conversation(conversationId: string): Promise<ConversationLike>
+    setMembers(
+        conversationId: string,
+        change: { readonly add?: readonly string[]; readonly remove?: readonly string[] },
+    ): Promise<ConversationLike>
+    /**
+     * Post a human member's message. In a room only the mentioned agents answer; their replies come
+     * back as `conversation.message` events and in `conversationMessages`.
+     */
+    postMessage(
+        conversationId: string,
+        message: {
+            readonly text: string
+            readonly mentions?: readonly string[]
+            readonly authorId?: string
+        },
+    ): Promise<ConversationMessageLike>
+    conversationMessages(
+        conversationId: string,
+        options?: { readonly after?: number; readonly limit?: number },
+    ): Promise<{
+        readonly messages: readonly ConversationMessageLike[]
+        readonly nextAfter?: number
+    }>
     /** The webhook subscriptions this credential can see. */
     webhooks(): Promise<readonly WebhookLike[]>
     /**
@@ -1184,6 +1262,9 @@ export function createClient(options: ClientOptions): DispachClient {
                 }),
 
             start: () => json<AgentLifecycleState>("POST", at("/start"), { body: {} }),
+            assign: (participantId) =>
+                json<AssignmentLike>("PUT", at("/assignee"), { body: { participantId } }),
+            unassign: () => json<{ id: string; unassigned: boolean }>("DELETE", at("/assignee")),
 
             context: (opts) => {
                 const params = new URLSearchParams()
@@ -1236,6 +1317,43 @@ export function createClient(options: ClientOptions): DispachClient {
         // page crashed to black on `schedules.map is not a function`.
         usage: (options) => json<UsageReportLike>("GET", `/v1/usage${usageQuery(options)}`),
         activity: () => json<ActivityLike>("GET", "/v1/activity"),
+        participants: async () =>
+            (await json<{ participants: readonly ParticipantLike[] }>("GET", "/v1/participants"))
+                .participants,
+        registerParticipant: (input) =>
+            json<ParticipantLike>("POST", "/v1/participants", { body: input }),
+        conversations: async () =>
+            (await json<{ conversations: readonly ConversationLike[] }>("GET", "/v1/conversations"))
+                .conversations,
+        createConversation: (input) =>
+            json<ConversationLike>("POST", "/v1/conversations", { body: input }),
+        conversation: (conversationId) =>
+            json<ConversationLike>(
+                "GET",
+                `/v1/conversations/${encodeURIComponent(conversationId)}`,
+            ),
+        setMembers: (conversationId, change) =>
+            json<ConversationLike>(
+                "PATCH",
+                `/v1/conversations/${encodeURIComponent(conversationId)}/members`,
+                { body: change },
+            ),
+        postMessage: (conversationId, message) =>
+            json<ConversationMessageLike>(
+                "POST",
+                `/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+                { body: message },
+            ),
+        conversationMessages: (conversationId, options = {}) => {
+            const query = new URLSearchParams()
+            if (options.after !== undefined) query.set("after", String(options.after))
+            if (options.limit !== undefined) query.set("limit", String(options.limit))
+            const suffix = query.size === 0 ? "" : `?${query}`
+            return json<{ messages: readonly ConversationMessageLike[]; nextAfter?: number }>(
+                "GET",
+                `/v1/conversations/${encodeURIComponent(conversationId)}/messages${suffix}`,
+            )
+        },
         webhooks: async () =>
             (await json<{ webhooks: readonly WebhookLike[] }>("GET", "/v1/webhooks")).webhooks,
         createWebhook: (input) =>

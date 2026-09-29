@@ -21,6 +21,7 @@ import type {
     AgentStateStore,
     ArtifactRecord,
     ArtifactStore,
+    ConversationStore,
     DeliveryBacklog,
     DeliveryRecord,
     DeliveryStatus,
@@ -63,6 +64,7 @@ import type {
     WebhookSubscription,
 } from "../store.ts"
 import { DEFAULT_KEY_TOUCH_MS } from "../store.ts"
+import { sqliteConversations } from "./conversations.ts"
 import type { OpenOptions, SqlDatabase, SqlParam, SqlStatement } from "./driver.ts"
 import { openDatabase } from "./driver.ts"
 import { type MigrationReport, migrate } from "./migrations.ts"
@@ -699,6 +701,7 @@ export class SqliteStore implements Store {
     readonly outbox: OutboxStore
     readonly leases: LeaseStore
     readonly agentState: AgentStateStore
+    readonly conversations: ConversationStore
     readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
@@ -2103,6 +2106,8 @@ export class SqliteStore implements Store {
             lease: q.leaseGet.get(agentId) !== undefined,
         })
 
+        const conversations = sqliteConversations(db)
+        this.conversations = conversations
         this.agentState = {
             get: async (agentId) => {
                 const row = q.agentStateGet.get<AgentStateRow>(agentId)
@@ -2318,6 +2323,9 @@ export class SqliteStore implements Store {
                 // the whole argument for the column. A state row surviving its agent would make a
                 // re-provisioned agent of the same name silently arrive switched off.
                 q.agentStateDeleteAll.run(agentId)
+                // Its room memberships and who it was assigned to: an agent removed from the silo is no
+                // longer in any conversation, and a re-provisioned one of the same name starts unassigned.
+                conversations.purgeAgent(agentId)
                 scheduleQ.deleteAll.run(agentId)
                 return went
             })

@@ -730,6 +730,13 @@ export const LimitsSchema = z
          */
         reloadHoldMs: z.number().int().nonnegative().default(30_000),
         /**
+         * In a room, how many agent replies deep a message may be and still make this agent answer
+         * (Phase 27). A human's message is hop 0; each agent reply is one more. Past it the agent
+         * reads the message and does not answer, and `conversation.skipped` says why — the guard
+         * against two agents replying to each other forever.
+         */
+        maxHops: z.number().int().nonnegative().default(4),
+        /**
          * Model tokens (prompt + output, every call the meter records) this agent may spend in a
          * rolling window. Checked when a turn **starts**: a turn under the budget runs to its end, so
          * the overshoot is bounded by one turn and stopping mid-work is never the outcome. Absent is
