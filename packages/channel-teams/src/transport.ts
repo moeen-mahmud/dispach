@@ -39,6 +39,8 @@ export interface TeamsTransportOptions {
     /** Activities from any other Entra tenant are dropped. Absent: any tenant the bot is in. */
     readonly tenantId?: string
     readonly fetch?: FetchLike
+    /** The agent this channel belongs to, so the status names the real endpoint path (QA K14). */
+    readonly agentId?: string
 }
 
 export class TeamsTransport implements ChannelTransport {
@@ -52,6 +54,7 @@ export class TeamsTransport implements ChannelTransport {
     readonly #auth: BotFrameworkAuth
     readonly #tenantId: string | undefined
     readonly #fetch: FetchLike
+    readonly #agentId: string | undefined
     readonly #file: string
     #host: ChannelHost | undefined
     #services: Record<string, string>
@@ -60,6 +63,7 @@ export class TeamsTransport implements ChannelTransport {
         this.id = options.id
         this.#auth = options.auth
         this.#tenantId = options.tenantId
+        this.#agentId = options.agentId
         this.#fetch = options.fetch ?? ((url, init) => fetch(url, init))
         this.#file = join(options.dir, BRAND.stateDir, `teams-${options.id}.json`)
         this.#services = readServices(this.#file)
@@ -67,7 +71,10 @@ export class TeamsTransport implements ChannelTransport {
 
     async start(host: ChannelHost): Promise<void> {
         this.#host = host
-        host.status("connected", `webhook — POST /v1/channels/${this.id}/webhook/<agent>`)
+        host.status(
+            "connected",
+            `webhook — POST /v1/channels/${this.id}/webhook/${this.#agentId ?? "<agent>"}`,
+        )
     }
 
     async stop(): Promise<void> {

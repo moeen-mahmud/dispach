@@ -61,7 +61,7 @@ export const UNSCOPED: Principal = { kind: "open" }
 /**
  * May this caller do this kind of thing?
  *
- * A capability set that is absent means **all four**, which is what makes a scope opt-in narrowing
+ * A capability set that is absent means **all of them**, which is what makes a scope opt-in narrowing
  * and keeps an unscoped key byte-identical to one minted before 18.2. An empty array is a different
  * statement and is honoured as written: a key that may do nothing is a coherent thing to mint,
  * however useless, and quietly promoting it to "everything" would be the worst possible reading.

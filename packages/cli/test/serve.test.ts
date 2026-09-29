@@ -437,9 +437,16 @@ describe("a broken agent does not take the host down", () => {
     function sandbox(): string {
         const home = mkdtempSync(join(tmpdir(), "serve-sandbox-"))
         const agents = join(home, BRAND.stateDir, "agents")
-        for (const [id, keyEnv] of [
-            ["fine", "MODEL_API_KEY"],
-            ["halfdone", "KEY_NOBODY_SET"],
+        // `mediahalf` loads and is refused by `Agent.create` instead (QA K14): a media provider whose
+        // key is not set yet. That refusal used to exit the host for every agent.
+        for (const [id, keyEnv, extra] of [
+            ["fine", "MODEL_API_KEY", ""],
+            ["halfdone", "KEY_NOBODY_SET", ""],
+            [
+                "mediahalf",
+                "MODEL_API_KEY",
+                "media:\n  transcription:\n    provider: openai\n    apiKeyEnv: MEDIA_KEY_NOBODY_SET\n",
+            ],
         ] as const) {
             const dir = join(agents, id)
             mkdirSync(dir, { recursive: true })
@@ -454,7 +461,7 @@ model:
     apiKeyEnv: ${keyEnv}
 server:
   enabled: true
-`,
+${extra}`,
                 "utf8",
             )
         }
@@ -484,6 +491,7 @@ server:
                     // Or the ambient environment satisfies the very variable this fixture
                     // withholds, and the broken agent loads perfectly.
                     KEY_NOBODY_SET: "",
+                    MEDIA_KEY_NOBODY_SET: "",
                 },
                 stdio: ["ignore", "pipe", "pipe"],
             },
@@ -525,6 +533,8 @@ server:
         expect(out).toContain("NOT served")
         expect(out).toContain("halfdone")
         expect(out).toContain("KEY_NOBODY_SET")
+        expect(out).toContain("mediahalf")
+        expect(out).toContain("MEDIA_KEY_NOBODY_SET")
     }, 30_000)
 
     test("a manifest named on the command line still refuses", async () => {

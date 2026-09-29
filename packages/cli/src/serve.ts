@@ -351,8 +351,8 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
      */
     const approvals = createApprovalRegistry()
 
-    const runtime = await Runtime.create({
-        agents: manifests.map((entry) => entry.path),
+    const createOptions = (paths: readonly string[]): Parameters<typeof Runtime.create>[0] => ({
+        agents: paths,
         // The seam `ToolContext.approve` declared in Phase 3 and nothing ever filled. A blocked
         // call now emits `approval.requested` and waits for a POST; an unanswered one ends with the
         // turn, because core races the approver against the turn's own signal rather than starting
@@ -387,6 +387,48 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         // than a guess — `ppid === 1` would also be true of any orphaned process.
         mode: asDaemon ? "daemon" : "terminal",
     })
+
+    /**
+     * **One agent the runtime refuses to build does not take the host down either (QA K14).**
+     *
+     * The pre-check above only sees what `loadManifest` refuses. `Agent.create` refuses more — a media
+     * provider whose key is not set yet (enabled first and filled second, on purpose), a workspace
+     * file `memory_write` grew past its budget — and one such agent made `serve` exit 1 for every
+     * agent in the sandbox. So when a *discovered* set fails, each agent is built alone in a
+     * throwaway, in-memory runtime; the ones that fail join `broken` and are reported beside the
+     * others, and the host starts with the rest. Only the failure path pays for it.
+     */
+    let runtime: Runtime
+    try {
+        runtime = await Runtime.create(createOptions(manifests.map((entry) => entry.path)))
+    } catch (error) {
+        if (!discovered || manifests.length === 0) throw error
+        const survivors: typeof manifests = []
+        for (const entry of manifests) {
+            try {
+                const probe = await Runtime.create({
+                    ...createOptions([entry.path]),
+                    store: ":memory:",
+                    startChannels: false,
+                    startSchedules: false,
+                })
+                await probe.stop()
+                survivors.push(entry)
+            } catch (alone) {
+                broken.push({
+                    path: entry.path,
+                    detail: isHarnessError(alone) ? alone.message : String(alone),
+                    ...(isHarnessError(alone) && alone.hint !== undefined
+                        ? { hint: alone.hint }
+                        : {}),
+                })
+            }
+        }
+        // Every agent builds alone, so the failure is not any one agent's: say it as it was.
+        if (survivors.length === manifests.length) throw error
+        manifests.splice(0, manifests.length, ...survivors)
+        runtime = await Runtime.create(createOptions(survivors.map((entry) => entry.path)))
+    }
 
     // Claimed and *registered* before the socket binds, and that ordering is the bug this fixes.
     //

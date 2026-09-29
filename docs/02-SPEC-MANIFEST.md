@@ -872,6 +872,13 @@ API-initiated turns.
 | `timezone` | no | IANA name. Defaults to `TZ` then UTC. Applies to `cron` only: `every` is interval-anchored and does not participate in DST. |
 | `role` | no | A model role from `model:` to run this turn on instead of `main`. Omit for `main`. |
 
+**A recurring schedule fires a little after its time, on purpose.** `cron` and `every` carry a fixed
+offset of up to a tenth of their interval, capped at 15 minutes: a daily `0 8 * * *` fires somewhere
+between 08:00 and 08:15, the same minute every day, and a `15m` moves by at most 90 seconds. It is
+derived from the schedule's `id` (decision 9.10), so it never moves between runs or restarts, and
+`dispach schedules` shows the real next run. It keeps a fleet of agents from all calling the model
+at 08:00:00. An `at` carries none, because a person who wrote an instant meant that instant.
+
 **Timing.** `cron` is wall-clock-anchored and `every` is interval-anchored. On a DST spring-forward a
 `cron` occurrence whose local time does not exist is **skipped entirely** — a daily 02:15 does not
 fire that day, not shifted and not late — and on a fall-back the repeated hour fires **exactly once**.

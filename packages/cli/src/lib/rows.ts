@@ -125,6 +125,43 @@ export function headingRule(label: string, width: number): string {
  * Originally: Keeps the cursor inside the window rather than paging, because a cursor that jumps a
  * whole viewport loses the reader's place.
  */
+/**
+ * `viewport` for rows that are not all one line tall (QA K5).
+ *
+ * The settings editor draws a heading as a blank line and its label, and counting it as one row made the
+ * frame taller than the terminal at 40 rows: the title, the first heading and the cursor scrolled off the
+ * top at open. The window grows around `index`, a row below then a row above, until the next one would
+ * pass `budget` lines, so the cursor is always inside it.
+ */
+export function viewportByHeight(
+    heights: readonly number[],
+    index: number,
+    budget: number,
+): { readonly from: number; readonly to: number } {
+    const total = heights.length
+    const at = (i: number) => heights[i] ?? 1
+    if (heights.reduce((sum, height) => sum + height, 0) <= budget) return { from: 0, to: total }
+    const cursor = Math.min(Math.max(0, index), Math.max(0, total - 1))
+    let from = cursor
+    let to = cursor + 1
+    let used = at(cursor)
+    let downward = true
+    for (;;) {
+        const canDown = to < total && used + at(to) <= budget
+        const canUp = from > 0 && used + at(from - 1) <= budget
+        if (!canDown && !canUp) break
+        if ((downward && canDown) || !canUp) {
+            used += at(to)
+            to += 1
+        } else {
+            from -= 1
+            used += at(from)
+        }
+        downward = !downward
+    }
+    return { from, to }
+}
+
 export function viewport(
     total: number,
     index: number,

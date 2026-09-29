@@ -4,6 +4,14 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Fixed in the QA pass
+
+- `serve` no longer exits for every agent when one of them is refused at build time (a media key not set yet, a workspace file over budget); that agent is listed as not served.
+- The web app gives a new conversation its own session instead of `api:default`, reopens it after a reload, and opens a conversation at its newest reply.
+- `tools --warm` no longer stops at a provider it cannot warm (the default `composio: {}` without a key), and still fails when a pinned tool is left uncovered.
+- `config edit` fits a 40-row terminal; the init summary no longer runs "Background service" into its value; the Teams status names its real webhook path.
+- The manifest spec now says that recurring schedules fire up to a tenth of their interval late, the same amount every time.
+
 ### Runtime API
 
 - Agent templates: `GET /v1/templates` and `POST /v1/agents {"template", "vars"}`. Secret vars go to `.env`, never into a file.

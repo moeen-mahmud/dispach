@@ -18,12 +18,14 @@ export interface WizardFrameProps {
 }
 
 export function WizardFrame({ step, total, answered, hint, children }: WizardFrameProps) {
+    // Sized from the longest label, with a gap: a fixed 18 ran "Background service" (18) into its value.
+    const width = Math.max(18, ...answered.map((entry) => entry.label.length + 2))
     return (
         <Box flexDirection="column">
             {answered.map((entry) => (
                 <Text key={entry.label}>
                     <Text color={THEME.success}>{GLYPH.check}</Text>
-                    <Text dimColor>{entry.label.padEnd(18)}</Text>
+                    <Text dimColor>{entry.label.padEnd(width)}</Text>
                     {entry.value}
                 </Text>
             ))}

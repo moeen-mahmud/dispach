@@ -71,6 +71,7 @@ export const teamsChannel: ChannelFactory = (context) => {
     }
     return new TeamsTransport({
         id: context.id,
+        agentId: context.agentId,
         dir: context.dir,
         auth: new BotFrameworkAuth({
             appId,

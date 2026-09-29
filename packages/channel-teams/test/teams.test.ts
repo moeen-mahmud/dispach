@@ -154,6 +154,22 @@ function setup(options: { tenantId?: string } = {}) {
     return { transport, host, received, bearer, deliver, ms, keys, dir, key }
 }
 
+describe("status", () => {
+    test("names the endpoint to register, with the real agent id (QA K14)", async () => {
+        const { auth, dir } = {
+            auth: new BotFrameworkAuth({ appId: APP, password: "pw" }),
+            dir: mkdtempSync(join(tmpdir(), "teams-")),
+        }
+        const seen: string[] = []
+        const transport = new TeamsTransport({ id: "teams", dir, auth, agentId: "crew" })
+        await transport.start({
+            receive: () => {},
+            status: (_s: string, detail?: string) => seen.push(detail ?? ""),
+        } as unknown as ChannelHost)
+        expect(seen).toContain("webhook — POST /v1/channels/teams/webhook/crew")
+    })
+})
+
 describe("verifying the connector", () => {
     test("a genuine activity is read; every forgery is refused and nothing in it reaches the agent", async () => {
         const { transport, host, received, bearer, deliver } = setup()

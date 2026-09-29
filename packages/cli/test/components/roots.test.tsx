@@ -1473,6 +1473,30 @@ describe("ConfigEditor", () => {
         expect(frame.text).toContain("(not set)")
     })
 
+    test("a long list fits a 40-row terminal: headings are two lines and are budgeted as two (QA K5)", () => {
+        // Fourteen blocks of two settings. Counted a row per heading, the window drew ten lines more
+        // than the terminal had, and the title and the cursor scrolled off the top at open.
+        const many: EditorRow[] = []
+        for (let block = 0; block < 14; block += 1) {
+            many.push({ kind: "heading", label: `block${block}` })
+            for (const field of ["a", "b"]) {
+                many.push({
+                    kind: "setting",
+                    setting: { path: `block${block}.${field}`, means: "x", agentListed: true },
+                    value: "v",
+                })
+            }
+        }
+        const frame = renderFrame(editor({ rows: many, reload: () => many, window: 100 }), {
+            columns: 100,
+            rows: 40,
+        })
+        const lines = frame.lines.length
+        // The editor may use rows - SCREEN_CHROME_ROWS (8) for the list, plus its three chrome lines.
+        expect(lines).toBeLessThanOrEqual(40 - 8 + 3)
+        expect(frame.lines.some((line) => line.includes("❯"))).toBe(true)
+    })
+
     test("the cursor opens on the first setting, not on the heading above it", async () => {
         const harness = mount(editor(), { columns: 80 })
         const frame = harness.frame()
