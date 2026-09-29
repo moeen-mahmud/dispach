@@ -45,6 +45,13 @@ export interface RawInbound {
      * group is not somebody whose permissions exist. Absent means `peerId` already is the person.
      */
     readonly senderId?: string
+    /**
+     * `agent` when the sender is another agent rather than a person (Phase 30, A2A). Its text is then
+     * fenced as untrusted and the turn acts for nobody — the same treatment an agent sender gets
+     * everywhere — so a remote agent can never approve, configure or commit anything. Absent is a
+     * person, as every channel before this assumed.
+     */
+    readonly senderKind?: "agent"
     /** Thread, topic, or forum sub-id. Keeps a forum topic from sharing one session with its group. */
     readonly thread?: string
     /** The words, or a voice note's caption. May be empty when `audio` is present. */

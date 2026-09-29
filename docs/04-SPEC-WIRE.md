@@ -165,6 +165,7 @@ and WebSocket surfaces can return:
 | `bundle_memory_not_writable` | 400 | A bundle carrying `MEMORY.md` into an agent with no writable memory file. |
 | `bundle_no_memory` / `bundle_no_knowledge` | 400 | A bundle carrying `memory/` or `knowledge/` into an agent without that manifest block. |
 | `bundle_import_refused` | 400 | The agent would not load with the bundle (a knowledge entry without keywords, a file over its budget). Every file the import touched was restored; the message and hint are the load's own. |
+| `plugin_route_failed` | 500 | A plugin's route threw. The error names the plugin; the runtime's own routes are unaffected. |
 | `key_scope_agent_unknown` | 400 | `scope.agents` names an agent this server does not hold. Refused at mint rather than producing a key that reaches nothing. |
 | `provision_adopt_failed` | — | Returned *inside* a `201`: the agent was written and is not running. |
 | `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting — an embedder over its own agent store. The container has the lookup, and `start` works there. |
@@ -267,6 +268,9 @@ POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disable
 POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }
 POST /v1/agents/:id/reload        → 200 { id, status: "loaded", adopted[] }
                                   | 202 { id, status: "pending", running, holdAfterMs, adopted: [] }
+*    /v1/agents/:id/plugins/:plugin/<path>   → whatever the plugin answers, behind its declared
+                                            capability and this key's agent scope (Phase 30)
+GET  /.well-known/<name>                     → a plugin route's `root`, while one agent claims it
 GET  /v1/agents/:id/export?paths=MEMORY.md,memory/,knowledge/
                                   → { version: 1, agentId, exportedAt, files: [{ path, content }] }
 POST /v1/agents/:id/import { bundle, mode?: "skip" | "overwrite" }   (25 MB cap)
@@ -764,7 +768,7 @@ POST /v1/keys  { "label": "web · user_8812",
 | --- | --- | --- |
 | `agents` | every agent | An id naming no agent is **reported at mint**, never silently matched against nothing. |
 | `sessions` | every session | A prefix; a trailing `*` is accepted and ignored. Not a namespace — `team_4` also matches `team_42:x`. |
-| `can` | all four | An **empty array** is honoured as written: a key that may do nothing is a coherent thing to mint. |
+| `can` | all of them | `read`, `chat`, `write`, `admin`, and `peer` — the last reaches only a plugin route that declares it (an A2A endpoint) and no first-party route, so a remote agent's key cannot start a trusted turn. An **empty array** is honoured as written: a key that may do nothing is a coherent thing to mint. |
 | `participant` | any sender | The one participant this key speaks for. Every turn it starts, on `POST /messages` or the socket, has `from` set to it; a `from` naming anyone else is `403 sender_not_bound_participant`. It becomes the turn's **acting participant**, which every tool receives (below). |
 | `expiresIn` | never expires | Seconds. Reported back as an absolute `expiresAt`. Enforced in the same query that hides a revoked key, so the two are indistinguishable. |
 

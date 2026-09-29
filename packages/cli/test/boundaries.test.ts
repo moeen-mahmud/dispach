@@ -964,6 +964,7 @@ describe("first-party packages use only the public core API", () => {
     const PACKAGES = resolve(import.meta.dirname, "..", "..")
     const FIRST_PARTY = [
         "channel-teams",
+        "channel-a2a",
         "channel-slack",
         "media-aws",
         "channel-telegram",

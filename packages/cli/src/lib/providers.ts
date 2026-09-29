@@ -13,6 +13,7 @@
  * a rendering import costs more than the whole command.
  */
 
+import a2aPlugin from "@dispach/channel-a2a"
 import slackPlugin, { slackChannel } from "@dispach/channel-slack"
 import teamsPlugin, { teamsChannel } from "@dispach/channel-teams"
 import telegramPlugin, { telegramChannel } from "@dispach/channel-telegram"
@@ -148,6 +149,9 @@ export const CHANNEL_IDS: readonly string[] = Object.keys(CHANNELS)
  * different namespace on purpose: one plugin can register several.
  */
 export const BUILT_IN_PLUGINS: BuiltInPlugins = {
+    // Loaded only when a manifest names it: it mounts routes and a channel, so it is opt-in by
+    // name rather than a default table entry (Phase 30).
+    "@dispach/channel-a2a": a2aPlugin,
     "@dispach/channel-teams": teamsPlugin,
     "@dispach/channel-slack": slackPlugin,
     "@dispach/channel-telegram": telegramPlugin,

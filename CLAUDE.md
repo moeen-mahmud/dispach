@@ -177,7 +177,8 @@ packages/core/       the loop, context, tools, skills, memory, store, schedule, 
 packages/cli/        `dispach` binary — lib/ plumbing, components/ Ink, pure reducers at top level
 packages/server/     HTTP/SSE/WS surface
 packages/client/     typed client for the API — reattach, streams, typed errors
-packages/channel-*/  Telegram, WhatsApp, Teams (Bot Framework, webhook-only), Slack (Socket Mode). Each is a plugin the binary bundles
+packages/channel-*/  Telegram, WhatsApp, Teams (Bot Framework, webhook-only), Slack (Socket Mode), A2A (JSON-RPC, peers
+                     are agents: untrusted, acting for nobody). Each is a plugin the binary bundles
 packages/tools-*/    system (shell, files), Composio, web, MCP (remote servers over Streamable HTTP — a provider,
                      never the substrate: decisions 4.7, 14.22)
 packages/model-*/    model transports beyond chat-completions: Bedrock Converse. Its AWS SDK loads on

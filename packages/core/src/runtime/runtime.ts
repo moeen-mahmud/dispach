@@ -33,7 +33,12 @@ import type { AgentManifest, TeamMemberConfig } from "../manifest/schema.ts"
 import type { MediaProviderFactory } from "../media/provider.ts"
 import type { FetchLike } from "../model/provider.ts"
 import { BUILT_IN_TRANSPORTS, type ModelTransport } from "../model/transport.ts"
-import { agentPluginSupply, type BuiltInPlugins, type LoadedPlugin } from "../plugins/loader.ts"
+import {
+    agentPluginSupply,
+    type BuiltInPlugins,
+    type LoadedPlugin,
+    type MountedRoute,
+} from "../plugins/loader.ts"
 import { type Middleware, notify } from "../plugins/middleware.ts"
 import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams, type TurnStreamsOptions } from "../store/buffer.ts"
@@ -252,6 +257,7 @@ export interface AgentSupply {
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     readonly middleware: readonly Middleware[]
+    readonly routes?: readonly MountedRoute[]
     /** Plugins this agent named that did not load, carried so they reach `agent.warnings`. */
     readonly failedPlugins?: readonly ErrorDetail[]
 }
@@ -1893,6 +1899,7 @@ async function prepareAgents(input: {
                 channels: supply.channels,
                 scriptRunner: supply.scriptRunner,
                 middleware: supply.middleware,
+                routes: supply.routes,
                 failedPlugins: supply.failed,
             })
             pluginsByAgent.set(agentId, supply.loaded)
@@ -2203,6 +2210,9 @@ function instantiateAgent(input: {
         // six debugging rounds.
         ...(runner === undefined ? {} : { scriptRunner: runner }),
         ...(supply.middleware.length === 0 ? {} : { middleware: supply.middleware }),
+        ...(supply.routes === undefined || supply.routes.length === 0
+            ? {}
+            : { pluginRoutes: supply.routes }),
         // Built-in first, so a plugin may replace `chat-completions` — the manifest named it.
         transports: new Map([...BUILT_IN_TRANSPORTS, ...Object.entries(supply.modelTransports)]),
         mediaProviders: new Map(Object.entries(supply.mediaProviders)),

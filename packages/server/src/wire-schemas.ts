@@ -186,12 +186,12 @@ export const KeyScopeBody = z.object({
         description: "Session-key prefix. Absent means every session.",
     }),
     can: z
-        .array(z.enum(["read", "chat", "write", "admin"]))
+        .array(z.enum(["read", "chat", "write", "admin", "peer"]))
         .optional()
         .meta({
             code: "key_scope_can_invalid",
-            hint: 'Send { "can": ["chat", "read"] }. The four are read (every GET), chat (send a message, answer an approval, stop a turn), write (schedules, phase, clearing a session) and admin (keys, provisioning, start/stop/reload). Absent means all four; an empty array means none, and is honoured as written.',
-            description: "Capabilities this key may exercise. Absent means all four.",
+            hint: 'Send { "can": ["chat", "read"] }. read (every GET), chat (send a message, answer an approval, stop a turn), write (schedules, phase, clearing a session), admin (keys, provisioning, start/stop/reload), and peer (a plugin route that asks for it — an A2A endpoint — and nothing else). Absent means all five; an empty array means none, and is honoured as written.',
+            description: "Capabilities this key may exercise. Absent means all of them.",
         }),
     participant: z.string().min(1).optional().meta({
         code: "key_scope_participant_invalid",

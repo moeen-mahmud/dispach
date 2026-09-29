@@ -53,6 +53,7 @@
     },
     "devDependencies": {
         "@dispach/channel-telegram": "workspace:*",
+        "@dispach/channel-a2a": "workspace:*",
         "@dispach/channel-slack": "workspace:*",
         "@dispach/media-aws": "workspace:*",
         "@dispach/channel-teams": "workspace:*",

@@ -540,16 +540,34 @@ export class ChannelHub {
         }
 
         try {
+            const senderId = `${message.channelType}:${message.senderId ?? message.peerId}`
             const result = await bound.agent.send(input, {
                 sessionKey: message.sessionKey,
                 source: transport.id,
-                // The person the channel authenticated, never the conversation: in a group the peer
-                // is the group. Keyed by channel *type* so an embedder maps one namespace per provider.
-                participant: {
-                    id: `${message.channelType}:${message.senderId ?? message.peerId}`,
-                    ...(message.senderName === undefined ? {} : { name: message.senderName }),
-                    via: "channel",
-                },
+                // A remote agent is an agent sender: untrusted text and no acting participant, which
+                // `participantOf` derives from `from` — so nothing it says can act for a person.
+                ...(message.senderKind === "agent"
+                    ? {
+                          from: {
+                              id: senderId,
+                              kind: "agent" as const,
+                              ...(message.senderName === undefined
+                                  ? {}
+                                  : { name: message.senderName }),
+                          },
+                      }
+                    : {
+                          // The person the channel authenticated, never the conversation: in a group
+                          // the peer is the group. Keyed by channel *type* so an embedder maps one
+                          // namespace per provider.
+                          participant: {
+                              id: senderId,
+                              ...(message.senderName === undefined
+                                  ? {}
+                                  : { name: message.senderName }),
+                              via: "channel" as const,
+                          },
+                      }),
             })
             stopTyping()
 

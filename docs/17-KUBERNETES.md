@@ -146,6 +146,7 @@ agents actually use:
 | `web.whatsapp.com`, `*.whatsapp.net` | 443 | a WhatsApp channel (the socket, then media) |
 | `login.botframework.com`, `login.microsoftonline.com`, `smba.trafficmanager.net` | 443 | a Teams channel: the connector's signing keys, the bot's token, replies. Teams also needs **ingress** to the webhook route |
 | `slack.com`, `wss-primary.slack.com`, `files.slack.com` (`*.slack.com`) | 443 | a Slack channel: the Web API, the Socket Mode WebSocket, and voice clips and images. No ingress |
+| each `peers.<name>.url` in `@dispach/channel-a2a`'s config | as configured | `a2a_send` to that peer only; the tool's `peer` is an enum of these names, so no other host is reachable through it. Inbound A2A is ingress on the runtime's own port |
 | `transcribestreaming.<region>.amazonaws.com` | 443 | `media.transcription.provider: aws`. Image generation on `aws` is Bedrock, above |
 | the media `baseUrl` host | 443 | `media.*.provider: openai` (`api.openai.com`, a gateway) |
 | `api.tavily.com`, `api.search.brave.com`, `api.exa.ai` | 443 | `web_search`, whichever backend is configured |

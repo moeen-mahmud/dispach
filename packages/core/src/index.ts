@@ -330,6 +330,7 @@ export {
     type LoadedPlugins,
     type LoadPluginsOptions,
     loadPlugins,
+    type MountedRoute,
     SETUP_BUDGET_MS,
 } from "./plugins/loader.ts"
 export {
@@ -346,8 +347,11 @@ export type {
     Logger,
     Permission,
     Plugin,
+    PluginCaller,
     PluginContext,
     PluginPaths,
+    PluginRoute,
+    PluginRouteRequest,
 } from "./plugins/plugin.ts"
 export { satisfies as satisfiesApiRange } from "./plugins/semver.ts"
 export {

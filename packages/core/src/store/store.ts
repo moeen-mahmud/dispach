@@ -372,10 +372,15 @@ export const DEFAULT_KEY_TOUCH_MS = 60_000
  *
  * The names go on the wire (`GET /v1/keys`, `POST /v1/keys`), so they are append-only in practice.
  */
-export type Capability = "read" | "chat" | "write" | "admin"
+/**
+ * What a credential may do. `peer` is narrower than the others rather than beside them: it reaches only
+ * a plugin route that declares it (an A2A endpoint), and no first-party route asks for it — so a key a
+ * remote agent holds cannot start a trusted turn through `POST /messages` (Phase 30).
+ */
+export type Capability = "read" | "chat" | "write" | "admin" | "peer"
 
 /** Every capability, for validation and for a listing that cannot go stale against the union. */
-export const CAPABILITIES: readonly Capability[] = ["read", "chat", "write", "admin"]
+export const CAPABILITIES: readonly Capability[] = ["read", "chat", "write", "admin", "peer"]
 
 /**
  * How far one key reaches. **Every field absent is byte-identical to an unscoped key**, which is

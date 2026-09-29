@@ -45,7 +45,13 @@ export type Principal =
     /** The token from `server.tokenEnv`. The operator's own credential; unscoped by definition. */
     | { readonly kind: "token" }
     /** An operator key, with whatever scope it was minted under. */
-    | { readonly kind: "key"; readonly keyId: string; readonly scope?: KeyScope }
+    | {
+          readonly kind: "key"
+          readonly keyId: string
+          /** The key's label, for a plugin route mapping a key to someone it knows (Phase 30). */
+          readonly label?: string
+          readonly scope?: KeyScope
+      }
     /** A one-time claim. Opens `POST /v1/keys` and nothing else; `authorise` enforces that. */
     | { readonly kind: "claim" }
 

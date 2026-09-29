@@ -27,6 +27,13 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - A stand-in never commits: a mutating call is queued for the owner (`GET /v1/actions`), even with the tool allowed, and runs only when they approve it.
 - `delegation.offer` and `delegation.to` let a coordinator hand work to another member's agent, with the same handoff a team uses.
 
+### Agents talking to agents
+
+- `@dispach/channel-a2a`: an agent answers A2A v1.0 peers over JSON-RPC (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and publishes an Agent Card. A peer's text is untrusted and its turn acts for nobody.
+- `a2a_send(peer, text)` asks a peer the manifest names. It is mutating, and its answer is untrusted.
+- Plugins can mount HTTP routes (`defineRoute`), under `/v1/agents/:id/plugins/<name>/`, behind the same auth, capability and scope checks as every route.
+- A new key capability, `peer`, reaches only a plugin route that asks for it.
+
 ### Team memory
 
 - Shared memory scopes: the space, a person's owner scope, and projects, over `/v1/memory/notes` and `/v1/projects`. Agents recall them next to their own notes.

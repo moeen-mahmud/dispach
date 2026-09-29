@@ -1,0 +1,31 @@
+{
+    "name": "@dispach/channel-a2a",
+    "version": "0.1.0",
+    "description": "A2A (Agent2Agent) v1.0 over JSON-RPC: expose an agent to peers, and call theirs.",
+    "license": "Apache-2.0",
+    "author": "Moeen Mahmud",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/moeen-mahmud/dispach.git",
+        "directory": "packages/channel-a2a"
+    },
+    "type": "module",
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --sourcemap=linked --packages=external && tsc -p tsconfig.build.json",
+        "typecheck": "tsc -p tsconfig.json"
+    },
+    "dependencies": {
+        "@dispach/core": "workspace:*"
+    },
+    "private": true
+}

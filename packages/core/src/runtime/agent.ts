@@ -86,6 +86,7 @@ import {
     resolveRoles,
     windowReport,
 } from "../model/roles.ts"
+import type { MountedRoute } from "../plugins/loader.ts"
 import type { Middleware } from "../plugins/middleware.ts"
 import { loadSkills, type SkillCatalogue } from "../skills/index.ts"
 import { activateSkills } from "../skills/load.ts"
@@ -194,6 +195,8 @@ export interface AgentCreateOptions extends ResolveRolesOptions {
      * process.
      */
     readonly middleware?: readonly Middleware[]
+    /** HTTP routes this agent's plugins declared (Phase 30). The server mounts them per agent. */
+    readonly pluginRoutes?: readonly MountedRoute[]
     /**
      * Media providers beyond the built-in `openai`, by the name `media.*.provider` selects: `aws`
      * from the media-aws plugin. Same shape and reasoning as `transports`.
@@ -419,6 +422,11 @@ export class Agent {
     /** Absent when the embedder supplied none; then a skill's scripts are never discovered. */
     readonly #scriptRunner: ScriptRunner | undefined
     readonly #middleware: readonly Middleware[]
+    /**
+     * What this agent answers over HTTP beyond `/v1`'s own routes, from its plugins. Rebuilt with the
+     * agent, so a reload that changes the plugin config changes the routes with it.
+     */
+    readonly pluginRoutes: readonly MountedRoute[]
     readonly #transcription:
         | { readonly config: TranscriptionConfig; readonly provider: MediaProvider }
         | undefined
@@ -462,6 +470,7 @@ export class Agent {
         skills: SkillCatalogue | undefined
         scriptRunner: ScriptRunner | undefined
         middleware: readonly Middleware[]
+        pluginRoutes: readonly MountedRoute[]
         approve: ((request: ApprovalRequest) => Promise<boolean>) | undefined
         transcription:
             | { readonly config: TranscriptionConfig; readonly provider: MediaProvider }
@@ -486,6 +495,7 @@ export class Agent {
         this.skills = init.skills
         this.#scriptRunner = init.scriptRunner
         this.#middleware = init.middleware
+        this.pluginRoutes = init.pluginRoutes
         this.#transcription = init.transcription
 
         const memory = init.loaded.manifest.memory
@@ -769,6 +779,7 @@ export class Agent {
             skills,
             scriptRunner: options.scriptRunner,
             middleware: options.middleware ?? [],
+            pluginRoutes: options.pluginRoutes ?? [],
             approve: options.approve,
             transcription,
         })

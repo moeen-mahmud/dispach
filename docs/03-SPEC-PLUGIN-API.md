@@ -64,6 +64,7 @@ interface PluginContext {
   defineMediaProvider(name: string, factory: MediaProviderFactory): void // Phase 26j
   defineScriptRunner(runner: ScriptRunner): void
   use(middleware: Middleware): void          // Phase 9B
+  defineRoute(route: PluginRoute): void      // Phase 30
 
   // ambient
   readonly config: unknown          // validated against configSchema
@@ -472,6 +473,40 @@ after `allowFrom`, so a stranger's audio is never downloaded. A transport that c
 declares `limits.attachments` and reads `OutboundMessage.attachment` (`{path, mimeType}`, with `text`
 as its caption); for one that does not, the outbox names the file in the reply instead. A tool
 produces such a file by calling `ToolContext.attach({path, mimeType})`.
+
+### HTTP route
+
+**Built in Phase 30.** A plugin that needs to answer HTTP — an A2A endpoint, a provider's callback —
+declares a route rather than reaching for the server:
+
+```ts
+interface PluginRoute {
+  method: "GET" | "POST"
+  path: string                       // below the mount; "/" is the mount itself
+  capability: Capability | "open"    // read | chat | write | admin | peer, or open
+  root?: string                      // also answer here while exactly one hosted agent declares it
+  handler(request: { request: Request; url: URL; path: string; caller: PluginCaller }): Promise<Response>
+}
+type PluginCaller =
+  | { kind: "operator" } | { kind: "key"; keyId: string; label: string } | { kind: "anonymous" }
+```
+
+It is mounted at `/v1/agents/<agentId>/plugins/<plugin name>/<path>`, so the plugin's `name` must be a
+lowercase slug; an invalid path or a route declared twice fails the plugin's `setup`, which is a
+warning like any failed plugin rather than an agent that will not start. **The gate is the one every
+first-party route has**: the server authenticates the caller, checks the declared capability (403), and
+answers an agent the key does not reach exactly as a missing one (404), all before the handler runs.
+The handler receives a *caller*, never the credential. Routes are rebuilt with the agent, so a reload
+changes them and a stopped agent answers none.
+
+`peer` is the capability for a remote agent's key: no first-party route asks for it, so a key minted
+with `can: ["peer"]` reaches a plugin route that declares it and nothing else — it cannot start a
+trusted turn through `POST /messages`. A route that throws answers `500 plugin_route_failed`, naming the
+plugin. `root` exists for `/.well-known/agent-card.json`, which a peer looks for at the host root; a root
+path that two agents claim is answered by neither, because it cannot say which one it means.
+
+A channel whose inbound text comes from another agent sets `RawInbound.senderKind: "agent"`: the text
+is fenced as untrusted and the turn acts for nobody, the treatment an agent sender gets everywhere.
 
 ### Store driver
 

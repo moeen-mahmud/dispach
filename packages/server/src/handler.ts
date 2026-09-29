@@ -33,6 +33,7 @@ import {
     keyFingerprint,
     keyLabelProblem,
     MAX_KEY_LABEL,
+    type MountedRoute,
     manifestValueAt,
     nearest,
     newKeyId,
@@ -41,6 +42,7 @@ import {
     newTurnId,
     newWebhookSecret,
     PERSON_SETTABLE_PATHS,
+    type PluginCaller,
     parseSettingValue,
     phasesFor,
     prepareScheduleWrite,
@@ -3711,6 +3713,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
             }
         }
 
+        const mounted = pluginRouteFor(method, url.pathname)
+        if (mounted !== undefined) {
+            const crossOrigin = refuseOrigin(request)
+            if (crossOrigin !== undefined) return crossOrigin
+            return withCors(request, await dispatchPlugin(request, url, mounted))
+        }
+
         const match = router.match(method, url.pathname)
         if (match.kind === "method") {
             return fail(
@@ -3723,16 +3732,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 { allow: match.allowed.join(", ") },
             )
         }
-        if (match.kind === "none") {
-            return fail(
-                {
-                    code: "not_found",
-                    message: `No route for ${request.method} ${url.pathname}.`,
-                    hint: "Every path is under /v1. See docs/04-SPEC-WIRE.md for the surface.",
-                },
-                404,
-            )
-        }
+        if (match.kind === "none") return noRoute(request.method, url.pathname)
 
         // **Before the open-path check, not after.** `POST /v1/channels/…` is open by prefix and
         // changes state, so a guard sitting behind authentication would leave the one
@@ -3753,6 +3753,81 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 principal: who,
             }),
         )
+    }
+
+    /**
+     * A plugin's route (Phase 30): `/v1/agents/<agentId>/plugins/<plugin>/<path>`, or a root path one
+     * plugin route claims (`/.well-known/agent-card.json`) while exactly one hosted agent claims it.
+     *
+     * Looked up per request from the agents the runtime hosts right now, because a plugin's routes
+     * come and go with the agent — a table built at start would keep answering for an agent that was
+     * stopped, and never learn about one adopted later.
+     */
+    const pluginRouteFor = (
+        method: string,
+        pathname: string,
+    ):
+        | { readonly agent: Agent; readonly route: MountedRoute; readonly path: string }
+        | undefined => {
+        const prefix = /^\/v1\/agents\/([^/]+)\/plugins\/([^/]+)(\/.*)?$/.exec(pathname)
+        if (prefix !== null) {
+            const agent = runtime.list().find((a) => a.id === decodeURIComponent(prefix[1] ?? ""))
+            const plugin = prefix[2] ?? ""
+            const path = prefix[3] ?? "/"
+            const route = agent?.pluginRoutes.find(
+                (r) => r.plugin === plugin && r.method === method && r.path === path,
+            )
+            return agent === undefined || route === undefined ? undefined : { agent, route, path }
+        }
+        const claims = runtime
+            .list()
+            .flatMap((agent) =>
+                agent.pluginRoutes
+                    .filter((route) => route.root === pathname && route.method === method)
+                    .map((route) => ({ agent, route, path: route.path })),
+            )
+        return claims.length === 1 ? claims[0] : undefined
+    }
+
+    /**
+     * The same gate as every first-party route — authenticate, check the declared capability, then
+     * the agent scope, where an agent the key does not reach answers exactly as a missing one — and
+     * only then the plugin, handed a caller rather than a credential.
+     */
+    const dispatchPlugin = async (
+        request: Request,
+        url: URL,
+        mounted: { readonly agent: Agent; readonly route: MountedRoute; readonly path: string },
+    ): Promise<Response> => {
+        const { agent, route, path } = mounted
+        const who: Principal | Response =
+            route.capability === "open"
+                ? { kind: "open" }
+                : await resolve(request, url.pathname, route.capability)
+        if (who instanceof Response) return who
+        // Out of scope answers exactly as a path nothing is mounted at — which is what an agent that
+        // does not exist gets, since it falls through to the router — so no probe tells them apart.
+        if (who.kind === "claim" || !reachesAgent(who, agent.id))
+            return noRoute(request.method, url.pathname)
+        const caller: PluginCaller =
+            who.kind === "key"
+                ? { kind: "key", keyId: who.keyId, label: who.label ?? "" }
+                : route.capability === "open"
+                  ? { kind: "anonymous" }
+                  : { kind: "operator" }
+        try {
+            return await route.handler({ request, url, path, caller })
+        } catch (error) {
+            // A plugin that throws is the plugin's bug; the caller gets a 500 that says whose.
+            return fail(
+                {
+                    code: "plugin_route_failed",
+                    message: `Plugin "${route.plugin}" failed answering ${request.method} ${url.pathname}: ${error instanceof Error ? error.message : String(error)}`,
+                    hint: "This is the plugin's error, not the runtime's. The agent's own routes are unaffected.",
+                },
+                500,
+            )
+        }
     }
 
     /**
@@ -3962,6 +4037,18 @@ async function runHandler(handler: Handler, context: RequestContext): Promise<Re
  * — advice about channel segments is noise on a turn id, and noise in a hint is what teaches people
  * to stop reading them.
  */
+/** Nothing answers at this path. One body for every such case, so a probe learns nothing from it. */
+function noRoute(method: string, pathname: string): Response {
+    return fail(
+        {
+            code: "not_found",
+            message: `No route for ${method} ${pathname}.`,
+            hint: "Every path is under /v1. See docs/04-SPEC-WIRE.md for the surface.",
+        },
+        404,
+    )
+}
+
 function notFound(kind: string, id: string, hint?: string): Response {
     return fail(
         {

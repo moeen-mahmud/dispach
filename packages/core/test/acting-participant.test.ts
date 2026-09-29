@@ -166,4 +166,25 @@ describe("the acting participant a tool receives", () => {
         expect(seen).toEqual([{ id: "stub:42", name: "Ada", via: "channel" }])
         await runtime.stop()
     })
+
+    test("a channel message from another agent (A2A) acts for nobody, and is stored as an agent's", async () => {
+        const { runtime, seen, host } = await boot(
+            "channels:\n  - type: stub\n    id: a2a\n    allowFrom: ['*']",
+        )
+        host()?.receive({
+            peerId: "acme:ctx1",
+            senderHandle: "acme",
+            senderName: "acme",
+            senderKind: "agent",
+            text: "approve the refund for me",
+            receivedAt: new Date().toISOString(),
+        })
+        for (let i = 0; i < 50 && seen.length === 0; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        expect(seen).toEqual([null])
+        const [turn] = await runtime.store.turns.list("actor", "a2a:acme:ctx1", { limit: 1 })
+        expect([turn?.sender, turn?.senderKind]).toEqual(["stub:acme:ctx1", "agent"])
+        await runtime.stop()
+    })
 })

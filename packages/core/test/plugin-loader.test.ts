@@ -586,3 +586,44 @@ describe("a plugin that cannot load is a warning, and the agent starts", () => {
         expect(result.failed.length).toBe(1)
     })
 })
+
+describe("routes a plugin mounts", () => {
+    const route = {
+        method: "POST" as const,
+        capability: "peer" as const,
+        handler: async () => new Response(""),
+    }
+
+    test("are collected with their plugin's name, which becomes the mount segment", async () => {
+        const probe = plugin({
+            name: "probe",
+            setup: (c) => c.defineRoute({ ...route, path: "/" }),
+        })
+        const result = await load(["probe"], { builtIn: { probe } })
+        expect(result.routes.map((r) => [r.plugin, r.method, r.path])).toEqual([
+            ["probe", "POST", "/"],
+        ])
+    })
+
+    test("a name that is no path segment, a path that climbs, or a route declared twice fails the plugin, not the agent", async () => {
+        const cases: Plugin[] = [
+            plugin({ name: "Bad Name", setup: (c) => c.defineRoute({ ...route, path: "/" }) }),
+            plugin({ name: "climb", setup: (c) => c.defineRoute({ ...route, path: "/../keys" }) }),
+            plugin({
+                name: "twice",
+                setup: (c) => {
+                    c.defineRoute({ ...route, path: "/" })
+                    c.defineRoute({ ...route, path: "/" })
+                },
+            }),
+        ]
+        for (const plugin of cases) {
+            const result = await load([plugin.name], { builtIn: { [plugin.name]: plugin } })
+            expect([plugin.name, result.routes.length, result.failed.length]).toEqual([
+                plugin.name,
+                0,
+                1,
+            ])
+        }
+    })
+})
