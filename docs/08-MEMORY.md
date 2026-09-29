@@ -169,6 +169,13 @@ selection covers both. A stand-in reads its owner's scope and the space; a room 
 scopes only; both also go without the volatile tier. Reads of an owner scope made for somebody else
 are audited (`memory_reads`). Decisions 14.39–14.42; the reconcile reasoning is in CLAUDE.md.
 
+## Export and import (R11, 2026-09-29)
+
+`GET /v1/agents/:id/export` and `POST /v1/agents/:id/import` move the carried file, the archive and
+knowledge between agents as JSON. Notes merge one top-level item at a time, so a repeat import is a
+no-op. An import writes files and nothing else, so the next turn's `syncFiles` indexes it, and a rebuild
+re-reads it like any note. Decisions 14.43–14.44.
+
 ## What was refused
 
 - **Embeddings / a second persistent index.** Decision 5.32: prove lexical insufficient first.

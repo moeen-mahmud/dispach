@@ -826,6 +826,13 @@ describe("conversations", () => {
         expect((await client.setSpaceWriter("user:ada")).writer).toBe("user:ada")
         expect((await client.deleteNote(note.id)).deleted).toBe(true)
         expect((await client.deleteProject("apollo")).deleted).toBe(true)
+
+        // An agent bundle (R11): a list of files out, a report with lists in.
+        const bundle = await client.agent(agentId).exportBundle()
+        expect(Array.isArray(bundle.files)).toBe(true)
+        const report = await client.agent(agentId).importBundle(bundle)
+        expect(Array.isArray(report.added)).toBe(true)
+        expect(report.reload).toBe("none")
         await runtime.stop()
     })
 })

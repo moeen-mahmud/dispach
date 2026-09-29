@@ -19,12 +19,15 @@ import {
     type AgentStateRecord,
     type AnyEvent,
     agentOf,
+    bundleSections,
     type ConversationRecord,
     type ErrorDetail,
     EVENT_TYPES,
     editManifest,
     entryPhase,
+    exportBundle,
     HarnessError,
+    importBundle,
     isHarnessError,
     isPhased,
     keyFingerprint,
@@ -89,6 +92,7 @@ import {
     ConversationBody,
     ConversationMessageBody,
     DecisionBody,
+    ImportBody,
     KeyBody,
     MembersBody,
     MessageBody,
@@ -107,6 +111,13 @@ import {
 
 /** Bodies larger than this are refused before a channel plugin sees them. */
 const MAX_BODY_BYTES = 1_000_000
+
+/**
+ * An agent bundle's cap (R11): memory and knowledge are markdown, and a year of notes is well under
+ * this. Its own number because a bundle is not a message, and raising the shared cap for it would
+ * raise it for every route a stranger's channel can reach.
+ */
+const MAX_BUNDLE_BYTES = 25_000_000
 
 /**
  * Caps on the sender fields and the idempotency key.
@@ -822,6 +833,57 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * not this route's: a reload that killed somebody's half-finished answer to pick up a setting
      * would be a worse trade than waiting. `agent_turn_in_flight` names the count.
      */
+    /**
+     * A slice of one agent, out and in (doc 16 R11): its memory and knowledge, as a JSON bundle. The
+     * embedder brokers it — scans for secrets, decides who may — so both are `admin`, and a key bound
+     * to a participant must be an admin participant's.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/export",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const refusal = await requireAdminParticipant(context.principal)
+                if (refusal !== undefined) return refusal
+                const paths = context.url.searchParams.get("paths")
+                try {
+                    const sections = bundleSections(
+                        paths === null ? undefined : paths.split(",").map((p) => p.trim()),
+                    )
+                    return json(exportBundle(agent, sections))
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    router.add(
+        "POST",
+        "/v1/agents/:id/import",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const refusal = await requireAdminParticipant(context.principal)
+                if (refusal !== undefined) return refusal
+                const body = await readJson(context.request, MAX_BUNDLE_BYTES)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(ImportBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                try {
+                    const report = await importBundle({
+                        agent,
+                        bundle: parsed.value.bundle,
+                        ...(parsed.value.mode === undefined ? {} : { mode: parsed.value.mode }),
+                        reload: async () => (await runtime.reload(agent.id)).status,
+                    })
+                    return json({ id: agent.id, ...report })
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
     router.add(
         "POST",
         "/v1/agents/:id/reload",
@@ -4198,28 +4260,29 @@ function stateFields(state: AgentStateRecord): Record<string, string> {
 
 async function readJson(
     request: Request,
+    limit = MAX_BODY_BYTES,
 ): Promise<{ kind: "ok"; value: unknown } | { kind: "error"; error: ErrorDetail }> {
     // Checked before reading, so a declared 500 MB body is refused rather than buffered. A body
     // with no content-length is still bounded by the read below.
     const declared = Number.parseInt(request.headers.get("content-length") ?? "0", 10)
-    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    if (Number.isFinite(declared) && declared > limit) {
         return {
             kind: "error",
             error: {
                 code: "body_too_large",
-                message: `The request body declares ${declared} bytes; the limit is ${MAX_BODY_BYTES}.`,
+                message: `The request body declares ${declared} bytes; the limit is ${limit}.`,
                 hint: "This cap is enforced before a channel plugin sees anything, so a plugin never has to defend against a large POST.",
             },
         }
     }
 
     const raw = await request.text()
-    if (raw.length > MAX_BODY_BYTES) {
+    if (raw.length > limit) {
         return {
             kind: "error",
             error: {
                 code: "body_too_large",
-                message: `The request body is ${raw.length} bytes; the limit is ${MAX_BODY_BYTES}.`,
+                message: `The request body is ${raw.length} bytes; the limit is ${limit}.`,
                 hint: "Send less. A message longer than this is not a message.",
             },
         }

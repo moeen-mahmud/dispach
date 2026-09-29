@@ -158,6 +158,13 @@ and WebSocket surfaces can return:
 | `project_not_found` | 404 | A `project:<id>` scope naming a project nobody defined. |
 | `project_agents_invalid` | 400 | `agents` that is not a list of agent ids. |
 | `space_writer_invalid` | 400 | No `writer`. |
+| `bundle_path_not_allowed` | 400 | A bundle path, or an export `paths` entry, other than `MEMORY.md`, `memory/<name>.md` or `knowledge/<name>.md` — one level, markdown only. The manifest, secrets and skills never travel. Nothing is written when any path is refused. |
+| `bundle_version_unsupported` | 400 | A bundle whose `version` this build does not read. |
+| `bundle_files_invalid` | 400 | No `bundle`, no `files` list, an entry without a string `path` and `content`, or a path named twice. |
+| `bundle_mode_invalid` | 400 | A `mode` other than `skip` or `overwrite`. |
+| `bundle_memory_not_writable` | 400 | A bundle carrying `MEMORY.md` into an agent with no writable memory file. |
+| `bundle_no_memory` / `bundle_no_knowledge` | 400 | A bundle carrying `memory/` or `knowledge/` into an agent without that manifest block. |
+| `bundle_import_refused` | 400 | The agent would not load with the bundle (a knowledge entry without keywords, a file over its budget). Every file the import touched was restored; the message and hint are the load's own. |
 | `key_scope_agent_unknown` | 400 | `scope.agents` names an agent this server does not hold. Refused at mint rather than producing a key that reaches nothing. |
 | `provision_adopt_failed` | — | Returned *inside* a `201`: the agent was written and is not running. |
 | `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting — an embedder over its own agent store. The container has the lookup, and `start` works there. |
@@ -260,6 +267,11 @@ POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disable
 POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }
 POST /v1/agents/:id/reload        → 200 { id, status: "loaded", adopted[] }
                                   | 202 { id, status: "pending", running, holdAfterMs, adopted: [] }
+GET  /v1/agents/:id/export?paths=MEMORY.md,memory/,knowledge/
+                                  → { version: 1, agentId, exportedAt, files: [{ path, content }] }
+POST /v1/agents/:id/import { bundle, mode?: "skip" | "overwrite" }   (25 MB cap)
+                                  → { id, added[], merged: [{ path, notes }], skipped[], overwritten[],
+                                      evicted, reload: "none" | "loaded" | "pending" }
 
 GET  /v1/openapi.json    → the generated OpenAPI 3.1 document
 GET  /docs               → a browser reference over it
@@ -829,6 +841,8 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/sessions/:key/phase` | `write` |
 | `POST /v1/agents` | `admin` |
 | `POST /v1/agents/:id/reload` | `admin` |
+| `GET /v1/agents/:id/export` | `admin` |
+| `POST /v1/agents/:id/import` | `admin` |
 | `POST /v1/agents/:id/start` | `admin` |
 | `POST /v1/agents/:id/stop` | `admin` |
 | `GET /v1/agents/:id/secrets` | `admin` |

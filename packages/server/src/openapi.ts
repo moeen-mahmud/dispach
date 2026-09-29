@@ -41,6 +41,7 @@ import {
     ConversationBody,
     ConversationMessageBody,
     DecisionBody,
+    ImportBody,
     KeyBody,
     MembersBody,
     MessageBody,
@@ -88,6 +89,21 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         summary: "Every agent this server knows about, hosted or switched off.",
     },
     "GET /v1/agents/:id": { summary: "One agent, with its dialect, window, counts and warnings." },
+    "GET /v1/agents/:id/export": {
+        summary:
+            "A slice of the agent as a JSON bundle: its carried memory file, memory archive and knowledge. Never the manifest, secrets or skills.",
+    },
+    "POST /v1/agents/:id/import": {
+        summary:
+            "Merge a bundle into the agent: memory note by note, knowledge kept or overwritten. Reloads when the carried file or knowledge changed, and restores everything if that reload refuses.",
+        body: ImportBody,
+        statuses: [
+            {
+                code: 400,
+                when: "a path a bundle cannot carry, or a bundle the agent would not load",
+            },
+        ],
+    },
     "POST /v1/agents/:id/reload": {
         summary: "Re-read the manifest by replacing the agent with a new instance.",
         statuses: [

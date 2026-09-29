@@ -333,6 +333,12 @@ export interface AgentClient {
     /** Record which member this agent works for. An admin participant's act (Phase 27). */
     assign(participantId: string): Promise<AssignmentLike>
     unassign(): Promise<{ readonly id: string; readonly unassigned: boolean }>
+    /** A slice of this agent — its carried memory, archive and knowledge — as a bundle (R11). */
+    exportBundle(
+        paths?: readonly ("MEMORY.md" | "memory/" | "knowledge/")[],
+    ): Promise<AgentBundleLike>
+    /** Merge a bundle into this agent. Memory note by note; knowledge kept (`skip`) or `overwrite`n. */
+    importBundle(bundle: AgentBundleLike, mode?: "skip" | "overwrite"): Promise<ImportReportLike>
 }
 
 /** What `stop` and `start` report back. */
@@ -707,6 +713,24 @@ export interface ParticipantLike {
     /** Pushed by the embedder; absent reads as online. */
     readonly presence?: "online" | "offline"
     readonly presenceAt?: string
+}
+
+/** A slice of one agent: the carried memory file, the memory archive and knowledge (R11). */
+export interface AgentBundleLike {
+    readonly version: 1
+    readonly agentId: string
+    readonly exportedAt: string
+    readonly files: readonly { readonly path: string; readonly content: string }[]
+}
+
+export interface ImportReportLike {
+    readonly id: string
+    readonly added: readonly string[]
+    readonly merged: readonly { readonly path: string; readonly notes: number }[]
+    readonly skipped: readonly string[]
+    readonly overwritten: readonly string[]
+    readonly evicted: number
+    readonly reload: "none" | "loaded" | "pending"
 }
 
 /** A note in a shared memory scope (Phase 29): `space`, `owner:<participantId>` or `project:<id>`. */
@@ -1336,6 +1360,17 @@ export function createClient(options: ClientOptions): DispachClient {
             assign: (participantId) =>
                 json<AssignmentLike>("PUT", at("/assignee"), { body: { participantId } }),
             unassign: () => json<{ id: string; unassigned: boolean }>("DELETE", at("/assignee")),
+            exportBundle: (paths) =>
+                json<AgentBundleLike>(
+                    "GET",
+                    at(
+                        `/export${paths === undefined ? "" : `?paths=${encodeURIComponent(paths.join(","))}`}`,
+                    ),
+                ),
+            importBundle: (bundle, mode) =>
+                json<ImportReportLike>("POST", at("/import"), {
+                    body: { bundle, ...(mode === undefined ? {} : { mode }) },
+                }),
 
             context: (opts) => {
                 const params = new URLSearchParams()

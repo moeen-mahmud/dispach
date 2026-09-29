@@ -34,6 +34,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - Every read of someone's owner scope for somebody else is recorded: `GET /v1/participants/:id/memory/reads` and `memory.read`.
 - `PUT /v1/memory/space/writer` names the one non-admin who may write the space. An agent named there saves `memory_write` to the space.
 - An agent id may no longer start with `~`.
+- Move memory and knowledge between agents: `GET /v1/agents/:id/export` returns a JSON bundle, and `POST /v1/agents/:id/import` merges it, note by note for memory and `skip` or `overwrite` for knowledge. A bundle the agent would not load is rolled back.
 
 ### Media
 

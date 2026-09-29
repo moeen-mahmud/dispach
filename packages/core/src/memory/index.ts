@@ -85,6 +85,7 @@ export {
     appendNote,
     archiveNameFor,
     entriesIn,
+    evictToBudget,
     injectedTokens,
     memoryTargetMissing,
     type NoteResult,

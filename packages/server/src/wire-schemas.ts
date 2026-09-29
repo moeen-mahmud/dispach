@@ -457,6 +457,21 @@ export const SpaceWriterBody = z.object({
     }),
 })
 
+export const ImportBody = z.object({
+    bundle: refuse(z.record(z.string(), z.unknown()), {
+        code: "bundle_files_invalid",
+        hint: 'Send { "bundle": <the body GET /v1/agents/:id/export returned> }.',
+        description:
+            "A bundle from GET /v1/agents/:id/export: MEMORY.md, memory/<name>.md and knowledge/<name>.md, nothing else.",
+    }),
+    mode: refuse(z.enum(["skip", "overwrite"]).optional(), {
+        code: "bundle_mode_invalid",
+        hint: 'Either "skip" (keep a knowledge file that exists, the default) or "overwrite". Memory is always merged note by note.',
+        description:
+            "What to do with a knowledge file the agent already has. Memory is merged either way.",
+    }),
+})
+
 export const DecisionBody = z.object({
     approve: refuse(z.boolean(), {
         code: "action_decision_required",

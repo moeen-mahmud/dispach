@@ -360,6 +360,17 @@ export {
     type TurnAdmission,
 } from "./runtime/agent.ts"
 export {
+    type AgentBundle,
+    BUNDLE_SECTIONS,
+    BUNDLE_VERSION,
+    type BundleFile,
+    type BundleSection,
+    bundleSections,
+    exportBundle,
+    type ImportReport,
+    importBundle,
+} from "./runtime/bundle.ts"
+export {
     type ChannelFactory,
     type ChannelFactoryContext,
     ChannelHub,
