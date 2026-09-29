@@ -44,11 +44,14 @@ import {
     KeyBody,
     MembersBody,
     MessageBody,
+    NoteBody,
     ParticipantBody,
     PhaseBody,
     PresenceBody,
+    ProjectBody,
     ProvisionBody,
     SecretsBody,
+    SpaceWriterBody,
     StopBody,
     WebhookBody,
 } from "./wire-schemas.ts"
@@ -156,6 +159,39 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             "Push whether a person is there. In a DM between two people, an offline person's agent stands in for them.",
         body: PresenceBody,
         statuses: [{ code: 403, when: "a participant-bound key setting someone else's presence" }],
+    },
+    "POST /v1/memory/notes": {
+        summary:
+            "Add a note to a shared memory scope — the space, a person's owner scope, or a project. Agents recall it when a turn is about it.",
+        body: NoteBody,
+        statuses: [
+            { code: 403, when: "this participant may not write that scope" },
+            { code: 404, when: "the scope's owner or project does not exist" },
+        ],
+    },
+    "GET /v1/memory/notes": {
+        summary:
+            "Every note in one shared scope, oldest first. An owner scope is readable by its owner.",
+    },
+    "DELETE /v1/memory/notes/:noteId": {
+        summary: "Remove a note. Whoever may write its scope may remove it.",
+    },
+    "GET /v1/participants/:participantId/memory/reads": {
+        summary:
+            "The person's audit: every time an agent recalled their owner scope for somebody else, stand-ins included.",
+    },
+    "GET /v1/projects": { summary: "Projects, each with the agents that share its memory." },
+    "PUT /v1/projects/:projectId": {
+        summary: "Define a project, or replace which agents share its memory. An admin's act.",
+        body: ProjectBody,
+    },
+    "DELETE /v1/projects/:projectId": {
+        summary: "Remove a project and its notes.",
+    },
+    "PUT /v1/memory/space/writer": {
+        summary:
+            "Name the one non-admin who may write the space. An agent named here saves its memory_write to the space.",
+        body: SpaceWriterBody,
     },
     "GET /v1/actions": {
         summary:

@@ -12,6 +12,7 @@
  * to an in-memory SQLite database rather than to a different implementation.
  */
 
+import { randomUUID } from "node:crypto"
 import { statSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import type { InboundAudio } from "../channels/channel.ts"
@@ -64,11 +65,16 @@ import {
     fts5Retriever,
     type IndexReport,
     type MemoryRetriever,
+    type ReadPlan,
     type RetrievedPassage,
+    readPlan,
     retrieveWithContext,
+    scopeCorpus,
+    scopeOfSource,
     selectPassages,
     sessionSource,
     syncFiles,
+    syncNotes,
     syncSessions,
 } from "../memory/index.ts"
 import type { PromptStyle } from "../model/prompt-style.ts"
@@ -1186,10 +1192,15 @@ export class Agent {
 
         const active = this.knowledge === undefined ? [] : activateKnowledge(input, this.knowledge)
         const skills = this.#activateSkills(input, history)
-        const remembered = await this.#recall(input, sessionKey, history)
+        const participant = options.participant ?? participantOf(options.from)
+        const plan = await this.#readPlan(options.from, participant)
+        const remembered = await this.#recall(input, sessionKey, history, plan, {
+            turnId,
+            participant,
+            owner: plan.owner,
+        })
 
         const meter = this.#meter(sessionKey, turnId, options.from?.id)
-        const participant = options.participant ?? participantOf(options.from)
         const turnRuntime = this.#toolsFor(options.turnTools)
         if (options.from?.id !== undefined) this.#senders.set(turnId, options.from.id)
         const result = await runTurn({
@@ -1209,7 +1220,12 @@ export class Agent {
             // since a re-read with nothing writing is a filesystem call per turn for no observable
             // difference.
             ...(this.workspace.examples === "" ? {} : { examples: this.workspace.examples }),
-            ...(this.workspace.volatile === "" ? {} : { volatile: this.workspace.volatile }),
+            // The volatile tier *is* private memory — `USER.md` and the notes `memory_write` appends —
+            // so a turn that may not read private memory does not get it in its prompt either.
+            // Skipping retrieval alone would still hand a stand-in every note in `MEMORY.md`.
+            ...(this.workspace.volatile === "" || !plan.private
+                ? {}
+                : { volatile: this.workspace.volatile }),
             ...(this.workspace.reminder === "" ? {} : { reminder: this.workspace.reminder }),
             // Activated once per turn against the input — the selection is a function of the turn,
             // so it is stable across the steps within one and re-selecting per step would let two
@@ -1263,6 +1279,9 @@ export class Agent {
             ...(options.runtimeNote === undefined ? {} : { runtimeNote: options.runtimeNote }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
+            ...((await this.store.conversations.spaceWriter()) === `agent:${this.id}`
+                ? { writeNote: (text: string) => this.#writeSpaceNote(text) }
+                : {}),
         }).finally(() => this.#senders.delete(turnId))
 
         // Carried per session, not per turn. One turn's observations are a sample of the estimator's
@@ -1483,7 +1502,13 @@ export class Agent {
                 ? []
                 : activateKnowledge(input, this.knowledge)
         const skills = input === "" ? [] : this.#activateSkills(input, history)
-        const remembered = await this.#recall(input, sessionKey, history)
+        const remembered = await this.#recall(
+            input,
+            sessionKey,
+            history,
+            await this.#readPlan(undefined, null),
+            undefined,
+        )
         const tools = this.#toolRuntime
 
         const assembled = assembleContext({
@@ -1633,12 +1658,40 @@ export class Agent {
         input: string,
         sessionKey: string,
         history: readonly ChatMessage[],
+        plan: ReadPlan,
+        audit:
+            | {
+                  readonly turnId: string
+                  readonly participant: ActingParticipant | null
+                  readonly owner: string | undefined
+              }
+            | undefined,
     ): Promise<readonly { source: string; at: string; text: string; because?: string }[]> {
         const memory = this.#memory
         if (memory === undefined || memory.maxActive === 0 || input === "") return []
 
         try {
-            await this.#syncMemory(memory.dir)
+            if (plan.private) await this.#syncMemory(memory.dir)
+            const retrievers: MemoryRetriever[] = plan.private ? [memory.retrieve] : []
+            for (const scope of plan.scopes) {
+                // The scope's whole note list, every time: `syncNotes` owns its corpus and drops what it
+                // was not handed. One indexed query, and nothing re-read unless a note arrived or went.
+                await syncNotes({
+                    store: this.store.memory,
+                    scope,
+                    notes: await this.store.conversations.notes(scope),
+                    now: new Date(),
+                })
+                retrievers.push(
+                    fts5Retriever({ store: this.store.memory, agentId: scopeCorpus(scope) }),
+                )
+            }
+            // Every corpus scores on the same normalised scale (`rank/bm25.ts`), so one ranking across
+            // them is a fair one: a strong team note outranks a weak private one, and the reverse.
+            const retrieve: MemoryRetriever = async (request) =>
+                (await Promise.all(retrievers.map((each) => each(request))))
+                    .flat()
+                    .sort((a, b) => b.score - a.score)
 
             const previousAssistant = [...history]
                 .reverse()
@@ -1647,7 +1700,7 @@ export class Agent {
                 previousAssistant?.origin === undefined && previousAssistant?.tainted !== true
                     ? previousAssistant
                     : undefined
-            const ranked = await retrieveWithContext(memory.retrieve, {
+            const ranked = await retrieveWithContext(retrieve, {
                 input,
                 now: new Date(),
                 minimumScore: memory.threshold,
@@ -1668,11 +1721,13 @@ export class Agent {
                 ],
             })
 
-            return selectPassages(ranked, {
+            const selected = selectPassages(ranked, {
                 threshold: memory.threshold,
                 maxActive: memory.maxActive,
                 budget: memory.budget,
-            }).map((hit) => ({
+            })
+            if (audit !== undefined) await this.#auditReads(selected, sessionKey, audit)
+            return selected.map((hit) => ({
                 source: hit.passage.source,
                 at: hit.passage.at,
                 text: hit.passage.text,
@@ -1685,6 +1740,100 @@ export class Agent {
                 hint: "The turn continues without slot 7. Run `memory rebuild` to re-read the files; if it keeps failing, the store may be from a newer build.",
             })
             return []
+        }
+    }
+
+    /**
+     * Which memory this turn may read (`memory/scopes.ts` has the rule and its reasons).
+     *
+     * Only a conversation turn or a stand-in narrows anything, and only those pay for the lookups that
+     * decide it — every other turn reads what it always read, plus any shared scope it belongs to.
+     */
+    async #readPlan(
+        from: TurnSender | undefined,
+        participant: ActingParticipant | null,
+    ): Promise<ReadPlan> {
+        const conversations = this.store.conversations
+        const room = from?.room
+        // An unknown room reads as a room rather than a DM: the narrower plan, when the record is missing.
+        const conversation =
+            room === undefined || from === undefined
+                ? undefined
+                : { kind: (await conversations.get(room))?.kind ?? "room", authorId: from.id }
+        const owner = (await conversations.assignment(this.id))?.participantId
+        return readPlan({
+            ...(participant?.onBehalfOf === undefined
+                ? {}
+                : { standingInFor: participant.onBehalfOf }),
+            ...(conversation === undefined ? {} : { conversation }),
+            ...(owner === undefined ? {} : { owner }),
+            projects: await conversations.projectsOf(this.id),
+        })
+    }
+
+    /** `memory_write` for the space writer: a team note, indexed at the next read of the space. */
+    async #writeSpaceNote(text: string): Promise<string> {
+        await this.store.conversations.addNote({
+            id: `mn_${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+            scope: "space",
+            text,
+            writtenBy: `agent:${this.id}`,
+            createdAt: new Date().toISOString(),
+        })
+        return "Saved to the team's shared memory (space), where every agent in the team can read it."
+    }
+
+    /**
+     * Record every read of somebody's owner scope that was not made for that person (Phase 29).
+     *
+     * A person's own agent answering the person themselves is not a disclosure; anything else is — a
+     * stand-in speaking to someone else, a room, the operator — and the owner can list them all.
+     */
+    async #auditReads(
+        selected: readonly { readonly passage: { readonly source: string } }[],
+        sessionKey: string,
+        audit: {
+            readonly turnId: string
+            readonly participant: ActingParticipant | null
+            readonly owner: string | undefined
+        },
+    ): Promise<void> {
+        const byScope = new Map<string, string[]>()
+        for (const hit of selected) {
+            const scope = scopeOfSource(hit.passage.source)
+            if (scope === undefined || !scope.startsWith("owner:")) continue
+            const owner = scope.slice("owner:".length)
+            if (audit.participant?.id === owner) continue
+            // Unattributed work on the owner's own agent — a schedule, the operator's console — is
+            // work for the owner, not a disclosure to someone else.
+            if (audit.participant === null && audit.owner === owner) continue
+            byScope.set(scope, [...(byScope.get(scope) ?? []), hit.passage.source])
+        }
+        const at = new Date().toISOString()
+        for (const [scope, sources] of byScope) {
+            const requestedBy = audit.participant?.id
+            const onBehalfOf = audit.participant?.onBehalfOf
+            await this.store.conversations.recordRead({
+                scope,
+                reader: this.id,
+                turnId: audit.turnId,
+                sessionKey,
+                ...(requestedBy === undefined ? {} : { requestedBy }),
+                ...(onBehalfOf === undefined ? {} : { onBehalfOf }),
+                sources,
+                at,
+            })
+            this.#bus.emit(
+                "memory.read",
+                {
+                    scope,
+                    reader: this.id,
+                    sources,
+                    ...(requestedBy === undefined ? {} : { requestedBy }),
+                    ...(onBehalfOf === undefined ? {} : { onBehalfOf }),
+                },
+                { agentId: this.id, sessionKey, turnId: audit.turnId },
+            )
         }
     }
 
@@ -1760,12 +1909,26 @@ export class Agent {
      * only shape with no silent loss in it — and it makes a rebuild the backfill for an agent whose
      * sessions predate this being wired up at all.
      */
-    async rebuildMemory(): Promise<IndexReport & { readonly sessions: readonly string[] }> {
+    async rebuildMemory(): Promise<
+        IndexReport & { readonly sessions: readonly string[]; readonly scopes: readonly string[] }
+    > {
         const memory = this.#memory
         if (memory === undefined) throw memoryNotConfigured()
         await this.store.memory.clear(this.id)
+        // Every shared scope too, from its canonical notes: a rebuild is what somebody runs when
+        // retrieval looks wrong, and a scope's index is exactly as rebuildable as a file's.
+        const scopes = await this.store.conversations.noteScopes()
+        for (const scope of scopes) {
+            await this.store.memory.clear(scopeCorpus(scope))
+            await syncNotes({
+                store: this.store.memory,
+                scope,
+                notes: await this.store.conversations.notes(scope),
+                now: new Date(),
+            })
+        }
         const files = await this.#syncMemory(memory.dir)
-        if (!memory.includeHistory) return { ...files, sessions: [] }
+        if (!memory.includeHistory) return { ...files, sessions: [], scopes }
         const sessions = await syncSessions({
             store: this.store.memory,
             agentId: this.id,
@@ -1777,7 +1940,7 @@ export class Agent {
             now: new Date(),
         })
         // The session pass ran second, so its count is the corpus total rather than the files' subtotal.
-        return { ...files, passages: sessions.passages, sessions: sessions.indexed }
+        return { ...files, passages: sessions.passages, sessions: sessions.indexed, scopes }
     }
 
     #activateSkills(

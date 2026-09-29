@@ -184,6 +184,11 @@ export interface ToolContext {
      * dropping notes on the floor because nowhere was configured to keep them.
      */
     readonly memoryDir?: string
+    /**
+     * Where `memory_write` saves instead of the workspace file, when this agent is the team's
+     * designated space writer (Phase 29). Returns the observation. Absent: the workspace file, as ever.
+     */
+    readonly writeNote?: (text: string) => Promise<string>
 }
 
 /** What `artifact_read` needs to know about a displaced observation. Structural on purpose. */

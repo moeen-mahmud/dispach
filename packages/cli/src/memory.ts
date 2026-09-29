@@ -78,6 +78,11 @@ export async function memoryCommand(options: MemoryOptions): Promise<number> {
                                 ? "none indexed — memory.includeHistory is off, or there are no sessions yet"
                                 : String(report.sessions.length),
                     },
+                    // Shared scopes are the team's, rebuilt from their notes beside this agent's own.
+                    {
+                        label: "shared scopes",
+                        value: report.scopes.length === 0 ? "none" : report.scopes.join(", "),
+                    },
                     {
                         label: "dropped",
                         value: report.dropped.length === 0 ? "" : report.dropped.join(", "),

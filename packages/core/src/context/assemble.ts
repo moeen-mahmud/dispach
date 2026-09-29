@@ -12,6 +12,7 @@
  */
 
 import { isSessionSource, SESSION_SOURCE_PREFIX } from "../memory/conversation.ts"
+import { describeScope, scopeOfSource } from "../memory/scopes.ts"
 import type { ChatMessage } from "../model/provider.ts"
 import { type ContextBlock, SLOT, skillHeader, VOLATILE_HEADER } from "./blocks.ts"
 import { isTurnStart } from "./compaction/stages.ts"
@@ -231,9 +232,12 @@ export function assembleContext(input: AssembleInput): AssembledContext {
     // dropped by a conditional spread in another, and the source string already carries the answer.
     for (const passage of input.memory ?? []) {
         if (passage.text.trim() === "") continue
+        const scope = scopeOfSource(passage.source)
         const provenance = isSessionSource(passage.source)
             ? `From an earlier conversation in this session's store (${passage.source.slice(SESSION_SOURCE_PREFIX.length)}), on ${passage.at}:`
-            : `From ${passage.source}, learned ${passage.at}:`
+            : scope !== undefined
+              ? `From ${describeScope(scope)}, noted ${passage.at}:`
+              : `From ${passage.source}, learned ${passage.at}:`
         const because =
             passage.because === undefined || passage.because.trim() === ""
                 ? ""

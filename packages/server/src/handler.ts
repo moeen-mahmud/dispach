@@ -92,12 +92,15 @@ import {
     KeyBody,
     MembersBody,
     MessageBody,
+    NoteBody,
     ParticipantBody,
     PhaseBody,
     PresenceBody,
+    ProjectBody,
     ProvisionBody,
     parseBody,
     SecretsBody,
+    SpaceWriterBody,
     StopBody,
     WebhookBody,
 } from "./wire-schemas.ts"
@@ -2057,7 +2060,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
     }
     const refusedBy = (error: unknown): Response => {
         if (!isHarnessError(error)) throw error
-        return fail(error.toDetail(), error.code.endsWith("_not_found") ? 404 : 400)
+        return fail(
+            error.toDetail(),
+            error.code.endsWith("_not_found") ? 404 : error.code.endsWith("_forbidden") ? 403 : 400,
+        )
     }
 
     router.add(
@@ -2424,6 +2430,207 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     unassigned: await runtime.store.conversations.unassign(agent.id),
                 }),
             ),
+        { capability: "admin" },
+    )
+
+    /**
+     * Team memory scopes (Phase 29). Who may write which scope is decided in the hub; the route only
+     * says who is asking. A bound key is its participant. An unbound key is the embedder's backend,
+     * the operator — but only with `admin`: `chat` alone is not enough to write the whole team's memory.
+     */
+    const memoryActor = (
+        principal: Principal,
+    ):
+        | { readonly ok: true; readonly actor: string | undefined }
+        | { readonly ok: false; readonly response: Response } => {
+        const bound = boundParticipant(principal)
+        if (bound !== undefined || can(principal, "admin")) return { ok: true, actor: bound }
+        return {
+            ok: false,
+            response: fail(
+                {
+                    code: "memory_write_requires_admin",
+                    message: "This key is bound to no participant and does not carry admin.",
+                    hint: "A member writes through a key minted with scope.participant; the embedder's backend writes shared scopes with an admin key.",
+                },
+                403,
+            ),
+        }
+    }
+
+    router.add(
+        "POST",
+        "/v1/memory/notes",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(NoteBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const who = memoryActor(context.principal)
+            if (!who.ok) return who.response
+            try {
+                return json(
+                    await runtime.conversations.addNote({
+                        scope: parsed.value.scope,
+                        text: parsed.value.text,
+                        ...(who.actor === undefined ? {} : { authorId: who.actor }),
+                    }),
+                    201,
+                )
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "chat" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/memory/notes",
+        async (context) => {
+            const scope = context.url.searchParams.get("scope") ?? ""
+            try {
+                return json({
+                    notes: await runtime.conversations.notes(
+                        scope,
+                        boundParticipant(context.principal),
+                    ),
+                })
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "read" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/memory/notes/:noteId",
+        async (context) => {
+            const who = memoryActor(context.principal)
+            if (!who.ok) return who.response
+            try {
+                await runtime.conversations.deleteNote(context.params.noteId ?? "", who.actor)
+                return json({ id: context.params.noteId, deleted: true })
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "chat" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/participants/:participantId/memory/reads",
+        async (context) => {
+            try {
+                return json({
+                    reads: await runtime.conversations.reads(
+                        context.params.participantId ?? "",
+                        boundParticipant(context.principal),
+                    ),
+                })
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "read" },
+    )
+
+    /** An admin participant's act, like assignment. An unbound admin key is the embedder's backend. */
+    const requireAdminParticipant = async (principal: Principal): Promise<Response | undefined> => {
+        const bound = boundParticipant(principal)
+        if (bound === undefined) return undefined
+        const by = await runtime.store.conversations.participant(bound)
+        if (by?.role === "admin") return undefined
+        return fail(
+            {
+                code: "memory_scope_forbidden",
+                message: `${bound} is not an admin participant.`,
+                hint: 'Only a participant registered with role "admin" defines projects and names the space writer.',
+            },
+            403,
+        )
+    }
+
+    router.add(
+        "GET",
+        "/v1/projects",
+        async () => json({ projects: await runtime.store.conversations.projects() }),
+        { capability: "read" },
+    )
+
+    router.add(
+        "PUT",
+        "/v1/projects/:projectId",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(ProjectBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const refusal = await requireAdminParticipant(context.principal)
+            if (refusal !== undefined) return refusal
+            // An agent this key cannot reach answers like one that does not exist.
+            const unreachable = (parsed.value.agents ?? []).find(
+                (id) => !reachesAgent(context.principal, id),
+            )
+            if (unreachable !== undefined) {
+                return fail(
+                    {
+                        code: "agent_not_found",
+                        message: `No agent "${unreachable}".`,
+                        hint: "GET /v1/agents lists the ones hosted here.",
+                    },
+                    404,
+                )
+            }
+            try {
+                return json(
+                    await runtime.conversations.upsertProject({
+                        id: context.params.projectId ?? "",
+                        ...(parsed.value.name === undefined ? {} : { name: parsed.value.name }),
+                        ...(parsed.value.agents === undefined
+                            ? {}
+                            : { agents: parsed.value.agents }),
+                    }),
+                )
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/projects/:projectId",
+        async (context) => {
+            const refusal = await requireAdminParticipant(context.principal)
+            if (refusal !== undefined) return refusal
+            const id = context.params.projectId ?? ""
+            return json({ id, deleted: await runtime.store.conversations.deleteProject(id) })
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "PUT",
+        "/v1/memory/space/writer",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(SpaceWriterBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const refusal = await requireAdminParticipant(context.principal)
+            if (refusal !== undefined) return refusal
+            const bound = boundParticipant(context.principal)
+            try {
+                await runtime.conversations.setSpaceWriter(parsed.value.writer, bound)
+                return json({ writer: parsed.value.writer })
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
         { capability: "admin" },
     )
 

@@ -50,6 +50,7 @@ import { isSessionSource, renderConversation, sessionSource } from "./conversati
 import { correctTerms } from "./correct.ts"
 import { document, type Passage, splitPassages } from "./passages.ts"
 import { boosted, type MemoryRetriever, type RetrievedPassage } from "./retriever.ts"
+import { isScopeSource, noteSource, scopeCorpus } from "./scopes.ts"
 
 /**
  * How many candidates to pull per requested result.
@@ -257,6 +258,40 @@ export async function syncSessions(input: {
 }
 
 /**
+ * Bring one shared scope's index in line with its notes (Phase 29).
+ *
+ * A **third** reconcile pass, and it cannot collide with the other two by construction: a scope is
+ * indexed under its own corpus key (`scopeCorpus`), never under an agent's id, so `syncFiles` and
+ * `syncSessions` never see its sources and it never sees theirs. That is why it may own every source
+ * in its corpus — and why the caller must hand it the scope's whole note list, every time.
+ */
+export async function syncNotes(input: {
+    readonly store: MemoryStore
+    readonly scope: string
+    readonly notes: readonly {
+        readonly id: string
+        readonly text: string
+        readonly createdAt: string
+    }[]
+    readonly now: Date
+}): Promise<IndexReport> {
+    return await reconcile({
+        store: input.store,
+        agentId: scopeCorpus(input.scope),
+        sources: input.notes.map((note) => ({
+            source: noteSource(input.scope, note.id),
+            read: () => note.text,
+            // A note is immutable once written, so its creation time and length are a complete
+            // staleness pair: the only change a note has is being deleted, which reconcile handles.
+            mtimeMs: Number.isFinite(Date.parse(note.createdAt)) ? Date.parse(note.createdAt) : 0,
+            size: note.text.length,
+        })),
+        now: input.now,
+        owns: () => true,
+    })
+}
+
+/**
  * Anything the indexer can treat as a document: an identity, a staleness pair, and a lazy read.
  *
  * `read` may be async because a conversation is read from the store rather than from disk. It stays
@@ -373,6 +408,8 @@ export function enumerateFiles(input: {
             // dropped by the other, alternating forever. Refused here rather than disambiguated,
             // because the prefix is the discriminator both passes agree on.
             .filter((name) => !isSessionSource(name))
+            // Same reason for a scope's prefix: slot 7 frames a `scope:` source as shared memory.
+            .filter((name) => !isScopeSource(name))
             .sort()
     } catch {
         // No archive directory yet. Eviction creates it on first use, never speculatively.

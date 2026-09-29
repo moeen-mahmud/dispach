@@ -709,6 +709,34 @@ export interface ParticipantLike {
     readonly presenceAt?: string
 }
 
+/** A note in a shared memory scope (Phase 29): `space`, `owner:<participantId>` or `project:<id>`. */
+export interface MemoryNoteLike {
+    readonly id: string
+    readonly scope: string
+    readonly text: string
+    readonly writtenBy: string
+    readonly createdAt: string
+}
+
+/** One recall of someone's owner scope made for somebody else. */
+export interface MemoryReadLike {
+    readonly scope: string
+    readonly reader: string
+    readonly turnId: string
+    readonly sessionKey: string
+    readonly requestedBy?: string
+    readonly onBehalfOf?: string
+    readonly sources: readonly string[]
+    readonly at: string
+}
+
+export interface ProjectLike {
+    readonly id: string
+    readonly name?: string
+    readonly agents: readonly string[]
+    readonly createdAt: string
+}
+
 export interface ConversationLike {
     readonly id: string
     readonly kind: "room" | "dm"
@@ -901,6 +929,21 @@ export interface DispachClient {
     }): Promise<readonly DeferredActionLike[]>
     /** Approve (runs the exact call) or decline a queued action. The owner's to decide. */
     decideAction(actionId: string, approve: boolean): Promise<DeferredActionLike>
+    /** Add a note to a shared memory scope. Who may write which scope is the server's to decide. */
+    addNote(input: { readonly scope: string; readonly text: string }): Promise<MemoryNoteLike>
+    notes(scope: string): Promise<readonly MemoryNoteLike[]>
+    deleteNote(noteId: string): Promise<{ readonly id: string; readonly deleted: boolean }>
+    /** A person's audit of reads of their owner scope. Theirs, or an admin's. */
+    memoryReads(participantId: string): Promise<readonly MemoryReadLike[]>
+    projects(): Promise<readonly ProjectLike[]>
+    /** Define a project; `agents`, when given, replaces its membership. */
+    putProject(
+        projectId: string,
+        input: { readonly name?: string; readonly agents?: readonly string[] },
+    ): Promise<ProjectLike>
+    deleteProject(projectId: string): Promise<{ readonly id: string; readonly deleted: boolean }>
+    /** Name the space's one non-admin writer: a participant, or `agent:<id>`. */
+    setSpaceWriter(writer: string): Promise<{ readonly writer: string }>
     /** The webhook subscriptions this credential can see. */
     webhooks(): Promise<readonly WebhookLike[]>
     /**
@@ -1399,6 +1442,39 @@ export function createClient(options: ClientOptions): DispachClient {
             json<DeferredActionLike>("POST", `/v1/actions/${encodeURIComponent(actionId)}`, {
                 body: { approve },
             }),
+        addNote: (input) => json<MemoryNoteLike>("POST", "/v1/memory/notes", { body: input }),
+        notes: async (scope) =>
+            (
+                await json<{ notes: readonly MemoryNoteLike[] }>(
+                    "GET",
+                    `/v1/memory/notes?scope=${encodeURIComponent(scope)}`,
+                )
+            ).notes,
+        deleteNote: (noteId) =>
+            json<{ id: string; deleted: boolean }>(
+                "DELETE",
+                `/v1/memory/notes/${encodeURIComponent(noteId)}`,
+            ),
+        memoryReads: async (participantId) =>
+            (
+                await json<{ reads: readonly MemoryReadLike[] }>(
+                    "GET",
+                    `/v1/participants/${encodeURIComponent(participantId)}/memory/reads`,
+                )
+            ).reads,
+        projects: async () =>
+            (await json<{ projects: readonly ProjectLike[] }>("GET", "/v1/projects")).projects,
+        putProject: (projectId, input) =>
+            json<ProjectLike>("PUT", `/v1/projects/${encodeURIComponent(projectId)}`, {
+                body: input,
+            }),
+        deleteProject: (projectId) =>
+            json<{ id: string; deleted: boolean }>(
+                "DELETE",
+                `/v1/projects/${encodeURIComponent(projectId)}`,
+            ),
+        setSpaceWriter: (writer) =>
+            json<{ writer: string }>("PUT", "/v1/memory/space/writer", { body: { writer } }),
         webhooks: async () =>
             (await json<{ webhooks: readonly WebhookLike[] }>("GET", "/v1/webhooks")).webhooks,
         createWebhook: (input) =>

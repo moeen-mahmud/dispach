@@ -231,6 +231,8 @@ export interface TurnInput {
     readonly runtimeNote?: string
     /** Every mutating call is queued rather than run: a stand-in's turn. See `ExecuteInput.defer`. */
     readonly deferMutations?: ExecuteInput["defer"]
+    /** Forwarded to `ToolContext.writeNote`: set when this agent is the space writer (Phase 29). */
+    readonly writeNote?: (text: string) => Promise<string>
     /** Caller's cancellation. A disconnect must never be wired to this. */
     readonly signal?: AbortSignal
     readonly turnId?: string
@@ -1167,6 +1169,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                               ...(tools.memoryDir === undefined
                                   ? {}
                                   : { memoryDir: tools.memoryDir }),
+                              ...(input.writeNote === undefined
+                                  ? {}
+                                  : { writeNote: input.writeNote }),
                               // Wired from the compaction seam rather than from `tools`, because the
                               // artifact store and the compaction that fills it are one capability:
                               // an agent with a store but no thresholds has no pointers to follow,

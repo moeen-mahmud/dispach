@@ -678,6 +678,13 @@ directory mtime disagrees with the cache.
 The agent writes memory through a built-in `memory_write` tool that appends to
 `memory/YYYY-MM-DD.md`. The agent is the author; the harness is the librarian.
 
+**Scopes (Phase 29).** An agent's own corpus is its *private* scope. Shared scopes — `space`,
+`owner:<participant>`, `project:<id>` — are rows in `memory_notes`, indexed under their own corpus key
+(`~<scope>`) so neither the file pass nor the conversation pass can drop them. `memory/scopes.ts`
+`readPlan` decides per turn which corpora are ranked together: a stand-in and a room turn leave out
+private memory and the volatile tier. A read of someone's owner scope for somebody else is written to
+`memory_reads` in the recall itself.
+
 ---
 
 ## Skills

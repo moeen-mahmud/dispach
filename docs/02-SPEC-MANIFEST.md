@@ -139,7 +139,7 @@ server:
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `apiVersion` | `"dispach/v1"` | yes | Refused if unknown. Never silently upgraded. |
-| `id` | string | yes | Slug. Unique within a runtime. Used in session keys and API paths. |
+| `id` | string | yes | Slug. Unique within a runtime. Used in session keys and API paths. May not start with `~`, which keys a shared memory scope (Phase 29). |
 | `name` | string | no | Display only. |
 | `extends` | string | no | Path to a base manifest. Shallow merge, arrays replace. |
 
@@ -640,6 +640,15 @@ carried, and one from June is found by searching. Nothing is deleted at either s
 | `threshold` | 0.20 | Score floor after original-query coverage and recency. `memory search` exposes all three terms. |
 | `budget` | 2000 | Total tokens across injected passages. Outside the workspace cap — this tier is retrieved, not carried. |
 | `includeHistory` | true | Index the person's messages and clean agent replies as well as the notes, under `session:<key>`. Never tool observations, runtime-authored messages, or tainted assistant prose. |
+
+**Shared scopes (Phase 29) need no field.** Beside its own memory — everything above, which is the
+agent's *private* scope — an agent recalls the team's shared scopes: its owner's (`owner:<participant>`,
+from the agent's assignment), the `space`, and each `project:<id>` it belongs to. They are written over
+`/v1/memory/notes` (`04-SPEC-WIRE.md`), recalled with the same `maxActive`, `threshold` and `budget`,
+and framed in slot 10 as shared memory. What a turn reads depends on where it came from: a stand-in
+reads its owner's scope and the space and never private; a room turn reads shared scopes only; the
+agent's DM with its owner, and every other turn, read everything. A turn that may not read private
+memory also goes without the `volatile` tier, since that tier is private memory too.
 
 **`maxActive` and `budget` were raised from 3 and 600 when `includeHistory` was implemented**, and the
 change was required rather than generous. Those numbers were sized for note bullets, which are one

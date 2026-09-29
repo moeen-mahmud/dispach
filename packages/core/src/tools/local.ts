@@ -145,6 +145,13 @@ const memoryWrite: Tool = {
         const labels = tags.length === 0 ? "" : ` _(${tags.join(", ")})_`
         const line = `\n- **${stamped}**${labels} ${text}\n`
 
+        // The space writer's notes are the team's, and go where the team reads them.
+        if (context.writeNote !== undefined) {
+            return await context.writeNote(
+                tags.length === 0 ? text : `${text} (${tags.join(", ")})`,
+            )
+        }
+
         const target = context.writeTarget
 
         // A workspace that declares a memory file and makes it read-only is refused out loud. The
@@ -411,5 +418,6 @@ export function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
         ...(overrides.readArtifact === undefined ? {} : { readArtifact: overrides.readArtifact }),
         ...(overrides.setPhase === undefined ? {} : { setPhase: overrides.setPhase }),
         ...(overrides.memoryDir === undefined ? {} : { memoryDir: overrides.memoryDir }),
+        ...(overrides.writeNote === undefined ? {} : { writeNote: overrides.writeNote }),
     }
 }

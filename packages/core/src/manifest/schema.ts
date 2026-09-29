@@ -826,7 +826,12 @@ export const ServerSchema = z
 export const AgentManifestSchema = z
     .object({
         apiVersion: z.string().min(1),
-        id: slug,
+        // `~` is reserved: a shared memory scope's corpus key starts with one (`memory/scopes.ts`), and
+        // an agent sharing that key would read and reconcile a team's notes as its own.
+        id: slug.refine((value) => !value.startsWith("~"), {
+            message:
+                "An agent id may not start with `~`; that prefix is reserved for shared memory scopes.",
+        }),
         name: z.string().min(1).optional(),
         /** Path to a base manifest. Shallow merge; arrays replace. */
         extends: z.string().min(1).optional(),

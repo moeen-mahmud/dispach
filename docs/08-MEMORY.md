@@ -160,6 +160,15 @@ slowest query moved; it is still five times inside the 20 ms ceiling.
 
 ---
 
+## Phase 29 — team scopes (2026-09-29)
+
+An agent's own memory is its **private** scope. Beside it, a team has shared scopes — `space`,
+`owner:<participant>` and `project:<id>` — whose notes are rows (`memory_notes`) indexed under their
+own corpus key, `~<scope>`. They rank with the private corpus on the same normalised scale, so one
+selection covers both. A stand-in reads its owner's scope and the space; a room turn reads shared
+scopes only; both also go without the volatile tier. Reads of an owner scope made for somebody else
+are audited (`memory_reads`). Decisions 14.39–14.42; the reconcile reasoning is in CLAUDE.md.
+
 ## What was refused
 
 - **Embeddings / a second persistent index.** Decision 5.32: prove lexical insufficient first.

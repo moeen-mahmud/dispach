@@ -425,6 +425,38 @@ export const PresenceBody = z.object({
     }),
 })
 
+export const NoteBody = z.object({
+    scope: refuse(z.string().trim().min(1), {
+        code: "memory_scope_invalid",
+        hint: 'A shared scope: "space", "owner:<participantId>" or "project:<projectId>".',
+        description:
+            "Where the note goes. `owner:<id>` is written only by that person; `space` by an admin or the designated space writer; a project by an admin.",
+    }),
+    text: refuse(z.string().trim().min(1), {
+        code: "memory_note_empty",
+        hint: 'Send { "scope": "space", "text": "…" } — one or two sentences worth remembering.',
+        description: "The note. Recalled into an agent's prompt when a turn is about it.",
+    }),
+})
+
+export const ProjectBody = z.object({
+    name: annotate(z.string().min(1).optional(), "A display name for the embedder's own listing."),
+    agents: refuse(z.array(z.string().trim().min(1)).optional(), {
+        code: "project_agents_invalid",
+        hint: 'Agent ids, bare ("crew", not "agent:crew"). Given, it replaces the membership; omitted, it is left alone.',
+        description: "The agents that share this project's memory. Replaces the list when given.",
+    }),
+})
+
+export const SpaceWriterBody = z.object({
+    writer: refuse(z.string().trim().min(1), {
+        code: "space_writer_invalid",
+        hint: 'A registered participant id, or "agent:<agentId>" for an agent whose memory_write should go to the space.',
+        description:
+            "The one non-admin who may write the space. An agent named here saves every memory_write to the space, so name one that holds nobody's private context.",
+    }),
+})
+
 export const DecisionBody = z.object({
     approve: refuse(z.boolean(), {
         code: "action_decision_required",

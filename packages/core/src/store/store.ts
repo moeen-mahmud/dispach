@@ -685,6 +685,44 @@ export interface ConversationMessageRecord {
     readonly createdAt: string
 }
 
+/**
+ * A note in a shared memory scope (Phase 29): `space`, `owner:<participant>` or `project:<id>`.
+ * Canonical; the memory index holds a projection of it under the scope's own corpus key.
+ */
+export interface MemoryNoteRecord {
+    readonly id: string
+    readonly scope: string
+    readonly text: string
+    /** A participant id, or `agent:<id>` for the space writer's `memory_write`. */
+    readonly writtenBy: string
+    readonly createdAt: string
+}
+
+/** A group of agents sharing a `project:<id>` scope. Defined by the embedder. */
+export interface ProjectRecord {
+    readonly id: string
+    readonly name?: string
+    /** Agent ids, bare. */
+    readonly agents: readonly string[]
+    readonly createdAt: string
+}
+
+/** One retrieval that returned passages from someone's owner scope. What that person can audit. */
+export interface MemoryReadRecord {
+    readonly scope: string
+    /** The agent that read. */
+    readonly reader: string
+    readonly turnId: string
+    readonly sessionKey: string
+    /** Whose message the turn was answering, when a person's. */
+    readonly requestedBy?: string
+    /** Set when the reader was standing in for the owner. */
+    readonly onBehalfOf?: string
+    /** The passages' sources, as recalled. */
+    readonly sources: readonly string[]
+    readonly at: string
+}
+
 /** Who an agent works for, recorded by an admin. The human stays accountable for what it is asked. */
 export interface AssignmentRecord {
     readonly agentId: string
@@ -734,6 +772,32 @@ export interface ConversationStore {
         result: string | undefined,
         at: string,
     ): Promise<DeferredActionRecord | undefined>
+    addNote(record: MemoryNoteRecord): Promise<MemoryNoteRecord>
+    /** Every note in one scope, oldest first. The whole set, because the indexer reconciles against it. */
+    notes(scope: string): Promise<readonly MemoryNoteRecord[]>
+    note(id: string): Promise<MemoryNoteRecord | undefined>
+    deleteNote(id: string): Promise<boolean>
+    /** Every scope that holds a note. What a rebuild re-indexes. */
+    noteScopes(): Promise<readonly string[]>
+    upsertProject(record: Omit<ProjectRecord, "agents">): Promise<ProjectRecord>
+    project(id: string): Promise<ProjectRecord | undefined>
+    projects(): Promise<readonly ProjectRecord[]>
+    deleteProject(id: string): Promise<boolean>
+    setProjectAgents(
+        id: string,
+        add: readonly string[],
+        remove: readonly string[],
+    ): Promise<ProjectRecord>
+    /** Project ids an agent belongs to. */
+    projectsOf(agentId: string): Promise<readonly string[]>
+    setSpaceWriter(writer: string, setBy: string | undefined, at: string): Promise<void>
+    spaceWriter(): Promise<string | undefined>
+    recordRead(record: MemoryReadRecord): Promise<void>
+    /** Newest first. */
+    reads(
+        scope: string,
+        options?: { readonly limit?: number },
+    ): Promise<readonly MemoryReadRecord[]>
 }
 
 export interface AgentStateStore {

@@ -619,6 +619,17 @@ export interface EventDataMap {
     }
     /** An admin recorded who an agent works for. */
     "agent.assigned": { participantId: string; assignedBy?: string }
+    /**
+     * A turn recalled passages from someone's owner scope for somebody other than that person
+     * (Phase 29). The same record lands in the audit the owner can list.
+     */
+    "memory.read": {
+        scope: string
+        reader: string
+        sources: readonly string[]
+        requestedBy?: string
+        onBehalfOf?: string
+    }
     "turn.end": {
         reason: TurnEndReason
         steps: number
@@ -693,6 +704,7 @@ export const EVENT_TYPES = [
     "action.deferred",
     "action.decided",
     "agent.assigned",
+    "memory.read",
     "turn.end",
     "error",
 ] as const satisfies readonly EventType[]

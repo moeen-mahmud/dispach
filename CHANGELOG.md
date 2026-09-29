@@ -27,6 +27,14 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - A stand-in never commits: a mutating call is queued for the owner (`GET /v1/actions`), even with the tool allowed, and runs only when they approve it.
 - `delegation.offer` and `delegation.to` let a coordinator hand work to another member's agent, with the same handoff a team uses.
 
+### Team memory
+
+- Shared memory scopes: the space, a person's owner scope, and projects, over `/v1/memory/notes` and `/v1/projects`. Agents recall them next to their own notes.
+- A stand-in reads its owner's scope and the space, never the agent's private memory; a room turn reads shared scopes only.
+- Every read of someone's owner scope for somebody else is recorded: `GET /v1/participants/:id/memory/reads` and `memory.read`.
+- `PUT /v1/memory/space/writer` names the one non-admin who may write the space. An agent named there saves `memory_write` to the space.
+- An agent id may no longer start with `~`.
+
 ### Media
 
 - `media.transcription` and `media.image`: `openai` (any `/audio/transcriptions` and `/images/generations` endpoint) is built in; `aws` (Amazon Transcribe, Nova Canvas) comes from `@dispach/media-aws`. Set through settings, the API or `config_set`.

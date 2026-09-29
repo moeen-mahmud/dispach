@@ -150,6 +150,14 @@ and WebSocket surfaces can return:
 | `action_not_found` | 404 | No such action, or one this key may not decide — a member-bound key decides only its own. The same answer either way. |
 | `action_already_decided` | 409 | The action was approved or declined already. Nothing ran twice. |
 | `assignment_requires_admin` | 403 | A participant-bound key assigning an agent when its participant is not an `admin`. |
+| `memory_scope_invalid` | 400 | A scope other than `space`, `owner:<participantId>` or `project:<projectId>`. An agent's private memory has no route: the agent writes it. |
+| `memory_note_empty` | 400 | A note with no text. |
+| `memory_scope_forbidden` | 403 | This participant may not write — or, for an owner scope, read — that scope. `owner:<id>` is its owner's alone, admins included; the space takes an admin or the designated writer; a project, an admin. Also a non-admin participant defining a project or naming the space writer, and anyone but the person or an admin reading their audit. |
+| `memory_write_requires_admin` | 403 | An unbound key without `admin` writing a shared scope. A member writes through a participant-bound key. |
+| `memory_note_not_found` | 404 | No such note. |
+| `project_not_found` | 404 | A `project:<id>` scope naming a project nobody defined. |
+| `project_agents_invalid` | 400 | `agents` that is not a list of agent ids. |
+| `space_writer_invalid` | 400 | No `writer`. |
 | `key_scope_agent_unknown` | 400 | `scope.agents` names an agent this server does not hold. Refused at mint rather than producing a key that reaches nothing. |
 | `provision_adopt_failed` | — | Returned *inside* a `201`: the agent was written and is not running. |
 | `start_not_supported` | 501 | This server has no way to find the manifest for an agent it is not hosting — an embedder over its own agent store. The container has the lookup, and `start` works there. |
@@ -283,6 +291,15 @@ GET    /v1/actions?status                            → { actions: [{ id, agent
 POST   /v1/actions/:actionId { approve }             → the action, decided (`done`, `failed` or `denied`)
 PUT    /v1/agents/:id/assignee { participantId }     → { agentId, participantId, assignedBy?, assignedAt }
 DELETE /v1/agents/:id/assignee                       → { id, unassigned }
+POST   /v1/memory/notes { scope, text }              → 201 { id, scope, text, writtenBy, createdAt }
+GET    /v1/memory/notes?scope                        → { notes: [...] }   (oldest first)
+DELETE /v1/memory/notes/:noteId                      → { id, deleted: true }
+GET    /v1/participants/:participantId/memory/reads  → { reads: [{ scope, reader, turnId, sessionKey,
+                                                                 requestedBy?, onBehalfOf?, sources, at }] }
+GET    /v1/projects                                  → { projects: [{ id, name?, agents, createdAt }] }
+PUT    /v1/projects/:projectId { name?, agents? }    → the project (`agents` replaces the membership)
+DELETE /v1/projects/:projectId                       → { id, deleted }
+PUT    /v1/memory/space/writer { writer }            → { writer }
 
 GET /v1/usage?by&from&to → { buckets: [{ agentId?, model?, day?, sender?, calls, promptTokens,
                                          cachedPromptTokens, cacheWriteTokens, outputTokens,
@@ -841,6 +858,14 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/actions/:actionId` | `chat` |
 | `PUT /v1/agents/:id/assignee` | `admin` |
 | `DELETE /v1/agents/:id/assignee` | `admin` |
+| `POST /v1/memory/notes` | `chat` |
+| `GET /v1/memory/notes` | `read` |
+| `DELETE /v1/memory/notes/:noteId` | `chat` |
+| `GET /v1/participants/:participantId/memory/reads` | `read` |
+| `GET /v1/projects` | `read` |
+| `PUT /v1/projects/:projectId` | `admin` |
+| `DELETE /v1/projects/:projectId` | `admin` |
+| `PUT /v1/memory/space/writer` | `admin` |
 
 
 
@@ -1175,6 +1200,7 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `agent.assigned` | an admin recorded who an agent works for | `participantId`, `assignedBy?` |
 | `action.deferred` | a stand-in queued a mutating call for its absent owner; nothing ran (Phase 28) | `actionId`, `conversationId`, `ownerId`, `requestedBy`, `slug` |
 | `action.decided` | the owner answered it | `actionId`, `conversationId`, `status` (`done` \| `failed` \| `denied`) |
+| `memory.read` | a turn recalled someone's owner scope for somebody other than that person — a stand-in, a room, another caller (Phase 29). The owner's own requests, and unattributed work on their own agent, are not recorded | `scope`, `reader` (the agent), `sources`, `requestedBy?`, `onBehalfOf?` (set for a stand-in). The same record is kept for `GET /v1/participants/:id/memory/reads` |
 | `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs`, `attachments?` (`[{path, mimeType}]`, files a tool produced for the reply, relative to the agent's directory; a channel sends them after the text) |
 | `error` | anything uncaught | `code`, `message`, `hint`, `stack?` |
 

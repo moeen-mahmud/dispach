@@ -233,6 +233,14 @@ export {
     withDeadline,
 } from "./media/provider.ts"
 export {
+    describeScope,
+    parseScope,
+    type ReadPlan,
+    readPlan,
+    type SharedScope,
+    scopeCorpus,
+} from "./memory/scopes.ts"
+export {
     CAPABILITY_REGISTRY,
     type CapabilityEntry,
     describeWindowSource,
@@ -504,6 +512,8 @@ export type {
     // keeps paying for.
     LeaseRecord,
     LeaseStore,
+    MemoryNoteRecord,
+    MemoryReadRecord,
     MessagePage,
     MessageStore,
     ModelCallRecord,
@@ -511,6 +521,7 @@ export type {
     OperatorKeyStore,
     OutboxStore,
     ParticipantRecord,
+    ProjectRecord,
     RuntimeMode,
     ScheduleFired,
     ScheduleOrigin,

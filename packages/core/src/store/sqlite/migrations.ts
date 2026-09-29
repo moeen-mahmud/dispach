@@ -1064,6 +1064,57 @@ CREATE TABLE deferred_actions (
 CREATE INDEX deferred_actions_by_owner ON deferred_actions (owner_id, status);
 `,
     },
+    {
+        version: 24,
+        name: "memory_scopes",
+        /**
+         * Team memory scopes (Phase 29): notes shared beyond one agent, the projects that group agents,
+         * the one designated space writer, and the audit of who read a person's owner scope.
+         *
+         * `memory_notes` is canonical and the index is a projection of it, the relationship `messages`
+         * has with an indexed conversation, so a rebuild can always restore a scope. `scope` is `space`,
+         * `owner:<participant>` or `project:<id>`. `memory_reads` names its reader `reader` rather than
+         * `agent_id` on purpose: purging an agent must not erase a person's record of what was read.
+         */
+        sql: `
+CREATE TABLE memory_notes (
+    id         TEXT PRIMARY KEY,
+    scope      TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    written_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX memory_notes_by_scope ON memory_notes (scope, created_at);
+CREATE TABLE projects (
+    id         TEXT PRIMARY KEY,
+    name       TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE project_members (
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    agent_id   TEXT NOT NULL,
+    PRIMARY KEY (project_id, agent_id)
+);
+CREATE TABLE memory_space_writer (
+    slot       TEXT PRIMARY KEY CHECK (slot = 'space'),
+    writer     TEXT NOT NULL,
+    set_by     TEXT,
+    set_at     TEXT NOT NULL
+);
+CREATE TABLE memory_reads (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope        TEXT NOT NULL,
+    reader       TEXT NOT NULL,
+    turn_id      TEXT NOT NULL,
+    session_key  TEXT NOT NULL,
+    requested_by TEXT,
+    on_behalf_of TEXT,
+    sources      TEXT NOT NULL,
+    at           TEXT NOT NULL
+);
+CREATE INDEX memory_reads_by_scope ON memory_reads (scope, at);
+`,
+    },
 ]
 
 export interface MigrationReport {

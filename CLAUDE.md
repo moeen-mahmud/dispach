@@ -1694,6 +1694,13 @@ Never claim a performance property without a number in `evals/` and a script to 
   behind a `--history` flag: `clear` wipes both, so an opt-in would make a plain rebuild delete every
   conversation and report success. `enumerateFiles` refuses a memory file named `session:*.md`, which
   would otherwise be dropped by whichever pass ran second and re-added by the other, forever.
+- **A shared memory scope is a separate corpus, never a third prefix, and private memory reaches a prompt two
+  ways.** Phase 29's scopes (`space`, `owner:<id>`, `project:<id>`) are indexed under `~<scope>` rather than
+  as sources in an agent's corpus, so `syncFiles` and `syncSessions` cannot see them and `syncNotes` may own
+  its whole corpus, provided it is handed the scope's whole note list every time. A turn barred from private
+  memory, a stand-in or a room, must also lose the **volatile tier**: `USER.md` and `MEMORY.md` are injected
+  every turn, so skipping recall alone still handed a stand-in every saved note. `memory-scopes.test.ts`
+  asserts both, and each goes red with its guard reverted.
 - **A retrieved conversation excerpt needs a different sentence from a retrieved note, and slot 2 needs a
   memory row.** Both were measured on the same live agent, and both are the "a fact with no frame is a fact
   a small model will not connect to a question" lesson again. With one frame for both, an agent holding

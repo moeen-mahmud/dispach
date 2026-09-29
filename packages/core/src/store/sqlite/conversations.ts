@@ -10,9 +10,56 @@ import type {
     ConversationRecord,
     ConversationStore,
     DeferredActionRecord,
+    MemoryNoteRecord,
+    MemoryReadRecord,
     ParticipantRecord,
+    ProjectRecord,
 } from "../store.ts"
 import type { SqlDatabase } from "./driver.ts"
+
+interface NoteRow {
+    id: string
+    scope: string
+    text: string
+    written_by: string
+    created_at: string
+}
+
+interface ProjectRow {
+    id: string
+    name: string | null
+    created_at: string
+}
+
+interface ReadRow {
+    scope: string
+    reader: string
+    turn_id: string
+    session_key: string
+    requested_by: string | null
+    on_behalf_of: string | null
+    sources: string
+    at: string
+}
+
+const noteOf = (row: NoteRow): MemoryNoteRecord => ({
+    id: row.id,
+    scope: row.scope,
+    text: row.text,
+    writtenBy: row.written_by,
+    createdAt: row.created_at,
+})
+
+const readOf = (row: ReadRow): MemoryReadRecord => ({
+    scope: row.scope,
+    reader: row.reader,
+    turnId: row.turn_id,
+    sessionKey: row.session_key,
+    ...(row.requested_by === null ? {} : { requestedBy: row.requested_by }),
+    ...(row.on_behalf_of === null ? {} : { onBehalfOf: row.on_behalf_of }),
+    sources: JSON.parse(row.sources) as string[],
+    at: row.at,
+})
 
 interface ParticipantRow {
     id: string
@@ -177,6 +224,60 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
               WHERE id = ? AND status = 'pending'`,
         ),
         actionsDeleteForAgent: db.prepare("DELETE FROM deferred_actions WHERE agent_id = ?"),
+        noteInsert: db.prepare(
+            "INSERT INTO memory_notes (id, scope, text, written_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        ),
+        noteGet: db.prepare("SELECT * FROM memory_notes WHERE id = ?"),
+        notesIn: db.prepare("SELECT * FROM memory_notes WHERE scope = ? ORDER BY created_at, id"),
+        noteDelete: db.prepare("DELETE FROM memory_notes WHERE id = ?"),
+        notesDeleteIn: db.prepare("DELETE FROM memory_notes WHERE scope = ?"),
+        noteScopes: db.prepare("SELECT DISTINCT scope FROM memory_notes ORDER BY scope"),
+        projectUpsert: db.prepare(
+            `INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET name = excluded.name`,
+        ),
+        projectGet: db.prepare("SELECT * FROM projects WHERE id = ?"),
+        projectList: db.prepare("SELECT * FROM projects ORDER BY id"),
+        projectDelete: db.prepare("DELETE FROM projects WHERE id = ?"),
+        projectAgents: db.prepare(
+            "SELECT agent_id FROM project_members WHERE project_id = ? ORDER BY agent_id",
+        ),
+        projectAgentAdd: db.prepare(
+            "INSERT OR IGNORE INTO project_members (project_id, agent_id) VALUES (?, ?)",
+        ),
+        projectAgentRemove: db.prepare(
+            "DELETE FROM project_members WHERE project_id = ? AND agent_id = ?",
+        ),
+        projectAgentsClear: db.prepare("DELETE FROM project_members WHERE project_id = ?"),
+        projectsOf: db.prepare(
+            "SELECT project_id FROM project_members WHERE agent_id = ? ORDER BY project_id",
+        ),
+        projectsDeleteForAgent: db.prepare("DELETE FROM project_members WHERE agent_id = ?"),
+        writerSet: db.prepare(
+            `INSERT INTO memory_space_writer (slot, writer, set_by, set_at) VALUES ('space', ?, ?, ?)
+             ON CONFLICT (slot) DO UPDATE SET writer = excluded.writer, set_by = excluded.set_by,
+                 set_at = excluded.set_at`,
+        ),
+        writerGet: db.prepare("SELECT writer FROM memory_space_writer WHERE slot = 'space'"),
+        writerClearIf: db.prepare("DELETE FROM memory_space_writer WHERE writer = ?"),
+        readInsert: db.prepare(
+            `INSERT INTO memory_reads
+                 (scope, reader, turn_id, session_key, requested_by, on_behalf_of, sources, at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ),
+        readsIn: db.prepare("SELECT * FROM memory_reads WHERE scope = ? ORDER BY id DESC LIMIT ?"),
+    }
+
+    const projectOf = (row: ProjectRow): ProjectRecord => ({
+        id: row.id,
+        ...(row.name === null ? {} : { name: row.name }),
+        agents: q.projectAgents.all<{ agent_id: string }>(row.id).map((member) => member.agent_id),
+        createdAt: row.created_at,
+    })
+
+    const project = (id: string): ProjectRecord | undefined => {
+        const row = q.projectGet.get<ProjectRow>(id)
+        return row === undefined ? undefined : projectOf(row)
     }
 
     const conversationOf = (row: ConversationRow): ConversationRecord => ({
@@ -210,6 +311,9 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
         deleteParticipant: async (id) =>
             db.transaction(() => {
                 q.memberRemoveEverywhere.run(id)
+                // Their owner scope goes with them; the index drops it at the next sync of the scope.
+                q.notesDeleteIn.run(`owner:${id}`)
+                q.writerClearIf.run(id)
                 return q.participantDelete.run(id).changes > 0
             }),
         create: async (record) =>
@@ -313,10 +417,73 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
             const row = q.actionGet.get<ActionRow>(id)
             return row === undefined ? undefined : actionOf(row)
         },
+        addNote: async (record) => {
+            q.noteInsert.run(
+                record.id,
+                record.scope,
+                record.text,
+                record.writtenBy,
+                record.createdAt,
+            )
+            return record
+        },
+        notes: async (scope) => q.notesIn.all<NoteRow>(scope).map(noteOf),
+        note: async (id) => {
+            const row = q.noteGet.get<NoteRow>(id)
+            return row === undefined ? undefined : noteOf(row)
+        },
+        deleteNote: async (id) => q.noteDelete.run(id).changes > 0,
+        noteScopes: async () => q.noteScopes.all<{ scope: string }>().map((row) => row.scope),
+        upsertProject: async (record) => {
+            q.projectUpsert.run(record.id, record.name ?? null, record.createdAt)
+            const found = project(record.id)
+            if (found === undefined)
+                throw new Error(`project "${record.id}" vanished after a write`)
+            return found
+        },
+        project: async (id) => project(id),
+        projects: async () => q.projectList.all<ProjectRow>().map(projectOf),
+        deleteProject: async (id) =>
+            db.transaction(() => {
+                q.projectAgentsClear.run(id)
+                q.notesDeleteIn.run(`project:${id}`)
+                return q.projectDelete.run(id).changes > 0
+            }),
+        setProjectAgents: async (id, add, remove) => {
+            db.transaction(() => {
+                for (const agentId of add) q.projectAgentAdd.run(id, agentId)
+                for (const agentId of remove) q.projectAgentRemove.run(id, agentId)
+            })
+            const found = project(id)
+            if (found === undefined) throw new Error(`project "${id}" does not exist`)
+            return found
+        },
+        projectsOf: async (agentId) =>
+            q.projectsOf.all<{ project_id: string }>(agentId).map((row) => row.project_id),
+        setSpaceWriter: async (writer, setBy, at) => {
+            q.writerSet.run(writer, setBy ?? null, at)
+        },
+        spaceWriter: async () => q.writerGet.get<{ writer: string }>()?.writer,
+        recordRead: async (record) => {
+            q.readInsert.run(
+                record.scope,
+                record.reader,
+                record.turnId,
+                record.sessionKey,
+                record.requestedBy ?? null,
+                record.onBehalfOf ?? null,
+                JSON.stringify(record.sources),
+                record.at,
+            )
+        },
+        reads: async (scope, options = {}) =>
+            q.readsIn.all<ReadRow>(scope, options.limit ?? 100).map(readOf),
         purgeAgent: (agentId) => {
             q.memberRemoveEverywhere.run(`agent:${agentId}`)
             q.assignmentDelete.run(agentId)
             q.actionsDeleteForAgent.run(agentId)
+            q.projectsDeleteForAgent.run(agentId)
+            q.writerClearIf.run(`agent:${agentId}`)
         },
     }
 }

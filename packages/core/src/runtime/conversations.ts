@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto"
 import { GovernorError, HarnessError } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import type { TurnSender } from "../loop/sender.ts"
+import { parseScope } from "../memory/scopes.ts"
 import type {
     AssignmentRecord,
     ConversationKind,
@@ -33,7 +34,10 @@ import type {
     ConversationRecord,
     ConversationStore,
     DeferredActionRecord,
+    MemoryNoteRecord,
+    MemoryReadRecord,
     ParticipantRecord,
+    ProjectRecord,
 } from "../store/store.ts"
 import type { Agent } from "./agent.ts"
 
@@ -314,6 +318,181 @@ export class ConversationHub {
             { agentId: input.agentId },
         )
         return record
+    }
+
+    /**
+     * Who may write a shared scope (Phase 29). `actorId` absent is the operator — an unbound key,
+     * already admitted by its capability — who may write anything an admin may.
+     *
+     * - `owner:<X>`: only X. Not even an admin: another member's memory is theirs to edit (a non-goal).
+     * - `space`: an admin, or the one designated space writer.
+     * - `project:<id>`: an admin, into a project that exists.
+     */
+    async #mayWrite(scope: string, actorId: string | undefined): Promise<void> {
+        const actor = actorId === undefined ? undefined : await this.#store.participant(actorId)
+        if (actorId !== undefined && actor === undefined) {
+            throw refused(
+                "participant_not_found",
+                `No participant "${actorId}".`,
+                "POST /v1/participants registers one.",
+            )
+        }
+        const admin = actorId === undefined || actor?.role === "admin"
+        if (scope.startsWith("owner:")) {
+            const owner = scope.slice("owner:".length)
+            if ((await this.#store.participant(owner)) === undefined) {
+                throw refused(
+                    "participant_not_found",
+                    `No participant "${owner}" for scope ${scope}.`,
+                    "An owner scope belongs to a registered human. POST /v1/participants registers one.",
+                    "scope",
+                )
+            }
+            if (actorId !== undefined && actorId !== owner) {
+                throw refused(
+                    "memory_scope_forbidden",
+                    `${actorId} may not write ${scope}.`,
+                    "An owner scope is written only by its owner; an admin writes the space or a project instead.",
+                    "scope",
+                )
+            }
+            return
+        }
+        if (scope.startsWith("project:")) {
+            const id = scope.slice("project:".length)
+            if ((await this.#store.project(id)) === undefined) {
+                throw refused(
+                    "project_not_found",
+                    `No project "${id}".`,
+                    "PUT /v1/projects/:id creates one.",
+                    "scope",
+                )
+            }
+        }
+        if (admin) return
+        if (scope === "space" && (await this.#store.spaceWriter()) === actorId) return
+        throw refused(
+            "memory_scope_forbidden",
+            `${actorId} may not write ${scope}.`,
+            scope === "space"
+                ? "The space is read-only except to admins and its designated writer (PUT /v1/memory/space/writer)."
+                : "A project's memory is written by an admin.",
+            "scope",
+        )
+    }
+
+    #scope(value: string): string {
+        const scope = parseScope(value)
+        if (scope === undefined) {
+            throw refused(
+                "memory_scope_invalid",
+                `"${value}" is not a memory scope.`,
+                "A shared scope is `space`, `owner:<participantId>` or `project:<projectId>`. An agent's private memory is written by the agent itself.",
+                "scope",
+            )
+        }
+        return scope
+    }
+
+    async addNote(input: {
+        readonly scope: string
+        readonly text: string
+        readonly authorId?: string
+    }): Promise<MemoryNoteRecord> {
+        const scope = this.#scope(input.scope)
+        const text = input.text.trim()
+        if (text === "") {
+            throw refused(
+                "memory_note_empty",
+                "A note needs text.",
+                "Send `text`: one or two sentences worth remembering.",
+                "text",
+            )
+        }
+        await this.#mayWrite(scope, input.authorId)
+        return this.#store.addNote({
+            id: `mn_${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+            scope,
+            text,
+            writtenBy: input.authorId ?? "operator",
+            createdAt: this.#now().toISOString(),
+        })
+    }
+
+    /** Readable by whoever may write it, and by everyone for the space and projects. */
+    async notes(scopeValue: string, actorId?: string): Promise<readonly MemoryNoteRecord[]> {
+        const scope = this.#scope(scopeValue)
+        if (scope.startsWith("owner:")) await this.#mayWrite(scope, actorId)
+        return this.#store.notes(scope)
+    }
+
+    async deleteNote(id: string, actorId?: string): Promise<void> {
+        const note = await this.#store.note(id)
+        if (note === undefined) {
+            throw refused(
+                "memory_note_not_found",
+                `No note "${id}".`,
+                "GET /v1/memory/notes?scope=… lists a scope's notes.",
+            )
+        }
+        await this.#mayWrite(note.scope, actorId)
+        await this.#store.deleteNote(id)
+    }
+
+    /** The owner's audit: every read of their scope made for somebody else. Theirs, or an admin's. */
+    async reads(participantId: string, actorId?: string): Promise<readonly MemoryReadRecord[]> {
+        if (actorId !== undefined && actorId !== participantId) {
+            const actor = await this.#store.participant(actorId)
+            if (actor?.role !== "admin") {
+                throw refused(
+                    "memory_scope_forbidden",
+                    `${actorId} may not read ${participantId}'s memory audit.`,
+                    "A person's audit is theirs, or an admin's.",
+                )
+            }
+        }
+        return this.#store.reads(`owner:${participantId}`)
+    }
+
+    async upsertProject(input: {
+        readonly id: string
+        readonly name?: string
+        readonly agents?: readonly string[]
+    }): Promise<ProjectRecord> {
+        for (const agentId of input.agents ?? []) this.#requireAgent(agentId)
+        const existing = await this.#store.project(input.id)
+        const saved = await this.#store.upsertProject({
+            id: input.id,
+            ...(input.name === undefined ? {} : { name: input.name }),
+            createdAt: existing?.createdAt ?? this.#now().toISOString(),
+        })
+        if (input.agents === undefined) return saved
+        const remove = (existing?.agents ?? []).filter((id) => !input.agents?.includes(id))
+        return this.#store.setProjectAgents(input.id, input.agents, remove)
+    }
+
+    async setSpaceWriter(writer: string, setBy?: string): Promise<void> {
+        const agentId = agentOf(writer)
+        if (agentId !== undefined) this.#requireAgent(agentId)
+        else if ((await this.#store.participant(writer)) === undefined) {
+            throw refused(
+                "participant_not_found",
+                `No participant "${writer}".`,
+                "The space writer is a registered human or a hosted agent (agent:<id>).",
+                "writer",
+            )
+        }
+        await this.#store.setSpaceWriter(writer, setBy, this.#now().toISOString())
+    }
+
+    #requireAgent(agentId: string): void {
+        if (this.#agent(agentId) === undefined) {
+            throw refused(
+                "agent_not_found",
+                `No agent "${agentId}".`,
+                "GET /v1/agents lists the ones hosted here.",
+            )
+        }
     }
 
     async #append(
