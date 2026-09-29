@@ -21,6 +21,12 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - Room text is untrusted to every agent, so a mutating call from a room needs a `policy.allow` rule or an approval.
 - A key bound to a participant posts only as them and sees only their conversations. An admin participant can assign an agent to a member; `GET /v1/agents/:id` shows it.
 
+### Stand-ins and delegation
+
+- A DM can hold two people and their agents. When one is offline (`PUT /v1/participants/:id/presence`), their agent answers for them after `standIn.escalateAfterMs`, says so at first contact, and marks each reply `onBehalfOf`.
+- A stand-in never commits: a mutating call is queued for the owner (`GET /v1/actions`), even with the tool allowed, and runs only when they approve it.
+- `delegation.offer` and `delegation.to` let a coordinator hand work to another member's agent, with the same handoff a team uses.
+
 ### Media
 
 - `media.transcription` and `media.image`: `openai` (any `/audio/transcriptions` and `/images/generations` endpoint) is built in; `aws` (Amazon Transcribe, Nova Canvas) comes from `@dispach/media-aws`. Set through settings, the API or `config_set`.
@@ -29,6 +35,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 
 ### Fixes
 
+- A team member or delegate with no tools of its own can return its artifact; every handoff to one used to fail.
 - A reload onto a manifest the agent cannot be built from now fails and leaves the running agent in place, instead of removing it.
 
 ### Channels

@@ -117,3 +117,60 @@ describe("a key bound to a participant, in conversations", () => {
         expect(await codeOf(anonymous)).toBe("conversation_author_required")
     })
 })
+
+describe("presence and queued actions (Phase 28)", () => {
+    test("a bound key sets only its own presence", async () => {
+        const { call, bob } = await setup()
+        const own = await call("PUT", "/v1/participants/user:bob/presence", {
+            token: bob,
+            body: { presence: "offline" },
+        })
+        expect(own.status).toBe(200)
+        expect(((await own.json()) as { presence: string }).presence).toBe("offline")
+        const other = await call("PUT", "/v1/participants/user:ada/presence", {
+            token: bob,
+            body: { presence: "offline" },
+        })
+        expect(other.status).toBe(403)
+        expect(await codeOf(other)).toBe("sender_not_bound_participant")
+    })
+
+    test("only the owner decides an action, once; anyone else's reads as missing", async () => {
+        const { call, runtime, room, bob, ada } = await setup()
+        await runtime.store.conversations.deferAction({
+            id: "da_test",
+            agentId: "assistant",
+            conversationId: room.id,
+            ownerId: "user:ada",
+            requestedBy: "user:bob",
+            slug: "no_such_tool",
+            args: {},
+            status: "pending",
+            createdAt: new Date().toISOString(),
+        })
+        const bobs = (await (await call("GET", "/v1/actions", { token: bob })).json()) as {
+            actions: unknown[]
+        }
+        expect(bobs.actions).toEqual([])
+        const byBob = await call("POST", "/v1/actions/da_test", {
+            token: bob,
+            body: { approve: true },
+        })
+        expect(byBob.status).toBe(404)
+        expect(await codeOf(byBob)).toBe("action_not_found")
+
+        const byAda = await call("POST", "/v1/actions/da_test", {
+            token: ada,
+            body: { approve: true },
+        })
+        expect(byAda.status).toBe(200)
+        // The tool does not exist, so it ran and failed — decided, and never run a second time.
+        expect(((await byAda.json()) as { status: string }).status).toBe("failed")
+        const again = await call("POST", "/v1/actions/da_test", {
+            token: ada,
+            body: { approve: true },
+        })
+        expect(again.status).toBe(409)
+        expect(await codeOf(again)).toBe("action_already_decided")
+    })
+})

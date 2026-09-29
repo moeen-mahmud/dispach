@@ -704,6 +704,9 @@ export interface ParticipantLike {
     readonly name?: string
     readonly role: "admin" | "member"
     readonly createdAt: string
+    /** Pushed by the embedder; absent reads as online. */
+    readonly presence?: "online" | "offline"
+    readonly presenceAt?: string
 }
 
 export interface ConversationLike {
@@ -723,8 +726,25 @@ export interface ConversationMessageLike {
     readonly mentions: readonly string[]
     readonly hop: number
     readonly turnId?: string
+    /** The absent owner a stand-in answered for. */
+    readonly onBehalfOf?: string
     readonly seq: number
     readonly createdAt: string
+}
+
+/** A mutating call a stand-in queued for its absent owner (Phase 28). */
+export interface DeferredActionLike {
+    readonly id: string
+    readonly agentId: string
+    readonly conversationId: string
+    readonly ownerId: string
+    readonly requestedBy: string
+    readonly slug: string
+    readonly args: Readonly<Record<string, unknown>>
+    readonly status: "pending" | "done" | "failed" | "denied"
+    readonly result?: string
+    readonly createdAt: string
+    readonly decidedAt?: string
 }
 
 export interface AssignmentLike {
@@ -873,6 +893,14 @@ export interface DispachClient {
         readonly messages: readonly ConversationMessageLike[]
         readonly nextAfter?: number
     }>
+    /** Push whether a person is there. An offline person's agent stands in for them in a DM. */
+    setPresence(participantId: string, presence: "online" | "offline"): Promise<ParticipantLike>
+    /** Actions stand-ins queued for their owners. A member-bound key sees its own. */
+    actions(options?: {
+        readonly status?: DeferredActionLike["status"]
+    }): Promise<readonly DeferredActionLike[]>
+    /** Approve (runs the exact call) or decline a queued action. The owner's to decide. */
+    decideAction(actionId: string, approve: boolean): Promise<DeferredActionLike>
     /** The webhook subscriptions this credential can see. */
     webhooks(): Promise<readonly WebhookLike[]>
     /**
@@ -1354,6 +1382,23 @@ export function createClient(options: ClientOptions): DispachClient {
                 `/v1/conversations/${encodeURIComponent(conversationId)}/messages${suffix}`,
             )
         },
+        setPresence: (participantId, presence) =>
+            json<ParticipantLike>(
+                "PUT",
+                `/v1/participants/${encodeURIComponent(participantId)}/presence`,
+                { body: { presence } },
+            ),
+        actions: async (options = {}) =>
+            (
+                await json<{ actions: readonly DeferredActionLike[] }>(
+                    "GET",
+                    `/v1/actions${options.status === undefined ? "" : `?status=${options.status}`}`,
+                )
+            ).actions,
+        decideAction: (actionId, approve) =>
+            json<DeferredActionLike>("POST", `/v1/actions/${encodeURIComponent(actionId)}`, {
+                body: { approve },
+            }),
         webhooks: async () =>
             (await json<{ webhooks: readonly WebhookLike[] }>("GET", "/v1/webhooks")).webhooks,
         createWebhook: (input) =>

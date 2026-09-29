@@ -139,12 +139,16 @@ and WebSocket surfaces can return:
 | `conversation_kind_invalid` | 400 | A kind other than `room` or `dm`. |
 | `conversation_members_required` | 400 | No members, or a members list that is not a list of ids. |
 | `conversation_member_unknown` | 400 | A member that is neither a registered human nor an agent this key reaches. |
-| `conversation_dm_shape` | 400 | A dm that is not exactly one human and one agent, or a change to a dm's members. |
+| `conversation_dm_shape` | 400 | A dm that is not one human and one agent, or two humans with at most one agent each, assigned to them — or a change to a dm's members. |
 | `conversation_creator_not_member` | 403 | A participant-bound key creating a conversation it is not in. |
 | `conversation_not_found` | 404 | No such conversation, or one this key may not see — a member-bound key sees only its own, and every key must reach each agent in it. The same answer either way. |
 | `conversation_author_required` | 400 | A message from an unbound key with no `authorId`. |
 | `conversation_author_not_member` | 400 | The author is not a human member of the conversation. Agents post by answering. |
 | `conversation_mention_unknown` | 400 | A mention naming someone who is not a member. |
+| `presence_invalid` | 400 | A presence other than `online` or `offline`. |
+| `action_decision_required` | 400 | A decision without a boolean `approve`. |
+| `action_not_found` | 404 | No such action, or one this key may not decide — a member-bound key decides only its own. The same answer either way. |
+| `action_already_decided` | 409 | The action was approved or declined already. Nothing ran twice. |
 | `assignment_requires_admin` | 403 | A participant-bound key assigning an agent when its participant is not an `admin`. |
 | `key_scope_agent_unknown` | 400 | `scope.agents` names an agent this server does not hold. Refused at mint rather than producing a key that reaches nothing. |
 | `provision_adopt_failed` | — | Returned *inside* a `201`: the agent was written and is not running. |
@@ -273,6 +277,10 @@ PATCH  /v1/conversations/:conversationId/members { add?, remove? } → the conve
 POST   /v1/conversations/:conversationId/messages { text, mentions?, authorId? }
                                                      → 202 { id, authorId, origin, text, mentions, hop, seq, … }
 GET    /v1/conversations/:conversationId/messages?after&limit → { conversationId, messages, nextAfter? }
+PUT    /v1/participants/:participantId/presence { presence: "online" | "offline" } → the participant
+GET    /v1/actions?status                            → { actions: [{ id, agentId, conversationId, ownerId,
+                                                                   requestedBy, slug, args, status, result?, … }] }
+POST   /v1/actions/:actionId { approve }             → the action, decided (`done`, `failed` or `denied`)
 PUT    /v1/agents/:id/assignee { participantId }     → { agentId, participantId, assignedBy?, assignedAt }
 DELETE /v1/agents/:id/assignee                       → { id, unassigned }
 
@@ -828,6 +836,9 @@ here that the server does not register, or a registered route missing from here,
 | `PATCH /v1/conversations/:conversationId/members` | `admin` |
 | `POST /v1/conversations/:conversationId/messages` | `chat` |
 | `GET /v1/conversations/:conversationId/messages` | `read` |
+| `PUT /v1/participants/:participantId/presence` | `chat` |
+| `GET /v1/actions` | `read` |
+| `POST /v1/actions/:actionId` | `chat` |
 | `PUT /v1/agents/:id/assignee` | `admin` |
 | `DELETE /v1/agents/:id/assignee` | `admin` |
 
@@ -1159,9 +1170,11 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `schedule.deferred` | a fire arrived mid-run | `scheduleId`, `kind` |
 | `schedule.error` | unreadable schedule, or the turn it started failed | `scheduleId`, `code`, `message`, `hint` |
 | `media.result` | a media call finished | `callId` (a ledger key, like `model.result`'s, and on its usage row), `kind` (`transcription` \| `image`), `provider`, `model`, `latencyMs`, `images?`, `audioSeconds?` (when the provider or the channel reported a duration), `sender?` (Phase 26j) |
-| `conversation.message` | a message in a room or DM | `conversationId`, `messageId`, `authorId`, `origin` (`human` \| `agent`, stamped by the runtime), `text`, `mentions`, `hop`, `turnId?` (an agent's reply). An agent's carries its `agentId` in the envelope; a human's carries none (Phase 27) |
+| `conversation.message` | a message in a room or DM | `conversationId`, `messageId`, `authorId`, `origin` (`human` \| `agent`, stamped by the runtime), `text`, `mentions`, `hop`, `turnId?` (an agent's reply). A stand-in's messages carry `onBehalfOf` in the log. An agent's carries its `agentId` in the envelope; a human's carries none (Phase 27) |
 | `conversation.skipped` | a message addressed an agent that did not answer | `conversationId`, `messageId`, `reason` (`hop_limit` \| `refused` \| `failed`), `detail`, `hop`, `ceiling` (the agent's `limits.maxHops`) |
 | `agent.assigned` | an admin recorded who an agent works for | `participantId`, `assignedBy?` |
+| `action.deferred` | a stand-in queued a mutating call for its absent owner; nothing ran (Phase 28) | `actionId`, `conversationId`, `ownerId`, `requestedBy`, `slug` |
+| `action.decided` | the owner answered it | `actionId`, `conversationId`, `status` (`done` \| `failed` \| `denied`) |
 | `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs`, `attachments?` (`[{path, mimeType}]`, files a tool produced for the reply, relative to the agent's directory; a channel sends them after the text) |
 | `error` | anything uncaught | `code`, `message`, `hint`, `stack?` |
 

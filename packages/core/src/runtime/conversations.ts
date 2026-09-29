@@ -32,6 +32,7 @@ import type {
     ConversationMessageRecord,
     ConversationRecord,
     ConversationStore,
+    DeferredActionRecord,
     ParticipantRecord,
 } from "../store/store.ts"
 import type { Agent } from "./agent.ts"
@@ -154,15 +155,8 @@ export class ConversationHub {
         const members = [...new Set(input.members)]
         await this.#checkMembers(members)
         const agents = members.filter((member) => agentOf(member) !== undefined)
-        const humans = members.length - agents.length
-        if (input.kind === "dm" && (agents.length !== 1 || humans !== 1)) {
-            throw refused(
-                "conversation_dm_shape",
-                `A dm is one human and one agent; this names ${humans} human(s) and ${agents.length} agent(s).`,
-                'Use kind "room" for anything larger. In a room an agent answers only when mentioned.',
-                "members",
-            )
-        }
+        const humans = members.filter((member) => agentOf(member) === undefined)
+        if (input.kind === "dm") await this.#checkDmShape(humans, agents)
         return this.#store.create({
             id: `cv_${randomUUID().replaceAll("-", "").slice(0, 20)}`,
             kind: input.kind,
@@ -188,6 +182,32 @@ export class ConversationHub {
         }
         await this.#checkMembers(add)
         return this.#store.setMembers(conversationId, add, remove)
+    }
+
+    /**
+     * A dm is one human and their agent, or two people with their agents present (Phase 28): at
+     * most one agent each, and each assigned to one of the two — the agent that stands in for them.
+     */
+    async #checkDmShape(humans: readonly string[], agents: readonly string[]): Promise<void> {
+        const shape = (why: string) =>
+            refused(
+                "conversation_dm_shape",
+                `${why} This names ${humans.length} human(s) and ${agents.length} agent(s).`,
+                'A dm is one human and one agent, or two humans with the agents assigned to them (PUT /v1/agents/:id/assignee). Use kind "room" for anything else.',
+                "members",
+            )
+        if (humans.length === 1 && agents.length === 1) return
+        if (humans.length !== 2 || agents.length === 0 || agents.length > 2) {
+            throw shape("That is not a dm.")
+        }
+        const owners = new Set<string>()
+        for (const member of agents) {
+            const owner = (await this.#store.assignment(agentOf(member) ?? ""))?.participantId
+            if (owner === undefined || !humans.includes(owner) || owners.has(owner)) {
+                throw shape(`${member} is not the one agent assigned to either person.`)
+            }
+            owners.add(owner)
+        }
     }
 
     async #require(conversationId: string): Promise<ConversationRecord> {
@@ -323,9 +343,20 @@ export class ConversationHub {
     }
 
     #fanOut(conversation: ConversationRecord, message: ConversationMessageRecord): void {
+        const humans = conversation.members.filter((member) => agentOf(member) === undefined)
+        // Two people and their agents: an agent answers only by standing in for its owner.
+        const personal = conversation.kind === "dm" && humans.length === 2
         for (const member of conversation.members) {
             const agentId = agentOf(member)
             if (agentId === undefined || member === message.authorId) continue
+            if (personal) {
+                if (message.origin === "human") this.#maybeStandIn(agentId, conversation, message)
+                else
+                    this.#enqueue(agentId, conversation.id, () =>
+                        this.#deliver(agentId, conversation.id, message, false),
+                    )
+                continue
+            }
             const addressed =
                 conversation.kind === "dm"
                     ? message.origin === "human"
@@ -334,6 +365,281 @@ export class ConversationHub {
                 this.#deliver(agentId, conversation.id, message, addressed),
             )
         }
+        // A person speaking in a conversation is plainly there: anything waiting to answer for them
+        // in it is withdrawn, and the message it was waiting on is read instead.
+        if (message.origin === "human") this.#withdraw(message.authorId, conversation.id)
+    }
+
+    /** Messages waiting for an owner to stay away long enough, by owner. */
+    readonly #pending = new Map<
+        string,
+        {
+            conversationId: string
+            agentId: string
+            message: ConversationMessageRecord
+            timer: ReturnType<typeof setTimeout>
+        }[]
+    >()
+
+    /**
+     * A person's message to someone whose agent may stand in for them. The agent answers when its
+     * owner is offline and stays so for `standIn.escalateAfterMs`; otherwise it reads the message.
+     * Presence nobody pushed reads as online — an agent never speaks for someone it was not told is
+     * away.
+     */
+    #maybeStandIn(
+        agentId: string,
+        conversation: ConversationRecord,
+        message: ConversationMessageRecord,
+    ): void {
+        void (async () => {
+            const agent = this.#agent(agentId)
+            const owner = (await this.#store.assignment(agentId))?.participantId
+            const standIn = agent?.manifest.standIn
+            const observe = () =>
+                this.#enqueue(agentId, conversation.id, () =>
+                    this.#deliver(agentId, conversation.id, message, false),
+                )
+            if (
+                agent === undefined ||
+                owner === undefined ||
+                owner === message.authorId ||
+                standIn?.enabled !== true
+            ) {
+                observe()
+                return
+            }
+            if ((await this.#store.participant(owner))?.presence !== "offline") {
+                observe()
+                return
+            }
+            const entry = {
+                conversationId: conversation.id,
+                agentId,
+                message,
+                timer: setTimeout(() => {
+                    this.#remove(owner, entry)
+                    this.#enqueue(agentId, conversation.id, () =>
+                        this.#standIn(agentId, owner, message),
+                    )
+                }, standIn.escalateAfterMs),
+            }
+            entry.timer.unref?.()
+            this.#pending.set(owner, [...(this.#pending.get(owner) ?? []), entry])
+        })()
+    }
+
+    #remove(owner: string, entry: { timer: ReturnType<typeof setTimeout> }): void {
+        const left = (this.#pending.get(owner) ?? []).filter((candidate) => candidate !== entry)
+        if (left.length === 0) this.#pending.delete(owner)
+        else this.#pending.set(owner, left)
+    }
+
+    /** The owner is back, or spoke: waiting stand-ins become reads. */
+    #withdraw(owner: string, conversationId?: string): void {
+        for (const entry of this.#pending.get(owner) ?? []) {
+            if (conversationId !== undefined && entry.conversationId !== conversationId) continue
+            clearTimeout(entry.timer)
+            this.#remove(owner, entry)
+            this.#enqueue(entry.agentId, entry.conversationId, () =>
+                this.#deliver(entry.agentId, entry.conversationId, entry.message, false),
+            )
+        }
+    }
+
+    /** Pushed by the embedder. Coming online withdraws every stand-in waiting to answer for them. */
+    async setPresence(
+        participantId: string,
+        presence: "online" | "offline",
+    ): Promise<ParticipantRecord> {
+        const updated = await this.#store.setPresence(
+            participantId,
+            presence,
+            this.#now().toISOString(),
+        )
+        if (updated === undefined) {
+            throw refused(
+                "participant_not_found",
+                `No participant "${participantId}".`,
+                "POST /v1/participants registers one.",
+            )
+        }
+        if (presence === "online") this.#withdraw(participantId)
+        return updated
+    }
+
+    /**
+     * Answer for an absent owner: disclosed at first contact, marked `onBehalfOf` on every message,
+     * and unable to commit — every mutating call is queued for the owner, whatever the policy allows.
+     */
+    async #standIn(
+        agentId: string,
+        owner: string,
+        message: ConversationMessageRecord,
+    ): Promise<void> {
+        const agent = this.#agent(agentId)
+        if (agent === undefined) return
+        // Checked again at the moment of answering: they may have come back while the timer ran.
+        if ((await this.#store.participant(owner))?.presence !== "offline") {
+            await this.#deliver(agentId, message.conversationId, message, false)
+            return
+        }
+        const ownerName = (await this.#store.participant(owner))?.name ?? owner
+        const sender = await this.#store.participant(message.authorId)
+        const senderName = sender?.name ?? message.authorId
+        const self = agentParticipant(agentId)
+        const log = await this.#store.messages(message.conversationId, { limit: 500 })
+        const disclosed = log.some((entry) => entry.authorId === self && entry.onBehalfOf === owner)
+        const sessionKey = roomSessionKey(message.conversationId)
+        const from: TurnSender = {
+            id: message.authorId,
+            kind: "user",
+            ...(sender?.name === undefined ? {} : { name: sender.name }),
+            room: message.conversationId,
+        }
+        let result: Awaited<ReturnType<Agent["send"]>>
+        try {
+            result = await agent.send(message.text, {
+                sessionKey,
+                source: `room:${message.conversationId}`,
+                from,
+                participant: { id: message.authorId, via: "api", onBehalfOf: owner },
+                runtimeNote: `You are standing in for ${ownerName}, who is away, answering ${senderName} as ${ownerName}'s agent. You cannot commit ${ownerName} to anything: whatever would change something is queued for ${ownerName} to approve, and you should say so plainly.`,
+                deferMutations: async (call) => {
+                    const action = await this.#store.deferAction({
+                        id: `da_${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+                        agentId,
+                        conversationId: message.conversationId,
+                        ownerId: owner,
+                        requestedBy: message.authorId,
+                        slug: call.slug,
+                        args: call.args,
+                        status: "pending",
+                        createdAt: this.#now().toISOString(),
+                    })
+                    this.#bus.emit(
+                        "action.deferred",
+                        {
+                            actionId: action.id,
+                            conversationId: action.conversationId,
+                            ownerId: owner,
+                            requestedBy: action.requestedBy,
+                            slug: action.slug,
+                        },
+                        { agentId, sessionKey },
+                    )
+                    return `Queued for ${ownerName}'s approval as ${action.id}. It has NOT happened. Tell ${senderName} that ${ownerName} will decide.`
+                },
+            })
+        } catch (cause) {
+            this.#bus.emit(
+                "conversation.skipped",
+                {
+                    conversationId: message.conversationId,
+                    messageId: message.id,
+                    reason: cause instanceof GovernorError ? "refused" : "failed",
+                    detail: cause instanceof Error ? cause.message : String(cause),
+                    hop: message.hop,
+                    ceiling: agent.manifest.limits.maxHops,
+                },
+                { agentId, sessionKey },
+            )
+            return
+        }
+        const text = result.text.trim()
+        if (text === "") return
+        const conversation = await this.#store.get(message.conversationId)
+        if (conversation === undefined) return
+        const reply = await this.#append({
+            conversationId: message.conversationId,
+            authorId: self,
+            origin: "agent",
+            // The disclosure is the runtime's, not the model's, so it cannot be talked out of it.
+            text: disclosed
+                ? text
+                : `(${ownerName}'s agent, answering while ${ownerName} is away.) ${text}`,
+            mentions: [],
+            hop: message.hop + 1,
+            turnId: result.turnId,
+            onBehalfOf: owner,
+        })
+        this.#fanOut(conversation, reply)
+    }
+
+    /**
+     * The owner's answer to a queued action. Approved, the exact call runs as the owner's agent and
+     * its outcome is posted into the conversation; denied, that is posted. Decided once.
+     */
+    async decideAction(actionId: string, approve: boolean): Promise<DeferredActionRecord> {
+        const action = await this.#store.action(actionId)
+        if (action === undefined || action.status !== "pending") {
+            throw refused(
+                action === undefined ? "action_not_found" : "action_already_decided",
+                action === undefined
+                    ? `No action "${actionId}".`
+                    : `Action ${actionId} was already ${action.status}.`,
+                "GET /v1/actions lists the ones waiting on you.",
+            )
+        }
+        const agent = this.#agent(action.agentId)
+        const owner = await this.#store.participant(action.ownerId)
+        const ownerName = owner?.name ?? action.ownerId
+        let status: "done" | "failed" | "denied" = "denied"
+        let result: string | undefined
+        if (approve) {
+            if (agent === undefined) {
+                status = "failed"
+                result = `The agent ${action.agentId} is not hosted any more.`
+            } else {
+                const ran = await agent.runApproved(
+                    { slug: action.slug, args: action.args },
+                    {
+                        sessionKey: roomSessionKey(action.conversationId),
+                        participant: { id: action.ownerId, via: "api" },
+                    },
+                )
+                status = ran.ok ? "done" : "failed"
+                result = ran.output
+            }
+        }
+        const decided = await this.#store.decideAction(
+            action.id,
+            status,
+            result,
+            this.#now().toISOString(),
+        )
+        if (decided === undefined) {
+            throw refused(
+                "action_already_decided",
+                `Action ${actionId} was decided by someone else first.`,
+                "Nothing ran twice. GET /v1/actions shows its outcome.",
+            )
+        }
+        this.#bus.emit(
+            "action.decided",
+            { actionId: action.id, conversationId: action.conversationId, status },
+            { agentId: action.agentId },
+        )
+        const conversation = await this.#store.get(action.conversationId)
+        if (conversation !== undefined) {
+            const said =
+                status === "denied"
+                    ? `${ownerName} declined ${action.slug}.`
+                    : status === "done"
+                      ? `${ownerName} approved ${action.slug}; it is done. ${(result ?? "").slice(0, 400)}`
+                      : `${ownerName} approved ${action.slug}, and it failed: ${(result ?? "").slice(0, 400)}`
+            const note = await this.#append({
+                conversationId: conversation.id,
+                authorId: agentParticipant(action.agentId),
+                origin: "agent",
+                text: said,
+                mentions: [],
+                hop: 1,
+                onBehalfOf: action.ownerId,
+            })
+            this.#fanOut(conversation, note)
+        }
+        return decided
     }
 
     #enqueue(agentId: string, conversationId: string, work: () => Promise<void>): void {

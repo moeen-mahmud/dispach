@@ -34,7 +34,7 @@ import { type ResolvedRole, requestParamsFor } from "../model/roles.ts"
 import { compose, type Middleware } from "../plugins/middleware.ts"
 import type { ParsedOutput, StepOutput, ToolDialect } from "../tools/dialect/dialect.ts"
 import { nativeWireTokens } from "../tools/dialect/native.ts"
-import { type ApprovalRequest, executeIntents } from "../tools/execute.ts"
+import { type ApprovalRequest, type ExecuteInput, executeIntents } from "../tools/execute.ts"
 import { phaseSetTool } from "../tools/local.ts"
 import type { PolicyConfig } from "../tools/policy.ts"
 import type { ToolRegistry } from "../tools/registry.ts"
@@ -224,6 +224,13 @@ export interface TurnInput {
     readonly from?: TurnSender
     /** Who the turn acts for, handed to every tool as `ToolContext.actingParticipant`. Absent: nobody. */
     readonly participant?: ActingParticipant
+    /**
+     * A sentence the runtime puts before the input, outside any fence around it: a stand-in's
+     * instructions. Runtime-authored, so it is not the sender's text and is not framed as theirs.
+     */
+    readonly runtimeNote?: string
+    /** Every mutating call is queued rather than run: a stand-in's turn. See `ExecuteInput.defer`. */
+    readonly deferMutations?: ExecuteInput["defer"]
     /** Caller's cancellation. A disconnect must never be wired to this. */
     readonly signal?: AbortSignal
     readonly turnId?: string
@@ -494,7 +501,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
      * and does not have to be baked into the evidence. History is the other way round — it is prompt
      * material, so it carries the fence, exactly as a rendered observation already does.
      */
-    const promptInput = frameSenderInput(input.input, input.from)
+    const framedInput = frameSenderInput(input.input, input.from)
+    const promptInput =
+        input.runtimeNote === undefined ? framedInput : `${input.runtimeNote}\n\n${framedInput}`
     const inputTrust = trustOfSender(input.from)
 
     const link = linkSignals(input.signal, input.limits.turnTimeoutMs)
@@ -1206,6 +1215,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                           policy: tools.policy,
                           ...(tools.approve === undefined ? {} : { approve: tools.approve }),
                           ...(untrustedSource === undefined ? {} : { untrustedSource }),
+                          ...(input.deferMutations === undefined
+                              ? {}
+                              : { defer: input.deferMutations }),
                       })
 
             if (outcome.results.some((result) => result.ok)) {

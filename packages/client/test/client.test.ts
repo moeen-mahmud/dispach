@@ -805,6 +805,10 @@ describe("conversations", () => {
         expect(log.messages.map((m) => m.text)).toEqual(["hello"])
         expect(log.nextAfter).toBe(posted.seq)
 
+        expect((await client.setPresence("user:ada", "offline")).presence).toBe("offline")
+        const actions = await client.actions({ status: "pending" })
+        expect(Array.isArray(actions)).toBe(true)
+
         const assigned = await client.agent(agentId).assign("user:ada")
         expect(assigned.participantId).toBe("user:ada")
         expect((await client.agent(agentId).unassign()).unassigned).toBe(true)

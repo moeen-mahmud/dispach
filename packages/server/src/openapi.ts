@@ -40,11 +40,13 @@ import {
     AssigneeBody,
     ConversationBody,
     ConversationMessageBody,
+    DecisionBody,
     KeyBody,
     MembersBody,
     MessageBody,
     ParticipantBody,
     PhaseBody,
+    PresenceBody,
     ProvisionBody,
     SecretsBody,
     StopBody,
@@ -148,6 +150,25 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     },
     "GET /v1/conversations/:conversationId/messages": {
         summary: "The conversation's log, oldest first, after a sequence number.",
+    },
+    "PUT /v1/participants/:participantId/presence": {
+        summary:
+            "Push whether a person is there. In a DM between two people, an offline person's agent stands in for them.",
+        body: PresenceBody,
+        statuses: [{ code: 403, when: "a participant-bound key setting someone else's presence" }],
+    },
+    "GET /v1/actions": {
+        summary:
+            "Mutating calls stand-ins queued for their owners. A member-bound key sees its own.",
+    },
+    "POST /v1/actions/:actionId": {
+        summary:
+            "Approve or decline a queued action. Approved, the exact call runs as the owner's agent and the outcome is posted in the DM.",
+        body: DecisionBody,
+        statuses: [
+            { code: 404, when: "no such action, or not this key's to decide" },
+            { code: 409, when: "already decided" },
+        ],
     },
     "PUT /v1/agents/:id/assignee": {
         summary: "Record which member an agent works for. An admin participant's act.",

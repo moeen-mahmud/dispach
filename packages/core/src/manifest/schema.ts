@@ -642,6 +642,47 @@ export const MediaSchema = z
     })
     .strict()
 
+/**
+ * Answering for the owner while they are away (Phase 28). Only in a DM between two people, and only
+ * for the human the agent is assigned to. Off unless declared.
+ */
+export const StandInSchema = z
+    .object({
+        enabled: z.boolean().default(false),
+        /**
+         * How long after a message to an offline owner the agent answers for them. 0 answers at once.
+         * The owner coming online, or replying, before then cancels it.
+         */
+        escalateAfterMs: z.number().int().nonnegative().default(0),
+    })
+    .strict()
+
+/**
+ * Handing work to other members' agents in the same silo (Phase 28). A target declares what it
+ * offers; a coordinator declares whom it may use. The handoff that results is the team one: a fresh
+ * session, a typed artifact, the same depth limit.
+ */
+export const DelegationSchema = z
+    .object({
+        /** What this agent takes on for others: a task line and the artifact it returns. */
+        offer: z
+            .object({
+                task: z.string().min(1),
+                artifact: z
+                    .object({
+                        type: z.literal("object"),
+                        properties: z.record(z.string(), JsonSchemaNodeSchema),
+                        required: z.array(z.string()).optional(),
+                    })
+                    .strict(),
+            })
+            .strict()
+            .optional(),
+        /** The agents this one may delegate to, by id, or "*" for every agent that offers. */
+        to: z.union([z.literal("*"), z.array(slug).min(1)]).optional(),
+    })
+    .strict()
+
 export const ScheduleSchema = z
     .object({
         id: slug,
@@ -802,6 +843,8 @@ export const AgentManifestSchema = z
         schedules: z.array(ScheduleSchema).default([]),
         team: TeamSchema.optional(),
         media: MediaSchema.optional(),
+        standIn: StandInSchema.optional(),
+        delegation: DelegationSchema.optional(),
         plugins: z.array(PluginRefSchema).default([]),
         limits: LimitsSchema.prefault({}),
         server: ServerSchema.prefault({}),
@@ -827,6 +870,8 @@ export type ScheduleConfig = z.infer<typeof ScheduleSchema>
 export type TeamMemberConfig = z.infer<typeof TeamMemberSchema>
 export type TeamConfig = z.infer<typeof TeamSchema>
 export type MediaConfig = z.infer<typeof MediaSchema>
+export type StandInConfig = z.infer<typeof StandInSchema>
+export type DelegationConfig = z.infer<typeof DelegationSchema>
 export type TranscriptionConfig = NonNullable<MediaConfig["transcription"]>
 export type ImageConfig = NonNullable<MediaConfig["image"]>
 export type PluginRef = z.infer<typeof PluginRefSchema>

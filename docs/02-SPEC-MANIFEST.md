@@ -961,6 +961,39 @@ it was never given access to, and the browser cannot hide the name it resolved. 
 
 ---
 
+### `standIn` and `delegation` (Phase 28)
+
+```yaml
+standIn:
+  enabled: true           # answer for my assigned owner in a DM while they are offline
+  escalateAfterMs: 0      # how long an offline owner's silence lasts before I answer; 0 = at once
+
+delegation:
+  offer:                  # what I take on for other members' agents
+    task: Looks things up in the research archive.
+    artifact:
+      type: object
+      properties: { finding: { type: string } }
+      required: [finding]
+  to: "*"                 # or [agent ids]: whom I may delegate to (only agents that offer)
+```
+
+**`standIn`** applies only in a DM between two people, and only to the agent assigned to the absent
+one (`PUT /v1/agents/:id/assignee`). It answers when its owner's pushed presence is `offline` and
+stays so for `escalateAfterMs` after the message; the owner coming online, or writing in the DM,
+withdraws it and the agent only reads the message. Presence nobody pushed reads as online. Each reply
+is marked `onBehalfOf` the owner and its first carries a disclosure the runtime writes, not the model
+(`(Ada's agent, answering while Ada is away.)`). **It never commits**: every mutating call is queued as
+an action for the owner, whatever `policy.allow` says (a `deny` rule still refuses), and runs only
+when they approve it with `POST /v1/actions/:actionId`, its outcome posted in the DM.
+
+**`delegation`** lets a coordinator hand work to another member's agent in the silo. The handoff is
+the team one — `handoff(member, task)`, a fresh session, a typed artifact through `submit_artifact`,
+the same depth limit — resolved among agents that declare an `offer` and match `to`. The delegate's
+turn acts for the person who asked the coordinator, so they stay accountable. A cycle across members
+(`A` offers to `B`, `B` to `A`) is refused at load. Targets are fixed when the coordinator loads; an
+agent adopted later is reachable after the coordinator reloads.
+
 ### `team`
 
 Sub-agents this agent may delegate to. **Declaring the block is what registers the `handoff`

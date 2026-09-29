@@ -416,6 +416,23 @@ export const ConversationMessageBody = z.object({
 
 export const AssigneeBody = z.object({ participantId: participantId("assignee") })
 
+export const PresenceBody = z.object({
+    presence: refuse(z.enum(["online", "offline"]), {
+        code: "presence_invalid",
+        hint: 'Send { "presence": "online" } or "offline". It is pushed by you, never inferred; until it is, a person reads as online and no agent stands in for them.',
+        description:
+            "Whether the person is there. Decides whether their agent stands in for them in a DM.",
+    }),
+})
+
+export const DecisionBody = z.object({
+    approve: refuse(z.boolean(), {
+        code: "action_decision_required",
+        hint: 'Send { "approve": true } to run the queued call as it was asked, or false to decline it.',
+        description: "Run the queued call (true) or decline it (false).",
+    }),
+})
+
 export const WebhookBody = z.object({
     url: refuse(z.string().min(1), {
         code: "webhook_url_invalid",

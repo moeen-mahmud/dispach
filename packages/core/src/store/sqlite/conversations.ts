@@ -9,6 +9,7 @@ import type {
     ConversationMessageRecord,
     ConversationRecord,
     ConversationStore,
+    DeferredActionRecord,
     ParticipantRecord,
 } from "../store.ts"
 import type { SqlDatabase } from "./driver.ts"
@@ -19,6 +20,22 @@ interface ParticipantRow {
     name: string | null
     role: string
     created_at: string
+    presence: string | null
+    presence_at: string | null
+}
+
+interface ActionRow {
+    id: string
+    agent_id: string
+    conversation_id: string
+    owner_id: string
+    requested_by: string
+    slug: string
+    args: string
+    status: string
+    result: string | null
+    created_at: string
+    decided_at: string | null
 }
 
 interface ConversationRow {
@@ -38,6 +55,7 @@ interface MessageRow {
     mentions: string
     hop: number
     turn_id: string | null
+    on_behalf_of: string | null
     created_at: string
 }
 
@@ -54,6 +72,22 @@ const participantOf = (row: ParticipantRow): ParticipantRecord => ({
     ...(row.name === null ? {} : { name: row.name }),
     role: row.role === "admin" ? "admin" : "member",
     createdAt: row.created_at,
+    ...(row.presence === "online" || row.presence === "offline" ? { presence: row.presence } : {}),
+    ...(row.presence_at === null ? {} : { presenceAt: row.presence_at }),
+})
+
+const actionOf = (row: ActionRow): DeferredActionRecord => ({
+    id: row.id,
+    agentId: row.agent_id,
+    conversationId: row.conversation_id,
+    ownerId: row.owner_id,
+    requestedBy: row.requested_by,
+    slug: row.slug,
+    args: JSON.parse(row.args) as Record<string, unknown>,
+    status: row.status as DeferredActionRecord["status"],
+    ...(row.result === null ? {} : { result: row.result }),
+    createdAt: row.created_at,
+    ...(row.decided_at === null ? {} : { decidedAt: row.decided_at }),
 })
 
 const messageOf = (row: MessageRow): ConversationMessageRecord => ({
@@ -65,6 +99,7 @@ const messageOf = (row: MessageRow): ConversationMessageRecord => ({
     mentions: JSON.parse(row.mentions) as string[],
     hop: row.hop,
     ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
+    ...(row.on_behalf_of === null ? {} : { onBehalfOf: row.on_behalf_of }),
     seq: row.seq,
     createdAt: row.created_at,
 })
@@ -107,8 +142,9 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
         ),
         messageInsert: db.prepare(
             `INSERT INTO conversation_messages
-                 (id, conversation_id, author_id, origin, text, mentions, hop, turn_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 (id, conversation_id, author_id, origin, text, mentions, hop, turn_id,
+                  on_behalf_of, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ),
         messageBySeq: db.prepare("SELECT * FROM conversation_messages WHERE seq = ?"),
         messagesAfter: db.prepare(
@@ -123,6 +159,24 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
         ),
         assignmentGet: db.prepare("SELECT * FROM agent_assignments WHERE agent_id = ?"),
         assignmentDelete: db.prepare("DELETE FROM agent_assignments WHERE agent_id = ?"),
+        assignedTo: db.prepare(
+            "SELECT * FROM agent_assignments WHERE participant_id = ? ORDER BY agent_id",
+        ),
+        presenceSet: db.prepare(
+            "UPDATE participants SET presence = ?, presence_at = ? WHERE id = ?",
+        ),
+        actionInsert: db.prepare(
+            `INSERT INTO deferred_actions
+                 (id, agent_id, conversation_id, owner_id, requested_by, slug, args, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        ),
+        actionGet: db.prepare("SELECT * FROM deferred_actions WHERE id = ?"),
+        actionsAll: db.prepare("SELECT * FROM deferred_actions ORDER BY created_at, id"),
+        actionDecide: db.prepare(
+            `UPDATE deferred_actions SET status = ?, result = ?, decided_at = ?
+              WHERE id = ? AND status = 'pending'`,
+        ),
+        actionsDeleteForAgent: db.prepare("DELETE FROM deferred_actions WHERE agent_id = ?"),
     }
 
     const conversationOf = (row: ConversationRow): ConversationRecord => ({
@@ -191,6 +245,7 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
                 JSON.stringify(message.mentions),
                 message.hop,
                 message.turnId ?? null,
+                message.onBehalfOf ?? null,
                 message.createdAt,
             )
             const row = q.messageBySeq.get<MessageRow>(lastInsertRowid)
@@ -217,9 +272,51 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
             return row === undefined ? undefined : assignmentOf(row)
         },
         unassign: async (agentId) => q.assignmentDelete.run(agentId).changes > 0,
+        setPresence: async (id, presence, at) => {
+            q.presenceSet.run(presence, at, id)
+            const row = q.participantGet.get<ParticipantRow>(id)
+            return row === undefined ? undefined : participantOf(row)
+        },
+        assignedTo: async (participantId) =>
+            q.assignedTo.all<AssignmentRow>(participantId).map(assignmentOf),
+        deferAction: async (record) => {
+            q.actionInsert.run(
+                record.id,
+                record.agentId,
+                record.conversationId,
+                record.ownerId,
+                record.requestedBy,
+                record.slug,
+                JSON.stringify(record.args),
+                record.createdAt,
+            )
+            const row = q.actionGet.get<ActionRow>(record.id)
+            if (row === undefined) throw new Error(`action "${record.id}" vanished after a write`)
+            return actionOf(row)
+        },
+        action: async (id) => {
+            const row = q.actionGet.get<ActionRow>(id)
+            return row === undefined ? undefined : actionOf(row)
+        },
+        actions: async (filter = {}) =>
+            q.actionsAll
+                .all<ActionRow>()
+                .map(actionOf)
+                .filter(
+                    (action) =>
+                        (filter.ownerId === undefined || action.ownerId === filter.ownerId) &&
+                        (filter.status === undefined || action.status === filter.status),
+                ),
+        // ponytail: filters in memory over every action; an indexed query if actions pile up.
+        decideAction: async (id, status, result, at) => {
+            if (q.actionDecide.run(status, result ?? null, at, id).changes === 0) return undefined
+            const row = q.actionGet.get<ActionRow>(id)
+            return row === undefined ? undefined : actionOf(row)
+        },
         purgeAgent: (agentId) => {
             q.memberRemoveEverywhere.run(`agent:${agentId}`)
             q.assignmentDelete.run(agentId)
+            q.actionsDeleteForAgent.run(agentId)
         },
     }
 }

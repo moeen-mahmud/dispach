@@ -766,6 +766,15 @@ POST /v1/conversations/:id/messages (a human member)
   approval. A DM between one human and their agent keeps the old, trusted behaviour.
 - An agent's own history, compaction and memory apply unchanged, because a room is a session.
 
+### Stand-ins and delegation (Phase 28)
+
+A DM may be two people with their assigned agents present. Each agent only reads, until its owner is
+offline (pushed presence) for `standIn.escalateAfterMs` after a message — then it answers, disclosed
+and marked `onBehalfOf`, and every mutating call it tries becomes a **deferred action** the owner
+approves or declines later (`ExecuteInput.defer`, ahead of `policy.allow`). A coordinator reaches
+other members' agents through the same `handoff` tool a team uses, resolved among agents that declare
+`delegation.offer`.
+
 ---
 
 ## CLI

@@ -628,6 +628,27 @@ export interface ParticipantRecord {
     /** `admin` may assign agents to members. Nothing else differs. */
     readonly role: "admin" | "member"
     readonly createdAt: string
+    /** Pushed by the embedder (Phase 28). Absent until pushed, and absent reads as online. */
+    readonly presence?: "online" | "offline"
+    readonly presenceAt?: string
+}
+
+/** A mutating call a stand-in queued for its owner, run only when the owner approves. */
+export interface DeferredActionRecord {
+    readonly id: string
+    readonly agentId: string
+    readonly conversationId: string
+    /** The absent owner who decides. */
+    readonly ownerId: string
+    /** Whose message the stand-in was answering. */
+    readonly requestedBy: string
+    readonly slug: string
+    readonly args: Readonly<Record<string, unknown>>
+    readonly status: "pending" | "done" | "failed" | "denied"
+    /** The tool's output, or the error, once decided. */
+    readonly result?: string
+    readonly createdAt: string
+    readonly decidedAt?: string
 }
 
 export type ConversationKind = "room" | "dm"
@@ -657,6 +678,8 @@ export interface ConversationMessageRecord {
     readonly hop: number
     /** The turn that produced it, for an agent's message. */
     readonly turnId?: string
+    /** The absent owner a stand-in answered for (Phase 28). */
+    readonly onBehalfOf?: string
     /** Monotonic within the store; `after` in a listing. */
     readonly seq: number
     readonly createdAt: string
@@ -691,6 +714,26 @@ export interface ConversationStore {
     assign(record: AssignmentRecord): Promise<AssignmentRecord>
     assignment(agentId: string): Promise<AssignmentRecord | undefined>
     unassign(agentId: string): Promise<boolean>
+    setPresence(
+        id: string,
+        presence: "online" | "offline",
+        at: string,
+    ): Promise<ParticipantRecord | undefined>
+    /** Agents assigned to a participant. */
+    assignedTo(participantId: string): Promise<readonly AssignmentRecord[]>
+    deferAction(record: DeferredActionRecord): Promise<DeferredActionRecord>
+    action(id: string): Promise<DeferredActionRecord | undefined>
+    actions(filter?: {
+        readonly ownerId?: string
+        readonly status?: DeferredActionRecord["status"]
+    }): Promise<readonly DeferredActionRecord[]>
+    /** Move a pending action to its outcome. `undefined` when it was not pending (decided twice). */
+    decideAction(
+        id: string,
+        status: "done" | "failed" | "denied",
+        result: string | undefined,
+        at: string,
+    ): Promise<DeferredActionRecord | undefined>
 }
 
 export interface AgentStateStore {

@@ -88,11 +88,13 @@ import {
     ConfigBody,
     ConversationBody,
     ConversationMessageBody,
+    DecisionBody,
     KeyBody,
     MembersBody,
     MessageBody,
     ParticipantBody,
     PhaseBody,
+    PresenceBody,
     ProvisionBody,
     parseBody,
     SecretsBody,
@@ -2279,6 +2281,97 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 })
             }),
         { capability: "read" },
+    )
+
+    router.add(
+        "PUT",
+        "/v1/participants/:participantId/presence",
+        async (context) => {
+            const id = context.params.participantId ?? ""
+            const bound = boundParticipant(context.principal)
+            // Pushed by the embedder for anyone, or by a member's own front end for them alone.
+            if (bound !== undefined && bound !== id) {
+                return fail(
+                    {
+                        code: "sender_not_bound_participant",
+                        message: `This key speaks for ${bound}, and the presence names ${id}.`,
+                        hint: "A key bound to a participant sets only that participant's presence. The embedder's backend, holding an unbound key, sets anyone's.",
+                    },
+                    403,
+                )
+            }
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(PresenceBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            try {
+                return json(await runtime.conversations.setPresence(id, parsed.value.presence))
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "chat" },
+    )
+
+    /** What a stand-in queued for its owner (Phase 28). A bound key sees only its own. */
+    router.add(
+        "GET",
+        "/v1/actions",
+        async (context) => {
+            const status = context.url.searchParams.get("status")
+            const bound = boundParticipant(context.principal)
+            const all = await runtime.store.conversations.actions({
+                ...(bound === undefined ? {} : { ownerId: bound }),
+                ...(status === "pending" ||
+                status === "done" ||
+                status === "failed" ||
+                status === "denied"
+                    ? { status }
+                    : {}),
+            })
+            return json({
+                actions: all.filter((action) => reachesAgent(context.principal, action.agentId)),
+            })
+        },
+        { capability: "read" },
+    )
+
+    router.add(
+        "POST",
+        "/v1/actions/:actionId",
+        async (context) => {
+            const id = context.params.actionId ?? ""
+            const action = await runtime.store.conversations.action(id)
+            const bound = boundParticipant(context.principal)
+            // Someone else's action answers exactly like a missing one.
+            if (
+                action === undefined ||
+                !reachesAgent(context.principal, action.agentId) ||
+                (bound !== undefined && bound !== action.ownerId)
+            ) {
+                return fail(
+                    {
+                        code: "action_not_found",
+                        message: `No action "${id}".`,
+                        hint: "GET /v1/actions lists the ones waiting on you.",
+                    },
+                    404,
+                )
+            }
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(DecisionBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            try {
+                return json(await runtime.conversations.decideAction(id, parsed.value.approve))
+            } catch (error) {
+                if (isHarnessError(error) && error.code === "action_already_decided") {
+                    return fail(error.toDetail(), 409)
+                }
+                return refusedBy(error)
+            }
+        },
+        { capability: "chat" },
     )
 
     router.add(

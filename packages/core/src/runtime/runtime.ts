@@ -29,7 +29,7 @@ import type { EnvSource } from "../manifest/env.ts"
 import { type ManifestHeader, readManifestHeader } from "../manifest/header.ts"
 import { type LoadedManifest, loadManifest, loadManifestFromObject } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
-import type { TeamMemberConfig } from "../manifest/schema.ts"
+import type { AgentManifest, TeamMemberConfig } from "../manifest/schema.ts"
 import type { MediaProviderFactory } from "../media/provider.ts"
 import type { FetchLike } from "../model/provider.ts"
 import { BUILT_IN_TRANSPORTS, type ModelTransport } from "../model/transport.ts"
@@ -42,7 +42,7 @@ import { SqliteStore } from "../store/sqlite/store.ts"
 import type { DeliveryBacklog, LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
 import { expandTeams } from "../team/expand.ts"
 import type { HandoffTarget } from "../team/handoff.ts"
-import { handoffTool } from "../team/supervisor.ts"
+import { checkTeamGraph, handoffTool } from "../team/supervisor.ts"
 import type { ApprovalRequest } from "../tools/execute.ts"
 import { ToolRegistry } from "../tools/registry.ts"
 import type { ScriptRunner, Tool, ToolProvider, ToolProviderFactory } from "../tools/types.ts"
@@ -590,6 +590,11 @@ export class Runtime {
             hosted.map((entry: LoadedManifest, index) =>
                 instantiateAgent({
                     entry,
+                    peers: peersAmong(
+                        prepared.loaded
+                            .filter((loaded) => !prepared.memberIds.has(loaded.manifest.id))
+                            .map((loaded) => loaded.manifest),
+                    ),
                     supply: prepared.supplyFor(entry.manifest.id),
                     registry: registries[index],
                     team: prepared.teams.get(entry.manifest.id),
@@ -1140,6 +1145,12 @@ export class Runtime {
             const bindings = buildChannels(entry, supply)
             const agent = instantiateAgent({
                 entry,
+                peers: peersAmong(
+                    this.all().map((hosted) => hosted.manifest),
+                    prepared.loaded
+                        .filter((loaded) => !prepared.memberIds.has(loaded.manifest.id))
+                        .map((loaded) => loaded.manifest),
+                ),
                 warnings: [
                     ...(supply.failedPlugins ?? []),
                     ...built.warnings,
@@ -1306,6 +1317,12 @@ export class Runtime {
                 // disposed the old instance, the rebuild threw, and the agent was simply gone.
                 instantiateAgent({
                     entry,
+                    peers: peersAmong(
+                        this.all().map((hosted) => hosted.manifest),
+                        prepared.loaded
+                            .filter((loaded) => !prepared.memberIds.has(loaded.manifest.id))
+                            .map((loaded) => loaded.manifest),
+                    ),
                     supply,
                     registry: built.registry,
                     team: prepared.teams.get(entry.manifest.id),
@@ -2030,7 +2047,36 @@ export async function buildRegistry(
  * turn time — see the comment on `teamTools`. Under `adopt` it reads the runtime, so a supervisor
  * adopted into a live process reaches members adopted in the same call.
  */
+/** What an agent knows of the others in its silo, for delegation (Phase 28). */
+export interface DelegationPeer {
+    readonly id: string
+    readonly offer?: NonNullable<AgentManifest["delegation"]>["offer"]
+    readonly to?: NonNullable<AgentManifest["delegation"]>["to"]
+    /** Its in-process team, for the cycle walk. */
+    readonly team?: readonly string[]
+}
+
+function peerOf(manifest: AgentManifest): DelegationPeer {
+    return {
+        id: manifest.id,
+        ...(manifest.delegation?.offer === undefined ? {} : { offer: manifest.delegation.offer }),
+        ...(manifest.delegation?.to === undefined ? {} : { to: manifest.delegation.to }),
+        ...(manifest.team === undefined
+            ? {}
+            : { team: manifest.team.members.map((member) => member.id) }),
+    }
+}
+
+/** Every agent this boot loaded or this runtime hosts, by id, the newer manifest winning. */
+function peersAmong(...lists: readonly (readonly AgentManifest[])[]): readonly DelegationPeer[] {
+    const byId = new Map<string, DelegationPeer>()
+    for (const list of lists) for (const manifest of list) byId.set(manifest.id, peerOf(manifest))
+    return [...byId.values()]
+}
+
 function instantiateAgent(input: {
+    /** Other agents in the silo, for `delegation.to`. */
+    readonly peers: readonly DelegationPeer[]
     /** Findings made before the agent existed — a channel that could not be built. */
     readonly warnings?: readonly ErrorDetail[]
     readonly entry: LoadedManifest
@@ -2061,21 +2107,77 @@ function instantiateAgent(input: {
     // initialised from this function's own results, so every inferred type in the chain
     // becomes circular and TypeScript gives up with six `implicitly has type any` errors.
     // One explicit return type on the getter breaks the cycle; the other follows from it.
+    // Other members' agents this one may delegate to (Phase 28): peers that offer, filtered by this
+    // agent's `delegation.to`. Fixed at load like the team, because the handoff tool renders into
+    // slot 1 once; an agent adopted later is reachable after this one reloads.
+    const wants = entry.manifest.delegation?.to
+    const offered: TeamMemberConfig[] =
+        wants === undefined
+            ? []
+            : input.peers
+                  .filter(
+                      (peer) =>
+                          peer.id !== entry.manifest.id &&
+                          peer.offer !== undefined &&
+                          (wants === "*" || wants.includes(peer.id)) &&
+                          !(team ?? []).some((member) => member.id === peer.id),
+                  )
+                  .map((peer) => ({
+                      id: peer.id,
+                      manifest: "",
+                      task: peer.offer?.task ?? "",
+                      artifact: peer.offer?.artifact ?? { type: "object", properties: {} },
+                  }))
+    // The delegation edges join the team graph for the one walk that refuses a cycle or an
+    // over-deep chain, so `A → B → A` across members is caught at load exactly as within a team.
+    if (offered.length > 0) {
+        const edges = new Map(
+            input.peers.map((peer) => [
+                peer.id,
+                [
+                    ...(peer.team ?? []),
+                    ...input.peers
+                        .filter(
+                            (other) =>
+                                other.id !== peer.id &&
+                                other.offer !== undefined &&
+                                peer.to !== undefined &&
+                                (peer.to === "*" || peer.to.includes(other.id)),
+                        )
+                        .map((other) => other.id),
+                ],
+            ]),
+        )
+        edges.set(entry.manifest.id, [
+            ...(team ?? []).map((member) => member.id),
+            ...offered.map((member) => member.id),
+        ])
+        checkTeamGraph(entry.manifest.id, (id) => edges.get(id) ?? [])
+    }
     const teamTools: readonly Tool[] =
-        team === undefined
+        team === undefined && offered.length === 0
             ? []
             : [
                   handoffTool({
                       bus,
                       store: store.handoffs,
-                      members: team.map((config) => ({
-                          config,
-                          // Resolved per call. `runtime` is assigned below this block,
-                          // so this closure cannot be evaluated eagerly either.
-                          get agent(): HandoffTarget {
-                              return resolveMember(config.id)
-                          },
-                      })),
+                      members: [
+                          ...(team ?? []).map((config) => ({
+                              config,
+                              // Resolved per call. `runtime` is assigned below this block,
+                              // so this closure cannot be evaluated eagerly either.
+                              get agent(): HandoffTarget {
+                                  return resolveMember(config.id)
+                              },
+                          })),
+                          ...offered.map((config) => ({
+                              config,
+                              crossMember: true as const,
+                              get agent(): HandoffTarget {
+                                  return resolveMember(config.id)
+                              },
+                          })),
+                      ],
                   }),
               ]
     const withTeam: ToolRegistry | undefined =

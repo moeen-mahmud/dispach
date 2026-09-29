@@ -1034,6 +1034,36 @@ CREATE TABLE agent_assignments (
 );
 `,
     },
+    {
+        version: 23,
+        name: "stand_ins",
+        /**
+         * Presence, stand-in replies, and the actions a stand-in queued for its owner (Phase 28).
+         *
+         * `presence` is NULL until the embedder pushes one, and NULL reads as online: an agent never
+         * speaks for someone it was not told is away. A deferred action is a mutating call a stand-in
+         * wanted to make, recorded with its exact arguments and run only when the owner approves.
+         */
+        sql: `
+ALTER TABLE participants ADD COLUMN presence TEXT CHECK (presence IN ('online', 'offline'));
+ALTER TABLE participants ADD COLUMN presence_at TEXT;
+ALTER TABLE conversation_messages ADD COLUMN on_behalf_of TEXT;
+CREATE TABLE deferred_actions (
+    id              TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    owner_id        TEXT NOT NULL,
+    requested_by    TEXT NOT NULL,
+    slug            TEXT NOT NULL,
+    args            TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed', 'denied')),
+    result          TEXT,
+    created_at      TEXT NOT NULL,
+    decided_at      TEXT
+);
+CREATE INDEX deferred_actions_by_owner ON deferred_actions (owner_id, status);
+`,
+    },
 ]
 
 export interface MigrationReport {

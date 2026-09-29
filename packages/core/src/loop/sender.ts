@@ -122,6 +122,12 @@ export interface ActingParticipant {
     readonly name?: string
     /** Which surface vouched for `id`. */
     readonly via: "api" | "channel"
+    /**
+     * Whose agent is answering, when it is standing in for its owner (Phase 28). `id` stays the real
+     * sender; this names the absent owner the reply is on behalf of. A tool authorises the sender and
+     * reads the owner's scope.
+     */
+    readonly onBehalfOf?: string
 }
 
 /** A user sender acts for themselves; a peer agent acts for nobody, whatever it claims. */

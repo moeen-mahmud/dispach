@@ -88,7 +88,7 @@ import type { SessionSummary, Store, TurnRecord } from "../store/store.ts"
 import { type DialectId, passThroughFilter, type StreamFilter } from "../tools/dialect/dialect.ts"
 import { nativeDialect, nativeWireTokens } from "../tools/dialect/native.ts"
 import { nltDialect } from "../tools/dialect/nlt.ts"
-import type { ApprovalRequest } from "../tools/execute.ts"
+import { type ApprovalRequest, type ExecuteInput, executeIntents } from "../tools/execute.ts"
 import { onceOnlyTools } from "../tools/policy.ts"
 import { ToolRegistry } from "../tools/registry.ts"
 import type { ScriptRunner, Tool } from "../tools/types.ts"
@@ -258,6 +258,13 @@ export interface AgentSendOptions {
      * travels with the delegation rather than being baked into the member.
      */
     readonly turnTools?: readonly Tool[]
+    /**
+     * Queue every mutating call instead of running it — a stand-in's turn (Phase 28). Checked before
+     * `policy.allow`; see `ExecuteInput.defer`.
+     */
+    readonly deferMutations?: ExecuteInput["defer"]
+    /** Runtime-authored text before the input, outside its fence. See `TurnInput.runtimeNote`. */
+    readonly runtimeNote?: string
     /** A slot from `admit()`. Absent: `send` admits for itself, and throws the refusal. */
     readonly admission?: AdmittedTurn
 }
@@ -371,6 +378,8 @@ export class Agent {
 
     #bus: EventBus
     #toolRuntime: ToolRuntime | undefined
+    /** For a tool-less agent, the runtime a turn's own tools layer onto. See the constructor. */
+    #bareToolRuntime: ToolRuntime | undefined
     /**
      * Per-session compaction state, in memory for the process's lifetime.
      *
@@ -539,6 +548,22 @@ export class Agent {
         // the wire format cannot carry is refused, and "at load" is the only useful place to refuse it.
         if (init.tools.size === 0) {
             this.#toolRuntime = undefined
+            // No catalogue, so nothing in slot 1 — kept that way. But a turn can still bring its own
+            // tools (a handoff's `submit_artifact`), and with no runtime to layer them onto they were
+            // dropped: a member with no tools of its own could never return its artifact, and every
+            // delegation to one failed as "finished without returning an answer". Found by running a
+            // cross-member delegation in the image. This runtime is used only for such a turn.
+            this.#bareToolRuntime = {
+                registry: init.tools,
+                dialect,
+                dir: init.loaded.dir,
+                blocks: [],
+                wireTokens: 0,
+                observationMaxTokens: this.manifest.context.observationMaxTokens,
+                untrustedOnMutate: this.manifest.tools.untrusted.onMutate,
+                policy: this.manifest.tools.policy,
+                ...(init.approve === undefined ? {} : { approve: init.approve }),
+            }
         } else {
             const specs = init.tools.specs()
             const requestTools = dialect.requestTools(specs)
@@ -835,6 +860,59 @@ export class Agent {
         ])
     }
 
+    /**
+     * Run one tool call a person has approved outside any turn — a stand-in's queued action, once
+     * its owner says yes (Phase 28). Through the executor, so coercion, events, the observation cap
+     * and the policy's `deny` rules all still apply; the approval is the one already given.
+     */
+    async runApproved(
+        call: { readonly slug: string; readonly args: Readonly<Record<string, unknown>> },
+        options: { readonly sessionKey: string; readonly participant: ActingParticipant },
+    ): Promise<{ readonly ok: boolean; readonly output: string }> {
+        const turnId = newTurnId()
+        const callId = `approved-${turnId}`
+        const signal = AbortSignal.timeout(this.manifest.limits.toolTimeoutMs)
+        const outcome = await executeIntents({
+            registry: this.tools,
+            intents: [{ callId, slug: call.slug, args: call.args }],
+            context: {
+                agentId: this.id,
+                sessionKey: options.sessionKey,
+                turnId,
+                dir: this.dir,
+                signal,
+                deadlineMs: this.manifest.limits.toolTimeoutMs,
+                now: () => new Date(),
+                actingParticipant: options.participant,
+            },
+            bus: this.#bus,
+            eventContext: { agentId: this.id, sessionKey: options.sessionKey, turnId },
+            timeoutMs: this.manifest.limits.toolTimeoutMs,
+            maxParallel: 1,
+            observationMaxTokens: this.manifest.context.observationMaxTokens,
+            untrustedInTurn: false,
+            onMutate: this.manifest.tools.untrusted.onMutate,
+            policy: this.manifest.tools.policy,
+            approve: async () => true,
+        })
+        const result = outcome.results[0]
+        if (result === undefined) {
+            return {
+                ok: false,
+                output: outcome.repair
+                    .map((error) => `${error.field}: ${error.message}`)
+                    .join("; "),
+            }
+        }
+        return { ok: result.ok, output: result.output }
+    }
+
+    /** The runtime a turn runs its tools on: the agent's own, or the bare one for a turn's tools. */
+    #toolsFor(turnTools: readonly Tool[] | undefined): ToolRuntime | undefined {
+        if (this.#toolRuntime !== undefined) return this.#toolRuntime
+        return turnTools !== undefined && turnTools.length > 0 ? this.#bareToolRuntime : undefined
+    }
+
     /** Whether `transcribe` can do anything. A channel asks before it bothers the sender. */
     get canTranscribe(): boolean {
         return this.#transcription !== undefined
@@ -1112,6 +1190,7 @@ export class Agent {
 
         const meter = this.#meter(sessionKey, turnId, options.from?.id)
         const participant = options.participant ?? participantOf(options.from)
+        const turnRuntime = this.#toolsFor(options.turnTools)
         if (options.from?.id !== undefined) this.#senders.set(turnId, options.from.id)
         const result = await runTurn({
             agentId: this.id,
@@ -1157,7 +1236,7 @@ export class Agent {
                 toolTimeoutMs: this.manifest.limits.toolTimeoutMs,
                 maxParallelTools: this.manifest.limits.maxParallelTools,
             },
-            ...(this.#toolRuntime === undefined ? {} : { tools: this.#toolRuntime }),
+            ...(turnRuntime === undefined ? {} : { tools: turnRuntime }),
             compaction: this.#compaction(sessionKey, meter),
             ...(isPhased(this.manifest.phases)
                 ? {
@@ -1178,6 +1257,10 @@ export class Agent {
             source,
             ...(options.from === undefined ? {} : { from: options.from }),
             ...(participant === null ? {} : { participant }),
+            ...(options.deferMutations === undefined
+                ? {}
+                : { deferMutations: options.deferMutations }),
+            ...(options.runtimeNote === undefined ? {} : { runtimeNote: options.runtimeNote }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         }).finally(() => this.#senders.delete(turnId))

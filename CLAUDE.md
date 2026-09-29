@@ -1270,6 +1270,12 @@ Never claim a performance property without a number in `evals/` and a script to 
   volume is seeded from the image's own directories and a Kubernetes volume is not. Found only by
   applying the example to a real cluster (k3s in Docker); the example's `layout` init container
   creates the directory first, as the same non-root user.
+- **A tool-less agent has no tool runtime, so anything a *turn* brings needs one made for it.**
+  `submit_artifact` arrives as a turn tool and was layered only onto a runtime that existed, so a team
+  member or delegate with no tools of its own could never return an artifact — every handoff to one
+  failed as "finished without returning an answer". Every unit test gave its members tools; the image
+  run with a bare delegate found it. `#bareToolRuntime` is used only for such a turn, so a tool-less
+  agent's ordinary prompt keeps no catalogue.
 - **A reload's trial has to build what the swap builds.** It built the tool registry only, so
   anything `Agent.create` refuses and the schema accepts — an unknown media provider, a workspace file
   over budget — passed the trial, the old instance was disposed, the rebuild threw, and the agent was

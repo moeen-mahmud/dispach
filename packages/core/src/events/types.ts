@@ -600,6 +600,23 @@ export interface EventDataMap {
         hop: number
         ceiling: number
     }
+    /**
+     * A stand-in wanted to make a mutating call and queued it for its absent owner instead (Phase 28).
+     * Nothing ran. `POST /v1/actions/:actionId` is how the owner answers.
+     */
+    "action.deferred": {
+        actionId: string
+        conversationId: string
+        ownerId: string
+        requestedBy: string
+        slug: string
+    }
+    /** The owner answered a queued action: `done` or `failed` once it ran, `denied` if they declined. */
+    "action.decided": {
+        actionId: string
+        conversationId: string
+        status: "done" | "failed" | "denied"
+    }
     /** An admin recorded who an agent works for. */
     "agent.assigned": { participantId: string; assignedBy?: string }
     "turn.end": {
@@ -673,6 +690,8 @@ export const EVENT_TYPES = [
     "schedule.error",
     "conversation.message",
     "conversation.skipped",
+    "action.deferred",
+    "action.decided",
     "agent.assigned",
     "turn.end",
     "error",

@@ -84,6 +84,17 @@ export interface ExecuteInput {
      * intentions, which is why it is stated here and not left to a plugin author's judgement.
      */
     readonly middleware?: readonly Middleware[]
+    /**
+     * Queue every mutating call for someone else to approve later, instead of running or asking now
+     * (Phase 28: a stand-in never commits). Consulted **before** `policy.allow`, so no allow rule
+     * lets a stand-in act; a `deny` rule and the hardline floor still refuse outright. Returns what
+     * the model reads — that the call is queued and has not happened.
+     */
+    readonly defer?: (call: {
+        readonly callId: string
+        readonly slug: string
+        readonly args: Readonly<Record<string, unknown>>
+    }) => Promise<string>
 }
 
 /** What a person is being asked to allow. */
@@ -333,6 +344,37 @@ async function decideAndRun(
     const { spec } = entry.tool
     const call = { callId: entry.intent.callId, slug: spec.slug }
     const match = spec.policyArg === undefined ? undefined : stringArg(entry.args[spec.policyArg])
+
+    if (spec.mutating && input.defer !== undefined) {
+        // The rules alone, with the taint set aside: a stand-in's input is room text and would be
+        // refused by the gate, where the point is to hand the decision to the owner. What the rules
+        // deny stays denied; everything else waits for the owner.
+        const ruled = authorize({
+            policy: input.policy,
+            query: { slug: spec.slug, ...(match === undefined ? {} : { match }) },
+            mutating: true,
+            tainted: false,
+            onMutate: input.onMutate,
+            approver: true,
+        })
+        if (ruled.effect !== "deny") {
+            const output = await input.defer({
+                callId: call.callId,
+                slug: spec.slug,
+                args: entry.args,
+            })
+            return {
+                callId: call.callId,
+                slug: spec.slug,
+                ok: true,
+                output,
+                latencyMs: 0,
+                bytes: new TextEncoder().encode(output).byteLength,
+                truncated: false,
+                trust: "trusted",
+            }
+        }
+    }
 
     let decision = authorize({
         policy: input.policy,

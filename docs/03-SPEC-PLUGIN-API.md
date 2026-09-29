@@ -522,8 +522,10 @@ factory the runtime builds agents with, handed over so a provider whose tools ed
 written: the same check the TUI, the web app and `PATCH /config` make (decision 14.24). A factory must
 construct without network I/O, which is what makes building one to validate its config safe.
 
-**`ctx.actingParticipant`** is who the turn acts for: `{ id, name?, via: "api" | "channel" }`, or
-`null` for a schedule, a peer agent, a delegation or the operator. Every tool receives it, local and
+**`ctx.actingParticipant`** is who the turn acts for: `{ id, name?, via: "api" | "channel", onBehalfOf? }`, or
+`null` for a schedule, a peer agent, an in-process team handoff or the operator. A cross-member
+delegation (Phase 28) carries the person who asked the coordinator, who stays accountable; a
+stand-in's turn carries the real sender as `id` and the absent owner as `onBehalfOf`. Every tool receives it, local and
 provider alike. The runtime stamps it from the surface the turn arrived through; nothing the model
 writes reaches it. A tool that calls an embedder's API forwards it (a header, say) so the embedder
 can authorise the person as well as the agent. Optional in the type so a plugin's own test fixture
