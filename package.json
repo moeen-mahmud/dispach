@@ -35,6 +35,8 @@
         "verify:endpoints": "bun scripts/verify-endpoints.ts",
         "eval:memory": "bun scripts/eval-memory.ts",
         "eval:skills": "bun scripts/eval-skills.ts",
+        "eval:self-widening": "bun scripts/eval-self-widening.ts",
+        "eval:memory-provenance": "bun scripts/eval-memory-provenance.ts",
         "bench:schedule": "bun scripts/bench-schedule.ts",
         "prepare": "husky"
     },

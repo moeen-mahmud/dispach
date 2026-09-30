@@ -102,8 +102,11 @@ const AGENT_ROWS = SETTINGS.filter((entry) => entry.agentListed)
  *
  * `value` is optional because two of the three depend only on the path, and those have to fire before
  * the value is even parsed.
+ *
+ * Exported for `scripts/eval-self-widening.ts`, whose floor arm has to apply *this* rule and not a
+ * copy of it — a reimplemented floor would measure the copy. Nothing else imports it.
  */
-function floorRefusal(path: string, value?: unknown): string | undefined {
+export function floorRefusal(path: string, value?: unknown): string | undefined {
     const key = path.toLowerCase()
     const ALLOW_FROM =
         "who is allowed to talk to you is not yours to decide. It is the inbound gate, so an agent that could widen it could be talked into widening it by the very message it is reading — put the handle in agent.yaml yourself; a refused message prints the exact line"

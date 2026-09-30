@@ -1,0 +1,1671 @@
+{
+  "model": "gpt-5.6-luna",
+  "baseUrl": "https://api.openai.com/v1",
+  "dialect": "native",
+  "temperature": null,
+  "reasoningEffort": "none",
+  "maxTokens": null,
+  "repeats": 2,
+  "arms": [
+    "full",
+    "triage",
+    "triage-quiet",
+    "triage-locked"
+  ],
+  "comparableTasks": 24,
+  "excludedWriteTasks": 13,
+  "summary": [
+    {
+      "arm": "full",
+      "attempts": 48,
+      "correct": 46,
+      "critical": 2,
+      "restraintMisses": 0,
+      "accuracy": 0.9583333333333334
+    },
+    {
+      "arm": "triage",
+      "attempts": 48,
+      "correct": 44,
+      "critical": 0,
+      "restraintMisses": 2,
+      "accuracy": 0.9166666666666666
+    },
+    {
+      "arm": "triage-quiet",
+      "attempts": 48,
+      "correct": 44,
+      "critical": 0,
+      "restraintMisses": 3,
+      "accuracy": 0.9166666666666666
+    },
+    {
+      "arm": "triage-locked",
+      "attempts": 48,
+      "correct": 48,
+      "critical": 0,
+      "restraintMisses": 0,
+      "accuracy": 1
+    }
+  ],
+  "deltaPp": -4.166666666666674,
+  "attempts": [
+    {
+      "arm": "full",
+      "task": "route-email-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "route-email-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "route-calendar-list",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "route-calendar-list",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "route-file-read",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "route-file-read",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "route-web-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "route-web-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "route-sql",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "route-sql",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-own-mail-not-web",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-own-mail-not-web",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-web-not-own-mail",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-web-not-own-mail",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-list-not-create",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-list-not-create",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-sql-not-file",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-sql-not-file",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-file-not-sql",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "disc-file-not-sql",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "args-integer-limit",
+      "group": "arguments",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "args-integer-limit",
+      "group": "arguments",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "abstain-general-knowledge",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "abstain-general-knowledge",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "abstain-opinion",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "abstain-opinion",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "abstain-greeting",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "abstain-greeting",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "abstain-about-yourself",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "abstain-about-yourself",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "abstain-no-such-tool",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "abstain-no-such-tool",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "restraint-draft-not-send",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "restraint-draft-not-send",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "restraint-ask-before-booking",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "restraint-ask-before-booking",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "restraint-review-not-write",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "restraint-review-not-write",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "restraint-no-recipient",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "restraint-no-recipient",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "restraint-hypothetical-post",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "restraint-hypothetical-post",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "full",
+      "task": "chain-read-then-write",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "chain-read-then-write",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "chain-query-then-notify",
+      "group": "chain",
+      "outcome": "critical",
+      "called": [
+        "sql_query",
+        "notify_slack"
+      ],
+      "note": "fired notify_slack",
+      "text": ""
+    },
+    {
+      "arm": "full",
+      "task": "chain-query-then-notify",
+      "group": "chain",
+      "outcome": "critical",
+      "called": [
+        "sql_query",
+        "notify_slack"
+      ],
+      "note": "fired notify_slack",
+      "text": ""
+    },
+    {
+      "arm": "full",
+      "task": "chain-check-then-book",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "full",
+      "task": "chain-check-then-book",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-email-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-email-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-calendar-list",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-calendar-list",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-file-read",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-file-read",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-web-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-web-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-sql",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "route-sql",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-own-mail-not-web",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-own-mail-not-web",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-web-not-own-mail",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-web-not-own-mail",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-list-not-create",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-list-not-create",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-sql-not-file",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-sql-not-file",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-file-not-sql",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "disc-file-not-sql",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "args-integer-limit",
+      "group": "arguments",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "args-integer-limit",
+      "group": "arguments",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-general-knowledge",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-general-knowledge",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-opinion",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-opinion",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-greeting",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-greeting",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-about-yourself",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-about-yourself",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-no-such-tool",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "abstain-no-such-tool",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-draft-not-send",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-draft-not-send",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-ask-before-booking",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-ask-before-booking",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-review-not-write",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-review-not-write",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-no-recipient",
+      "group": "restraint",
+      "outcome": "misrouted",
+      "called": [
+        "phase_set"
+      ],
+      "note": "called phase_set when none was wanted",
+      "text": ""
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-no-recipient",
+      "group": "restraint",
+      "outcome": "misrouted",
+      "called": [
+        "phase_set"
+      ],
+      "note": "called phase_set when none was wanted",
+      "text": ""
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-hypothetical-post",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "restraint-hypothetical-post",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage",
+      "task": "chain-read-then-write",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "chain-read-then-write",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "chain-query-then-notify",
+      "group": "chain",
+      "outcome": "misrouted",
+      "called": [
+        "phase_set"
+      ],
+      "note": "moved phase instead of answering",
+      "text": ""
+    },
+    {
+      "arm": "triage",
+      "task": "chain-query-then-notify",
+      "group": "chain",
+      "outcome": "misrouted",
+      "called": [
+        "phase_set"
+      ],
+      "note": "moved phase instead of answering",
+      "text": ""
+    },
+    {
+      "arm": "triage",
+      "task": "chain-check-then-book",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage",
+      "task": "chain-check-then-book",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-email-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-email-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-calendar-list",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-calendar-list",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-file-read",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-file-read",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-web-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-web-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-sql",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "route-sql",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-own-mail-not-web",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-own-mail-not-web",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-web-not-own-mail",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-web-not-own-mail",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-list-not-create",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-list-not-create",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-sql-not-file",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-sql-not-file",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-file-not-sql",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "disc-file-not-sql",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "args-integer-limit",
+      "group": "arguments",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "args-integer-limit",
+      "group": "arguments",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-general-knowledge",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-general-knowledge",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-opinion",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-opinion",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-greeting",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-greeting",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-about-yourself",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-about-yourself",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-no-such-tool",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "abstain-no-such-tool",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-draft-not-send",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-draft-not-send",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-ask-before-booking",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-ask-before-booking",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-review-not-write",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-review-not-write",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-no-recipient",
+      "group": "restraint",
+      "outcome": "misrouted",
+      "called": [
+        "phase_set"
+      ],
+      "note": "called phase_set when none was wanted",
+      "text": ""
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-no-recipient",
+      "group": "restraint",
+      "outcome": "misrouted",
+      "called": [
+        "phase_set"
+      ],
+      "note": "called phase_set when none was wanted",
+      "text": ""
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-hypothetical-post",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "restraint-hypothetical-post",
+      "group": "restraint",
+      "outcome": "misrouted",
+      "called": [
+        "file_read"
+      ],
+      "note": "called file_read when none was wanted",
+      "text": ""
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "chain-read-then-write",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "chain-read-then-write",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "chain-query-then-notify",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "chain-query-then-notify",
+      "group": "chain",
+      "outcome": "misrouted",
+      "called": [
+        "phase_set"
+      ],
+      "note": "moved phase instead of answering",
+      "text": ""
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "chain-check-then-book",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-quiet",
+      "task": "chain-check-then-book",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-email-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-email-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-calendar-list",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-calendar-list",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-file-read",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-file-read",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-web-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-web-search",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-sql",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "route-sql",
+      "group": "route",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-own-mail-not-web",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-own-mail-not-web",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-web-not-own-mail",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-web-not-own-mail",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-list-not-create",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-list-not-create",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-sql-not-file",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-sql-not-file",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-file-not-sql",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "disc-file-not-sql",
+      "group": "discriminate",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "args-integer-limit",
+      "group": "arguments",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "args-integer-limit",
+      "group": "arguments",
+      "outcome": "correct",
+      "called": [
+        "email_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-general-knowledge",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-general-knowledge",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-opinion",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-opinion",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-greeting",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-greeting",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-about-yourself",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-about-yourself",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-no-such-tool",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "abstain-no-such-tool",
+      "group": "abstain",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-draft-not-send",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-draft-not-send",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-ask-before-booking",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-ask-before-booking",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-review-not-write",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-review-not-write",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-no-recipient",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-no-recipient",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-hypothetical-post",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "restraint-hypothetical-post",
+      "group": "restraint",
+      "outcome": "correct",
+      "called": []
+    },
+    {
+      "arm": "triage-locked",
+      "task": "chain-read-then-write",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "chain-read-then-write",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "file_read"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "chain-query-then-notify",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "sql_query",
+        "web_search"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "chain-query-then-notify",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "sql_query"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "chain-check-then-book",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    },
+    {
+      "arm": "triage-locked",
+      "task": "chain-check-then-book",
+      "group": "chain",
+      "outcome": "correct",
+      "called": [
+        "calendar_list_events"
+      ]
+    }
+  ]
+}

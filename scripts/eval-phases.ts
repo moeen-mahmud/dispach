@@ -8,10 +8,18 @@
  *
  * ## What is measured, and what the arms mean
  *
- * Two arms over the same fixtures, same endpoint, same prompts:
+ * Four arms over the same fixtures, same endpoint, same prompts:
  *
  * - **full** — the whole ten-tool catalogue, as an unphased agent sees it.
- * - **triage** — only the read tools plus `phase_set`, as a `triage` phase sees it.
+ * - **triage** — only the read tools plus `phase_set`, as a `triage` phase sees it. `phase_set`'s
+ *   summary advertises the other phase: "Other phases: act (adds 5 tools)".
+ * - **triage-quiet** — the same, with `phase_set` advertising nothing (`others: []`). The agent can
+ *   leave the phase but is not told what is on the other side.
+ * - **triage-locked** — the read tools alone; no `phase_set` at all. A restriction with no visible exit.
+ *
+ * The first two are the committed measurement (deepseek-v4-pro, 2026-08). The second two were added to
+ * isolate the mechanism the first run suggested: every extra failure under `triage` was a restraint
+ * task, one of them a literal `phase_set` call — so is the cost the restriction, or its advertisement?
  *
  * Scored on the tasks where the two arms are answering the *same* question: those whose correct first
  * step is a read tool, and those whose correct first step is no tool at all (`abstain`, `restraint`).
@@ -40,11 +48,33 @@ import { allowFor, PHASE_SET, visibleIn } from "../packages/core/src/loop/phases
 import { parseDotEnv } from "../packages/core/src/manifest/env.ts"
 import { loadManifest } from "../packages/core/src/manifest/load.ts"
 import { createChatCompletionsProvider } from "../packages/core/src/model/chat-completions.ts"
+import type { ToolCallRequest } from "../packages/core/src/model/provider.ts"
+import type { ToolDialect } from "../packages/core/src/tools/dialect/dialect.ts"
+import { nativeDialect } from "../packages/core/src/tools/dialect/native.ts"
 import { nltDialect } from "../packages/core/src/tools/dialect/nlt.ts"
 import { phaseSetTool } from "../packages/core/src/tools/local.ts"
 import type { ToolSpec } from "../packages/core/src/tools/types.ts"
 
-const FLAGS = ["model", "base-url", "api-key-env", "manifest", "repeats", "out", "help"] as const
+const FLAGS = [
+    "model",
+    "base-url",
+    "api-key-env",
+    "manifest",
+    "repeats",
+    "arms",
+    "reasoning",
+    "temperature",
+    "max-tokens",
+    "dialect",
+    "out",
+    "help",
+] as const
+
+type Arm = "full" | "triage" | "triage-quiet" | "triage-locked"
+
+type Reasoning = "none" | "minimal" | "low" | "medium" | "high"
+const REASONING: readonly Reasoning[] = ["none", "minimal", "low", "medium", "high"]
+const ARMS: readonly Arm[] = ["full", "triage", "triage-quiet", "triage-locked"]
 
 type Outcome = "correct" | "misrouted" | "critical"
 
@@ -91,9 +121,47 @@ interface Target {
     readonly id: string
     readonly baseUrl: string
     readonly apiKeyEnv?: string
+    /** Sent as `reasoning_effort`. A reasoning model bills thinking against `maxTokens`; 800 is tight. */
+    readonly reasoning?: Reasoning
+    /**
+     * `0` unless `--temperature` says otherwise; `--temperature none` omits the field. The committed
+     * deepseek runs used 0. OpenAI's gpt-5 family refuses any value but the default, so it needs `none`.
+     */
+    readonly temperature?: number
+    /**
+     * `800` unless `--max-tokens` says otherwise; `none` omits it. OpenAI's gpt-5 family rejects
+     * `max_tokens` outright ("use max_completion_tokens"), so it needs `none` — which is also what the
+     * runtime does by default: `max_tokens` is absent from the wire unless a manifest configures it.
+     */
+    readonly maxTokens?: number
+}
+
+/** The request fields a model family can refuse. Returned as a string when a flag is malformed. */
+function tuning(): { reasoning?: Reasoning; temperature?: number; maxTokens?: number } | string {
+    const reasoningRaw = arg("reasoning")
+    if (reasoningRaw !== undefined && !REASONING.includes(reasoningRaw as Reasoning)) {
+        return `eval-phases: --reasoning ${reasoningRaw} is not one of ${REASONING.join(", ")}.`
+    }
+    const temperatureRaw = arg("temperature") ?? "0"
+    const temperature = temperatureRaw === "none" ? undefined : Number(temperatureRaw)
+    if (temperature !== undefined && !Number.isFinite(temperature)) {
+        return `eval-phases: --temperature ${temperatureRaw} is not a number (or "none").`
+    }
+    const maxTokensRaw = arg("max-tokens") ?? "800"
+    const maxTokens = maxTokensRaw === "none" ? undefined : Number(maxTokensRaw)
+    if (maxTokens !== undefined && !Number.isInteger(maxTokens)) {
+        return `eval-phases: --max-tokens ${maxTokensRaw} is not an integer (or "none").`
+    }
+    return {
+        ...(reasoningRaw === undefined ? {} : { reasoning: reasoningRaw as Reasoning }),
+        ...(temperature === undefined ? {} : { temperature }),
+        ...(maxTokens === undefined ? {} : { maxTokens }),
+    }
 }
 
 function resolveTarget(env: Record<string, string | undefined>): Target | string {
+    const tuned = tuning()
+    if (typeof tuned === "string") return tuned
     const manifestPath = arg("manifest")
     if (manifestPath !== undefined) {
         const main = loadManifest(manifestPath).manifest.model.main
@@ -101,6 +169,7 @@ function resolveTarget(env: Record<string, string | undefined>): Target | string
             id: main.id,
             baseUrl: main.baseUrl,
             ...(main.apiKeyEnv === undefined ? {} : { apiKeyEnv: main.apiKeyEnv }),
+            ...tuned,
         }
     }
     const id = arg("model") ?? env.MODEL_ID
@@ -116,7 +185,7 @@ function resolveTarget(env: Record<string, string | undefined>): Target | string
     if (apiKeyEnv !== undefined && env[apiKeyEnv] === undefined) {
         return `eval-phases: ${apiKeyEnv} is not set, so ${id} cannot be reached.`
     }
-    return { id, baseUrl, ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }) }
+    return { id, baseUrl, ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }), ...tuned }
 }
 
 const READ_SLUGS = EVAL_TOOLS.filter((spec) => !MUTATING_SLUGS.includes(spec.slug)).map(
@@ -135,15 +204,19 @@ function comparable(task: EvalTask): boolean {
 
 const TRIAGE = { triage: { allow: ["tag:read"], entry: true }, act: { allow: ["*"] } }
 
-function catalogueFor(arm: "full" | "triage"): readonly ToolSpec[] {
+function catalogueFor(arm: Arm): readonly ToolSpec[] {
     if (arm === "full") return EVAL_TOOLS
     const visible = visibleIn(EVAL_TOOLS, allowFor(TRIAGE, "triage"))
+    if (arm === "triage-locked") return visible
     return [
         ...visible,
         phaseSetTool({
             phases: Object.keys(TRIAGE),
             current: "triage",
-            others: [{ name: "act", adds: EVAL_TOOLS.length - visible.length }],
+            // The only difference between `triage` and `triage-quiet` is this list: it is what puts
+            // "Other phases: act (adds 5 tools)" into the tool's summary.
+            others:
+                arm === "triage" ? [{ name: "act", adds: EVAL_TOOLS.length - visible.length }] : [],
         }).spec,
     ]
 }
@@ -193,6 +266,21 @@ async function main(): Promise<number> {
     }
 
     const repeats = Math.max(1, Number(arg("repeats") ?? 1))
+    const arms = (arg("arms")?.split(",") ?? ARMS).map((name) => name.trim()) as Arm[]
+    const badArm = arms.find((name) => !ARMS.includes(name))
+    if (badArm !== undefined) {
+        console.error(`eval-phases: no arm called "${badArm}". Arms: ${ARMS.join(", ")}.`)
+        return 2
+    }
+    // NLT is the default here as it is in the runtime. `native` exists because a model that does not
+    // write NLT scores "called nothing" on every routing task in every arm, which reads as "phases
+    // make no difference" and is a fact about the dialect — the gpt-5.6 run of 2026-09-02 is that.
+    const dialectName = arg("dialect") ?? "nlt"
+    if (dialectName !== "nlt" && dialectName !== "native") {
+        console.error(`eval-phases: --dialect ${dialectName} is not nlt or native.`)
+        return 2
+    }
+    const dialect: ToolDialect = dialectName === "native" ? nativeDialect : nltDialect
     const outDir = arg("out") ?? join("evals", "phases")
     const tasks = EVAL_TASKS.filter(comparable)
     const excluded = EVAL_TASKS.length - tasks.length
@@ -204,41 +292,59 @@ async function main(): Promise<number> {
     })
 
     console.log(`model      ${target.id}  (${target.baseUrl})`)
+    console.log(`dialect    ${dialectName}`)
+    console.log(
+        `request    temperature ${target.temperature ?? "(omitted)"}${target.reasoning === undefined ? "" : `, reasoning_effort ${target.reasoning}`}, max_tokens ${target.maxTokens ?? "(omitted)"}`,
+    )
     console.log(
         `tasks      ${tasks.length} comparable of ${EVAL_TASKS.length}; ${excluded} write-expecting excluded`,
     )
     console.log(
-        `arms       full (${catalogueFor("full").length} tools) vs triage (${catalogueFor("triage").length})`,
+        `arms       ${arms.map((arm) => `${arm} (${catalogueFor(arm).length} tools)`).join(", ")}`,
     )
     console.log(`repeats    ${repeats}`)
     console.log("")
 
     const attempts: Attempt[] = []
 
-    for (const arm of ["full", "triage"] as const) {
+    for (const arm of arms) {
         const specs = catalogueFor(arm)
-        const blocks = nltDialect.renderCatalogue(specs, [])
+        // Under NLT the catalogue is the system prompt; under native it travels as the request's
+        // `tools` and the rendered block is empty (or the not-enabled list, which this eval does not
+        // use). Same `ToolSpec`s either way — one schema, two renderings.
+        const blocks = dialect.renderCatalogue(specs, [])
         const system = blocks.map((block) => block.content).join("\n\n")
+        const requestTools = dialect.requestTools(specs)
 
         for (const task of tasks) {
             for (let pass = 0; pass < repeats; pass += 1) {
                 let text = ""
+                const calls: ToolCallRequest[] = []
                 for await (const chunk of provider.chat(
                     {
                         model: target.id,
                         messages: [
-                            { role: "system", content: system },
+                            ...(system.trim() === ""
+                                ? []
+                                : [{ role: "system" as const, content: system }]),
                             { role: "user", content: task.prompt },
                         ],
-                        temperature: 0,
-                        maxTokens: 800,
+                        ...(requestTools === undefined ? {} : { tools: requestTools }),
+                        ...(target.temperature === undefined
+                            ? {}
+                            : { temperature: target.temperature }),
+                        ...(target.reasoning === undefined
+                            ? {}
+                            : { reasoningEffort: target.reasoning }),
+                        ...(target.maxTokens === undefined ? {} : { maxTokens: target.maxTokens }),
                     },
                     new AbortController().signal,
                 )) {
                     if (chunk.type === "text") text += chunk.delta
+                    if (chunk.type === "tool_call") calls.push(chunk.call)
                 }
 
-                const parsed = nltDialect.parse({ text, calls: [] })
+                const parsed = dialect.parse({ text, calls })
                 const called = parsed.intents.map((intent) => intent.slug)
                 const { outcome, note } = scoreOne(task, called)
                 attempts.push({
@@ -260,18 +366,29 @@ async function main(): Promise<number> {
         process.stdout.write("\n")
     }
 
-    const summary = (["full", "triage"] as const).map((arm) => {
+    const summary = arms.map((arm) => {
         const own = attempts.filter((attempt) => attempt.arm === arm)
         const correct = own.filter((attempt) => attempt.outcome === "correct").length
         const critical = own.filter((attempt) => attempt.outcome === "critical").length
-        return { arm, attempts: own.length, correct, critical, accuracy: correct / own.length }
+        // Where the loss lands: the restraint group is where the committed run put every extra failure.
+        const restraintMisses = own.filter(
+            (attempt) => attempt.group === "restraint" && attempt.outcome !== "correct",
+        ).length
+        return {
+            arm,
+            attempts: own.length,
+            correct,
+            critical,
+            restraintMisses,
+            accuracy: correct / own.length,
+        }
     })
 
     console.log("")
-    console.log("arm      attempts  correct  critical  accuracy")
+    console.log("arm            attempts  correct  critical  restraint-miss  accuracy")
     for (const row of summary) {
         console.log(
-            `${row.arm.padEnd(8)}  ${String(row.attempts).padStart(8)}  ${String(row.correct).padStart(7)}  ${String(row.critical).padStart(8)}  ${percent(row.accuracy).padStart(8)}`,
+            `${row.arm.padEnd(14)}  ${String(row.attempts).padStart(8)}  ${String(row.correct).padStart(7)}  ${String(row.critical).padStart(8)}  ${String(row.restraintMisses).padStart(14)}  ${percent(row.accuracy).padStart(8)}`,
         )
     }
 
@@ -279,9 +396,13 @@ async function main(): Promise<number> {
     const triage = summary.find((row) => row.arm === "triage")
     const delta = full === undefined || triage === undefined ? 0 : triage.accuracy - full.accuracy
     console.log("")
-    console.log(
-        `delta      ${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(1)}pp with the phase constraint`,
-    )
+    for (const row of summary) {
+        if (row.arm === "full" || full === undefined) continue
+        const d = row.accuracy - full.accuracy
+        console.log(
+            `delta      ${row.arm.padEnd(14)} ${d >= 0 ? "+" : ""}${(d * 100).toFixed(1)}pp against full`,
+        )
+    }
     if (full?.accuracy === 1 && triage?.accuracy === 1) {
         // The saturation rule, from `eval rules`: a probe both arms ace has measured the probe, not the
         // feature. It licenses exactly one conclusion — no *cost* at this difficulty — and nothing more.
@@ -298,7 +419,12 @@ async function main(): Promise<number> {
             {
                 model: target.id,
                 baseUrl: target.baseUrl,
+                dialect: dialectName,
+                temperature: target.temperature ?? null,
+                reasoningEffort: target.reasoning ?? null,
+                maxTokens: target.maxTokens ?? null,
                 repeats,
+                arms,
                 comparableTasks: tasks.length,
                 excludedWriteTasks: excluded,
                 summary,
