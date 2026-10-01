@@ -254,6 +254,14 @@ export interface HandlerOptions {
      */
     readonly channels?: ChannelAdmin
     /**
+     * What the CLI injects for `DELETE /v1/agents/:id`. Absent answers `501`.
+     *
+     * Injected because where an agent's files are, and whether they may be deleted, is the CLI's
+     * knowledge: only an agent inside the sandbox is ever deleted, and never one whose id another
+     * directory also declares — that delete would take the other agent's conversations with it.
+     */
+    readonly remover?: AgentRemover
+    /**
      * What the CLI injects for `GET` and `PUT /v1/agents/:id/secrets`. Absent answers `501`.
      *
      * Injected for `channels`' reason: the values go into the `.env` beside the manifest, and how is
@@ -307,6 +315,18 @@ export interface ChannelAdmin {
     ): { readonly note: string; readonly variable: string }
     /** Delete a stored pairing on disk, for an agent that is not running. */
     unpair(manifestPath: string, channelId: string): { readonly note: string }
+}
+
+/** What the CLI injects for `DELETE /v1/agents/:id`. See `HandlerOptions.remover`. */
+export interface AgentRemover {
+    /** The agent's directory, or why it may not be deleted. Deletes nothing. */
+    locate(
+        agentId: string,
+    ):
+        | { readonly ok: true; readonly dir: string }
+        | { readonly ok: false; readonly error: ErrorDetail; readonly status: 404 | 409 }
+    /** Delete the directory. Called last, after the agent is gone and its rows are purged. */
+    deleteDir(dir: string): Promise<void>
 }
 
 /** What the CLI injects for `POST /v1/agents`. See `HandlerOptions.provision`. */
@@ -1397,6 +1417,66 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 if (isHarnessError(error)) return fail(error.toDetail(), 400)
                 throw error
             }
+        },
+        { capability: "admin" },
+    )
+
+    /**
+     * Delete an agent: off this host, its rows out of the store, its directory off disk. Irreversible,
+     * so the request names the agent twice (`?confirm=<id>`), the way `remove` makes a person type it.
+     *
+     * The order is the CLI's `remove`, and the reason is the same: everything checkable is checked
+     * before anything happens, and the irreplaceable thing — the directory — goes last, so a failure
+     * part-way leaves an agent that still loads rather than data nothing can name.
+     */
+    router.add(
+        "DELETE",
+        "/v1/agents/:id",
+        async (context) => {
+            const id = context.params.id ?? ""
+            if (!reachesAgent(context.principal, id)) return notFound("agent", id)
+            const hosted = runtime.list().some((agent) => agent.id === id)
+            const known = await runtime.store.agentState.get(id)
+            const remover = options.remover
+            if (remover === undefined) {
+                return fail(
+                    {
+                        code: "agent_remove_unsupported",
+                        message: "This server cannot delete agents.",
+                        hint: "`serve` provides deletion; an embedded handler has no sandbox to delete from. Use the CLI's `remove`.",
+                    },
+                    501,
+                )
+            }
+            if (context.url.searchParams.get("confirm") !== id) {
+                return fail(
+                    {
+                        code: "agent_remove_unconfirmed",
+                        message: `Deleting ${id} needs ?confirm=${id}.`,
+                        hint: "It deletes the agent's conversations, memory and files for good, so the request names the agent twice. POST /v1/agents/:id/stop switches one off and keeps everything.",
+                        field: "confirm",
+                    },
+                    400,
+                )
+            }
+            const located = remover.locate(id)
+            if (!located.ok) {
+                if (!hosted && known === undefined && located.status === 404) {
+                    return notFound("agent", id)
+                }
+                return fail(located.error, located.status)
+            }
+            if (hosted) {
+                try {
+                    await runtime.dispose(id, "stopped")
+                } catch (error) {
+                    if (isHarnessError(error)) return fail(error.toDetail(), 409)
+                    throw error
+                }
+            }
+            const purged = await runtime.store.purgeAgent(id)
+            await remover.deleteDir(located.dir)
+            return json({ id, removed: true, dir: located.dir, ...purged })
         },
         { capability: "admin" },
     )

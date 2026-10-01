@@ -133,7 +133,7 @@ describe("request mapping", () => {
         expect(input.additionalModelRequestFields).toEqual({
             thinking: { type: "enabled", budget_tokens: 8192 },
         })
-        expect(input.inferenceConfig).toEqual({ maxTokens: 8192 + 4096 })
+        expect(input.inferenceConfig).toEqual({ maxTokens: 8192 + 16_384 })
     })
 
     test("a model family without prompt caching is sent no cachePoint, nor is one opted out", () => {
@@ -199,6 +199,23 @@ describe("errors", () => {
         )
         expect(noCreds.error.code).toBe("bedrock_credentials_missing")
         expect(noCreds.error.hint).toContain("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+    })
+
+    test("a credentials endpoint that refuses is not a missing chain (pilot.4)", () => {
+        // What the SDK's HTTP provider throws once its retry wrapper has re-thrown it: the body is
+        // gone, the status survives in the text.
+        const refused = classify(
+            Object.assign(
+                new Error("CredentialsProviderError: Server responded with status: 403"),
+                { name: "CredentialsProviderError" },
+            ),
+            MODEL,
+            "eu-west-1",
+            "model.main",
+        )
+        expect(refused.retryable).toBe(false)
+        expect(refused.error.code).toBe("bedrock_credentials_refused")
+        expect(refused.error.status).toBe(403)
     })
 
     test("a new account's onboarding refusals name the onboarding step, not the model id or IAM", () => {

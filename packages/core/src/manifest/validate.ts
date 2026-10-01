@@ -13,6 +13,7 @@ import { BRAND } from "../brand.ts"
 import { STAGE_ORDER, type StageName } from "../context/compaction/stages.ts"
 import { apiVersionMismatch, type ErrorDetail, HarnessError } from "../errors.ts"
 import { resolveCapabilities } from "../model/capabilities.ts"
+import { nearest } from "../nearest.ts"
 import { parseSchedule } from "../schedule/kinds.ts"
 import { planWorkspace, type WorkspaceFileRef } from "../workspace/load.ts"
 import { planSoul } from "../workspace/soul.ts"
@@ -725,6 +726,11 @@ export function validateSchedules(
 
     for (const name of customRoleNames(manifest.model)) {
         if (referencedRoles.has(name)) continue
+        // Refused only where it looks like a typo of a built-in role, which is the failure this exists
+        // for: a misspelled `compacter` silently falls back to main. Any other name is a role declared
+        // ahead of the schedules that will use it — a template's `fast` or `deep`, named by schedules
+        // created over the API — and refusing it made a per-schedule model impossible (pilot.4).
+        if (nearest(name, MODEL_ROLES) === undefined) continue
         found.push({
             code: "model_role_unreferenced",
             message: `model.${name} is declared but no schedule names it, so nothing will ever use it.`,

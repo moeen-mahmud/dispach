@@ -4,6 +4,14 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.3
+
+- A path rule in `tools.policy` matches the normalised path: `workspace/../.env` no longer walks past `deny: ["file_read(.env)"]`.
+- `model.main.maxTokens`, `model.main.reasoningEffort` and `tools.budget.max` are settable through settings and `PATCH /config` (by a person, not the agent). Under Bedrock thinking the answer gets 16,384 tokens past the budget, up from 4,096.
+- A model role no schedule names yet loads, unless it looks like a typo of `main`, `selector` or `compactor`.
+- A Bedrock credentials endpoint that refuses is `bedrock_credentials_refused` with its status, not `bedrock_credentials_missing`.
+- `DELETE /v1/agents/:id?confirm=<id>` deletes an agent for good: off the host, out of the store, and its sandbox directory last. Admin; refuses an id two directories share.
+
 ### Since 0.2.0-pilot.2
 
 - `POST /v1/agents/:id/deliveries {channel, to, text, key}`: exact text on one of the agent's channels, with no turn, through the outbox. The text joins that conversation's history as the agent's. `admin`; a repeated `key` is neither sent nor recorded again.

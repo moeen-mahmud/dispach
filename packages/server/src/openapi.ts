@@ -267,6 +267,15 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             { code: 501, when: "this server has no credential writer" },
         ],
     },
+    "DELETE /v1/agents/:id": {
+        summary:
+            "Delete an agent for good: off this host, its rows out of the store, its directory off disk. Needs ?confirm=<id>.",
+        statuses: [
+            { code: 400, when: "no ?confirm=<id>" },
+            { code: 409, when: "two sandbox directories declare this id" },
+            { code: 501, when: "this server cannot delete agents" },
+        ],
+    },
     "POST /v1/agents/:id/stop": {
         summary: "Switch an agent off durably and drop it from this host now.",
         body: StopBody,

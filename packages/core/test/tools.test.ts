@@ -593,6 +593,38 @@ async function runTools(
 }
 
 describe("execution", () => {
+    test("a path rule sees the normalised path, so ../ cannot walk past it (pilot.4)", async () => {
+        const read = tool(
+            {
+                slug: "file_read",
+                mutating: false,
+                policyArg: "path",
+                policyArgIsPath: true,
+                parameters: {
+                    type: "object",
+                    properties: { path: { type: "string" } },
+                    required: ["path"],
+                },
+            },
+            async () => "the secret",
+        )
+        const registry = await ToolRegistry.create({
+            pinned: ["file_read"],
+            providers: [provider("fake", [read])],
+        })
+        const policy = { ...DEFAULT_POLICY, mode: "allow" as const, deny: ["file_read(.env)"] }
+        for (const path of [".env", "./.env", "workspace/../.env", "a/b/../../.env"]) {
+            const { outcome } = await runTools(registry, [intent("file_read", { path })], {
+                policy,
+            })
+            expect([path, outcome.results[0]?.ok]).toEqual([path, false])
+        }
+        const { outcome } = await runTools(registry, [intent("file_read", { path: "notes.md" })], {
+            policy,
+        })
+        expect(outcome.results[0]?.ok).toBe(true)
+    })
+
     test("a built-in tool runs and its observation is the output", async () => {
         const registry = await ToolRegistry.create({ local: ["now"] })
         const { outcome } = await runTools(registry, [intent("now")])

@@ -16,6 +16,7 @@ export {
     type PendingApproval,
 } from "./approvals.ts"
 export {
+    type AgentRemover,
     createHandler,
     type HandlerOptions,
     type Provisioner,

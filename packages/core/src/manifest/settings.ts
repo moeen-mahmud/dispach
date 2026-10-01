@@ -129,6 +129,23 @@ export const SETTINGS: readonly Setting[] = [
     },
     { path: "model.main.id", means: "the model this agent runs on", agentListed: true },
     { path: "model.main.temperature", means: "0 to 2", agentListed: true },
+    // Cost decisions, so a person's (pilot.4): the agent raising its own output or thinking budget is
+    // the agent spending its owner's money.
+    {
+        path: "model.main.maxTokens",
+        means: "the most one reply may generate; unset lets the endpoint decide",
+        agentListed: false,
+    },
+    {
+        path: "tools.budget.max",
+        means: "how many tools the model is shown at once, built-ins included",
+        agentListed: false,
+    },
+    {
+        path: "model.main.reasoningEffort",
+        means: "none | minimal | low | medium | high — how hard a reasoning model thinks",
+        agentListed: false,
+    },
     { path: "limits.maxSteps", means: "tool calls allowed in one turn", agentListed: true },
     {
         path: "limits.toolTimeoutMs",

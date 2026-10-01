@@ -90,6 +90,12 @@ export interface ToolSpec {
      * it simply cannot be narrowed, which is honest for something like `now`.
      */
     readonly policyArg?: string
+    /**
+     * `policyArg` is a filesystem path, so it is matched **normalised**: `./a/../.env` is `.env`.
+     * Matched raw, a `../` walked past any path rule — `deny: ["file_read(.env)"]` did not stop
+     * `file_read(workspace/../.env)` (pilot.4).
+     */
+    readonly policyArgIsPath?: true
     /** Matched by `phases.*.allow` as `tag:<name>`. */
     readonly tags: readonly string[]
     readonly parameters: ToolParameters

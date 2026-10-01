@@ -73,6 +73,26 @@ export function classify(
         }
     }
 
+    // The credentials endpoint answered, and said no — a refusal, not an absence. The SDK keeps only
+    // the status (its retry wrapper re-throws `String(error)`, dropping the body), so that is what is
+    // carried: an embedder vending credentials can make a 403 its budget stop and tell it apart from a
+    // missing chain (pilot.4).
+    const refused = /responded with status: (\d{3})/.exec(message)
+    if (name === "CredentialsProviderError" && refused !== null) {
+        return {
+            retryable: false,
+            status: Number(refused[1]),
+            error: new ModelError({
+                code: "bedrock_credentials_refused",
+                message: `The AWS credentials endpoint refused to issue credentials for Bedrock (${modelId} in ${region}): status ${refused[1]}.`,
+                hint: "The container-credentials endpoint answered and declined, which is the endpoint's decision rather than a missing configuration — a vending service may refuse once a budget is spent. Check that service; Dispach does not retry it.",
+                field,
+                status: Number(refused[1]),
+                cause: error,
+            }),
+        }
+    }
+
     if (name === "CredentialsProviderError" || /Could not load credentials/i.test(message)) {
         return {
             retryable: false,

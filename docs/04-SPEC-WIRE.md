@@ -53,6 +53,10 @@ and WebSocket surfaces can return:
 | `delivery_text_required` | 400 | `POST /deliveries` with empty `text`. |
 | `delivery_key_required` | 400 | `POST /deliveries` with no `key`. |
 | `delivery_channel_unknown` | 404 | `POST /deliveries` named a channel the agent is not running. |
+| `agent_remove_unconfirmed` | 400 | `DELETE /v1/agents/:id` without `?confirm=<id>`. |
+| `agent_remove_not_in_sandbox` | 404 | `DELETE` of an agent with no directory in the sandbox. |
+| `agent_remove_shared_id` | 409 | `DELETE` of an id two sandbox directories declare. |
+| `agent_remove_unsupported` | 501 | `DELETE` on a server with no remover (an embedded handler). |
 | `sender_invalid` | 400 | `from` is malformed, or `from.kind` is not `user` or `agent`. Refused rather than defaulted — `kind` decides the trust boundary. |
 | `idempotency_key_invalid` | 400 | `Idempotency-Key` is empty, over 255 characters, or not printable ASCII. |
 | `idempotency_key_reused` | 409 | The key belongs to a turn whose text or session differed. Nothing ran. |
@@ -270,6 +274,7 @@ GET /v1/agents/:id       → the above plus dialect, window, tool count, skills 
                            schedule count, warnings[], team? [{ id, task, artifact[] }],
                            assignedTo? { participantId, assignedBy?, assignedAt }
 POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disabledAt, reason? }
+DELETE /v1/agents/:id?confirm=<id> → 200 { id, removed: true, dir, sessions, messages, … }   (admin; deletes for good)
 POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }
 POST /v1/agents/:id/reload        → 200 { id, status: "loaded", adopted[] }
                                   | 202 { id, status: "pending", running, holdAfterMs, adopted: [] }
@@ -876,6 +881,7 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/import` | `admin` |
 | `POST /v1/agents/:id/start` | `admin` |
 | `POST /v1/agents/:id/stop` | `admin` |
+| `DELETE /v1/agents/:id` | `admin` |
 | `GET /v1/agents/:id/secrets` | `admin` |
 | `PUT /v1/agents/:id/secrets` | `admin` |
 | `GET /v1/agents/:id/config` | `admin` |

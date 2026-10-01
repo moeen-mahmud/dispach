@@ -15,6 +15,7 @@
  * in a log file.
  */
 
+import { rmSync } from "node:fs"
 import { dirname } from "node:path"
 import {
     AgentManifestSchema,
@@ -26,6 +27,7 @@ import {
     Runtime,
 } from "@dispach/core"
 import {
+    type AgentRemover,
     browsableHost,
     claimCommand,
     claimUrl,
@@ -53,6 +55,7 @@ import { provisionAgent, provisionSteps } from "#lib/provision"
 import {
     agentsDir,
     insideSandbox,
+    listAgents,
     pluginRoot,
     readHostToken,
     storePath,
@@ -543,6 +546,8 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                  * `applySecret`, the same one `config env` uses.
                  */
                 secrets: { status: secretStatus, write: writeSecrets },
+                /** `DELETE /v1/agents/:id`: sandbox agents only, and never an id two directories share. */
+                remover: sandboxRemover(env),
                 /**
                  * The same functions the `channels` command calls, injected for the same reason the
                  * provisioner is: *how* a channel is switched off or re-credentialled is the CLI's —
@@ -964,4 +969,47 @@ function portIsTaken(error: unknown): boolean {
         if ((error as { code?: unknown }).code === "EADDRINUSE") return true
     const message = error instanceof Error ? error.message : String(error)
     return message.includes("EADDRINUSE") || message.includes("in use")
+}
+
+/**
+ * What `DELETE /v1/agents/:id` may delete: an agent inside the sandbox whose id no other directory
+ * declares. The same two refusals `remove` makes — a path outside the sandbox is somebody's project,
+ * and a shared id shares one store, so deleting it would take the other agent's history too.
+ */
+export function sandboxRemover(env: Readonly<Record<string, string | undefined>>): AgentRemover {
+    return {
+        locate(agentId) {
+            const matches = listAgents(env).filter((agent) => agent.id === agentId)
+            const first = matches[0]
+            if (first === undefined) {
+                return {
+                    ok: false,
+                    status: 404,
+                    error: {
+                        code: "agent_remove_not_in_sandbox",
+                        message: `No agent "${agentId}" in the sandbox, so there are no files here to delete.`,
+                        hint: "Only sandbox agents are deleted over the API. An agent elsewhere is removed by deleting its directory yourself.",
+                    },
+                }
+            }
+            if (matches.length > 1) {
+                return {
+                    ok: false,
+                    status: 409,
+                    error: {
+                        code: "agent_remove_shared_id",
+                        message: `${matches.length} sandbox directories declare id "${agentId}": ${matches.map((agent) => agent.dir).join(", ")}.`,
+                        hint: "They share one conversation history, so deleting either would delete the other's too. Give one a different id first.",
+                    },
+                }
+            }
+            return { ok: true, dir: first.dir }
+        },
+        async deleteDir(dir) {
+            if (!insideSandbox(dir, env)) {
+                throw new Error(`refusing to delete ${dir}: it is outside the sandbox`)
+            }
+            rmSync(dir, { recursive: true, force: true })
+        },
+    }
 }

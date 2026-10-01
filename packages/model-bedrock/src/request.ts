@@ -41,6 +41,9 @@ export function thinksWithBudget(modelId: string): boolean {
 }
 
 /** `reasoningEffort` as an Anthropic thinking budget. `none` and unset mean no thinking requested. */
+/** Output left for the answer after a thinking budget, when no `maxTokens` was configured. */
+const ANSWER_HEADROOM = 16_384
+
 const THINKING_BUDGET: Record<string, number> = {
     minimal: 1024,
     low: 2048,
@@ -150,9 +153,13 @@ export function converseInput(
             ? THINKING_BUDGET[request.reasoningEffort]
             : undefined
     // Anthropic requires the output cap to exceed the thinking budget, and refuses a sampling
-    // temperature beside it.
+    // temperature beside it. The headroom past the budget is what the answer gets once thinking has
+    // spent it: 4,096 cut long tool calls off mid-argument (VelaCrew, pilot.4), so it is 16,384 —
+    // under every thinking-capable Claude's output ceiling even at the `high` budget.
     const maxTokens =
-        budget === undefined ? request.maxTokens : Math.max(request.maxTokens ?? 0, budget + 4096)
+        budget === undefined
+            ? request.maxTokens
+            : Math.max(request.maxTokens ?? 0, budget + ANSWER_HEADROOM)
     const inference = {
         ...(maxTokens === undefined ? {} : { maxTokens }),
         ...(budget !== undefined || request.temperature === undefined

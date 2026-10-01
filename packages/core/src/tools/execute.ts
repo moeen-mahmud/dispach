@@ -29,6 +29,7 @@
  * accumulates inside the loop, seeded by what earlier steps saw.
  */
 
+import { posix } from "node:path"
 import { estimateTokens } from "../context/tokens.ts"
 import { type ErrorDetail, toolFailed, toolTimedOut } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
@@ -207,6 +208,12 @@ function reasonFor(slug: string, by: "approver" | "error" | "abandoned"): string
 }
 
 /** The match argument as text. A non-string argument cannot be pattern-matched, so it is not. */
+/** A path as a rule should see it: `..` and `.` resolved lexically, no leading `./`. */
+function policyPath(value: string): string {
+    const normalised = posix.normalize(value.replaceAll("\\", "/"))
+    return normalised.startsWith("./") ? normalised.slice(2) : normalised
+}
+
 function stringArg(value: unknown): string | undefined {
     return typeof value === "string" ? value : undefined
 }
@@ -343,7 +350,8 @@ async function decideAndRun(
 ): Promise<ToolResult> {
     const { spec } = entry.tool
     const call = { callId: entry.intent.callId, slug: spec.slug }
-    const match = spec.policyArg === undefined ? undefined : stringArg(entry.args[spec.policyArg])
+    const raw = spec.policyArg === undefined ? undefined : stringArg(entry.args[spec.policyArg])
+    const match = raw !== undefined && spec.policyArgIsPath === true ? policyPath(raw) : raw
 
     if (spec.mutating && input.defer !== undefined) {
         // The rules alone, with the taint set aside: a stand-in's input is room text and would be

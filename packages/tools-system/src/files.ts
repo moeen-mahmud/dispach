@@ -93,6 +93,7 @@ export const FILE_READ_SPEC: Tool["spec"] = {
     mutating: false,
     trust: "untrusted",
     policyArg: "path",
+    policyArgIsPath: true,
     tags: ["read", "file"],
     parameters: {
         type: "object",
@@ -128,6 +129,7 @@ export const FILE_WRITE_SPEC: Tool["spec"] = {
     trustReason:
         "It reports what it wrote — the path, the line count — and never any of the content, so nothing from the file reaches the model through it.",
     policyArg: "path",
+    policyArgIsPath: true,
     tags: ["write", "file"],
     parameters: {
         type: "object",
@@ -155,6 +157,7 @@ export const FILE_EDIT_SPEC: Tool["spec"] = {
     trustReason:
         "It reports which occurrence changed and how long the file now is, never the text on either side of the change.",
     policyArg: "path",
+    policyArgIsPath: true,
     tags: ["write", "file"],
     parameters: {
         type: "object",
