@@ -26,6 +26,7 @@ import {
     editManifest,
     entryPhase,
     exportBundle,
+    formatSessionKey,
     HarnessError,
     importBundle,
     isHarnessError,
@@ -94,6 +95,7 @@ import {
     ConversationBody,
     ConversationMessageBody,
     DecisionBody,
+    DeliveryBody,
     ImportBody,
     KeyBody,
     MembersBody,
@@ -1396,6 +1398,57 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 throw error
             }
         },
+        { capability: "admin" },
+    )
+
+    // ─── Deliveries ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * Exact text out on one of the agent's channels, with no model turn — a reminder, an outreach
+     * message — through the same outbox as a reply, so retries and `key` idempotency are its own.
+     *
+     * `admin`, because it speaks as the agent to any recipient with nothing between the caller and
+     * the channel. Written into that conversation's history as the agent's, once: when the person
+     * answers, the agent sees what it "said". A repeated key is accepted, and neither sent nor
+     * recorded again.
+     */
+    router.add(
+        "POST",
+        "/v1/agents/:id/deliveries",
+        async (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(DeliveryBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const input = parsed.value
+                if (!runtime.channels.hasChannel(agent.id, input.channel)) {
+                    return fail(
+                        {
+                            code: "delivery_channel_unknown",
+                            message: `${agent.id} has no running channel "${input.channel}".`,
+                            hint: "Name a channel id from the agent's manifest (GET /v1/agents/:id lists them with their status). A disabled channel is not running and cannot send.",
+                            field: "channel",
+                        },
+                        404,
+                    )
+                }
+                // The key an inbound message from `to` on this channel resolves to, so a reply lands in
+                // the conversation the delivery was written into.
+                const sessionKey = formatSessionKey({ channel: input.channel, peerId: input.to })
+                const outside = outsideSession(context, sessionKey)
+                if (outside !== undefined) return outside
+                const { inserted } = await runtime.channels.deliver({
+                    agentId: agent.id,
+                    sessionKey,
+                    channelId: input.channel,
+                    recipient: input.to,
+                    text: input.text,
+                    key: input.key,
+                })
+                if (inserted) await agent.recordDelivered(input.text, { sessionKey })
+                return json({ sessionKey, key: input.key, duplicate: !inserted }, 202)
+            }),
         { capability: "admin" },
     )
 

@@ -197,12 +197,23 @@ test("a union type is refused rather than collapsed to its first member", () => 
     try {
         mapTool({
             slug: "UNION_TOOL",
-            input_parameters: { type: "object", properties: { x: { type: ["string", "null"] } } },
+            input_parameters: {
+                type: "object",
+                properties: { x: { type: ["string", "integer"] } },
+            },
         })
     } catch (error) {
         code = (error as { code?: string }).code ?? ""
     }
     expect(code).toBe("composio_schema_unsupported")
+})
+
+test("a nullable field is its type, which is not a union (pilot.3)", () => {
+    const spec = mapTool({
+        slug: "NULLABLE_TOOL",
+        input_parameters: { type: "object", properties: { x: { type: ["string", "null"] } } },
+    })
+    expect(spec.parameters.properties.x?.type).toBe("string")
 })
 
 test("whenNotToUse is left unset for the registry to flag", () => {

@@ -41,6 +41,7 @@ import {
     ConversationBody,
     ConversationMessageBody,
     DecisionBody,
+    DeliveryBody,
     ImportBody,
     KeyBody,
     MembersBody,
@@ -284,6 +285,15 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
                 code: 429,
                 when: "over limits.maxConcurrentTurns or limits.tokens; nothing recorded",
             },
+        ],
+    },
+    "POST /v1/agents/:id/deliveries": {
+        summary:
+            "Send exact text on one of the agent's channels, with no turn. It joins that conversation's history as the agent's.",
+        body: DeliveryBody,
+        statuses: [
+            { code: 202, when: "queued, or already queued under this key" },
+            { code: 404, when: "the agent has no running channel with that id" },
         ],
     },
     "POST /v1/agents/:id/turns/:turnId/stop": {

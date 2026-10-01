@@ -39,7 +39,7 @@ import {
     mcpRequestFailed,
     mcpToolFailed,
 } from "./errors.ts"
-import { SEPARATOR, slugOf, toSpec } from "./map.ts"
+import { SEPARATOR, slugOf, summaryOf, toSpec } from "./map.ts"
 
 export interface McpServerConfig {
     readonly name: string
@@ -243,7 +243,7 @@ export class McpProvider implements ToolProvider {
                 if (out.length >= AVAILABLE_LIMIT) return out
                 out.push({
                     slug: slugOf(server.name, tool.name),
-                    summary: toSpec(server.name, tool, undefined).summary,
+                    summary: summaryOf(server.name, tool),
                 })
             }
         }

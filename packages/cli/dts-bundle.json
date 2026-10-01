@@ -1,0 +1,17 @@
+{
+    "compilationOptions": { "preferredConfigPath": "./tsconfig.build.json" },
+    "entries": [
+        {
+            "filePath": "./src/client.ts",
+            "outFile": "./dist/client.d.ts",
+            "noCheck": true,
+            "libraries": { "inlinedLibraries": ["@dispach/client", "@dispach/core"] }
+        },
+        {
+            "filePath": "./src/wire.ts",
+            "outFile": "./dist/wire.d.ts",
+            "noCheck": true,
+            "libraries": { "inlinedLibraries": ["@dispach/core"] }
+        }
+    ]
+}

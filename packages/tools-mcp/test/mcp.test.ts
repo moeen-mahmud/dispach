@@ -58,7 +58,7 @@ interface Seen {
 }
 
 /** A fake server. `sse` answers requests as an event stream; `expire()` drops every session. */
-function server(options: { sse?: boolean; down?: boolean } = {}) {
+function server(options: { sse?: boolean; down?: boolean; tools?: McpTool[] } = {}) {
     const seen: Seen[] = []
     const sessions = new Set<string>()
     let n = 0
@@ -82,7 +82,7 @@ function server(options: { sse?: boolean; down?: boolean } = {}) {
         if (body.id === undefined) return new Response(null, { status: 202 })
         const result =
             body.method === "tools/list"
-                ? { tools: HULY }
+                ? { tools: options.tools ?? HULY }
                 : body.params?.name === "invoke_tool"
                   ? {
                         content: [{ type: "text", text: "tool delete_issue is not in TOOLS" }],
@@ -165,6 +165,47 @@ describe("mapping", () => {
         expect(toSpec("huly", { name: "x" }, undefined).mutating).toBe(true)
         expect(slugOf("huly", "a.b/c")).toBe("huly__a_b_c")
         expect(invoke?.trust).toBeUndefined()
+    })
+
+    test("a nullable field is its type; a real union is still refused (QA pilot.3)", () => {
+        const spec = toSpec(
+            "work",
+            {
+                name: "update_task",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        title: { type: ["string", "null"], description: "New title." },
+                        due: { anyOf: [{ type: "string", format: "date" }, { type: "null" }] },
+                    },
+                },
+            },
+            undefined,
+        )
+        expect(spec.parameters.properties.title?.type).toBe("string")
+        expect(spec.parameters.properties.title?.description).toBe("New title.")
+        expect(spec.parameters.properties.due?.type).toBe("string")
+        expect(spec.parameters.properties.due?.description).toBe("format date")
+        expect(() =>
+            toSpec(
+                "work",
+                { name: "u", inputSchema: { properties: { x: { type: ["string", "number"] } } } },
+                undefined,
+            ),
+        ).toThrow(/type: \[\]/)
+    })
+
+    test("a tool nobody pinned cannot refuse the agent by having a schema it cannot express", async () => {
+        // `available()` converted every cached tool's schema to read a summary, so one unpinned tool
+        // with a union refused the whole agent at boot.
+        const union: McpTool = {
+            name: "search",
+            description: "Search anything.",
+            inputSchema: { properties: { q: { type: ["string", "number"] } } },
+        }
+        const { mcp } = provider(server({ tools: [...HULY, union] }).fetch)
+        await mcp.refresh([])
+        expect((await mcp.available()).map((entry) => entry.slug)).toContain("huly__search")
     })
 
     test("a policy rule reaches the tool the proxy would call", () => {

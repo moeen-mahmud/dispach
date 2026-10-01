@@ -187,6 +187,44 @@ console.log(JSON.stringify({
     check("`dispach/client` is the same module", probe.sameModule)
     check("`dispach/wire` carries the event schema", probe.events > 20, `${probe.events} types`)
     check("an error reports its own name", probe.errorName === "DispachError", probe.errorName)
+
+    /**
+     * The types resolve from a clean install, under a strict consumer that checks libraries too.
+     *
+     * `client.d.ts` was `export * from "@dispach/client"` — a package nobody can install — so every
+     * type an embedder imported was unresolved, and VelaCrew wrote an ambient shim (pilot.3). The
+     * declarations are bundled now; this is the check that would have caught it.
+     */
+    writeFileSync(
+        join(work, "types.ts"),
+        `import { createClient, type DispachClient } from "dispach/client"
+import { EVENT_TYPES, type AnyEvent } from "dispach/wire"
+const client: DispachClient = createClient({ baseUrl: "http://127.0.0.1:7420" })
+const first: AnyEvent["type"] | undefined = EVENT_TYPES[0]
+export { client, first }
+`,
+    )
+    const tsc = Bun.spawnSync(
+        [
+            join(ROOT, "node_modules", ".bin", "tsc"),
+            "--noEmit",
+            "--strict",
+            "--skipLibCheck",
+            "false",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+            "--target",
+            "es2022",
+            "--lib",
+            "es2022,dom",
+            "types.ts",
+        ],
+        { cwd: work, stdout: "pipe", stderr: "pipe" },
+    )
+    const said = `${tsc.stdout.toString()}${tsc.stderr.toString()}`.trim().split("\n")[0] ?? ""
+    check("the client and wire types resolve, strictly", tsc.exitCode === 0, said)
 } finally {
     rmSync(work, { recursive: true, force: true })
 }

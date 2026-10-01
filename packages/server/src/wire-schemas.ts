@@ -155,6 +155,30 @@ export const MessageBody = z.object({
     ),
 })
 
+/** `POST /v1/agents/:id/deliveries` */
+export const DeliveryBody = z.object({
+    channel: refuse(z.string().min(1), {
+        code: "delivery_channel_required",
+        hint: 'Name a channel id from the agent\'s manifest, e.g. { "channel": "tg", ... } — the id, not the type.',
+        description: "The channel id to send on.",
+    }),
+    to: refuse(z.string().min(1), {
+        code: "delivery_recipient_required",
+        hint: "The channel's own address for the conversation: a Telegram chat id, a WhatsApp JID, a Slack channel id. The peer id an inbound message arrived with is always right.",
+        description: "Who to send it to, in the channel's own addressing.",
+    }),
+    text: refuse(z.string().trim().min(1), {
+        code: "delivery_text_required",
+        hint: 'Send { "text": "..." }. An empty message has nothing to deliver.',
+        description: "The exact text to send. No model turn runs.",
+    }),
+    key: refuse(z.string().min(1), {
+        code: "delivery_key_required",
+        hint: "Any string unique to this send, such as your own message id. A retry with the same key is not sent or recorded twice.",
+        description: "Idempotency key: a repeated key is accepted and does nothing.",
+    }),
+})
+
 /** `POST /v1/agents/:id/approvals/:approvalId` */
 export const ApprovalBody = z.object({
     granted: refuse(z.boolean(), {

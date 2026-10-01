@@ -371,7 +371,7 @@ export class ChannelHub {
         readonly thread?: string
         /** Files the turn produced, sent after the text. See `EnqueueReply.attachments`. */
         readonly attachments?: readonly DeliveryAttachment[]
-    }): Promise<void> {
+    }): Promise<{ readonly inserted: boolean }> {
         const bound = this.#agents.get(input.agentId)
         if (bound === undefined) {
             throw new Error(
@@ -379,7 +379,7 @@ export class ChannelHub {
                     'hint: add a channels entry to its manifest, or use deliver: "none" and read the reply from the API response.',
             )
         }
-        await bound.outbox.enqueue({
+        const { inserted } = await bound.outbox.enqueueReport({
             agentId: input.agentId,
             sessionKey: input.sessionKey,
             channelId: input.channelId,
@@ -393,6 +393,16 @@ export class ChannelHub {
                 : { attachments: input.attachments }),
         })
         await bound.outbox.drain(input.agentId)
+        return { inserted }
+    }
+
+    /** Whether this agent has a running channel with this id. A disabled one is never constructed. */
+    hasChannel(agentId: string, channelId: string): boolean {
+        return (
+            this.#agents
+                .get(agentId)
+                ?.bindings.some((binding) => binding.transport.id === channelId) === true
+        )
     }
 
     /**

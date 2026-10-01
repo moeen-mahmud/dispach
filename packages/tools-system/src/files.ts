@@ -32,7 +32,7 @@
  * one and reporting success.
  */
 
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises"
 import { dirname, isAbsolute, resolve } from "node:path"
 import { stripControl, type Tool, type ToolHandler } from "@dispach/core"
 import {
@@ -43,10 +43,11 @@ import {
     fileOutsideRoot,
     filePathEmpty,
     fileProtected,
+    fileSecret,
     fileTooLarge,
 } from "./errors.ts"
 import { SYSTEM_PROVIDER_ID } from "./paths.ts"
-import { protectedReason } from "./protect.ts"
+import { protectedReason, secretReason } from "./protect.ts"
 import { expandTilde, isWritable, locate, type Roots, writable } from "./root.ts"
 import type { ShellSessions } from "./session.ts"
 
@@ -227,6 +228,10 @@ export function fileReadHandler(options: FileOptions): ToolHandler {
             context.sessionKey,
             options.roots.primary,
         )
+
+        // The real path: a symlink named `notes.txt` that points at `.env` is still `.env`.
+        const secret = secretReason(await realpath(path).catch(() => path)) ?? secretReason(path)
+        if (secret !== undefined) throw fileSecret(path, secret)
 
         let size: number
         try {

@@ -57,7 +57,7 @@
     },
     "packages/cli": {
       "name": "dispach",
-      "version": "0.2.0-pilot.1",
+      "version": "0.2.0-pilot.2",
       "bin": {
         "dispach": "dist/index.js",
       },
@@ -81,6 +81,7 @@
         "@dispach/tools-system": "workspace:*",
         "@dispach/tools-web": "workspace:*",
         "@types/react": "19.2.18",
+        "dts-bundle-generator": "9.5.1",
         "ink-testing-library": "4.0.0",
         "react-devtools-core": "6.1.5",
         "ws": "^8",
@@ -703,6 +704,8 @@
     "dispach": ["dispach@workspace:packages/cli"],
 
     "dot-prop": ["dot-prop@5.3.0", "", { "dependencies": { "is-obj": "^2.0.0" } }, "sha512-QM8q3zDe58hqUqjraQOmzZ1LIH9SWQJTlEKCH4kJ2oQvLZk7RbQXvtDM2XEq3fwkV9CCvvH4LA0AV+ogFsBM2Q=="],
+
+    "dts-bundle-generator": ["dts-bundle-generator@9.5.1", "", { "dependencies": { "typescript": ">=5.0.2", "yargs": "^17.6.0" }, "bin": { "dts-bundle-generator": "dist/bin/dts-bundle-generator.js" } }, "sha512-DxpJOb2FNnEyOzMkG11sxO2dmxPjthoVWxfKqWYJ/bI/rT1rvTMktF5EKjAYrRZu6Z6t3NhOUZ0sZ5ZXevOfbA=="],
 
     "electron-to-chromium": ["electron-to-chromium@1.5.430", "", {}, "sha512-e1QEj72Y4zd8RlNZVmoTg+iCOSVwpk05IOiiQwdrkwCSVlZfPthevErhE+nckGd2YbsXfp1SkisznhGVIXP2NQ=="],
 

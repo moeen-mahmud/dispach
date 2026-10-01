@@ -4,6 +4,14 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.2
+
+- `POST /v1/agents/:id/deliveries {channel, to, text, key}`: exact text on one of the agent's channels, with no turn, through the outbox. The text joins that conversation's history as the agent's. `admin`; a repeated `key` is neither sent nor recorded again.
+- A tool schema's nullable field (`type: ["string", "null"]`, or `anyOf` with `{type: "null"}`) is read as its type; only a union of two real types is refused. An MCP tool nobody pinned can no longer refuse the whole agent.
+- `file_read` and `grep` never read a secret: `.env` and key files, credential directories, and a process's `environ`, through a symlink too.
+- A tool argument that is a list of objects arrives as objects; each item was turned into text first, so the call failed, then its repair, and the turn ended `tool_repair_failed`.
+- `dispach/client` and `dispach/wire` ship self-contained type declarations. They re-exported packages nobody can install, so every imported type was unresolved; `verify:package` now type-checks them from a clean install.
+
 ### Fixed in the QA pass
 
 - `serve` no longer exits for every agent when one of them is refused at build time (a media key not set yet, a workspace file over budget); that agent is listed as not served.

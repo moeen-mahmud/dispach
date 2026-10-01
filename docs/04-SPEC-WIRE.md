@@ -48,6 +48,11 @@ and WebSocket surfaces can return:
 | `bad_request_url` | 400 | `request.url` could not be parsed — usually a relative URL from a host framework. |
 | `message_text_required` | 400 | `POST /messages` with no `text`. |
 | `deliver_invalid` | 400 | `deliver` named a channel with no recipient, or an unknown shape. |
+| `delivery_channel_required` | 400 | `POST /deliveries` with no `channel`. |
+| `delivery_recipient_required` | 400 | `POST /deliveries` with no `to`. |
+| `delivery_text_required` | 400 | `POST /deliveries` with empty `text`. |
+| `delivery_key_required` | 400 | `POST /deliveries` with no `key`. |
+| `delivery_channel_unknown` | 404 | `POST /deliveries` named a channel the agent is not running. |
 | `sender_invalid` | 400 | `from` is malformed, or `from.kind` is not `user` or `agent`. Refused rather than defaulted — `kind` decides the trust boundary. |
 | `idempotency_key_invalid` | 400 | `Idempotency-Key` is empty, over 255 characters, or not printable ASCII. |
 | `idempotency_key_reused` | 409 | The key belongs to a turn whose text or session differed. Nothing ran. |
@@ -549,6 +554,27 @@ honest version possible. The old refusal's argument was correct about in-place m
 preserved above; what changed is that an **attached** view owns no runtime, so `/restart` in a CLI
 session hosted by a server has to reach it through here. Decisions 11.22 and 11.220.
 
+### Deliveries
+
+```
+POST /v1/agents/:id/deliveries
+```
+
+```json
+{ "channel": "tg", "to": "123456789", "text": "Your standup is in 10 minutes.", "key": "task-run-42" }
+```
+
+Sends exact text on one of the agent's channels with **no model turn**, through the same outbox as
+a reply: chunking, retries and the dedupe key are the outbox's. `to` is the channel's own address
+(the peer id an inbound message arrives with). Returns `202 { sessionKey, key, duplicate }`.
+
+- The text joins the history of the conversation an inbound message from `to` resolves to
+  (`{channel}:{to}`) as an assistant message, so a reply to it reads as a reply to something the
+  agent said. A threaded reply (Slack, Teams) carries a thread segment and lands in its own session.
+- `key` is required. A repeated key answers `202` with `duplicate: true` and is neither sent nor
+  recorded again.
+- `admin`: it speaks as the agent to any recipient with nothing in between.
+
 ### Turns
 
 ```
@@ -836,6 +862,7 @@ here that the server does not register, or a registered route missing from here,
 | `GET /v1/agents/:id/turns` | `read` |
 | `POST /v1/agents/:id/approvals/:approvalId` | `chat` |
 | `POST /v1/agents/:id/messages` | `chat` |
+| `POST /v1/agents/:id/deliveries` | `admin` |
 | `POST /v1/agents/:id/turns/:turnId/stop` | `chat` |
 | `POST /v1/agents/:id/schedules` | `write` |
 | `DELETE /v1/agents/:id/schedules/:sid` | `write` |

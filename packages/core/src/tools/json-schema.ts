@@ -15,6 +15,11 @@
  *
  * **`default: null` is dropped**: it is a schema saying "no default", and `coerce` would otherwise
  * send an explicit `null` on every call that left the field blank.
+ *
+ * **A nullable field is its non-null type.** `type: ["string", "null"]` and `anyOf: [{…}, {type:
+ * "null"}]` are what zod and most MCP servers emit for an optional field, and refusing them refused
+ * real servers (QA pilot.3). Leaving the field out is how this runtime says null, so nothing is
+ * lost. A union of two real types is still refused: it changes which documents are valid.
  */
 
 import type { JsonSchemaNode, JsonType, ToolParameters } from "./types.ts"
@@ -82,16 +87,35 @@ function stringArray(value: unknown): readonly string[] {
         : []
 }
 
+/** `{…, anyOf: [X, {type: "null"}]}` as X with the outer node's own keywords, or unchanged. */
+function unwrapNullable(raw: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+    const variants = raw.anyOf ?? raw.oneOf
+    if (!Array.isArray(variants) || variants.length !== 2) return raw
+    const isNull = (variant: unknown) => asRecord(variant)?.type === "null"
+    const other = variants.find((variant) => !isNull(variant))
+    if (!variants.some(isNull) || asRecord(other) === undefined) return raw
+    const { anyOf: _anyOf, oneOf: _oneOf, ...rest } = raw
+    return { ...asRecord(other), ...rest }
+}
+
+/** `["string", "null"]` as `"string"`; anything else unchanged, so a real union is still refused. */
+function nonNullType(declared: unknown): unknown {
+    if (!Array.isArray(declared)) return declared
+    const real = declared.filter((type) => type !== "null")
+    return real.length === 1 ? real[0] : declared
+}
+
 function node(
-    raw: Readonly<Record<string, unknown>>,
+    given: Readonly<Record<string, unknown>>,
     path: string,
     conversion: SchemaConversion,
 ): JsonSchemaNode {
+    const raw = unwrapNullable(given)
     for (const keyword of STRUCTURAL) {
         if (raw[keyword] !== undefined) throw conversion.unsupported(path, keyword)
     }
 
-    const declared = raw.type
+    const declared = nonNullType(raw.type)
     if (Array.isArray(declared)) throw conversion.unsupported(path, "type: []")
     const type: JsonType =
         typeof declared === "string" && TYPES.has(declared)

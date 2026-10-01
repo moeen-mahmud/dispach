@@ -39,6 +39,15 @@ function firstSentence(text: string): string {
  * `policyArg` names the argument a policy rule matches, and for a proxy tool that is the inner
  * tool's name — so `deny huly__invoke_tool(delete_issue)` reaches the call the proxy would make.
  */
+/**
+ * The one-line summary, without converting the schema. `available()` lists every cached tool, and
+ * one it could not convert used to throw there and refuse the whole agent (QA pilot.3).
+ */
+export function summaryOf(server: string, tool: McpTool): string {
+    const description = (tool.description ?? tool.title ?? "").trim()
+    return description === "" ? `The ${tool.name} tool on ${server}.` : firstSentence(description)
+}
+
 export function toSpec(server: string, tool: McpTool, policyArg: string | undefined): ToolSpec {
     const slug = slugOf(server, tool.name)
     const description = (tool.description ?? tool.title ?? "").trim()
@@ -46,8 +55,7 @@ export function toSpec(server: string, tool: McpTool, policyArg: string | undefi
     return {
         slug,
         provider: "mcp",
-        summary:
-            description === "" ? `The ${tool.name} tool on ${server}.` : firstSentence(description),
+        summary: summaryOf(server, tool),
         whenToUse: description === "" ? `the task needs ${tool.name} from ${server}` : description,
         mutating,
         tags: [server, mutating ? "write" : "read"],

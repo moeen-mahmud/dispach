@@ -183,6 +183,13 @@ export class Outbox {
      * collision that makes replay safe would stop happening.
      */
     async enqueue(reply: EnqueueReply): Promise<readonly DeliveryRecord[]> {
+        return (await this.enqueueReport(reply)).records
+    }
+
+    /** `enqueue`, saying whether anything was new — false when every chunk's key already existed. */
+    async enqueueReport(
+        reply: EnqueueReply,
+    ): Promise<{ readonly records: readonly DeliveryRecord[]; readonly inserted: boolean }> {
         const transport = this.#channels.get(reply.channelId)
         if (transport === undefined) {
             throw new Error(
@@ -251,7 +258,10 @@ export class Outbox {
         }))
 
         const results = await this.#store.enqueue(deliveries)
-        return results.map((result) => result.record)
+        return {
+            records: results.map((result) => result.record),
+            inserted: results.some((result) => result.inserted),
+        }
     }
 
     /**

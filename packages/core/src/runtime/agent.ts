@@ -859,6 +859,18 @@ export class Agent {
     }
 
     /**
+     * Put text the agent was made to send (`POST /v1/agents/:id/deliveries`) into that conversation's
+     * history as its own, so a reply to it reads as a reply to something the agent said. Untainted:
+     * the operator wrote it, not a stranger.
+     */
+    async recordDelivered(text: string, options: { readonly sessionKey: string }): Promise<void> {
+        await this.store.sessions.ensure(this.id, options.sessionKey)
+        await this.store.messages.append(this.id, options.sessionKey, [
+            { role: "assistant", content: text },
+        ])
+    }
+
+    /**
      * Put something said in a conversation into a session's history without answering it — how a
      * room message reaches an agent it did not address, so that agent has read the room when it is
      * next mentioned. Framed exactly as a turn's input would be, and tainted when untrusted, so the
