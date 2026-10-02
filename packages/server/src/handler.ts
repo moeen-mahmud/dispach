@@ -113,6 +113,7 @@ import {
     SecretsBody,
     SpaceWriterBody,
     StopBody,
+    ToolsRefreshBody,
     WebhookBody,
 } from "./wire-schemas.ts"
 
@@ -910,6 +911,44 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     return json({ id: agent.id, ...report })
                 } catch (error) {
                     return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    /**
+     * Fetch the tool providers now and reload only if the catalogue the agent serves moved (pilot.5,
+     * VelaCrew #20). The embedder used to PATCH `tools.pinned` or POST `/reload` after a connection,
+     * and retry the `pending` on the next chat open; this is one call that reloads only when needed.
+     * `admin`, like `/reload`: it can replace the agent.
+     */
+    router.add(
+        "POST",
+        "/v1/agents/:id/tools/refresh",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(ToolsRefreshBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                try {
+                    const outcome = await runtime.refreshTools(agent.id, {
+                        ...(parsed.value.providers === undefined
+                            ? {}
+                            : { providers: parsed.value.providers }),
+                    })
+                    return json(
+                        { id: agent.id, ...outcome },
+                        outcome.reload === "pending" ? 202 : 200,
+                    )
+                } catch (error) {
+                    if (isHarnessError(error)) {
+                        return fail(
+                            error.toDetail(),
+                            error.code === "agent_turn_in_flight" ? 409 : 400,
+                        )
+                    }
+                    throw error
                 }
             }),
         { capability: "admin" },

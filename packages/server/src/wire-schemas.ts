@@ -186,6 +186,15 @@ export const MessageBody = z.object({
     ),
 })
 
+/** `POST /v1/agents/:id/tools/refresh` */
+export const ToolsRefreshBody = z.object({
+    providers: refuse(z.array(z.string().min(1)).min(1).optional(), {
+        code: "tools_refresh_providers_invalid",
+        hint: 'Name provider ids from the agent\'s tools.providers, e.g. { "providers": ["composio"] }, or send {} to refresh every one.',
+        description: "Which providers to refresh. Omit for all of them.",
+    }),
+})
+
 /** `POST /v1/agents/:id/deliveries` */
 export const DeliveryBody = z.object({
     channel: refuse(z.string().min(1), {

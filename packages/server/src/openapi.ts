@@ -55,6 +55,7 @@ import {
     SecretsBody,
     SpaceWriterBody,
     StopBody,
+    ToolsRefreshBody,
     WebhookBody,
 } from "./wire-schemas.ts"
 
@@ -102,6 +103,21 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             {
                 code: 400,
                 when: "a path a bundle cannot carry, or a bundle the agent would not load",
+            },
+        ],
+    },
+    "POST /v1/agents/:id/tools/refresh": {
+        summary:
+            "Fetch the tool providers' catalogues and schemas now, and reload the agent only if what it serves changed.",
+        body: ToolsRefreshBody,
+        statuses: [
+            {
+                code: 202,
+                when: "something changed and a turn is running: the reload lands when it ends",
+            },
+            {
+                code: 400,
+                when: "a provider the agent does not have, or a reload the agent refuses",
             },
         ],
     },

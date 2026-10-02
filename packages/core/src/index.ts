@@ -421,6 +421,7 @@ export {
     type RuntimeActivity,
     type RuntimeOptions,
     type StoreSource,
+    type ToolsRefreshOutcome,
 } from "./runtime/runtime.ts"
 export type { ReconcileReport } from "./runtime/schedules.ts"
 export {

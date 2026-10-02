@@ -78,6 +78,27 @@ export type AgentSource = string | Record<string, unknown>
 export type DisposeReason = "requested" | "replaced" | "stopped"
 
 /** What `Runtime.reload` did: applied now, or waiting for the running turns. */
+/** What `refreshTools` found, per provider and in total, and whether it reloaded the agent. */
+export interface ToolsRefreshOutcome {
+    readonly providers: readonly {
+        readonly provider: string
+        readonly ok: boolean
+        readonly fetched: number
+        readonly error?: string
+    }[]
+    /** Pinned slugs the agent lacked and a provider can now resolve. */
+    readonly added: readonly string[]
+    /** Slugs the agent serves that a provider no longer has. */
+    readonly removed: readonly string[]
+    /** Slugs the agent serves whose schema moved. */
+    readonly changed: readonly string[]
+    /** `none` when nothing moved; otherwise the reload's own status. */
+    readonly reload: "none" | "loaded" | "pending"
+}
+
+/** How long one provider's refresh may take before it is reported as failed. */
+const TOOLS_REFRESH_TIMEOUT_MS = 60_000
+
 export type ReloadOutcome =
     | { readonly status: "loaded"; readonly adopted: readonly Agent[] }
     | { readonly status: "pending"; readonly running: number; readonly holdAfterMs: number }
@@ -1354,6 +1375,112 @@ export class Runtime {
      *
      * A second reload while one is pending joins it: the swap reads the manifest as it is then.
      */
+    /**
+     * Fetch the providers' catalogues and schemas now, and reload the agent only if what it serves
+     * changed (pilot.5, VelaCrew #20).
+     *
+     * The refresh after boot already does the fetch; this is the same call on demand, for a
+     * connection made or a work MCP's schema changed while the agent runs. It reloads rather than
+     * swapping the catalogue in place, because slot 1 is the cache-stable prefix and fixed for an
+     * agent's lifetime: the reload is the one path that rebuilds it, and it already waits for a
+     * running turn, so the change takes effect at the next turn. Nothing moved, nothing reloads.
+     */
+    async refreshTools(
+        agentId: string,
+        options: { readonly providers?: readonly string[] } = {},
+    ): Promise<ToolsRefreshOutcome> {
+        const agent = this.agent(agentId)
+        if (agent === undefined) throw agentNotHosted(agentId)
+        const all = this.#providersByAgent.get(agentId) ?? []
+        const unknown = (options.providers ?? []).filter(
+            (id) => !all.some((provider) => provider.id === id),
+        )
+        if (unknown.length > 0) {
+            throw new HarnessError({
+                code: "tools_refresh_provider_unknown",
+                message: `${agentId} has no tool provider ${unknown.join(", ")}.`,
+                hint: `Name providers from its tools.providers: ${all.map((provider) => provider.id).join(", ") || "none"}. Omit providers to refresh all of them.`,
+                field: "providers",
+            })
+        }
+        const chosen = all.filter(
+            (provider) =>
+                provider.refresh !== undefined &&
+                (options.providers === undefined || options.providers.includes(provider.id)),
+        )
+        const pinned = agent.manifest.tools.pinned
+        const serving = new Set(agent.tools.specs().map((spec) => spec.slug))
+
+        const results = await Promise.all(
+            chosen.map(async (provider) => {
+                const from = performance.now()
+                try {
+                    const result = await (provider.refresh?.(
+                        pinned,
+                        AbortSignal.timeout(TOOLS_REFRESH_TIMEOUT_MS),
+                    ) ?? Promise.resolve({ fetched: 0, changed: [], missing: [] }))
+                    this.bus.emit(
+                        "tools.refreshed",
+                        {
+                            provider: provider.id,
+                            ok: true,
+                            fetched: result.fetched,
+                            changed: [...result.changed],
+                            missing: [...result.missing],
+                            latencyMs: Math.round(performance.now() - from),
+                        },
+                        { agentId },
+                    )
+                    const listed = new Set((await provider.list?.()) ?? [])
+                    return { provider: provider.id, ok: true, result, listed }
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error)
+                    this.bus.emit(
+                        "tools.refreshed",
+                        {
+                            provider: provider.id,
+                            ok: false,
+                            fetched: 0,
+                            changed: [],
+                            missing: [],
+                            latencyMs: Math.round(performance.now() - from),
+                            error: message,
+                        },
+                        { agentId },
+                    )
+                    return { provider: provider.id, ok: false, error: message }
+                }
+            }),
+        )
+
+        const added = pinned.filter(
+            (slug) =>
+                !serving.has(slug) && results.some((entry) => entry.listed?.has(slug) === true),
+        )
+        const removed = [
+            ...new Set(results.flatMap((entry) => entry.result?.missing ?? [])),
+        ].filter((slug) => serving.has(slug))
+        const changed = [
+            ...new Set(results.flatMap((entry) => entry.result?.changed ?? [])),
+        ].filter((slug) => serving.has(slug))
+        const moved = added.length + removed.length + changed.length > 0
+        const reload = moved ? (await this.reload(agentId)).status : "none"
+
+        this.bus.emit("agent.tools.refreshed", { added, removed, changed, reload }, { agentId })
+        return {
+            providers: results.map((entry) => ({
+                provider: entry.provider,
+                ok: entry.ok,
+                fetched: entry.result?.fetched ?? 0,
+                ...(entry.error === undefined ? {} : { error: entry.error }),
+            })),
+            added,
+            removed,
+            changed,
+            reload,
+        }
+    }
+
     async reload(agentId: string): Promise<ReloadOutcome> {
         const source = this.#sources.get(agentId)
         if (source === undefined) return { status: "loaded", adopted: await this.replace(agentId) }

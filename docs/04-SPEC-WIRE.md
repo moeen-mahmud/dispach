@@ -47,6 +47,7 @@ and WebSocket surfaces can return:
 | `body_too_large` | 400 | Over the 1 MB cap, refused before a channel plugin sees it. |
 | `bad_request_url` | 400 | `request.url` could not be parsed — usually a relative URL from a host framework. |
 | `message_text_required` | 400 | `POST /messages` with no `text`. |
+| `tools_refresh_providers_invalid` | 400 | `POST …/tools/refresh` with `providers` that is not a non-empty list of ids. |
 | `message_note_invalid` | 400 | `POST /messages` with a `runtimeNote` that is empty or over 8,000 characters. |
 | `message_note_untrusted` | 400 | `POST /messages` with a `runtimeNote` from a peer agent (`from.kind: "agent"`). |
 | `message_images_invalid` | 400 | `POST /messages` with `images` that is not a list of `{path}` or `{data, mediaType?}`. The checks on each image have their own codes (`image_*`, `model_no_vision`); see `images` above. |
@@ -282,6 +283,8 @@ GET /v1/agents/:id       → the above plus dialect, window, tool count, skills 
 POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disabledAt, reason? }
 DELETE /v1/agents/:id?confirm=<id> → 200 { id, removed: true, dir, sessions, messages, … }   (admin; deletes for good)
 POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }
+POST /v1/agents/:id/tools/refresh { providers? } → 200 | 202 { id, providers: [{ provider, ok, fetched, error? }],
+                                  added[], removed[], changed[], reload: "none" | "loaded" | "pending" }   (admin, since 0.2.0-pilot.5)
 POST /v1/agents/:id/reload        → 200 { id, status: "loaded", adopted[] }
                                   | 202 { id, status: "pending", running, holdAfterMs, adopted: [] }
 *    /v1/agents/:id/plugins/:plugin/<path>   → whatever the plugin answers, behind its declared
@@ -912,6 +915,7 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/sessions/:key/phase` | `write` |
 | `POST /v1/agents` | `admin` |
 | `POST /v1/agents/:id/reload` | `admin` |
+| `POST /v1/agents/:id/tools/refresh` | `admin` |
 | `GET /v1/agents/:id/export` | `admin` |
 | `POST /v1/agents/:id/import` | `admin` |
 | `POST /v1/agents/:id/start` | `admin` |
@@ -1271,6 +1275,7 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `tool.gated` | a call was blocked | `slug`, `callId`, `reason`, `policy` |
 | `tool.repair` | step unusable | `slugs[]`, `errors[]` |
 | `tools.refreshed` | after `runtime.ready` | `provider`, `ok`, `fetched`, `changed[]`, `missing[]`, `latencyMs`, `error?` |
+| `agent.tools.refreshed` | `POST …/tools/refresh` finished | `added[]` (pinned tools a provider now has), `removed[]` (served tools a provider no longer has), `changed[]` (served tools whose schema moved), `reload` (`none` when nothing moved; `pending` lands when the running turn ends) (since 0.2.0-pilot.5) |
 | `delivery.sent` | outbox success | `channelId`, `providerMessageId?`, `chunkIndex`, `chunkTotal`, `attempts`, `uncertain` |
 | `delivery.retry` | retryable send failed | `channelId`, `chunkIndex`, `attempts`, `delayMs`, `error` |
 | `delivery.failed` | chunk abandoned | `channelId`, `chunkIndex`, `chunkTotal`, `attempts`, `exhausted`, `abandoned`, `error` |

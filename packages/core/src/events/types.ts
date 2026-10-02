@@ -428,6 +428,16 @@ export interface EventDataMap {
      * `changed` is the field worth watching. A slug whose schema moved under a running agent is a
      * catalogue the model has already been told about in the current session's cached prefix.
      */
+    /**
+     * `POST …/tools/refresh` finished (pilot.5): what moved in the catalogue the agent serves, and
+     * whether that reloaded it. `reload: pending` means the change lands when the running turn ends.
+     */
+    "agent.tools.refreshed": {
+        added: string[]
+        removed: string[]
+        changed: string[]
+        reload: "none" | "loaded" | "pending"
+    }
     "tools.refreshed": {
         provider: string
         ok: boolean
@@ -697,6 +707,7 @@ export const EVENT_TYPES = [
     "tool.gated",
     "tool.repair",
     "tools.refreshed",
+    "agent.tools.refreshed",
     "agent.channel.status",
     "agent.channel.error",
     "agent.channel.rejected",
