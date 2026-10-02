@@ -371,6 +371,13 @@ export const ToolsSchema = z
         local: z.array(z.string().min(1)).default([]),
         untrusted: ToolsUntrustedSchema.prefault({}),
         policy: ToolsPolicySchema.prefault({}),
+        /**
+         * What `tool.call` and `tool.result` carry (pilot.5, VelaCrew #16). `none` is the hash and
+         * the size, as always. `redacted` adds the arguments and the first 2 KB of the output, with
+         * values under secret-looking keys and the values of secret-named environment variables
+         * replaced. Person-only: it decides what every event subscriber and webhook receives.
+         */
+        eventDetail: z.enum(["none", "redacted"]).default("none"),
     })
     .strict()
 

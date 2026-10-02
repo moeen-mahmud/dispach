@@ -1266,8 +1266,8 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `model.retry` | a retryable model failure, before the next attempt | `status`, `attempt`, `delayMs` |
 | `model.fallback` | a call moved to the next model in its role's `fallbacks`, before any output (Phase 26c) | `from`, `to`, `reason` |
 | `model.result` | response done | `outputTokens`, `promptTokens`, `promptTokensReported`, `finishReason`, `latencyMs`, `firstTokenMs?` (to the first streamed output of any kind; absent when nothing streamed), `callId` (the model call's id: minted before its retries and fallbacks, the key a ledger debits on, carried by its usage row; not a tool call's), `model` (the one that answered, after any fallback), `role`, `cachedPromptTokens?`, `cacheWriteTokens?`, `sender?` (Phase 26c) |
-| `tool.call` | before execute | `slug`, `callId`, `argsHash`, `mutating` |
-| `tool.result` | after execute | `slug`, `callId`, `ok`, `latencyMs`, `bytes`, `truncated`, `trust` |
+| `tool.call` | before execute | `slug`, `callId`, `argsHash`, `mutating`, `args?` (only under `tools.eventDetail: redacted`: the arguments, redacted; strings over 1,024 characters are cut) |
+| `tool.result` | after execute | `slug`, `callId`, `ok`, `latencyMs`, `bytes`, `truncated`, `trust`, `output?`, `outputTruncated?` (only under `tools.eventDetail: redacted`: the first 2,048 characters of the output the model saw, redacted, and whether it was longer; `truncated` still means the model's own observation was cut) |
 | `tool.gated` | a call was blocked | `slug`, `callId`, `reason`, `policy` |
 | `tool.repair` | step unusable | `slugs[]`, `errors[]` |
 | `tools.refreshed` | after `runtime.ready` | `provider`, `ok`, `fetched`, `changed[]`, `missing[]`, `latencyMs`, `error?` |

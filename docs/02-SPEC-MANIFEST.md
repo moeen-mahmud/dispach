@@ -306,6 +306,7 @@ case-insensitive and whole-word against the current input. See `07-SPEC-WORKSPAC
 | `policy.onNoApprover` | `deny` | What `ask` means with nobody to ask — a schedule, a pipe, a channel with no approver. |
 | `model.<name>` | — | Beyond `main`, `selector` and `compactor`, any key under `model:` is a **custom role** a schedule may name with `role:`. A role nothing references is warned about, because that is also what a misspelled `compactor` looks like. |
 | `untrusted.onMutate` | `refuse` | What to do when untrusted content is in the turn and a mutating tool is requested: `refuse \| confirm \| allow`. A tainted mutating call needs **explicit** authorization — a matching `policy.allow` rule or a live approval; `mode: allow` is the absence of a rule, not one. `confirm` asks when an approver is reachable and refuses when none is. |
+| `eventDetail` | `none` | Since 0.2.0-pilot.5. `redacted` adds the call's arguments to `tool.call` and the first 2 KB of its output to `tool.result`. Values under credential-named keys (`token`, `password`, `apiKey`, …) and the values of secret-named environment variables (`*_KEY`, `*_TOKEN`, …) are replaced with `[redacted]` wherever they appear. That is a floor, not a guarantee: a secret the agent was told in conversation is in neither list. Settable by a person over `PATCH /config`, not by the agent. |
 
 **Configuring a remote provider and pinning nothing from it is a valid, startable agent.** A remote
 provider resolves from an on-disk cache during boot, where hard rule 4 permits no network call, so

@@ -35,6 +35,7 @@ import { type ResolvedRole, requestParamsFor } from "../model/roles.ts"
 import { compose, type Middleware } from "../plugins/middleware.ts"
 import type { ParsedOutput, StepOutput, ToolDialect } from "../tools/dialect/dialect.ts"
 import { nativeWireTokens } from "../tools/dialect/native.ts"
+import type { EventDetail } from "../tools/event-detail.ts"
 import { type ApprovalRequest, type ExecuteInput, executeIntents } from "../tools/execute.ts"
 import { phaseSetTool } from "../tools/local.ts"
 import type { PolicyConfig } from "../tools/policy.ts"
@@ -106,6 +107,8 @@ export interface ToolRuntime {
      * `ChatMessage.toolCalls`, `TurnInput.skills`, `ToolContext.readArtifact`), and it cost one here.
      */
     readonly memoryDir?: string
+    /** `tools.eventDetail: redacted`. Absent: events carry the hash and sizes only. */
+    readonly eventDetail?: EventDetail
     readonly observationMaxTokens: number
     /**
      * What to do when untrusted content is in the turn and the model asks for a mutating tool.
@@ -1265,6 +1268,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                           timeoutMs: input.limits.toolTimeoutMs,
                           maxParallel: input.limits.maxParallelTools,
                           observationMaxTokens: tools.observationMaxTokens,
+                          ...(tools.eventDetail === undefined
+                              ? {}
+                              : { eventDetail: tools.eventDetail }),
                           // Both halves or neither, for the reason `readArtifact` above gives: a stored
                           // artifact nothing can read is a pointer to nowhere.
                           ...(input.compaction?.persist === undefined ||

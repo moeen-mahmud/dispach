@@ -38,6 +38,7 @@ import type { EventContext } from "../events/types.ts"
 import { newApprovalId } from "../loop/ids.ts"
 import { compose, type Middleware } from "../plugins/middleware.ts"
 import { coerceArgs } from "./coerce.ts"
+import type { EventDetail } from "./event-detail.ts"
 import { authorize, type PolicyConfig } from "./policy.ts"
 import type { ToolRegistry } from "./registry.ts"
 import { stripControl } from "./sanitise.ts"
@@ -63,6 +64,8 @@ export interface ExecuteInput {
      * lacks is an instruction it can't follow.
      */
     readonly keepFull?: (artifacts: readonly Displaced[]) => Promise<void>
+    /** `tools.eventDetail: redacted`: the arguments and output the tool events carry. */
+    readonly eventDetail?: EventDetail
     /**
      * True when an earlier step in this turn produced untrusted output.
      *
@@ -569,6 +572,7 @@ async function runOne(entry: PlannedCall, input: ExecuteInput): Promise<ToolResu
             callId: intent.callId,
             argsHash: hashArgs(args),
             mutating: tool.spec.mutating,
+            ...(input.eventDetail === undefined ? {} : { args: input.eventDetail.args(args) }),
         },
         input.eventContext,
     )
@@ -608,6 +612,8 @@ async function runOne(entry: PlannedCall, input: ExecuteInput): Promise<ToolResu
                 bytes: result.bytes,
                 truncated: result.truncated,
                 trust: result.trust,
+                // The output as the model saw it, then capped again for the event.
+                ...(input.eventDetail === undefined ? {} : input.eventDetail.output(result.output)),
             },
             input.eventContext,
         )

@@ -377,7 +377,14 @@ export interface EventDataMap {
         audioSeconds?: number
         sender?: string
     }
-    "tool.call": { slug: string; callId: string; argsHash: string; mutating: boolean }
+    "tool.call": {
+        slug: string
+        callId: string
+        argsHash: string
+        mutating: boolean
+        /** Under `tools.eventDetail: redacted` only: the arguments, redacted. */
+        args?: Record<string, unknown>
+    }
     "tool.result": {
         slug: string
         callId: string
@@ -388,6 +395,10 @@ export interface EventDataMap {
         truncated: boolean
         /** Whether this output may contain text a stranger wrote. */
         trust: Trust
+        /** Under `tools.eventDetail: redacted` only: the first 2 KB of the output, redacted. */
+        output?: string
+        /** Set with `output`: whether the output was longer than what the event carries. */
+        outputTruncated?: boolean
     }
     /**
      * A call was blocked before it ran — by the trust gate, or by a `tools.policy` rule.

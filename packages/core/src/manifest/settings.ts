@@ -160,6 +160,12 @@ export const SETTINGS: readonly Setting[] = [
     // Person-only: the agent can't relax a guard on its own instructions. An embedder needs it because
     // the rule count is a heuristic, and a misread line otherwise refuses every reload and every
     // PATCH (VelaCrew, pilot.4).
+    // Person-only: it decides what every event subscriber and webhook receives about a tool call.
+    {
+        path: "tools.eventDetail",
+        means: "none | redacted — whether tool events carry the call's arguments and output",
+        agentListed: false,
+    },
     {
         path: "context.rules.onExceed",
         means: "fail | warn — whether too many counted rules in the workspace refuses the load",

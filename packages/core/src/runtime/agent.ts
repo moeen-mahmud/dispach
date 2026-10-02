@@ -99,6 +99,7 @@ import type { SessionSummary, Store, TurnRecord } from "../store/store.ts"
 import { type DialectId, passThroughFilter, type StreamFilter } from "../tools/dialect/dialect.ts"
 import { nativeDialect, nativeWireTokens } from "../tools/dialect/native.ts"
 import { nltDialect } from "../tools/dialect/nlt.ts"
+import { eventDetail } from "../tools/event-detail.ts"
 import { type ApprovalRequest, type ExecuteInput, executeIntents } from "../tools/execute.ts"
 import { onceOnlyTools } from "../tools/policy.ts"
 import { ToolRegistry } from "../tools/registry.ts"
@@ -577,6 +578,12 @@ export class Agent {
         //
         // `requestTools` is built here too, and not only for symmetry: under native it is where a slug
         // the wire format cannot carry is refused, and "at load" is the only useful place to refuse it.
+        // Built once, from the environment this agent loaded with, so a secret's value is known
+        // wherever it might turn up in a call or a result.
+        const detail =
+            this.manifest.tools.eventDetail === "redacted"
+                ? eventDetail(init.loaded.env)
+                : undefined
         if (init.tools.size === 0) {
             this.#checkScheduleAllows([])
             this.#toolRuntime = undefined
@@ -595,6 +602,7 @@ export class Agent {
                 untrustedOnMutate: this.manifest.tools.untrusted.onMutate,
                 policy: this.manifest.tools.policy,
                 ...(init.approve === undefined ? {} : { approve: init.approve }),
+                ...(detail === undefined ? {} : { eventDetail: detail }),
             }
         } else {
             const specs = init.tools.specs()
@@ -613,6 +621,7 @@ export class Agent {
                 wireTokens: requestTools === undefined ? 0 : nativeWireTokens(requestTools),
                 observationMaxTokens: this.manifest.context.observationMaxTokens,
                 untrustedOnMutate: this.manifest.tools.untrusted.onMutate,
+                ...(detail === undefined ? {} : { eventDetail: detail }),
                 // Resolved once, here, so every turn of this agent is decided by the same rules.
                 // The approver itself is supplied per run by whichever front end has a person
                 // attached — absent for a schedule or a pipe, which is exactly when
