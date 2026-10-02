@@ -186,6 +186,26 @@ export const MessageBody = z.object({
     ),
 })
 
+/** `PATCH /v1/agents/:id/vars` */
+export const VarsBody = z.object({
+    vars: refuse(
+        z.record(
+            z.string(),
+            refuse(z.string(), {
+                code: "template_value_invalid",
+                hint: "Template values are one line of text, sent as strings.",
+                description: "One variable's value.",
+            }),
+        ),
+        {
+            code: "vars_required",
+            hint: 'Send { "vars": { "userName": "…" } }: the template variables to change. The rest keep the values the agent was made with.',
+            description:
+                "The template variables to change. Only files nobody has edited since they were rendered are rewritten.",
+        },
+    ),
+})
+
 /** `POST /v1/agents/:id/tools/refresh` */
 export const ToolsRefreshBody = z.object({
     providers: refuse(z.array(z.string().min(1)).min(1).optional(), {

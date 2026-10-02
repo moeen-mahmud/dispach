@@ -47,6 +47,10 @@ and WebSocket surfaces can return:
 | `body_too_large` | 400 | Over the 1 MB cap, refused before a channel plugin sees it. |
 | `bad_request_url` | 400 | `request.url` could not be parsed — usually a relative URL from a host framework. |
 | `message_text_required` | 400 | `POST /messages` with no `text`. |
+| `vars_required` | 400 | `PATCH …/vars` with no `vars` object. |
+| `rerender_not_supported` | 501 | `PATCH …/vars` on a server with no templates directory (an embedder's handler). |
+| `agent_not_from_template` | 409 | `PATCH …/vars` on an agent with no record of its template: one made before 0.2.0-pilot.5, or not from a template. |
+| `template_var_secret` | 400 | `PATCH …/vars` naming a secret var; set it with `PUT …/secrets`. |
 | `tools_refresh_providers_invalid` | 400 | `POST …/tools/refresh` with `providers` that is not a non-empty list of ids. |
 | `message_note_invalid` | 400 | `POST /messages` with a `runtimeNote` that is empty or over 8,000 characters. |
 | `message_note_untrusted` | 400 | `POST /messages` with a `runtimeNote` from a peer agent (`from.kind: "agent"`). |
@@ -304,6 +308,9 @@ POST /v1/agents            { answers: {step: value, …} }
                            | { template, name, vars?: {var: value, …} }
                          → 201 { id, dir, files[], adopted[] }
 GET  /v1/templates       → { templates: [{ name, description?, vars[], problem? }] }
+PATCH /v1/agents/:id/vars  { vars: {var: value, …} }   (admin, gated like POST /v1/agents; since 0.2.0-pilot.5)
+                         → 200 | 202 { id, rendered[], skipped: [{ file, reason: "edited" | "memory" | "removed" }],
+                                       reload: "none" | "loaded" | "pending" }
 
 POST   /v1/webhooks { url, types[], agents? } → 201 { subscriptionId, url, types, scope?, secret, … }
 GET    /v1/webhooks            → { webhooks: [{ subscriptionId, url, types, scope?, failing,
@@ -916,6 +923,7 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents` | `admin` |
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/tools/refresh` | `admin` |
+| `PATCH /v1/agents/:id/vars` | `admin` |
 | `GET /v1/agents/:id/export` | `admin` |
 | `POST /v1/agents/:id/import` | `admin` |
 | `POST /v1/agents/:id/start` | `admin` |

@@ -56,6 +56,7 @@ import {
     SpaceWriterBody,
     StopBody,
     ToolsRefreshBody,
+    VarsBody,
     WebhookBody,
 } from "./wire-schemas.ts"
 
@@ -104,6 +105,23 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
                 code: 400,
                 when: "a path a bundle cannot carry, or a bundle the agent would not load",
             },
+        ],
+    },
+    "PATCH /v1/agents/:id/vars": {
+        summary:
+            "Apply changed template variables: re-render the files nobody edited since they were rendered, then reload.",
+        body: VarsBody,
+        statuses: [
+            {
+                code: 202,
+                when: "files changed and a turn is running: the reload lands when it ends",
+            },
+            {
+                code: 400,
+                when: "a secret or undeclared variable, or a result the agent would not load (every file is put back)",
+            },
+            { code: 409, when: "the agent was not made from a template on 0.2.0-pilot.5 or later" },
+            { code: 501, when: "this server has no templates" },
         ],
     },
     "POST /v1/agents/:id/tools/refresh": {

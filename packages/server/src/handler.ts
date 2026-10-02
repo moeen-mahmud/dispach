@@ -114,6 +114,7 @@ import {
     SpaceWriterBody,
     StopBody,
     ToolsRefreshBody,
+    VarsBody,
     WebhookBody,
 } from "./wire-schemas.ts"
 
@@ -358,6 +359,19 @@ export interface Provisioner {
         readonly name: string
         readonly vars: Readonly<Record<string, string>>
     }): ReturnType<Provisioner["create"]>
+    /**
+     * Apply changed vars to an agent made from a template (pilot.5): only files nobody edited since
+     * they were rendered are rewritten. Optional, so an embedder's provisioner without it still
+     * compiles; the route then answers 501.
+     */
+    rerender?(input: {
+        readonly agentDir: string
+        readonly vars: Readonly<Record<string, string>>
+    }): {
+        readonly rendered: readonly string[]
+        readonly skipped: readonly { readonly file: string; readonly reason: string }[]
+        readonly undo: () => void
+    }
 }
 
 /** One template as the wire carries it. Structural, so `packages/cli` needs no import from here. */
@@ -911,6 +925,82 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     return json({ id: agent.id, ...report })
                 } catch (error) {
                     return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    /**
+     * Re-render an agent's template files with changed vars (pilot.5, VelaCrew #21), then reload it.
+     *
+     * The engine rewrote persona files through `docker exec` and reloaded. Here the template's own
+     * renderer does it, and a file somebody edited since it was rendered is left alone and reported,
+     * which a rewrite from outside could not tell. If the agent refuses to load afterwards, every
+     * rewritten file is put back, so a bad value cannot leave an agent that will not start.
+     * Gated like provisioning, because it writes the agent's files.
+     */
+    router.add(
+        "PATCH",
+        "/v1/agents/:id/vars",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const rerender = options.provision?.rerender
+                if (rerender === undefined) {
+                    return fail(
+                        {
+                            code: "rerender_not_supported",
+                            message: "This server cannot re-render an agent's template.",
+                            hint: "`serve` provides it; an embedder mounting this handler has no templates directory. Edit the files and POST /reload instead.",
+                        },
+                        501,
+                    )
+                }
+                if (!mayProvision(context.principal)) {
+                    return fail(
+                        {
+                            code: "provisioning_not_local",
+                            message:
+                                "Re-rendering an agent's files needs either a loopback bind or a credential with the admin capability.",
+                            hint: "It writes the agent's files, like creating one. Present the server's token or an operator key minted with `can: [admin]`.",
+                        },
+                        403,
+                    )
+                }
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(VarsBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+
+                let result: ReturnType<NonNullable<Provisioner["rerender"]>>
+                try {
+                    result = rerender({ agentDir: agent.dir, vars: parsed.value.vars })
+                } catch (error) {
+                    if (isHarnessError(error)) {
+                        return fail(
+                            error.toDetail(),
+                            error.code === "agent_not_from_template" ? 409 : 400,
+                        )
+                    }
+                    throw error
+                }
+                const respond = (reload: "none" | "loaded" | "pending", status = 200) =>
+                    json(
+                        {
+                            id: agent.id,
+                            rendered: result.rendered,
+                            skipped: result.skipped,
+                            reload,
+                        },
+                        status,
+                    )
+                if (result.rendered.length === 0) return respond("none")
+                try {
+                    const outcome = await runtime.reload(agent.id)
+                    return respond(outcome.status, outcome.status === "pending" ? 202 : 200)
+                } catch (error) {
+                    result.undo()
+                    if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                    throw error
                 }
             }),
         { capability: "admin" },
