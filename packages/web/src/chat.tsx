@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useRef } from "react"
-import type { Row, Transcript } from "./lib/transcript.ts"
+import type { Row, SubagentBlock, Transcript } from "./lib/transcript.ts"
 
 export function Rows(props: {
     readonly state: Transcript
@@ -81,6 +81,7 @@ function RowView(props: {
                             </div>
                         </div>
                     ) : null}
+                    {row.subagent === undefined ? null : <Subagent block={row.subagent} />}
                 </div>
             )
 
@@ -146,6 +147,35 @@ function settledText(settled: "granted" | "denied" | "abandoned" | "error"): str
         case "error":
             return "The approver itself failed, so the call was refused. That says nothing about what anybody wanted."
     }
+}
+
+/**
+ * A routed call's subagent: one line while folded, the child's calls when opened. Closed by default,
+ * like reasoning, because the reply is what a person reads first.
+ */
+function Subagent(props: { readonly block: SubagentBlock }): React.ReactElement {
+    const { block } = props
+    const status =
+        block.outcome === undefined
+            ? "running…"
+            : `${block.steps ?? 0} step${block.steps === 1 ? "" : "s"} · ${block.tokens ?? 0} tokens · ${block.outcome.replace("_", " ")}`
+    return (
+        <details className="subagent">
+            <summary>
+                subagent {block.name} · {status}
+            </summary>
+            <ul>
+                {block.calls.map((call) => (
+                    <li key={call.callId} className={call.ok === false ? "failed" : undefined}>
+                        <span className="slug">{call.slug}</span>
+                        {call.ok === undefined
+                            ? " running…"
+                            : `${call.ok ? " ok" : " failed"}${call.latencyMs === undefined ? "" : ` · ${call.latencyMs} ms`}`}
+                    </li>
+                ))}
+            </ul>
+        </details>
+    )
 }
 
 function Fold(props: {

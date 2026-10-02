@@ -16,10 +16,12 @@
  * produce the same output and the tests need no fakes.
  */
 
-import { type AnyEvent, endNote } from "@dispach/core"
+import { type AnyEvent, endNote, SUBMIT_ARTIFACT } from "@dispach/core"
 import { MAX_TRANSCRIPT_ITEMS, REASONING_FOLD_ROWS } from "#lib/const"
+import { compactTokens } from "#lib/rows"
 import { ROLE_PREFIX } from "#lib/theme"
 import type {
+    SubagentView,
     TranscriptItem,
     TranscriptRole,
     TranscriptRow,
@@ -170,8 +172,99 @@ function applyDelta(
     }
 }
 
-function reduceEvent(state: TranscriptState, event: AnyEvent): TranscriptState {
+/** The tool row `match` picks, with its subagent replaced. Unchanged state when no row matches. */
+function withSubagent(
+    state: TranscriptState,
+    match: (item: TranscriptItem) => boolean,
+    change: (view: SubagentView | undefined, item: TranscriptItem) => SubagentView | undefined,
+): TranscriptState {
+    const at = state.items.findIndex(match)
+    if (at === -1) return state
+    const items = [...state.items]
+    const item = items[at] as TranscriptItem
+    const view = change(item.subagent, item)
+    if (view === undefined) return state
+    items[at] = { ...item, subagent: view }
+    return { ...state, items }
+}
+
+/**
+ * A subagent's own event: its tool calls become lines under the routed call's row. Its text and
+ * turn events stay out of the conversation, which is the parent's; `handoff.result` reports the end.
+ */
+function reduceChild(state: TranscriptState, event: AnyEvent): TranscriptState {
+    const mine = (item: TranscriptItem) => item.subagent?.sessionKey === event.sessionKey
+    // The child's return channel is how it hands back its answer, not work it did for the person.
+    if ("slug" in event.data && event.data.slug === SUBMIT_ARTIFACT) return state
     switch (event.type) {
+        case "tool.call":
+            return withSubagent(state, mine, (view) =>
+                view === undefined
+                    ? undefined
+                    : {
+                          ...view,
+                          lines: [
+                              ...view.lines,
+                              { callId: event.data.callId, text: `${event.data.slug} …` },
+                          ],
+                      },
+            )
+        case "tool.result": {
+            const { slug, callId, ok, latencyMs } = event.data
+            const text = `${slug} — ${ok ? "ok" : "failed"} · ${latencyMs} ms`
+            return withSubagent(state, mine, (view) =>
+                view === undefined
+                    ? undefined
+                    : {
+                          ...view,
+                          lines: view.lines.some((line) => line.callId === callId)
+                              ? view.lines.map((line) =>
+                                    line.callId === callId ? { callId, text } : line,
+                                )
+                              : [...view.lines, { callId, text }],
+                      },
+            )
+        }
+        case "tool.gated":
+            return withSubagent(state, mine, (view) =>
+                view === undefined
+                    ? undefined
+                    : {
+                          ...view,
+                          lines: [
+                              ...view.lines,
+                              { text: `${event.data.slug} — blocked: ${event.data.reason}` },
+                          ],
+                      },
+            )
+        default:
+            return state
+    }
+}
+
+function reduceEvent(state: TranscriptState, event: AnyEvent): TranscriptState {
+    if (event.parentTurnId !== undefined) return reduceChild(state, event)
+    switch (event.type) {
+        case "handoff.start": {
+            const { kind, name, callId, sessionKey } = event.data
+            if (kind !== "self" || callId === undefined) return state
+            return withSubagent(
+                state,
+                (item) => item.callId === callId,
+                () => ({ name: name ?? "subagent", sessionKey, lines: [] }),
+            )
+        }
+
+        case "handoff.result": {
+            const { sessionKey, steps, tokens, outcome } = event.data
+            const summary = `${steps} step${steps === 1 ? "" : "s"} · ${compactTokens(tokens.prompt + tokens.output)} tokens · ${outcome === "ok" ? "ok" : outcome.replace("_", " ")}`
+            return withSubagent(
+                state,
+                (item) => item.subagent?.sessionKey === sessionKey,
+                (view) => (view === undefined ? undefined : { ...view, summary }),
+            )
+        }
+
         case "turn.start":
             return {
                 ...state,
@@ -218,7 +311,14 @@ function reduceEvent(state: TranscriptState, event: AnyEvent): TranscriptState {
             }
             const items = [...state.items]
             const item = items[at] as TranscriptItem
-            items[at] = { id: item.id, role: ok ? "tool" : "error", text, callId }
+            items[at] = {
+                id: item.id,
+                role: ok ? "tool" : "error",
+                text,
+                callId,
+                // The routed call's block outlives its own completion: the child's lines are the point.
+                ...(item.subagent === undefined ? {} : { subagent: item.subagent }),
+            }
             return { ...state, items }
         }
 
@@ -569,6 +669,49 @@ export function transcriptRows(
                 lead: [...prefix].length,
                 continuation: n > 0,
             })
+        }
+
+        if (item.subagent !== undefined) {
+            // Folded with the reasoning blocks, by the same key: both are the detail behind a row, and
+            // the reply is what a person reads first.
+            const view = item.subagent
+            const open = options.expandReasoning === true
+            const status = view.summary ?? "running"
+            const more =
+                !open && view.lines.length > 0
+                    ? ` · ⌥r shows ${view.lines.length} call${view.lines.length === 1 ? "" : "s"}`
+                    : ""
+            for (const [n, line] of wrapText(
+                `↳ subagent ${view.name} · ${status}${more}`,
+                Math.max(1, options.columns - pad.length),
+            ).entries()) {
+                rows.push(
+                    chrome({
+                        key: `${item.id}:sub-${n}`,
+                        role: item.role,
+                        text: `${pad}${line}`,
+                        dim: true,
+                    }),
+                )
+            }
+            if (open) {
+                const inner = `${pad}  `
+                for (const [n, line] of view.lines.entries()) {
+                    for (const [w, wrapped] of wrapText(
+                        line.text,
+                        Math.max(1, options.columns - inner.length),
+                    ).entries()) {
+                        rows.push({
+                            key: `${item.id}:sub-${n}-${w}`,
+                            role: item.role,
+                            text: `${inner}${wrapped}`,
+                            dim: true,
+                            lead: inner.length,
+                            continuation: w > 0,
+                        })
+                    }
+                }
+            }
         }
 
         if (item.stats !== undefined && !options.quiet) {

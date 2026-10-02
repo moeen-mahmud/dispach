@@ -337,6 +337,26 @@ details.fold .body {
     font-size: 13px;
 }
 
+/* A routed call's subagent, under its tool row. Folded by default, like reasoning. */
+.tool details.subagent {
+    margin-top: 4px;
+}
+.tool details.subagent summary {
+    cursor: pointer;
+    color: var(--dim);
+    font-size: 11px;
+}
+.tool details.subagent ul {
+    list-style: none;
+    margin: 4px 0 0;
+    padding-left: 12px;
+    border-left: 1px solid var(--line);
+    color: var(--dim);
+}
+.tool details.subagent li.failed .slug {
+    color: var(--bad);
+}
+
 /* ─── composer ──────────────────────────────────────────────────────────── */
 
 .composer {

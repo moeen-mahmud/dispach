@@ -6,6 +6,7 @@
  * plain path's subscription is inside `runCommand` and nothing smaller reaches it.
  */
 
+import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -47,7 +48,8 @@ function model() {
     })
 }
 
-async function runPlain(baseUrl: string): Promise<string> {
+/** An agent whose `now` is routed to a subagent, in a home of its own. */
+function agentHome(baseUrl: string): string {
     const home = mkdtempSync(join(tmpdir(), "subagents-plain-"))
     roots.push(home)
     const manifest = join(home, "agent.yaml")
@@ -70,18 +72,15 @@ subagents:
       tools: [now]
 `,
     )
+    return home
+}
+
+/** One `run --plain` in that home, sharing its store with every other run there. */
+async function runIn(home: string, args: readonly string[]): Promise<string> {
+    const manifest = join(home, "agent.yaml")
     const child = spawn(
         process.execPath,
-        [
-            BINARY,
-            "run",
-            manifest,
-            "--input",
-            "what time is it?",
-            "--plain",
-            "--store",
-            join(home, "store.db"),
-        ],
+        [BINARY, "run", manifest, ...args, "--plain", "--store", join(home, "store.db")],
         {
             env: {
                 ...process.env,
@@ -107,11 +106,36 @@ describe("run --plain with a subagent", () => {
     test("prints the parent's reply and none of the child's", async () => {
         const server = model()
         try {
-            const out = await runPlain(`http://127.0.0.1:${server.port}/v1`)
+            const home = agentHome(`http://127.0.0.1:${server.port}/v1`)
+            const out = await runIn(home, ["--input", "what time is it?"])
             expect(out).toContain("It is late, says the clock.")
             expect(out).not.toContain("CHILD-PROSE-LEAK")
         } finally {
             server.stop(true)
         }
     }, 30_000)
+
+    test("--continue runs, and resumes the conversation rather than its subagent's session", async () => {
+        const server = model()
+        try {
+            const home = agentHome(`http://127.0.0.1:${server.port}/v1`)
+            await runIn(home, ["--input", "what time is it?"])
+            const again = await runIn(home, ["--continue", "--input", "and now?"])
+            // It ran, rather than throwing before the runtime source existed (3f7fe85).
+            expect(again).not.toContain("before initialization")
+            // Both questions are in the one conversation; the subagent's session got neither.
+            const db = new Database(join(home, "store.db"), { readonly: true })
+            const rows = db
+                .query("SELECT session_key AS key, content FROM messages WHERE role = 'user'")
+                .all() as { key: string; content: string }[]
+            db.close()
+            const asked = rows.filter(
+                (row) => row.content === "what time is it?" || row.content === "and now?",
+            )
+            expect(asked.map((row) => row.key.startsWith("local:"))).toEqual([true, true])
+            expect(new Set(asked.map((row) => row.key)).size).toBe(1)
+        } finally {
+            server.stop(true)
+        }
+    }, 60_000)
 })

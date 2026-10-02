@@ -14,6 +14,7 @@ import type { AnyEvent } from "../src/events/types.ts"
 import type { ActingParticipant } from "../src/loop/sender.ts"
 import type { FetchLike } from "../src/model/provider.ts"
 import { Runtime } from "../src/runtime/runtime.ts"
+import { isChildSession } from "../src/team/child-session.ts"
 import type { Tool, ToolProviderFactory } from "../src/tools/types.ts"
 import { describe, expect, test } from "./_harness.ts"
 
@@ -410,4 +411,11 @@ describe("a child's events", () => {
         ).toBe(true)
         await runtime.stop()
     })
+})
+
+test("a delegation's own session is not a conversation", () => {
+    expect(isChildSession("subagent:r_1")).toBe(true)
+    expect(isChildSession("handoff:r_1")).toBe(true)
+    expect(isChildSession("local:3c2dc5")).toBe(false)
+    expect(isChildSession("api:subagent:x")).toBe(false)
 })

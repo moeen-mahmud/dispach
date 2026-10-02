@@ -28,6 +28,7 @@ import type {
     ToolSummary,
 } from "@dispach/client"
 import { DispachError } from "@dispach/client"
+import { isChildSession } from "@dispach/core/wire"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Composer, Rows } from "./chat.tsx"
 import { Keys } from "./keys.tsx"
@@ -367,7 +368,8 @@ function Workspace(props: {
     const refreshSessions = useCallback(async () => {
         if (agent === undefined) return
         try {
-            setSessions(await agent.sessions())
+            // Not a delegation's own session: those are a child of a turn, not a conversation.
+            setSessions((await agent.sessions()).filter((row) => !isChildSession(row.sessionKey)))
             // **Cleared on success, or one transient failure is permanent.** The old code set the
             // error and never unset it, and because the string was identical every time React
             // bailed out of the re-render — so the banner sat there with nothing retrying behind
@@ -413,7 +415,8 @@ function Workspace(props: {
             stopRef.current = () => handle.stop()
             try {
                 sessionStorage.setItem(LIVE_TURN, turnId)
-                for await (const item of handle.stream({ chunks: true, signal })) {
+                // `children`: a routed call's subagent streams into its block under the tool row.
+                for await (const item of handle.stream({ chunks: true, children: true, signal })) {
                     setState((previous) => reduce(previous, item))
                 }
             } catch (caught) {

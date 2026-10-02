@@ -60,6 +60,8 @@ export type Row =
            * output can be anything. The text is in the stored session, on the reattach path.
            */
           readonly untrusted?: boolean
+          /** The routed call ran in a subagent (pilot.6): its calls, folded under this row. */
+          readonly subagent?: SubagentBlock
       }
     | {
           readonly kind: "approval"
@@ -72,6 +74,22 @@ export type Row =
       }
     /** How the turn ended, and anything the runtime wanted a person to read. */
     | { readonly kind: "note"; readonly id: string; readonly text: string; readonly bad: boolean }
+
+export interface SubagentBlock {
+    readonly name: string
+    /** The child's own session, which is how its events find this row. */
+    readonly sessionKey: string
+    readonly calls: readonly {
+        readonly callId: string
+        readonly slug: string
+        readonly ok?: boolean
+        readonly latencyMs?: number
+    }[]
+    /** Set when the child finishes: `ok`, `no_artifact`, `budget` or `error`. */
+    readonly outcome?: string
+    readonly steps?: number
+    readonly tokens?: number
+}
 
 export interface Transcript {
     /**
@@ -173,8 +191,85 @@ export function reduce(state: Transcript, item: TurnStreamItem): Transcript {
     }
 }
 
+/** The tool row `match` picks, with its subagent block changed. Unchanged when nothing matches. */
+function withBlock(
+    state: Transcript,
+    match: (row: Extract<Row, { kind: "tool" }>) => boolean,
+    change: (block: SubagentBlock | undefined) => SubagentBlock | undefined,
+): Transcript {
+    const index = state.rows.findIndex((row) => row.kind === "tool" && match(row))
+    const row = state.rows[index]
+    if (row === undefined || row.kind !== "tool") return state
+    const block = change(row.subagent)
+    if (block === undefined) return state
+    const rows = [...state.rows]
+    rows[index] = { ...row, subagent: block }
+    return { ...state, rows }
+}
+
+/**
+ * A subagent's own event, which a stream carries only when asked (`children: true`). Its calls go
+ * under the routed row; its text, steps and `turn.end` are its own turn's and touch nothing here.
+ */
+function onChild(state: Transcript, event: AnyEvent): Transcript {
+    const mine = (row: Extract<Row, { kind: "tool" }>) =>
+        row.subagent?.sessionKey === event.sessionKey
+    if (event.type === "tool.call") {
+        const data = event.data as EventDataMap["tool.call"]
+        return withBlock(state, mine, (block) =>
+            block === undefined
+                ? undefined
+                : { ...block, calls: [...block.calls, { callId: data.callId, slug: data.slug }] },
+        )
+    }
+    if (event.type === "tool.result") {
+        const data = event.data as EventDataMap["tool.result"]
+        return withBlock(state, mine, (block) =>
+            block === undefined
+                ? undefined
+                : {
+                      ...block,
+                      calls: block.calls.map((call) =>
+                          call.callId === data.callId
+                              ? { ...call, ok: data.ok, latencyMs: data.latencyMs }
+                              : call,
+                      ),
+                  },
+        )
+    }
+    return state
+}
+
 function onEvent(state: Transcript, event: AnyEvent): Transcript {
+    if (event.parentTurnId !== undefined) return onChild(state, event)
     switch (event.type) {
+        case "handoff.start": {
+            const data = event.data as EventDataMap["handoff.start"]
+            if (data.kind !== "self" || data.callId === undefined) return state
+            return withBlock(
+                state,
+                (row) => row.callId === data.callId,
+                () => ({ name: data.name ?? "subagent", sessionKey: data.sessionKey, calls: [] }),
+            )
+        }
+
+        case "handoff.result": {
+            const data = event.data as EventDataMap["handoff.result"]
+            return withBlock(
+                state,
+                (row) => row.subagent?.sessionKey === data.sessionKey,
+                (block) =>
+                    block === undefined
+                        ? undefined
+                        : {
+                              ...block,
+                              outcome: data.outcome,
+                              steps: data.steps,
+                              tokens: data.tokens.prompt + data.tokens.output,
+                          },
+            )
+        }
+
         case "turn.start":
             return { ...state, running: true }
 

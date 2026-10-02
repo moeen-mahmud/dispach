@@ -27,6 +27,7 @@ import {
     endedBadly,
     endNote,
     HarnessError,
+    isChildSession,
     processAlive,
     Runtime as RuntimeClass,
     VERSION,
@@ -320,7 +321,10 @@ export async function runCommand(options: RunOptions): Promise<number> {
         // `/restart` rebuilds the agent and stays in the same conversation.
         if (session.current === undefined || session.current === "") {
             const resolved = await resolveSession({
-                list: () => source.sessions(),
+                // The store, not `source`: that is built below, once the session is known, and
+                // reaching for it here threw `Cannot access 'source' before initialization` on every
+                // `--continue` and bare `--session` with no host running (since 3f7fe85).
+                list: async () => withoutChildren(await agent.store.sessions.list(agent.id)),
                 mode,
                 asked: session.current,
                 wantsContinue: options.continueSession === true,
@@ -815,7 +819,7 @@ async function runAttached(
     for (;;) {
         if (input.session.current === undefined || input.session.current === "") {
             const resolved = await resolveSession({
-                list: () => source.sessions(),
+                list: () => conversations(source),
                 mode: input.mode,
                 asked: input.session.current,
                 wantsContinue: input.continueSession === true,
@@ -995,7 +999,7 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
                 // rather than whatever a local store happens to hold. That is the whole reason an
                 // attached run opens no database: two readings of "which conversations exist" can
                 // disagree while both look correct, and only one of them is being written to.
-                const stored = await wired.source.sessions()
+                const stored = await conversations(wired.source)
                 return [...stored].sort(byRecency).map((row) => ({
                     sessionKey: row.sessionKey,
                     messages: row.messages,
@@ -1513,6 +1517,17 @@ async function sessionStatus(embedded: {
  * what is printed — with the pid and address, because "somewhere else" is not an answer somebody
  * can act on.
  */
+/** The sessions a person had, without the ones a delegation created (`isChildSession`). */
+function withoutChildren<T extends { readonly sessionKey: string }>(
+    rows: readonly T[],
+): readonly T[] {
+    return rows.filter((row) => !isChildSession(row.sessionKey))
+}
+
+async function conversations(source: AgentSource): Promise<readonly SourceSession[]> {
+    return withoutChildren(await source.sessions())
+}
+
 async function attachedStatus(source: AgentSource): Promise<string> {
     const described = source.describe()
     const host = source.host

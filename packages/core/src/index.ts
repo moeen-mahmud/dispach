@@ -580,6 +580,7 @@ export {
     SUBMIT_ARTIFACT,
     submitArtifactTool,
 } from "./team/artifact.ts"
+export { isChildSession } from "./team/child-session.ts"
 export { type ExpandedTeams, expandTeams } from "./team/expand.ts"
 export {
     type HandoffCost,

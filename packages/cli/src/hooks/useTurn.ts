@@ -67,7 +67,12 @@ export function useTurn(options: {
             // Other sessions share this bus — from Phase 4, a channel can be delivering a turn for
             // a different peer while this prompt is open. An event with no session key is
             // runtime-wide and belongs to everyone.
-            if (event.sessionKey !== undefined && event.sessionKey !== sessionKey) return
+            if (event.sessionKey !== undefined && event.sessionKey !== sessionKey) {
+                // A subagent of this conversation goes to the reducer whole, as an event: `reduceChild`
+                // keeps its tool calls under the routed row and nothing else of it touches this turn.
+                if (event.parentSessionKey === sessionKey) dispatch({ kind: "event", event })
+                return
+            }
 
             // Reasoning is never parsed for tool calls, so it is never filtered for them either.
             if (event.type === "model.chunk") {
