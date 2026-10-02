@@ -506,6 +506,7 @@ export {
     MAX_TEAM_DEPTH,
     type ResolvedMember,
 } from "./team/supervisor.ts"
+export { stripHtmlComments, trimTrailingSlashes } from "./text.ts"
 export {
     type Coercion,
     type CoercionFailure,

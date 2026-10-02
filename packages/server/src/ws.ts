@@ -410,7 +410,7 @@ export function attachWebSocket(
                         JSON.stringify({
                             type: "ws.error",
                             code: "internal_error",
-                            message: error instanceof Error ? error.message : String(error),
+                            message: "The turn budget could not be read.",
                         }),
                     )
                 })

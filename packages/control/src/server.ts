@@ -62,8 +62,8 @@ function fail(res: ServerResponse, error: unknown): void {
     send(res, 500, {
         error: {
             code: "internal_error",
-            message: error instanceof Error ? error.message : String(error),
-            hint: "A defect in the control plane, not in the request. The stack is on its stderr.",
+            message: "An unexpected failure in the control plane.",
+            hint: "A defect in the control plane, not in the request. The cause and stack are on its stderr.",
         },
     })
 }
@@ -342,7 +342,18 @@ export function createControlServer(options: ServerOptions): Server {
         const release = control.hold(subject)
         res.on("close", release)
         const awake = await control.ensureAwake(silo)
-        const target = new URL(rest, awake.baseUrl)
+        const base = new URL(awake.baseUrl)
+        const target = new URL(rest, base)
+        // `rest` is always a `/v1/…` path today, and a URL that leaves the silo's origin is refused
+        // rather than trusted to stay that way: `new URL("//elsewhere", base)` would.
+        if (target.origin !== base.origin) {
+            throw new ControlError({
+                code: "proxy_path_invalid",
+                message: "That path does not stay on the silo.",
+                hint: "Send a /v1/… path under /silos/:subject.",
+                status: 400,
+            })
+        }
         const headers: Record<string, string | string[]> = {}
         for (const [key, value] of Object.entries(req.headers)) {
             if (value !== undefined && !HOP_BY_HOP.has(key)) headers[key] = value

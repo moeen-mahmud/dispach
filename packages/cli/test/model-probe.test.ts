@@ -242,7 +242,7 @@ describe("every configured role", () => {
         const out = await run(dir, doFetch)
         expect(out).toContain("compactor · qwen3.5:9b")
         expect(calls.filter((call) => call.url.endsWith("/models"))).toHaveLength(2)
-        expect(calls.some((call) => call.url.startsWith("https://local.example.com"))).toBe(true)
+        expect(calls.some((call) => new URL(call.url).host === "local.example.com")).toBe(true)
     })
 })
 

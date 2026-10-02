@@ -3196,11 +3196,16 @@ async function runHandler(handler: Handler, context: RequestContext): Promise<Re
         return await handler(context)
     } catch (error) {
         if (isHarnessError(error)) return fail(error.toDetail(), 400)
+        // The cause goes to the server's stderr, not to the caller: an unexpected error's message can
+        // carry paths and internals, and the caller may be a scoped key's holder.
+        process.stderr.write(
+            `internal: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+        )
         return fail(
             {
                 code: "internal_error",
-                message: error instanceof Error ? error.message : String(error),
-                hint: "An unexpected failure in the server. The runtime's event stream carries what happened around it.",
+                message: "An unexpected failure in the server.",
+                hint: "Not caused by the request. The server's log has the cause, and the runtime's event stream carries what happened around it.",
             },
             500,
         )

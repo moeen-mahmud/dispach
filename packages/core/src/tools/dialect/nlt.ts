@@ -38,7 +38,9 @@ const HEREDOC_CLOSE = ">>>"
 // The optional angle brackets are measured, not defensive: `<ACTION: glob>` is one of the three
 // shapes deepseek-v4-pro produced. See ATTEMPTED_CALL below for the other two and for why tolerance
 // alone cannot be the whole answer.
-const ACTION_LINE = /^\s*(?:[-*+]\s+|\d+[.)]\s+)?<?\s*action\s*:\s*(.+?)\s*>?\s*$/i
+// Every whitespace run has one place to go: the lazy capture against `\s*>?\s*$` was cubic, and a
+// line of `action: x` and five thousand spaces took 17 s. The tail is trimmed by `actionSlug`.
+const ACTION_LINE = /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:<\s*)?action\s*:(.+)$/i
 /**
  * A field name has **no spaces**, and that one character class is load-bearing.
  *
@@ -55,7 +57,7 @@ const ACTION_LINE = /^\s*(?:[-*+]\s+|\d+[.)]\s+)?<?\s*action\s*:\s*(.+?)\s*>?\s*
  * silently truncated argument.
  */
 const KEY_LINE = /^\s*(?:[-*+]\s+|\d+[.)]\s+)?([A-Za-z_][\w.-]*?)\s*:\s*(.*)$/
-const FENCE_LINE = /^\s*`{3,}\s*[\w+-]*\s*$/
+const FENCE_LINE = /^\s*`{3,}\s*(?:[\w+-]+\s*)?$/
 const END_LINE = /^\s*end\s*$/i
 
 /**
@@ -96,7 +98,7 @@ const XML_CLOSE = /^\s*<\s*\/\s*action\s*>\s*$/i
  * transcripts no model has written one, and the alternative is a reply that shows the person a tag
  * they did not ask about wrapped round a tool call that never ran.
  */
-const LONE_TAG = /^\s*<\/?\s*[A-Za-z_][\w.:-]*\s*\/?\s*>\s*$/
+const LONE_TAG = /^\s*<\/?\s*[A-Za-z_][\w.:-]*\s*(?:\/\s*)?>\s*$/
 
 /**
  * Markup that says "this was meant to be a tool call" in a format this parser cannot read.
@@ -146,6 +148,12 @@ function attemptedCall(text: string): FieldError | undefined {
         message: "looks like a tool call written in a different format, so nothing ran.",
         hint: "Tool calls in this conversation are plain lines, not tags or JSON. Write `ACTION:` then the tool name, one `name: value` per line after it, then `END` alone on its own line — exactly as the tool list shows. Nothing was executed, so writing it again correctly is safe.",
     }
+}
+
+/** What follows `ACTION:`, trimmed, with one closing `>` dropped — what the old lazy capture kept. */
+function actionSlug(raw: string | undefined): string {
+    const trimmed = (raw ?? "").trim()
+    return trimmed.endsWith(">") ? trimmed.slice(0, -1).trimEnd() : trimmed
 }
 
 /** Strip the decoration a model puts around a tool name: backticks, quotes, trailing full stop. */
@@ -321,7 +329,7 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
         if (ACTION_LINE.test(line)) {
             closeBlock(state)
             const match = ACTION_LINE.exec(line)
-            const slug = cleanSlug(match?.[1] ?? "")
+            const slug = cleanSlug(actionSlug(match?.[1]))
             if (slug !== "")
                 state.block = { slug, fields: new Map(), wrapped: new Set(), severed: new Set() }
             return
@@ -332,7 +340,7 @@ function consumeLine(state: ParseState, line: string, fenceIsDecoration: () => b
 
     const action = ACTION_LINE.exec(line)
     if (action !== null) {
-        const slug = cleanSlug(action[1] ?? "")
+        const slug = cleanSlug(actionSlug(action[1]))
         closeBlock(state)
         if (slug === "") return
         state.block = { slug, fields: new Map(), wrapped: new Set(), severed: new Set() }
@@ -619,7 +627,7 @@ export function parseNlt(output: string): ParsedOutput {
  */
 function mightBecomeStructure(partial: string): boolean {
     // A bullet or list marker that has not yet been followed by anything could still precede ACTION.
-    if (/^\s*(?:[-*+]|\d+[.)]?)?\s*$/.test(partial)) return true
+    if (/^\s*(?:(?:[-*+]|\d+[.)]?)\s*)?$/.test(partial)) return true
 
     const head = partial.replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/, "").toLowerCase()
 

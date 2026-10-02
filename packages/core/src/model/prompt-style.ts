@@ -57,7 +57,7 @@ export const DEFAULT_PROMPT_STYLE: PromptStyle = {
  */
 export function parameterBillions(modelId: string): number | undefined {
     const id = modelId.toLowerCase()
-    const mixture = /(\d+)x(\d+(?:\.\d+)?)b\b/.exec(id)
+    const mixture = /(?<!\d)(\d+)x(\d+(?:\.\d+)?)b\b/.exec(id)
     if (mixture !== null) return Number(mixture[2])
     const plain = /(?:^|[^a-z0-9])(\d+(?:\.\d+)?)b\b/.exec(id)
     if (plain === null) return undefined
