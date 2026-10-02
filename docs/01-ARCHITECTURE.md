@@ -243,8 +243,9 @@ slot  content                                    pinned  cache          phase
  8    recent message window                        no
  9    workspace `reminder` tier                    yes
 10    retrieved memory passages (k)                no                      6
-11    current input + current task line            yes
-12    last error, if any                           yes
+11    the embedder's note about this message       yes     this turn only  0.2.0
+12    current input + current task line            yes
+13    last error, if any                           yes
 ```
 
 **Slot number equals prompt position.** The two are kept equal so this table can be read in
@@ -289,6 +290,11 @@ a rule stated once in slot 0 of a thirty-turn session is effectively in the midd
 Retrieved memory sits in slot 10, after the reminder and immediately before the current input:
 evidence next to the question. Measured on llama3.2:3b, the same correct passage in the old
 slot 7 (ahead of history) was ignored; adjacent to the question it was used.
+
+Slot 11 is `POST /messages {runtimeNote}`: what the embedding application knows about this one
+message — the active project, today's date in the person's zone. It is framed as not written by the
+person and exists for one turn. It is never history, because prepended to the text it was stored as
+the person's words and the model quoted it back as theirs.
 
 ### Budget
 

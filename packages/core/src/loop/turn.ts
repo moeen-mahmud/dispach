@@ -230,6 +230,12 @@ export interface TurnInput {
      * instructions. Runtime-authored, so it is not the sender's text and is not framed as theirs.
      */
     readonly runtimeNote?: string
+    /**
+     * The embedder's note about this message (`POST /messages {runtimeNote}`). Its own block before
+     * the input, never in history: unlike `runtimeNote` above, which is a stand-in's instructions and
+     * is stored with the input because every later turn of that conversation needs it.
+     */
+    readonly turnNote?: string
     /** Images sent with the input. Sent on every step of this turn, stored as references. */
     readonly images?: readonly ImageInput[]
     /**
@@ -778,6 +784,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     // replaced that array by the time this runs.
                     protectedTail: Math.max(0, messages.length - initialHistoryLength),
                     input: promptInput,
+                    ...(input.turnNote === undefined ? {} : { note: input.turnNote }),
                     ...(input.images === undefined || input.images.length === 0
                         ? {}
                         : { inputImages: input.images }),

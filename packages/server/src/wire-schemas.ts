@@ -133,6 +133,12 @@ export const DeliverSchema = refuse(
 // ─── one schema per body ────────────────────────────────────────────────────────────────
 
 /** `POST /v1/agents/:id/messages` */
+/**
+ * The cap on `runtimeNote`. A note is billed on every step of its turn, and one big enough to need
+ * more is a document, which `images` or a workspace file carry better.
+ */
+export const MAX_NOTE_CHARS = 8000
+
 export const MessageBody = z.object({
     text: refuse(z.string().trim().min(1), {
         code: "message_text_required",
@@ -143,6 +149,12 @@ export const MessageBody = z.object({
         z.string().min(1).optional(),
         "Which conversation this belongs to. Defaults to `api:default`.",
     ),
+    runtimeNote: refuse(z.string().trim().min(1).max(MAX_NOTE_CHARS).optional(), {
+        code: "message_note_invalid",
+        hint: `Send runtimeNote as non-empty text of at most ${MAX_NOTE_CHARS} characters: the active project, today's date in the person's zone, an attachment's extracted text.`,
+        description:
+            "Your application's note about this message: shown to the model in its own block before the text, labelled as not written by the person, for this turn only. Kept on the turn record (`GET …/turns`), never in history. Refused when `from` is an agent.",
+    }),
     images: refuse(
         z
             .array(

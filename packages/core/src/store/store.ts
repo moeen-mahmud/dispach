@@ -115,6 +115,8 @@ export interface TurnRecord {
     readonly sender?: string
     readonly senderName?: string
     readonly senderKind?: SenderKind
+    /** `POST /messages {runtimeNote}`, as sent. Absent when there was none. */
+    readonly note?: string
     readonly errorCode?: string
     readonly errorMessage?: string
     readonly errorHint?: string
@@ -186,6 +188,8 @@ export interface TurnStore {
          */
         readonly input: string
         readonly sender?: TurnSender
+        /** The embedder's note about this message, kept for debugging and replay. Never history. */
+        readonly note?: string
     }): Promise<TurnRecord>
     finish(
         turnId: string,

@@ -223,6 +223,7 @@ interface TurnRow {
     sender: string | null
     sender_name: string | null
     sender_kind: string | null
+    note: string | null
     error_code: string | null
     error_message: string | null
     error_hint: string | null
@@ -548,6 +549,7 @@ function toTurn(row: TurnRow): TurnRecord {
         ...(row.sender === null ? {} : { sender: row.sender }),
         ...(row.sender_name === null ? {} : { senderName: row.sender_name }),
         ...(row.sender_kind === null ? {} : { senderKind: row.sender_kind as SenderKind }),
+        ...(row.note === null ? {} : { note: row.note }),
         ...(row.error_code === null ? {} : { errorCode: row.error_code }),
         ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
         ...(row.error_hint === null ? {} : { errorHint: row.error_hint }),
@@ -876,8 +878,8 @@ export class SqliteStore implements Store {
             turnInsert: db.prepare(
                 `INSERT INTO turns
                      (turn_id, agent_id, session_key, status, source, input,
-                      sender, sender_name, sender_kind, started_at)
-                 VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)`,
+                      sender, sender_name, sender_kind, note, started_at)
+                 VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)`,
             ),
             // `OR IGNORE` rather than `ON CONFLICT DO UPDATE`: a second claim must **not** move the
             // key onto the new turn id. The whole point is that the first turn keeps it.
@@ -1387,6 +1389,7 @@ export class SqliteStore implements Store {
                         record.sender?.id ?? null,
                         record.sender?.name ?? null,
                         record.sender?.kind ?? null,
+                        record.note ?? null,
                         ts,
                     )
                 })

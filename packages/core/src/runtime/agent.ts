@@ -278,6 +278,8 @@ export interface AgentSendOptions {
     readonly deferMutations?: ExecuteInput["defer"]
     /** Runtime-authored text before the input, outside its fence. See `TurnInput.runtimeNote`. */
     readonly runtimeNote?: string
+    /** The embedder's note about this message. See `TurnInput.turnNote`. Kept on the turn row. */
+    readonly turnNote?: string
     /** Images sent with this message, already read (`readImages`). See `ChatMessage.images`. */
     readonly images?: readonly ImageInput[]
     /**
@@ -1263,6 +1265,7 @@ export class Agent {
             // beside it, so a reader can reconstruct the framing without the evidence carrying it.
             input,
             ...(options.from === undefined ? {} : { sender: options.from }),
+            ...(options.turnNote === undefined ? {} : { note: options.turnNote }),
         })
 
         const active = this.knowledge === undefined ? [] : activateKnowledge(input, this.knowledge)
@@ -1361,6 +1364,7 @@ export class Agent {
                 ? {}
                 : { images: options.images }),
             ...(options.toolsAllow === undefined ? {} : { toolsAllow: options.toolsAllow }),
+            ...(options.turnNote === undefined ? {} : { turnNote: options.turnNote }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             // A turn that may not read private memory may not write it either (QA 0.2.0): the

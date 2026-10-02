@@ -47,6 +47,8 @@ and WebSocket surfaces can return:
 | `body_too_large` | 400 | Over the 1 MB cap, refused before a channel plugin sees it. |
 | `bad_request_url` | 400 | `request.url` could not be parsed — usually a relative URL from a host framework. |
 | `message_text_required` | 400 | `POST /messages` with no `text`. |
+| `message_note_invalid` | 400 | `POST /messages` with a `runtimeNote` that is empty or over 8,000 characters. |
+| `message_note_untrusted` | 400 | `POST /messages` with a `runtimeNote` from a peer agent (`from.kind: "agent"`). |
 | `message_images_invalid` | 400 | `POST /messages` with `images` that is not a list of `{path}` or `{data, mediaType?}`. The checks on each image have their own codes (`image_*`, `model_no_vision`); see `images` above. |
 | `deliver_invalid` | 400 | `deliver` named a channel with no recipient, or an unknown shape. |
 | `delivery_channel_required` | 400 | `POST /deliveries` with no `channel`. |
@@ -603,6 +605,19 @@ POST /v1/agents/:id/messages
 
 Returns `202` with `{ turnId, sessionKey }` immediately, then streams SSE if `stream` is
 true. **The turn is not bound to this connection.** Disconnecting does not cancel it.
+
+#### `runtimeNote` — your application's note about this message (since 0.2.0-pilot.5)
+
+```json
+{ "text": "what's next?", "runtimeNote": "Project: Website Relaunch (id p_42)\nToday is 2026-10-02, Asia/Dhaka" }
+```
+
+Shown to the model in its own block just before the text, labelled as coming from the application
+and not from the person, for this turn only. It is kept on the turn record (`note` on
+`GET …/turns`) and never stored in the conversation, so a later turn neither carries it nor sees it
+as something the person said. At most 8,000 characters (`message_note_invalid`). A message with
+`from.kind: "agent"` cannot carry one (`message_note_untrusted`): a peer's text is fenced as untrusted,
+and a note is trusted framing outside that fence. It is not part of the idempotency hash.
 
 #### `images` — what the model is shown with the text (since 0.2.0-pilot.5)
 

@@ -1129,6 +1129,17 @@ ALTER TABLE schedules ADD COLUMN timeout_ms INTEGER;
 ALTER TABLE schedules ADD COLUMN max_steps INTEGER;
 `,
     },
+    {
+        version: 26,
+        name: "turn_note",
+        /**
+         * The embedder's note about one message (pilot.5, VelaCrew #13), kept on the turn row for
+         * debugging and replay. Never in `messages`: it is about the message, not part of it.
+         */
+        sql: `
+ALTER TABLE turns ADD COLUMN note TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

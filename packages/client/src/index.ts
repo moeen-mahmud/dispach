@@ -167,6 +167,12 @@ export interface SendOptions {
      * relative to the agent's directory is preferred; inline base64 must fit the 1 MB body limit.
      * A model without vision refuses with `model_no_vision`.
      */
+    /**
+     * Your application's note about this message (the active project, today's date in the person's
+     * zone). Shown to the model in its own block before the text, labelled as not the person's, for
+     * this turn only; kept on the turn record and never in history. At most 8,000 characters.
+     */
+    readonly runtimeNote?: string
     readonly images?: readonly (
         | { readonly path: string }
         | { readonly data: string; readonly mediaType?: string }
@@ -1192,6 +1198,9 @@ export function createClient(options: ClientOptions): DispachClient {
                         ...(opts?.deliver === undefined ? {} : { deliver: opts.deliver }),
                         ...(opts?.from === undefined ? {} : { from: opts.from }),
                         ...(opts?.images === undefined ? {} : { images: opts.images }),
+                        ...(opts?.runtimeNote === undefined
+                            ? {}
+                            : { runtimeNote: opts.runtimeNote }),
                     },
                     ...(opts?.idempotencyKey === undefined
                         ? {}

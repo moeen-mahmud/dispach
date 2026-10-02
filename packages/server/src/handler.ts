@@ -1587,6 +1587,20 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const idempotency = parseIdempotencyKey(context.request)
                 if (idempotency.kind === "error") return fail(idempotency.error, 400)
 
+                // A peer's text is fenced as untrusted, and a note sits outside that fence as trusted
+                // framing: from a peer it would be a way to speak past the fence its own text is in.
+                if (input.runtimeNote !== undefined && from.from?.kind === "agent") {
+                    return fail(
+                        {
+                            code: "message_note_untrusted",
+                            message: "A message from an agent cannot carry a runtimeNote.",
+                            hint: "A note is trusted framing outside the fence a peer's text is shown in. Put what the peer has to say in text.",
+                            field: "runtimeNote",
+                        },
+                        400,
+                    )
+                }
+
                 // Images are read and checked now, for the governor's reason below: once the turn
                 // detaches, a missing file or a model that cannot see would be refused to nobody.
                 let images: readonly ImageInput[] = []
@@ -1682,6 +1696,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         source: "api",
                         ...(from.from === undefined ? {} : { from: from.from }),
                         ...(images.length === 0 ? {} : { images }),
+                        ...(input.runtimeNote === undefined ? {} : { turnNote: input.runtimeNote }),
                         signal: controller.signal,
                     })
                     .then(async (result) => {
