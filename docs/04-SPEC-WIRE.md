@@ -701,8 +701,12 @@ watching a turn's progress — most of them — wants none of that. So the reade
 wants to be billed for the resolution. `stream` asks for a stream; `chunks` asks for the tokens
 in it.
 
+`children: true` (since 0.2.0-pilot.6) adds the events of any subagent the turn runs, interleaved
+in the order they happened and marked by `parentTurnId`. Off by default, because a client that ends
+on `turn.end` without reading `turnId` would otherwise stop at the child's.
+
 ```
-GET  /v1/agents/:id/turns/:turnId/stream?chunks=  → SSE, replays buffered events then tails
+GET  /v1/agents/:id/turns/:turnId/stream?chunks=&children=  → SSE, replays buffered events then tails
 POST /v1/agents/:id/turns/:turnId/stop            → cooperative cancel; persists partial content
 GET  /v1/agents/:id/turns/:turnId                 → final state once complete, with `sender*`
 ```
@@ -1236,6 +1240,8 @@ interface Event {
   sessionKey?: string
   turnId?: string
   stepId?: string
+  parentTurnId?: string     // a subagent's events: the turn that ran it
+  parentSessionKey?: string
   type: string
   data: unknown
 }
@@ -1246,6 +1252,13 @@ events — `runtime.ready`, `store.ready`, `runtime.stopping` — belong to the 
 any agent, so they carry no id. A client that trusted the old declaration and dereferenced it was
 reading the field on exactly the events that report the runtime coming up. `sessionKey`, `turnId`
 and `stepId` narrow the same way: present when the event happened inside one, absent otherwise.
+
+**A subagent's events carry `parentTurnId` and `parentSessionKey`** (since 0.2.0-pilot.6): its own
+`sessionKey` is `subagent:<runId>`, and these name the turn whose routed call ran it, so a view can
+nest the child's steps under that call. A key scoped to a session prefix reaches a child's events
+when it reaches the parent's session. A turn's stream (`POST /messages` with `stream: true`, or
+`GET …/turns/:turnId/stream`) includes them only with `children: true` (`?children=true`); the
+stream still ends on its own turn's `turn.end`, so read `turnId` before treating one as the end.
 
 | Type | When | Key `data` |
 | --- | --- | --- |
@@ -1262,8 +1275,8 @@ and `stepId` narrow the same way: present when the event happened inside one, ab
 | `agent.channel.status` | connect/disconnect, or a channel now waiting on a person | `channelId`, `channelType`, `status` (`starting` \| `connected` \| `disconnected` \| `error` \| `needs_input`), `detail?`, `input?` (`{kind, payload, issuedAt, expiresAt?}`, present only with `needs_input`) |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |
 | `agent.channel.rejected` | inbound not turned into a turn | `channelId`, `reason` (`duplicate` \| `denied`), `sender`, `detail` |
-| `handoff.start` | a delegation began | `member`, `task`, `sessionKey` |
-| `handoff.result` | how it ended | `member`, `sessionKey`, `outcome`, `steps`, `tokens`, `errorCode?` |
+| `handoff.start` | a delegation began | `member`, `task`, `sessionKey`, `kind` (`member` or `self` for a subagent), `name?` (the subagent's), `callId?` (the parent's tool call) |
+| `handoff.result` | how it ended | `member`, `sessionKey`, `kind`, `name?`, `callId?`, `outcome`, `steps`, `tokens`, `errorCode?` |
 | `approval.requested` | a call is waiting on a person | `approvalId`, `slug`, `callId`, `match?`, `mutating`, `reason` |
 | `approval.resolved` | how it ended | `approvalId`, `slug`, `granted`, `by` |
 | `turn.start` | inbound accepted | `source`, `inputTokens`, `trust`, `from?` |

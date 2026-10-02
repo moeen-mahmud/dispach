@@ -132,7 +132,16 @@ export async function runHandoff(init: {
     /** The child session's prefix and the turn's source. `handoff` for both unless a subagent runs. */
     readonly sessionPrefix?: string
     readonly source?: string
+    /** For the events: `self` and the subagent's name, or a team member; and the parent's call. */
+    readonly kind?: "member" | "self"
+    readonly name?: string
+    readonly callId?: string
 }): Promise<HandoffOutcome> {
+    const link = {
+        kind: init.kind ?? "member",
+        ...(init.name === undefined ? {} : { name: init.name }),
+        ...(init.callId === undefined ? {} : { callId: init.callId }),
+    }
     const now = init.now ?? (() => new Date())
     const handoffId = newHandoffId()
     const sessionKey = `${init.sessionPrefix ?? "handoff"}:${newRunId()}`
@@ -140,7 +149,7 @@ export async function runHandoff(init: {
 
     init.bus.emit(
         "handoff.start",
-        { member: init.member.id, task: init.task, sessionKey },
+        { member: init.member.id, task: init.task, sessionKey, ...link },
         init.eventContext,
     )
 
@@ -166,6 +175,7 @@ export async function runHandoff(init: {
             {
                 member: init.member.id,
                 sessionKey,
+                ...link,
                 outcome: outcome.kind,
                 steps: outcome.cost.steps,
                 tokens: {

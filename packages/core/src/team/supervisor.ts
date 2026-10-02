@@ -213,6 +213,7 @@ export function handoffTool(init: {
                     turnId: context.turnId,
                 },
                 signal: context.signal,
+                ...(context.callId === undefined ? {} : { callId: context.callId }),
                 ...(member.crossMember === true && context.actingParticipant
                     ? { participant: context.actingParticipant }
                     : {}),

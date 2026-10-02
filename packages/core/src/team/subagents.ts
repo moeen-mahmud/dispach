@@ -96,6 +96,9 @@ export function routedTool(init: {
                 signal: context.signal,
                 sessionPrefix: "subagent",
                 source: "subagent",
+                kind: "self",
+                name: child.name,
+                ...(context.callId === undefined ? {} : { callId: context.callId }),
                 ...(context.actingParticipant ? { participant: context.actingParticipant } : {}),
             })
             // Recorded whatever the outcome: a failed child's prose can carry what it read too.

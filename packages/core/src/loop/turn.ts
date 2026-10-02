@@ -28,7 +28,7 @@ import {
     turnTimeout,
 } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
-import type { TurnEndReason } from "../events/types.ts"
+import type { EventContext, TurnEndReason } from "../events/types.ts"
 import { imageReference } from "../media/image-input.ts"
 import type { ChatMessage, ImageInput, ToolDefinition } from "../model/provider.ts"
 import { type ResolvedRole, requestParamsFor } from "../model/roles.ts"
@@ -256,6 +256,8 @@ export interface TurnInput {
      * content. Its task was written by a model that read it, so the write gate applies from step one.
      */
     readonly taintedBy?: string
+    /** A subagent's parent turn, stamped on every event this turn emits. */
+    readonly parent?: { readonly turnId: string; readonly sessionKey: string }
     /** Caller's cancellation. A disconnect must never be wired to this. */
     readonly signal?: AbortSignal
     readonly turnId?: string
@@ -533,7 +535,14 @@ function narrowedTools(tools: ToolRuntime, allow: readonly string[]): ToolRuntim
 
 async function runTurnCore(input: TurnInput): Promise<TurnResult> {
     const turnId = input.turnId ?? newTurnId()
-    const context = { agentId: input.agentId, sessionKey: input.sessionKey, turnId }
+    const context: EventContext = {
+        agentId: input.agentId,
+        sessionKey: input.sessionKey,
+        turnId,
+        ...(input.parent === undefined
+            ? {}
+            : { parentTurnId: input.parent.turnId, parentSessionKey: input.parent.sessionKey }),
+    }
     const started = performance.now()
 
     /**

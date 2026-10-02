@@ -304,6 +304,7 @@ interface ChildTurn {
         /** The usage rows' role, whichever model the child ran on. */
         readonly usageRole: string
         readonly taintedBy?: string
+        readonly parent: { readonly turnId: string; readonly sessionKey: string }
     }
 }
 
@@ -1044,6 +1045,7 @@ export class Agent {
                     ...(defer === undefined ? {} : { deferMutations: defer }),
                     child: {
                         usageRole: "subagent",
+                        parent: { turnId: context.turnId, sessionKey: context.sessionKey },
                         ...(context.tainted === true
                             ? { taintedBy: "the turn that delegated this task" }
                             : {}),
@@ -1492,6 +1494,7 @@ export class Agent {
                         },
                     }),
             ...(child?.taintedBy === undefined ? {} : { taintedBy: child.taintedBy }),
+            ...(child?.parent === undefined ? {} : { parent: child.parent }),
         }).finally(() => {
             this.#senders.delete(turnId)
             this.#defers.delete(turnId)

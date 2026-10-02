@@ -72,7 +72,9 @@ interface Buffered {
      * receiving them from here. Every test used a fresh harness, so none of them had a predecessor
      * still holding interest.
      */
-    readonly listeners: Map<(event: AnyEvent) => void, boolean>
+    readonly listeners: Map<(event: AnyEvent) => void, ListenerInterest>
+    /** Subagent turns this turn ran, learned from their `parentTurnId`. Their events stay theirs. */
+    readonly children: Set<string>
     /** True once an event was discarded because the cap was reached. */
     truncated: boolean
     /** How many were discarded, so the report can be specific rather than merely alarming. */
@@ -129,8 +131,29 @@ const RETENTION = {
     count: 32,
 } as const
 
+interface ListenerInterest {
+    readonly chunks: boolean
+    readonly children: boolean
+}
+
+function fanOut(buffer: Buffered, event: AnyEvent, chunk: boolean, child: boolean): void {
+    for (const [listener, interest] of [...buffer.listeners]) {
+        if (chunk && !interest.chunks) continue
+        if (child && !interest.children) continue
+        try {
+            listener(event)
+        } catch {
+            // Deliberately swallowed here: this is a fan-out to observers of a turn, and the bus
+            // has already reported the event to its own error channel.
+        }
+    }
+}
+
 export class TurnStreams {
     #buffers = new Map<string, Buffered>()
+    /** Arrival order across every buffer, so a parent's replay can interleave its children's. */
+    #order = new WeakMap<AnyEvent, number>()
+    #seq = 0
     #maxEvents: number
     #retainMs: number
     #retainCount: number
@@ -234,6 +257,7 @@ export class TurnStreams {
             events: [],
             state: "running",
             listeners: new Map(),
+            children: new Set(),
             truncated: false,
             dropped: 0,
             // Provenance, so a reattaching client can be told *why* it has no token history rather
@@ -256,6 +280,7 @@ export class TurnStreams {
                 events: [],
                 state: "running",
                 listeners: new Map(),
+                children: new Set(),
                 truncated: false,
                 dropped: 0,
                 // A buffer created by the first event rather than by `open` holds no chunk
@@ -267,6 +292,7 @@ export class TurnStreams {
             this.#buffers.set(turnId, buffer)
         }
 
+        this.#order.set(event, this.#seq++)
         buffer.events.push(event)
         if (buffer.events.length > this.#maxEvents) {
             buffer.events.shift()
@@ -280,14 +306,16 @@ export class TurnStreams {
         // A listener that throws must not stop the others, nor the turn. Same reasoning as the
         // bus itself: an attached client with a bug is not permitted to break generation.
         const chunk = event.type === "model.chunk"
-        for (const [listener, wantsChunks] of [...buffer.listeners]) {
-            if (chunk && !wantsChunks) continue
-            try {
-                listener(event)
-            } catch {
-                // Deliberately swallowed here: this is a fan-out to observers of a turn, and the
-                // bus has already reported the event to its own error channel.
-            }
+        fanOut(buffer, event, chunk, false)
+
+        // A subagent's event also reaches its parent's listeners that asked for children. It is not
+        // pushed into the parent's buffer, so it can neither displace the parent's own events under
+        // the cap nor end the parent's stream with its own `turn.end`.
+        const parent =
+            event.parentTurnId === undefined ? undefined : this.#buffers.get(event.parentTurnId)
+        if (parent !== undefined) {
+            parent.children.add(turnId)
+            fanOut(parent, event, chunk, true)
         }
 
         if (event.type === "turn.end") {
@@ -311,7 +339,7 @@ export class TurnStreams {
     attach(
         turnId: string,
         onEvent: (event: AnyEvent) => void,
-        options: { readonly chunks?: boolean } = {},
+        options: { readonly chunks?: boolean; readonly children?: boolean } = {},
     ): TurnAttachment | undefined {
         const buffer = this.#buffers.get(turnId)
         if (buffer === undefined) return undefined
@@ -322,8 +350,9 @@ export class TurnStreams {
         if (wantsChunks) this.#takeChunkInterest()
 
         // Snapshot and subscribe with no await between them. This is the gapless handover.
-        const replay = [...buffer.events]
-        buffer.listeners.set(onEvent, wantsChunks)
+        const children = options.children === true
+        const replay = children ? this.#withChildren(buffer) : [...buffer.events]
+        buffer.listeners.set(onEvent, { chunks: wantsChunks, children })
 
         let detached = false
         return {
@@ -340,6 +369,14 @@ export class TurnStreams {
                 if (wantsChunks) this.#releaseChunkInterest()
             },
         }
+    }
+
+    /** The turn's events and its subagents' still-buffered ones, in the order they happened. */
+    #withChildren(buffer: Buffered): AnyEvent[] {
+        const events = [...buffer.events]
+        for (const child of buffer.children)
+            events.push(...(this.#buffers.get(child)?.events ?? []))
+        return events.sort((a, b) => (this.#order.get(a) ?? 0) - (this.#order.get(b) ?? 0))
     }
 
     /** Whether a turn is still attachable, without subscribing to it. */

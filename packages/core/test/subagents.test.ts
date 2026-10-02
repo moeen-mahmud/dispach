@@ -341,3 +341,71 @@ test("cancelling the parent stops the child, and the child's turn says so", asyn
     expect(ends.find((end) => end.session.startsWith("subagent:"))?.reason).toBe("stopped")
     await runtime.stop()
 })
+
+describe("a child's events", () => {
+    test("carry the parent's turn and session, and the handoff names the call it answers", async () => {
+        const { runtime, events } = await boot(LIST_THEN_SUBMIT)
+        const result = await runtime.agent("test")?.send("anything new?", { sessionKey: "api:e" })
+        const child = events.filter((event) => event.sessionKey?.startsWith("subagent:"))
+        expect(child.length).toBeGreaterThan(0)
+        for (const event of child) {
+            expect(event.parentTurnId).toBe(result?.turnId)
+            expect(event.parentSessionKey).toBe("api:e")
+        }
+        // The parent's own events carry no parent.
+        const own = events.filter((event) => event.sessionKey === "api:e")
+        expect(own.every((event) => event.parentTurnId === undefined)).toBe(true)
+
+        const call = own.find(
+            (event) =>
+                event.type === "tool.call" &&
+                (event.data as { slug?: string }).slug === "mail_list",
+        )
+        const start = events.find((event) => event.type === "handoff.start")
+        const data = start?.data as { kind?: string; name?: string; callId?: string } | undefined
+        expect(data?.kind).toBe("self")
+        expect(data?.name).toBe("inbox")
+        expect(data?.callId).toBe((call?.data as { callId?: string } | undefined)?.callId)
+        await runtime.stop()
+    })
+
+    test("reach a turn's stream only when it asks, without ending it", async () => {
+        const { runtime } = await boot(LIST_THEN_SUBMIT)
+        const turnId = "turn_parent"
+        runtime.streams.open(turnId)
+        const plain: string[] = []
+        const nested: { type: string; turnId?: string }[] = []
+        runtime.streams.attach(turnId, (event) => plain.push(event.type))
+        runtime.streams.attach(
+            turnId,
+            (event) =>
+                nested.push({
+                    type: event.type,
+                    ...(event.turnId ? { turnId: event.turnId } : {}),
+                }),
+            { children: true },
+        )
+        await runtime.agent("test")?.send("anything new?", { sessionKey: "api:s", turnId })
+
+        expect(plain.filter((type) => type === "turn.end").length).toBe(1)
+        const ends = nested.filter((event) => event.type === "turn.end")
+        expect(ends.length).toBe(2)
+        // The child ends first, and the parent's own end is still the last thing on its stream.
+        expect(ends.at(-1)?.turnId).toBe(turnId)
+        expect(nested.at(-1)?.turnId).toBe(turnId)
+        expect(runtime.streams.state(turnId)).toBe("ended")
+
+        // A late attach replays the child's events in place.
+        const replay = runtime.streams.attach(turnId, () => {}, { children: true })?.replay ?? []
+        const firstChild = replay.findIndex((event) => event.turnId !== turnId)
+        const handoffResult = replay.findIndex((event) => event.type === "handoff.result")
+        expect(firstChild).toBeGreaterThan(0)
+        expect(firstChild).toBeLessThan(handoffResult)
+        expect(
+            runtime.streams
+                .attach(turnId, () => {})
+                ?.replay.every((event) => event.turnId === turnId),
+        ).toBe(true)
+        await runtime.stop()
+    })
+})

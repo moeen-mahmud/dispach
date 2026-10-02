@@ -114,6 +114,11 @@ export interface StreamOptions {
      * asking for the tokens in it are two requests.
      */
     readonly chunks?: boolean
+    /**
+     * Also the events of subagents the turn runs, marked by `parentTurnId` (since 0.2.0-pilot.6).
+     * The stream still ends on the turn's own `turn.end`; a child's carries a different `turnId`.
+     */
+    readonly children?: boolean
     /** Aborts the HTTP request. **Does not cancel the turn** — `stop()` does. */
     readonly signal?: AbortSignal
 }
@@ -1129,7 +1134,13 @@ export function createClient(options: ClientOptions): DispachClient {
         sessionKey: string,
         facts: { readonly replayed?: boolean } = {},
     ): TurnHandle {
-        const query = (opts?: StreamOptions) => (opts?.chunks === true ? "?chunks=true" : "")
+        const query = (opts?: StreamOptions) => {
+            const params = new URLSearchParams()
+            if (opts?.chunks === true) params.set("chunks", "true")
+            if (opts?.children === true) params.set("children", "true")
+            const text = params.toString()
+            return text === "" ? "" : `?${text}`
+        }
 
         const handle: TurnHandle = {
             turnId,
@@ -1145,7 +1156,8 @@ export function createClient(options: ClientOptions): DispachClient {
             },
 
             async *tokens(opts) {
-                yield* textDeltas(handle.stream({ chunks: true, ...opts }), {
+                // Never a child's tokens: they are a different turn's text.
+                yield* textDeltas(handle.stream({ chunks: true, ...opts, children: false }), {
                     ...(opts?.allowTruncated === undefined
                         ? {}
                         : { allowTruncated: opts.allowTruncated }),

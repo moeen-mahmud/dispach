@@ -18,7 +18,7 @@
 import type { AnyEvent, Runtime, TurnAdmission } from "@dispach/core"
 import { newTurnId } from "@dispach/core"
 import { bearerFromProtocols, PROTOCOL, withBearerHeader } from "./auth.ts"
-import { type Principal, reachesAgent, reachesSession, senderFor } from "./principal.ts"
+import { type Principal, reachesAgent, reachesEventSession, senderFor } from "./principal.ts"
 
 /** Per-connection state, handed to the socket by `Bun.serve`'s upgrade. */
 export interface WsSession {
@@ -135,11 +135,7 @@ export function attachWebSocket(
              */
             if (event.agentId !== undefined && !reachesAgent(ws.data.principal, event.agentId))
                 continue
-            if (
-                event.sessionKey !== undefined &&
-                !reachesSession(ws.data.principal, event.sessionKey)
-            )
-                continue
+            if (!reachesEventSession(ws.data.principal, event)) continue
             // The per-socket half. One client asking for tokens is what puts them on the bus; this
             // is what stops them reaching the clients that did not ask.
             if (chunk && !ws.data.chunks) continue

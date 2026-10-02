@@ -184,6 +184,10 @@ export const MessageBody = z.object({
         z.boolean().optional(),
         "Include per-token `model.chunk` frames. Off by default — the reader decides.",
     ),
+    children: annotate(
+        z.boolean().optional(),
+        "Include the events of subagents this turn runs (they carry `parentTurnId`). Off by default.",
+    ),
 })
 
 /** `PATCH /v1/agents/:id/vars` */

@@ -17,6 +17,9 @@ export interface EventContext {
     readonly sessionKey?: string
     readonly turnId?: string
     readonly stepId?: string
+    /** Set on a subagent's events: the turn and session of the call that ran it. */
+    readonly parentTurnId?: string
+    readonly parentSessionKey?: string
 }
 
 export interface EventEnvelope<TType extends string = string, TData = unknown> {
@@ -28,6 +31,9 @@ export interface EventEnvelope<TType extends string = string, TData = unknown> {
     readonly sessionKey?: string
     readonly turnId?: string
     readonly stepId?: string
+    /** A subagent's events only: the parent turn that ran it, so a view can nest them. */
+    readonly parentTurnId?: string
+    readonly parentSessionKey?: string
     readonly type: TType
     readonly data: TData
 }
@@ -206,7 +212,17 @@ export interface EventDataMap {
      * say" — the artifact is all that reaches the supervisor's prompt, deliberately, so without
      * this a `no_artifact` would be unexplainable from the outside.
      */
-    "handoff.start": { member: string; task: string; sessionKey: string }
+    "handoff.start": {
+        member: string
+        task: string
+        sessionKey: string
+        /** `self` for a subagent, which is this agent; `member` for a team member. */
+        kind: "member" | "self"
+        /** A subagent's name. */
+        name?: string
+        /** The parent's tool call this delegation answers. */
+        callId?: string
+    }
     /**
      * How it ended. `outcome` rather than a boolean, and that is the same reasoning
      * `approval.resolved.by` carries: four outcomes collapse badly into `ok: false`.
@@ -219,6 +235,9 @@ export interface EventDataMap {
     "handoff.result": {
         member: string
         sessionKey: string
+        kind: "member" | "self"
+        name?: string
+        callId?: string
         outcome: "ok" | "no_artifact" | "budget" | "error"
         steps: number
         tokens: { prompt: number; output: number }

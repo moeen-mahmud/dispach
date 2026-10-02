@@ -184,6 +184,10 @@ export class EventBus {
             ...(context.sessionKey === undefined ? {} : { sessionKey: context.sessionKey }),
             ...(context.turnId === undefined ? {} : { turnId: context.turnId }),
             ...(context.stepId === undefined ? {} : { stepId: context.stepId }),
+            ...(context.parentTurnId === undefined ? {} : { parentTurnId: context.parentTurnId }),
+            ...(context.parentSessionKey === undefined
+                ? {}
+                : { parentSessionKey: context.parentSessionKey }),
             type,
             data,
         } as EventEnvelope<K, EventDataMap[K]> as AnyEvent

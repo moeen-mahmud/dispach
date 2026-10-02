@@ -227,6 +227,20 @@ describe("a turn, end to end", () => {
         await runtime.stop()
     })
 
+    test("children is asked for on the stream's query, and only when set", async () => {
+        const urls: string[] = []
+        const recording = (async (url: string | URL | Request) => {
+            urls.push(String(url))
+            return new Response("", { headers: { "content-type": "text/event-stream" } })
+        }) as typeof fetch
+        const client = createClient({ baseUrl: "http://127.0.0.1:7420", fetch: recording })
+        const turn = client.agent("assistant").turn("turn_1")
+        for await (const _ of turn.stream({ children: true, chunks: true })) break
+        for await (const _ of turn.stream()) break
+        expect(urls[0]).toEndWith("/turns/turn_1/stream?chunks=true&children=true")
+        expect(urls[1]).toEndWith("/turns/turn_1/stream")
+    })
+
     test("tokens are absent unless asked for", async () => {
         // Default off, per connection. `stream()` with no options must carry no `model.chunk`.
         const { client, runtime } = await harness()

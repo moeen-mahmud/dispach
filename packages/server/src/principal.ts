@@ -104,6 +104,19 @@ export function reachesSession(principal: Principal, sessionKey: string): boolea
 }
 
 /**
+ * Whether an event's session is within reach. A subagent's events carry the session of the call that
+ * ran it, and reaching that session reaches them: a key narrowed to one conversation sees the work
+ * done for it, and nothing that conversation did not start.
+ */
+export function reachesEventSession(
+    principal: Principal,
+    event: { readonly sessionKey?: string; readonly parentSessionKey?: string },
+): boolean {
+    if (event.sessionKey === undefined || reachesSession(principal, event.sessionKey)) return true
+    return event.parentSessionKey !== undefined && reachesSession(principal, event.parentSessionKey)
+}
+
+/**
  * The same scope, as a filter for a query that aggregates across agents and sessions.
  *
  * Derived here, beside `reachesAgent` and `reachesSession`, so the prefix rule (a trailing `*`

@@ -82,6 +82,7 @@ import {
     isScoped,
     type Principal,
     reachesAgent,
+    reachesEventSession,
     reachesSession,
     scopeFilter,
     senderFor,
@@ -1864,6 +1865,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     accepted: { turnId, sessionKey },
                     status: 202,
                     chunks: wantsChunks,
+                    children: input.children === true,
                 })
             }),
         { capability: "chat" },
@@ -1914,6 +1916,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 }
                 return streamTurn(runtime, turnId, {
                     chunks: context.url.searchParams.get("chunks") === "true",
+                    children: context.url.searchParams.get("children") === "true",
                 })
             }),
         { capability: "read", streaming: true },
@@ -3881,11 +3884,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                                 !reachesAgent(context.principal, event.agentId)
                             )
                                 return
-                            if (
-                                event.sessionKey !== undefined &&
-                                !reachesSession(context.principal, event.sessionKey)
-                            )
-                                return
+                            if (!reachesEventSession(context.principal, event)) return
                             if (
                                 types !== undefined &&
                                 types.length > 0 &&
@@ -4917,7 +4916,7 @@ function finishedStream(record: TurnRecord): Response {
 function streamTurn(
     runtime: Runtime,
     turnId: string,
-    extra?: { accepted?: unknown; status?: number; chunks?: boolean },
+    extra?: { accepted?: unknown; status?: number; chunks?: boolean; children?: boolean },
 ): Response {
     return sseResponse({
         ...(extra?.status === undefined ? {} : { status: extra.status }),
@@ -4934,9 +4933,10 @@ function streamTurn(
                 turnId,
                 (event: AnyEvent) => {
                     send({ event: event.type, data: event })
-                    if (event.type === "turn.end") close()
+                    // Its own end only: with `children`, a subagent's `turn.end` arrives here too.
+                    if (event.type === "turn.end" && event.turnId === turnId) close()
                 },
-                { chunks: extra?.chunks === true },
+                { chunks: extra?.chunks === true, children: extra?.children === true },
             )
 
             if (attachment === undefined) {

@@ -9,6 +9,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `subagents:` runs a routed tool call in a throwaway child of the same agent. The parent reads the child's artifact (`{summary, findings[]}` by default) instead of the raw output. Routing happens after the policy and the write gate, so a refused call starts no child.
 - A child inherits its parent's taint, stand-in deferral, acting participant and cancellation, and never spawns one of its own. Its tools must be ones the parent pins.
 - `model.subagent` (or `subagents[].model`) runs children on a cheaper model. Their usage rows and `model.result` events say `role: subagent`.
+- A subagent's events carry `parentTurnId` and `parentSessionKey`, and `handoff.start`/`handoff.result` gain `kind`, `name` and the parent's `callId`. A turn's stream includes its subagents' events with `children: true` (also on the client's `stream()`), and still ends on its own `turn.end`. A key scoped to a session reaches the subagents that session ran.
 - The release image builds its tarball once, natively, instead of once per platform under emulation.
 
 ### Since 0.2.0-pilot.4
