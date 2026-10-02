@@ -18,6 +18,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `tools.eventDetail: redacted` (off by default, a person's setting) adds the call's arguments to `tool.call` and the first 2 KB of its output to `tool.result`. Credential-named fields and the values of secret-named environment variables are replaced with `[redacted]`.
 - `POST /v1/agents/:id/tools/refresh {providers?}` fetches the tool providers' catalogues and schemas now, and reloads the agent only if what it serves changed (a reload during a turn lands when the turn ends, 202). It reports `added`, `removed`, `changed` and `reload`, and emits `agent.tools.refreshed`.
 - `PATCH /v1/agents/:id/vars {vars}` applies changed template variables to an agent made from a template: only files nobody edited since they were rendered are rewritten (`skipped` names the rest), memory never is, and the agent reloads. A result the agent refuses to load is put back. Agents created from a template now carry `.template.json` for this.
+- `ink` and `react` are optional dependencies, so an application using `dispach/client` can install with `--omit=optional` and get no terminal UI. A default install is unchanged. A UI command on such an install says which package is missing. (The client has imported nothing and shipped complete types since pilot.3.)
 - A scheduled run that ends `timeout`, `max_steps`, `no_progress` or `error` is recorded as an error, and `schedule.error` carries the turn's code (`turn_timeout`, …). It used to be recorded `ok`.
 
 ### Since 0.2.0-pilot.3

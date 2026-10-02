@@ -44,7 +44,7 @@
         "typecheck": "tsc -p tsconfig.json",
         "prepack": "cp ../../README.md ./README.md"
     },
-    "dependencies": {
+    "optionalDependencies": {
         "ink": "7.1.1",
         "react": "19.2.8"
     },

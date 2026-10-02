@@ -57,13 +57,9 @@
     },
     "packages/cli": {
       "name": "dispach",
-      "version": "0.2.0-pilot.2",
+      "version": "0.2.0-pilot.4",
       "bin": {
         "dispach": "dist/index.js",
-      },
-      "dependencies": {
-        "ink": "7.1.1",
-        "react": "19.2.8",
       },
       "devDependencies": {
         "@dispach/channel-a2a": "workspace:*",
@@ -85,6 +81,10 @@
         "ink-testing-library": "4.0.0",
         "react-devtools-core": "6.1.5",
         "ws": "^8",
+      },
+      "optionalDependencies": {
+        "ink": "7.1.1",
+        "react": "19.2.8",
       },
     },
     "packages/client": {

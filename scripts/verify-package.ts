@@ -21,6 +21,7 @@
 
 import {
     existsSync,
+    mkdirSync,
     mkdtempSync,
     readdirSync,
     readFileSync,
@@ -225,6 +226,33 @@ export { client, first }
     )
     const said = `${tsc.stdout.toString()}${tsc.stderr.toString()}`.trim().split("\n")[0] ?? ""
     check("the client and wire types resolve, strictly", tsc.exitCode === 0, said)
+
+    /**
+     * An embedder's install: no terminal UI (VelaCrew #26). `ink` and `react` are optional, so
+     * `--omit=optional` leaves them out, and the client must still load and the bin still answer.
+     */
+    const lean = join(work, "lean")
+    mkdirSync(lean)
+    writeFileSync(join(lean, "package.json"), JSON.stringify({ name: "embedder", type: "module" }))
+    run(
+        "npm",
+        ["install", "--no-audit", "--no-fund", "--omit=optional", join(work, tarball.filename)],
+        lean,
+    )
+    check(
+        "--omit=optional leaves the terminal UI out",
+        !existsSync(join(lean, "node_modules", "ink")) &&
+            !existsSync(join(lean, "node_modules", "react")),
+    )
+    writeFileSync(
+        join(lean, "probe.mjs"),
+        `import { createClient } from "dispach/client"\nconsole.log(typeof createClient)\n`,
+    )
+    check("the client loads without it", run("node", ["probe.mjs"], lean).trim() === "function")
+    check(
+        "the bin answers without it",
+        run(join(lean, "node_modules", ".bin", "dispach"), ["--version"], lean).trim() === expected,
+    )
 } finally {
     rmSync(work, { recursive: true, force: true })
 }
