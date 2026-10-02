@@ -798,6 +798,8 @@ Load order is manifest order; middleware composes outermost-first. A plugin whos
 | `turnTimeoutMs` | 1800000 | 30 min. Must exceed any upstream timeout on the model endpoint. |
 | `toolTimeoutMs` | 120000 | Per tool execution. |
 | `maxParallelTools` | 4 | Read-only tools only; mutating tools always serialise. |
+| `maxConcurrentTurns` | unlimited | Turns of this agent running at once, across sessions. Over it a new turn is **refused, not queued**: `429 agent_at_capacity` over HTTP, a short reply on a channel, an error on a schedule run. Nothing is recorded for a refused turn. Not settable by `config_set` — an agent cannot raise its own cap. |
+| `tokens` | unlimited | `{ max, windowMs }`: prompt + output tokens across every metered model call (compactor included) in a rolling window. Checked when a turn **starts**, so a running turn is never cut off and the overshoot is at most one turn. Over it: `429 agent_token_budget_exhausted`, same paths as above. Not settable by `config_set`. |
 
 ### `server`
 

@@ -308,6 +308,12 @@ export interface EventDataMap {
         promptTokensReported: boolean
         finishReason: string
         latencyMs: number
+        /**
+         * Milliseconds from the request to the first streamed output — text, reasoning or a tool
+         * call. The latency a person feels, which `latencyMs` (the whole call) hides on a long reply.
+         * Absent when nothing streamed: an error before the first chunk, or an empty reply.
+         */
+        firstTokenMs?: number
     }
     /**
      * A tool is about to run. `argsHash` rather than the arguments themselves: arguments carry

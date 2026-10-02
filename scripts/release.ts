@@ -28,6 +28,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
+import { compareVersions, isPrerelease, parseVersion, type Version } from "./semver.ts"
 
 const ROOT = resolve(import.meta.dirname, "..")
 const PACKAGE = join(ROOT, "packages", "cli", "package.json")
@@ -50,28 +51,24 @@ function run(command: string, args: readonly string[]): string {
     return new TextDecoder().decode(result.stdout)
 }
 
-function parse(version: string): readonly [number, number, number] {
-    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version)
-    if (match === null) fail(`"${version}" is not a version`, "Three numbers: 0.1.3.")
-    return [Number(match[1]), Number(match[2]), Number(match[3])]
-}
-
-function newer(next: string, current: string): boolean {
-    const a = parse(next)
-    const b = parse(current)
-    for (let i = 0; i < 3; i += 1) {
-        if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0)
+function parse(text: string): Version {
+    const parsed = parseVersion(text)
+    if (parsed === undefined) {
+        fail(
+            `"${text}" is not a version`,
+            "Three numbers, optionally a pre-release: 0.2.0 or 0.2.0-pilot.1.",
+        )
     }
-    return false
+    return parsed
 }
 
 const argv = process.argv.slice(2)
 const version = argv.find((arg) => !arg.startsWith("--"))
 if (version === undefined) fail("No version given", "bun run release 0.1.3")
-parse(version)
+const prerelease = isPrerelease(parse(version))
 
 const pkg = JSON.parse(readFileSync(PACKAGE, "utf8")) as { version: string }
-if (!newer(version, pkg.version)) {
+if (compareVersions(parse(version), parse(pkg.version)) <= 0) {
     fail(
         `${version} is not newer than the current ${pkg.version}`,
         "npm versions are immutable: pick the next number rather than reusing one.",
@@ -99,10 +96,20 @@ if (unreleased === null || body === "" || body === "_Nothing yet._") {
 }
 
 const date = new Date().toISOString().slice(0, 10)
-const dated = changelog.replace(
-    /^## Unreleased\n/m,
-    `## Unreleased\n\n_Nothing yet._\n\n## ${version} — ${date}\n`,
-)
+/**
+ * A pre-release **copies** the notes rather than consuming them. `## Unreleased` belongs to the
+ * release it will become: moving it under `0.2.0-pilot.1` would leave `0.2.0` itself with no notes
+ * and refused by the check above, after a pilot that changed nothing about what it describes.
+ */
+const dated = prerelease
+    ? changelog.replace(
+          /^(## Unreleased\n[\s\S]*?)(?=^## |(?![\s\S]))/m,
+          `$1\n## ${version} — ${date}\n\n${body}\n\n`,
+      )
+    : changelog.replace(
+          /^## Unreleased\n/m,
+          `## Unreleased\n\n_Nothing yet._\n\n## ${version} — ${date}\n`,
+      )
 writeFileSync(CHANGELOG, dated)
 
 writeFileSync(
@@ -151,7 +158,11 @@ process.stdout.write(`
     git tag -a v${version} -m "v${version}"
     git push && git push origin v${version}
 
-  The tag publishes: npm, the GitHub Release (notes from CHANGELOG.md), the Homebrew tap, the image.
+  ${
+      prerelease
+          ? "A pre-release tag publishes npm under the `next` dist-tag, a GitHub pre-release and the image at this version only — never `latest`, and never the Homebrew tap."
+          : "The tag publishes: npm, the GitHub Release (notes from CHANGELOG.md), the Homebrew tap, the image."
+}
   Watch it at https://github.com/moeen-mahmud/dispach/actions — it needs NPM_TOKEN and TAP_TOKEN set.
 
 `)

@@ -611,6 +611,25 @@ export const LimitsSchema = z
         toolTimeoutMs: z.number().int().positive().default(120_000),
         /** Read-only tools only; mutating tools always serialise. */
         maxParallelTools: z.number().int().positive().default(4),
+        /**
+         * Turns of this agent running at once, across every session. Absent is unlimited, which is
+         * what every agent had before this field existed. Over the cap a new turn is **refused**, not
+         * queued — `429` over the wire, the refusal text on a channel, an error on a schedule run.
+         */
+        maxConcurrentTurns: z.number().int().positive().optional(),
+        /**
+         * Model tokens (prompt + output, every call the meter records) this agent may spend in a
+         * rolling window. Checked when a turn **starts**: a turn under the budget runs to its end, so
+         * the overshoot is bounded by one turn and stopping mid-work is never the outcome. Absent is
+         * unlimited.
+         */
+        tokens: z
+            .object({
+                max: z.number().int().positive(),
+                windowMs: z.number().int().positive(),
+            })
+            .strict()
+            .optional(),
     })
     .strict()
 

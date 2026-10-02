@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Runtime } from "@dispach/core"
-import { createHandler, type Provisioner } from "../src/handler.ts"
+import { createHandler, type Provisioner, type SecretAdmin } from "../src/handler.ts"
 import type { ClaimTicket } from "../src/keys.ts"
 import type { Principal } from "../src/principal.ts"
 
@@ -186,6 +186,8 @@ export async function harness(
          * is refused by the loopback gate, because its `CMD` binds `0.0.0.0`.
          */
         provision?: Provisioner
+        /** The credential writer `GET`/`PUT /v1/agents/:id/secrets` need. Omitted means `501`. */
+        secrets?: SecretAdmin
     } = {},
 ) {
     const dir = workspace(options.manifest)
@@ -205,6 +207,7 @@ export async function harness(
         ...(options.origin === undefined ? {} : { origin: options.origin }),
         ...(options.resolveAgent === undefined ? {} : { resolveAgent: options.resolveAgent }),
         ...(options.provision === undefined ? {} : { provision: options.provision }),
+        ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
     })
 
     const call = (

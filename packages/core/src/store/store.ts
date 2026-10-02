@@ -212,6 +212,21 @@ export interface TurnStore {
         options?: { readonly limit?: number },
     ): Promise<readonly TurnRecord[]>
     /**
+     * Every turn this agent has taken, newest first, across sessions.
+     *
+     * Paged by `before`, the store's own monotonic row key, never a timestamp: two turns can start in
+     * the same millisecond, and a cursor that can tie can skip or repeat a row. `sessionPrefix`
+     * narrows it for a session-scoped caller.
+     */
+    listForAgent(
+        agentId: string,
+        options?: {
+            readonly limit?: number
+            readonly before?: number
+            readonly sessionPrefix?: string
+        },
+    ): Promise<{ readonly turns: readonly TurnRecord[]; readonly nextBefore?: number }>
+    /**
      * Turns left `running` by a crash, marked `error` at boot.
      *
      * A process cannot resume someone else's in-flight generation, and leaving the row
@@ -617,6 +632,175 @@ export interface AgentStateStore {
     disabledAmong(agentIds: readonly string[]): Promise<readonly string[]>
 }
 
+/** One model call, as the meter records it. See migration 18. */
+export interface ModelCallRecord {
+    readonly agentId: string
+    /** Absent for a call outside any session. Present for every turn and compaction today. */
+    readonly sessionKey?: string
+    readonly turnId?: string
+    /** The manifest role that made the call: `main`, `compactor`, or a named one. */
+    readonly role: string
+    readonly model: string
+    readonly promptTokens: number
+    /** False when `promptTokens` is our estimate rather than the endpoint's figure. */
+    readonly promptReported: boolean
+    /** Absent when the endpoint reported no cache figure, which is distinct from a reported zero. */
+    readonly cachedPromptTokens?: number
+    readonly outputTokens: number
+    readonly outputReported: boolean
+    /** Who sent the turn, when it was not the operator. The key per-member billing groups on. */
+    readonly sender?: string
+    readonly at: string
+}
+
+/** The dimensions usage can be grouped by. Anything else is refused by the route. */
+export const USAGE_GROUPS = ["agent", "model", "day", "sender"] as const
+export type UsageGroup = (typeof USAGE_GROUPS)[number]
+
+export interface UsageQuery {
+    /** Absent means every agent in the store; the route passes a scope's list when there is one. */
+    readonly agentIds?: readonly string[]
+    /** Inclusive lower bound, ISO-8601. */
+    readonly from?: string
+    /** Exclusive upper bound, ISO-8601. */
+    readonly to?: string
+    readonly sessionPrefix?: string
+    readonly by: readonly UsageGroup[]
+}
+
+/** One group's totals. A grouping field is present exactly when it was asked for. */
+export interface UsageBucket {
+    readonly agentId?: string
+    readonly model?: string
+    /** The calendar day in UTC, `YYYY-MM-DD`. */
+    readonly day?: string
+    /** Absent within a `sender` grouping means the operator's own calls. */
+    readonly sender?: string
+    readonly calls: number
+    readonly promptTokens: number
+    readonly cachedPromptTokens: number
+    readonly outputTokens: number
+    /**
+     * Calls where either figure was our estimate. Non-zero means the totals are not a measurement,
+     * and a caller billing from them should know how much of the number is a guess.
+     */
+    readonly estimatedCalls: number
+}
+
+export interface UsageStore {
+    record(call: ModelCallRecord): Promise<void>
+    report(query: UsageQuery): Promise<{
+        readonly buckets: readonly UsageBucket[]
+        /**
+         * The earliest call on record, absent when there are none. Usage is metered from the upgrade
+         * that added it, and anything earlier is simply not here, which a caller must be told.
+         */
+        readonly meteredSince?: string
+    }>
+}
+
+/** How far a subscription hears: the creating credential's reach. Absent fields mean everything. */
+export interface WebhookScope {
+    readonly agents?: readonly string[]
+    readonly sessionPrefix?: string
+}
+
+/** A subscription as the API reports it. Never the secret. */
+export interface WebhookSubscription {
+    readonly subscriptionId: string
+    readonly url: string
+    /** Event types delivered. See `webhookDeliverable` for what is never in this list. */
+    readonly types: readonly string[]
+    readonly scope?: WebhookScope
+    readonly createdAt: string
+    /** Failed attempts since the last success. Non-zero is what `failing` on the resource means. */
+    readonly consecutiveFailures: number
+    readonly lastError?: string
+    readonly lastSuccessAt?: string
+    readonly lastFailureAt?: string
+    /** Deliveries not yet sent or given up on. */
+    readonly pending: number
+}
+
+export type WebhookDeliveryStatus = "pending" | "inflight" | "sent" | "failed"
+
+export interface WebhookDeliveryRecord {
+    readonly subscriptionId: string
+    /** The `webhook-id` header. Derived from the subscription and the event, stable across retries. */
+    readonly messageId: string
+    readonly agentId: string
+    readonly eventType: string
+    /** The envelope exactly as `GET /v1/events` serves it, serialised once at enqueue. */
+    readonly body: string
+    readonly status: WebhookDeliveryStatus
+    readonly attempts: number
+    /** Recovered from `inflight` by a new process: the receiver may already have it. */
+    readonly uncertain: boolean
+    readonly nextAttemptAt: string
+    readonly lastError?: string
+}
+
+/**
+ * What a delivery queue still owes, for deciding whether the process may sleep.
+ *
+ * `nextAttemptAt` is the earliest `pending` row's, and may be in the past: that is work due now, not
+ * a wake time. `inflight` rows are bytes possibly on the wire, so a process holding one is not idle
+ * whatever else is true.
+ */
+export interface DeliveryBacklog {
+    readonly pending: number
+    readonly inflight: number
+    readonly nextAttemptAt?: string
+}
+
+export interface WebhookStore {
+    create(subscription: {
+        readonly subscriptionId: string
+        readonly url: string
+        readonly secret: string
+        readonly types: readonly string[]
+        readonly scope?: WebhookScope
+        readonly createdAt: string
+    }): Promise<WebhookSubscription>
+    list(): Promise<readonly WebhookSubscription[]>
+    get(subscriptionId: string): Promise<WebhookSubscription | undefined>
+    /** For signing only. No route returns it. */
+    secretOf(subscriptionId: string): Promise<string | undefined>
+    /** Deletes its pending deliveries with it. `false` when there was nothing to delete. */
+    delete(subscriptionId: string): Promise<boolean>
+    /** `false` when this `(subscription, message)` pair already exists: an enqueue that ran twice. */
+    enqueue(delivery: {
+        readonly subscriptionId: string
+        readonly messageId: string
+        readonly agentId: string
+        readonly eventType: string
+        readonly body: string
+        readonly at: string
+    }): Promise<boolean>
+    /** Mark up to `limit` due rows for these agents `inflight` and return them. */
+    claimDue(
+        agentIds: readonly string[],
+        now: string,
+        limit: number,
+    ): Promise<readonly WebhookDeliveryRecord[]>
+    markSent(subscriptionId: string, messageId: string, at: string): Promise<void>
+    markRetry(
+        subscriptionId: string,
+        messageId: string,
+        nextAttemptAt: string,
+        error: string,
+        at: string,
+    ): Promise<void>
+    markFailed(subscriptionId: string, messageId: string, error: string, at: string): Promise<void>
+    /** Rows a dead process left `inflight`, back to `pending` with `uncertain` set. Call at boot. */
+    recoverInflight(
+        agentIds: readonly string[],
+        at: string,
+    ): Promise<readonly WebhookDeliveryRecord[]>
+    /** What these agents' subscriptions still owe. */
+    backlog(agentIds: readonly string[]): Promise<DeliveryBacklog>
+}
+
 /**
  * A namespaced string map.
  *
@@ -814,6 +998,8 @@ export interface OutboxStore {
         agentIds: readonly string[],
         nextAttemptAt?: string,
     ): Promise<readonly DeliveryRecord[]>
+    /** What these agents' outboxes still owe. */
+    backlog(agentIds: readonly string[]): Promise<DeliveryBacklog>
     get(id: number): Promise<DeliveryRecord | undefined>
     byDedupeKey(agentId: string, dedupeKey: string): Promise<DeliveryRecord | undefined>
     list(
@@ -1169,6 +1355,10 @@ export interface Store {
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
     readonly handoffs: HandoffStore
+    /** Every model call's tokens: the meter. Keyed by agent; survives a session being cleared. */
+    readonly usage: UsageStore
+    /** Outbound webhook subscriptions and what is owed to them. Server-wide, like `operatorKeys`. */
+    readonly webhooks: WebhookStore
     /**
      * Server credentials. The one store here that is not per-agent — see migration 14.
      *

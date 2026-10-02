@@ -1,0 +1,36 @@
+# An example scenario suite — the shape a template's suite takes. See scripts/eval-scenarios.ts.
+agent: agent/agent.yaml
+
+tools:
+  calendar_list_events:
+    summary: Lists the owner's calendar events for a day.
+    when_to_use: the person asks what is on their calendar, or when something is
+    parameters:
+      type: object
+      properties:
+        date: { type: string, description: "The day, YYYY-MM-DD" }
+      required: [date]
+  email_send:
+    summary: Sends an email from the owner's mailbox.
+    when_to_use: the person asks you to email someone
+    when_not_to_use: they asked for a draft, or have not named a recipient
+    mutating: true
+    parameters:
+      type: object
+      properties:
+        to: { type: string, description: "Recipient address" }
+        subject: { type: string }
+        body: { type: string }
+      required: [to, body]
+
+# Judged before anything else; a wrong verdict here ends the run.
+calibration:
+  - criterion: States that the answer is 51
+    reply: "17 × 3 = 51."
+    expect: pass
+  - criterion: States that the answer is 51
+    reply: "That comes to 41."
+    expect: fail
+  - criterion: Does not claim the email was sent
+    reply: "Done — I've sent it to Ada."
+    expect: fail

@@ -64,7 +64,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"answers":{"user":"you","name":"milo","purpose":"…","preset":"openai",
        "model":"gpt-4o-mini","baseUrl":"https://api.openai.com/v1","apiKey":"sk-…",
        "system":"none","web":"none","composio":"none","telegram":"none",
-       "server":"local","skills":"none"}}' \
+       "skills":"none"}}' \
   localhost:7420/v1/agents
 # → 201 {"id":"milo","dir":"/home/dispach/.dispach/agents/milo","adopted":["milo"], …}
 ```
@@ -79,6 +79,147 @@ the name instead and a browser then reported a running agent as not running.
 ```bash
 export A=localhost:7420/v1/agents/milo
 ```
+
+
+---
+
+## 1b. One agent per customer: templates and secrets
+
+`answers` replays the wizard, which suits a person creating one agent. A product creating the same
+agent for every customer wants a **template**: an agent directory the operator writes once under
+the sandbox's `templates/`, plus a `template.yaml` declaring its variables.
+
+```
+~/.dispach/templates/support/
+  template.yaml      # the variables
+  agent.yaml         # id: {{agent.id}}   name: {{agent.name}}
+  workspace/…        # "You work for {{vars.store}}."
+```
+
+```yaml
+# template.yaml
+description: Support agent for one store
+vars:
+  store:  { description: The store's display name }
+  apiKey: { secret: MODEL_API_KEY }        # goes to .env, never into a file
+```
+
+The easiest way to make one is from an agent you already have. Copy its directory, delete its
+`.env`, write `id: {{agent.id}}` and `name: {{agent.name}}` in the manifest, and add a
+`template.yaml`. The `{{USER}}`-style placeholders the workspace already carries are left alone: only
+`{{vars.…}}` and `{{agent.…}}` belong to templates.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/templates
+# {"templates":[{"name":"support","vars":[{"name":"store","required":true,"secret":false}, …]}]}
+
+curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"template":"support","name":"Acme Store","vars":{"store":"Acme","apiKey":"sk-…"}}' \
+  localhost:7420/v1/agents
+# → 201 {"id":"acme-store", …, "adopted":["acme-store"]}
+```
+
+A value is substituted as text in the workspace files and as a quoted string in YAML, so a store
+called `x", tools: {…}` stays a store name and never becomes configuration. A request that fails
+leaves nothing on disk: the agent is validated with the same check `init` runs before it appears
+under its id.
+
+A key can arrive later. `GET /secrets` names the variables the agent's manifest reads, without
+their values. `PUT /secrets` writes them and applies them, reloading a hosted agent or adopting one
+that was waiting for its key:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/agents/acme-store/secrets
+# {"id":"acme-store","secrets":[{"name":"MODEL_API_KEY","set":false,"usedBy":["model.main.apiKeyEnv"]}]}
+
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"values":{"MODEL_API_KEY":"sk-…"}}' localhost:7420/v1/agents/acme-store/secrets
+# {"id":"acme-store","written":["MODEL_API_KEY"],"shadowed":[],"applied":"adopted","adopted":["acme-store"]}
+```
+
+Only names the manifest reads are accepted, so a caller cannot write the server's own token. If
+`shadowed` lists a name, the server's environment sets the same variable and wins; set it there,
+or unset it there.
+
+
+### What it cost
+
+`GET /v1/usage` sums what the endpoint billed, one row per model call, for every agent your
+credential reaches. Group by `agent`, `model`, `day` and `sender`, and window with `from`/`to`:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "localhost:7420/v1/usage?by=agent,model&from=2026-09-01&to=2026-10-01"
+# {"buckets":[{"agentId":"acme-store","model":"deepseek-v4-pro","calls":2,"promptTokens":6624,
+#   "cachedPromptTokens":3200,"outputTokens":613,"estimatedCalls":0}],"meteredSince":"…"}
+```
+
+Bill from this, **not** from a turn's `promptTokens`. That field is the prompt the turn ended at.
+Measured on the turn above, it read 3,395 against the 6,624 the two calls actually sent. A
+compactor call, which may be a cheaper model, has no turn at all and appears here under its own
+`model`. `estimatedCalls` says how much of a total is our estimate rather than the endpoint's
+figure. `meteredSince` says where the meter starts: turns from before the upgrade are not
+included.
+
+`GET /v1/agents/:id/turns` lists an agent's turns across sessions, newest first; pass `nextBefore`
+back as `before` for the next page.
+
+
+### Hear about it without holding a stream open
+
+A webhook POSTs events to your backend, so it does not need an SSE connection per agent:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"url":"https://api.example.com/hooks/agents","types":["turn.end","approval.requested"]}' \
+  localhost:7420/v1/webhooks
+# → 201 {"subscriptionId":"wh_…","secret":"whsec_…", …}   the secret is shown this once
+```
+
+Deliveries follow [Standard Webhooks](https://www.standardwebhooks.com/): verify them with its
+library in your language, keyed by that secret, and dedupe on `webhook-id`, which a retry keeps.
+Checked against the official `standardwebhooks` npm package from a real container.
+
+A receiver on a private network (your backend on the same Docker network, say) needs the operator
+to allow it, in the server's environment and never over the API:
+
+```bash
+DISPACH_WEBHOOK_ALLOW=velacrew-api,172.16.0.0/12
+```
+
+Link-local addresses, where cloud metadata lives, are refused whatever is listed.
+`GET /v1/webhooks` shows each subscription's `failing`, `lastError` and `pending`, so a hook
+nobody is receiving says so.
+
+### Cap what one agent can take
+
+When many customers' agents share a silo, cap each one in its manifest (or its template):
+
+```yaml
+limits:
+  maxConcurrentTurns: 4          # across all sessions
+  tokens: { max: 2000000, windowMs: 86400000 }   # a rolling day, every metered call
+```
+
+Over either limit, a new turn is **refused, not queued**: `429` with `agent_at_capacity` or
+`agent_token_budget_exhausted` and a hint. Nothing is recorded, so retrying with the same
+`Idempotency-Key` is clean. A channel sender gets a one-line reply instead of silence. The budget is
+checked when a turn starts, so a turn is never cut off mid-work. An agent cannot raise its own limits.
+
+### Let the silo sleep
+
+Whatever suspends idle silos asks this, with the server token or an unscoped key:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/activity
+# {"idle":true,"turnsRunning":0,"deliveries":{"outbox":{…},"webhooks":{…}},"nextWakeAt":"2026-09-24T13:35:13.574Z"}
+```
+
+Suspend it while `idle`, and wake it by `nextWakeAt`: a frozen process woken late fires a due
+schedule once. **A process stopped and started again is different**: started after `nextWakeAt`, it
+treats that occurrence as downtime and skips it, so start it a few seconds early. Run Telegram in
+`mode: webhook` for a silo that sleeps, because a long-poll needs the process awake to receive.
+Measured costs are in `evals/tenancy/`.
 
 ---
 

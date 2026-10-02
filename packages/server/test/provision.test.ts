@@ -13,7 +13,7 @@
 
 import { afterAll, describe, expect, test } from "bun:test"
 import { HarnessError } from "@dispach/core"
-import type { Provisioner } from "../src/handler.ts"
+import type { Provisioner, SecretAdmin } from "../src/handler.ts"
 import { cleanupWorkspaces, harness, TOKEN, workspace } from "./harness.ts"
 
 afterAll(cleanupWorkspaces)
@@ -78,6 +78,33 @@ function fakeProvisioner(manifestPath: string): Provisioner & { seen: Record<str
             }
             return {
                 agentId: "assistant",
+                manifestPath,
+                dir: manifestPath.replace("/agent.yaml", ""),
+                files: ["agent.yaml", ".env"],
+            }
+        },
+        templates: () => [
+            {
+                name: "support",
+                description: "One store's support agent",
+                vars: [
+                    { name: "store", required: true, secret: false },
+                    { name: "apiKey", required: false, secret: true },
+                ],
+            },
+        ],
+        createFromTemplate: (input) => {
+            seen.push({ template: input.template, name: input.name, ...input.vars })
+            if (input.template !== "support") {
+                throw new HarnessError({
+                    code: "template_not_found",
+                    message: `No template called "${input.template}".`,
+                    hint: "Templates here: support.",
+                    field: "template",
+                })
+            }
+            return {
+                agentId: "provisioned",
                 manifestPath,
                 dir: manifestPath.replace("/agent.yaml", ""),
                 files: ["agent.yaml", ".env"],
@@ -351,6 +378,206 @@ describe("what the route refuses", () => {
             token: null,
         })
         expect(response.status).toBe(401)
+        await runtime.stop()
+    })
+})
+
+describe("creating an agent from a template", () => {
+    test("GET /v1/templates lists them, and a template body creates and adopts", async () => {
+        const dir = workspace(OTHER)
+        const provisioner = fakeProvisioner(`${dir}/agent.yaml`)
+        const { runtime, call } = await harness({
+            token: TOKEN,
+            provision: provisioner,
+            origin: { host: "127.0.0.1" },
+        })
+        const listed = (await (await local(call)("GET", "/v1/templates")).json()) as {
+            templates: { name: string; vars: { name: string; secret: boolean }[] }[]
+        }
+        expect(listed.templates.map((entry) => entry.name)).toEqual(["support"])
+        expect(listed.templates[0]?.vars.find((entry) => entry.name === "apiKey")?.secret).toBe(
+            true,
+        )
+
+        const response = await local(call)("POST", "/v1/agents", {
+            body: { template: "support", name: "Acme Store", vars: { store: "Acme" } },
+        })
+        expect(response.status).toBe(201)
+        const body = (await response.json()) as { id: string; adopted: string[] }
+        expect(body.adopted).toEqual(["provisioned"])
+        // The template path reached the implementation, not the answers path.
+        expect(provisioner.seen[0]).toEqual({
+            template: "support",
+            name: "Acme Store",
+            store: "Acme",
+        })
+        await runtime.stop()
+    })
+
+    test("both bodies at once is refused, and so is neither", async () => {
+        const dir = workspace(OTHER)
+        const provisioner = fakeProvisioner(`${dir}/agent.yaml`)
+        const { runtime, call } = await harness({
+            token: TOKEN,
+            provision: provisioner,
+            origin: { host: "127.0.0.1" },
+        })
+        const both = await local(call)("POST", "/v1/agents", {
+            body: { answers: { name: "x" }, template: "support", name: "x" },
+        })
+        expect(both.status).toBe(400)
+        expect(((await both.json()) as { error: { code: string } }).error.code).toBe(
+            "provision_body_ambiguous",
+        )
+        const neither = await local(call)("POST", "/v1/agents", { body: { name: "x" } })
+        expect(((await neither.json()) as { error: { code: string } }).error.code).toBe(
+            "provision_answers_required",
+        )
+        // Nothing reached the implementation for either.
+        expect(provisioner.seen).toEqual([])
+        await runtime.stop()
+    })
+
+    test("an unknown template passes the implementation's refusal through", async () => {
+        const dir = workspace(OTHER)
+        const { runtime, call } = await harness({
+            token: TOKEN,
+            provision: fakeProvisioner(`${dir}/agent.yaml`),
+            origin: { host: "127.0.0.1" },
+        })
+        const response = await local(call)("POST", "/v1/agents", {
+            body: { template: "nope", name: "x" },
+        })
+        expect(response.status).toBe(400)
+        const detail = ((await response.json()) as { error: { code: string; hint: string } }).error
+        expect(detail.code).toBe("template_not_found")
+        expect(detail.hint).toContain("support")
+        await runtime.stop()
+    })
+})
+
+/** Writes into a map, and allows exactly the one variable these manifests read. */
+function fakeSecrets(): SecretAdmin & { store: Map<string, Record<string, string>> } {
+    const store = new Map<string, Record<string, string>>()
+    return {
+        store,
+        status: (manifestPath) => [
+            {
+                name: "MODEL_API_KEY",
+                set: store.get(manifestPath)?.MODEL_API_KEY !== undefined,
+                usedBy: ["model.main.apiKeyEnv"],
+            },
+        ],
+        write: (manifestPath, values) => {
+            for (const name of Object.keys(values)) {
+                if (name !== "MODEL_API_KEY") {
+                    throw new HarnessError({
+                        code: "secret_not_referenced",
+                        message: `"${name}" is not a variable this agent's manifest reads.`,
+                        hint: "It reads MODEL_API_KEY.",
+                        field: `values.${name}`,
+                    })
+                }
+            }
+            store.set(manifestPath, { ...store.get(manifestPath), ...values })
+            return { written: Object.keys(values), shadowed: [] }
+        },
+    }
+}
+
+describe("an agent's secrets", () => {
+    test("a hosted agent is reloaded, and no value is ever returned", async () => {
+        const secrets = fakeSecrets()
+        const { runtime, call } = await harness({ token: TOKEN, secrets })
+        const put = await call("PUT", "/v1/agents/assistant/secrets", {
+            body: { values: { MODEL_API_KEY: "sk-new" } },
+        })
+        expect(put.status).toBe(200)
+        const body = (await put.json()) as { applied: string; written: string[] }
+        expect(body).toMatchObject({ applied: "reloaded", written: ["MODEL_API_KEY"] })
+
+        const read = await call("GET", "/v1/agents/assistant/secrets")
+        const text = await read.text()
+        expect(JSON.parse(text)).toMatchObject({ secrets: [{ name: "MODEL_API_KEY", set: true }] })
+        expect(text).not.toContain("sk-new")
+        await runtime.stop()
+    })
+
+    test("an agent that was not running is adopted once its key arrives", async () => {
+        const dir = workspace(OTHER)
+        const { runtime, call } = await harness({
+            token: TOKEN,
+            secrets: fakeSecrets(),
+            resolveAgent: (id) => (id === "provisioned" ? `${dir}/agent.yaml` : undefined),
+        })
+        const put = await call("PUT", "/v1/agents/provisioned/secrets", {
+            body: { values: { MODEL_API_KEY: "sk-new" } },
+        })
+        expect(((await put.json()) as { applied: string }).applied).toBe("adopted")
+        expect(runtime.list().some((agent) => agent.id === "provisioned")).toBe(true)
+        await runtime.stop()
+    })
+
+    test("a stopped agent is written and left stopped", async () => {
+        const dir = workspace(OTHER)
+        const { runtime, call } = await harness({
+            token: TOKEN,
+            secrets: fakeSecrets(),
+            resolveAgent: (id) => (id === "provisioned" ? `${dir}/agent.yaml` : undefined),
+        })
+        await runtime.store.agentState.disable("provisioned", new Date().toISOString(), "weekend")
+        const put = await call("PUT", "/v1/agents/provisioned/secrets", {
+            body: { values: { MODEL_API_KEY: "sk-new" } },
+        })
+        expect(await put.json()).toMatchObject({ applied: "none", stopped: true })
+        expect(runtime.list().some((agent) => agent.id === "provisioned")).toBe(false)
+        await runtime.stop()
+    })
+
+    test("a variable the manifest does not read is refused, and nothing is applied", async () => {
+        const { runtime, call } = await harness({ token: TOKEN, secrets: fakeSecrets() })
+        const put = await call("PUT", "/v1/agents/assistant/secrets", {
+            body: { values: { SOMETHING_ELSE: "x" } },
+        })
+        expect(put.status).toBe(400)
+        expect(((await put.json()) as { error: { code: string } }).error.code).toBe(
+            "secret_not_referenced",
+        )
+        await runtime.stop()
+    })
+
+    test("out of scope answers the same 404 an imaginary agent does, on both verbs", async () => {
+        const dir = workspace(OTHER)
+        const { runtime, call } = await harness({
+            token: TOKEN,
+            secrets: fakeSecrets(),
+            resolveAgent: (id) => (id === "provisioned" ? `${dir}/agent.yaml` : undefined),
+        })
+        const minted = (await (
+            await call("POST", "/v1/keys", {
+                body: { label: "narrow", scope: { agents: ["assistant"], can: ["admin"] } },
+            })
+        ).json()) as { secret: string }
+        for (const method of ["GET", "PUT"]) {
+            const response = await call(method, "/v1/agents/provisioned/secrets", {
+                token: minted.secret,
+                ...(method === "PUT" ? { body: { values: { MODEL_API_KEY: "x" } } } : {}),
+            })
+            expect(response.status).toBe(404)
+            expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+                "agent_not_found",
+            )
+        }
+        await runtime.stop()
+    })
+
+    test("no writer is a 501 that names the alternative", async () => {
+        const { runtime, call } = await harness({ token: TOKEN })
+        const response = await call("GET", "/v1/agents/assistant/secrets")
+        expect(response.status).toBe(501)
+        expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+            "secrets_not_supported",
+        )
         await runtime.stop()
     })
 })

@@ -36,16 +36,23 @@ import { type Middleware, notify } from "../plugins/middleware.ts"
 import { Scheduler } from "../schedule/scheduler.ts"
 import { TurnStreams, type TurnStreamsOptions } from "../store/buffer.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
-import type { LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
+import type { DeliveryBacklog, LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
 import { expandTeams } from "../team/expand.ts"
 import type { HandoffTarget } from "../team/handoff.ts"
 import { handoffTool } from "../team/supervisor.ts"
 import type { ApprovalRequest } from "../tools/execute.ts"
 import { ToolRegistry } from "../tools/registry.ts"
 import type { ScriptRunner, Tool, ToolProvider, ToolProviderFactory } from "../tools/types.ts"
+import { VERSION } from "../version.ts"
+import {
+    EMPTY_ALLOWLIST,
+    parseWebhookAllowlist,
+    type WebhookAllowlist,
+    WebhookDispatcher,
+} from "../webhooks/webhooks.ts"
 import { Agent } from "./agent.ts"
 import { type ChannelFactory, ChannelHub } from "./channels.ts"
-import { claimLeases, LEASE_BEAT_MS } from "./lease.ts"
+import { claimLeases, LEASE_BEAT_MS, markRuntimeLive } from "./lease.ts"
 import { reconcileSchedules, scheduleRunner, scheduleRunOfSession } from "./schedules.ts"
 
 export type AgentSource = string | Record<string, unknown>
@@ -226,6 +233,15 @@ export function defaultStorePath(cwd: string = process.cwd()): string {
     return resolve(cwd, BRAND.stateDir, "store.db")
 }
 
+/** `Runtime.activity`: what an external waker needs to suspend a process and wake it in time. */
+export interface RuntimeActivity {
+    readonly idle: boolean
+    readonly turnsRunning: number
+    readonly deliveries: { readonly outbox: DeliveryBacklog; readonly webhooks: DeliveryBacklog }
+    /** ISO time; absent when nothing is scheduled or owed. May be in the past: due now. */
+    readonly nextWakeAt?: string
+}
+
 export class Runtime {
     readonly runtimeId: string
     readonly bus: EventBus
@@ -248,6 +264,8 @@ export class Runtime {
      */
     readonly plugins: ReadonlyMap<string, readonly LoadedPlugin[]>
     readonly scheduler: Scheduler
+    /** Outbound webhooks. Call `changed()` after writing a subscription. */
+    readonly webhooks: WebhookDispatcher
 
     /**
      * Every tool provider constructed, **by agent id**. Held so `stop` can tell each one to let go.
@@ -347,6 +365,7 @@ export class Runtime {
         channels: ChannelHub
         plugins: ReadonlyMap<string, readonly LoadedPlugin[]>
         scheduler: Scheduler
+        webhooks: WebhookDispatcher
         ownsStore: boolean
         owned: readonly string[]
         declined: readonly LeaseRecord[]
@@ -354,6 +373,8 @@ export class Runtime {
         options: RuntimeOptions
     }) {
         this.runtimeId = init.runtimeId
+        // Built means live: a lease naming this process's pid and this id is held, not inherited.
+        markRuntimeLive(init.runtimeId, true)
         this.bus = init.bus
         this.boot = init.boot
         this.store = init.store
@@ -361,6 +382,7 @@ export class Runtime {
         this.channels = init.channels
         this.plugins = init.plugins
         this.scheduler = init.scheduler
+        this.webhooks = init.webhooks
         this.#ownsStore = init.ownsStore
         this.#owned = [...init.owned]
         this.#declined = [...init.declined]
@@ -573,6 +595,34 @@ export class Runtime {
             run: scheduleRunner({ agents: () => runtime.all(), hub }),
         })
 
+        /**
+         * Outbound webhooks. Listening now costs nothing (enqueueing is a row); sending waits for
+         * `runtime.ready` below. The allowlist is the operator's, from the environment: a malformed
+         * one is a warning and "public only", the safe direction, never a failed boot.
+         */
+        const allowVar = `${BRAND.envPrefix}WEBHOOK_ALLOW`
+        let allow: WebhookAllowlist = EMPTY_ALLOWLIST
+        try {
+            allow = parseWebhookAllowlist((options.env ?? process.env)[allowVar], allowVar)
+        } catch (error) {
+            bus.emit("agent.warning", {
+                code: isHarnessError(error) ? error.code : "webhook_allowlist_invalid",
+                message: error instanceof Error ? error.message : String(error),
+                hint: isHarnessError(error)
+                    ? error.hint
+                    : "Webhooks go to the public internet only until the list is fixed.",
+            })
+        }
+        const webhooks: WebhookDispatcher = new WebhookDispatcher({
+            store: store.webhooks,
+            bus,
+            fetch: options.fetch ?? globalThis.fetch,
+            allow,
+            agents: () => runtime.all().map((agent) => agent.id),
+            userAgent: `${BRAND.name}/${VERSION}`,
+        })
+        await webhooks.attach()
+
         const runtime: Runtime = new Runtime({
             runtimeId,
             bus,
@@ -582,6 +632,7 @@ export class Runtime {
             channels: hub,
             plugins: prepared.plugins,
             scheduler,
+            webhooks,
             ownsStore,
             owned: leases.owned,
             declined: leases.declined,
@@ -675,6 +726,10 @@ export class Runtime {
 
         if (options.startSchedules === true) await scheduler.start()
 
+        // After readiness: sending is network I/O. Recovery first, so a delivery a dead process
+        // left in flight goes out again under the same `webhook-id` and is flagged uncertain.
+        await webhooks.start()
+
         // After readiness, so a timer never delays boot. `unref` because a heartbeat must not be
         // the reason a one-shot command fails to exit — the lease going stale is exactly the
         // recoverable state it is designed for, whereas a process that will not end is not.
@@ -759,6 +814,43 @@ export class Runtime {
     /** Every agent, members included. For a caller that needs the whole process, not the surface. */
     all(): readonly Agent[] {
         return [...this.#agents.values()]
+    }
+
+    /**
+     * Whether this process may be suspended now, and when it must be woken.
+     *
+     * For an **external** waker — a control plane that suspends idle silos. Nothing here suspends
+     * anything. `idle` means no turn is running, no delivery is on the wire, and none is due yet;
+     * `nextWakeAt` is the earliest of a schedule's due time and a pending delivery's retry. A late wake
+     * is safe: the scheduler re-reads the wall clock when it fires, so a schedule overdue by the length
+     * of a suspension runs once under its own late-fire policy, not once per missed timer.
+     *
+     * Schedules count only while the scheduler is started: under `run` nothing would fire them, and a
+     * wake time nothing acts on would keep a waker waking a process for no reason.
+     *
+     * What this cannot see is a channel holding a connection open. A Telegram long-poll suspended is a
+     * bot that answers late, not one that loses messages — Telegram holds updates — but a hosted
+     * deployment that suspends wants `mode: webhook`, which needs no process awake to receive.
+     */
+    async activity(now = Date.now()): Promise<RuntimeActivity> {
+        const ids = this.all().map((agent) => agent.id)
+        const turnsRunning = this.all().reduce((sum, agent) => sum + agent.inFlight, 0)
+        const [outbox, webhooks, schedule] = await Promise.all([
+            this.store.outbox.backlog(ids),
+            this.store.webhooks.backlog(ids),
+            this.scheduler.started ? this.store.schedules.nextDue(ids) : Promise.resolve(undefined),
+        ])
+        const candidates = [schedule, outbox.nextAttemptAt, webhooks.nextAttemptAt].filter(
+            (at): at is string => at !== undefined,
+        )
+        const nextWakeAt = candidates.sort()[0]
+        const dueNow = nextWakeAt !== undefined && Date.parse(nextWakeAt) <= now
+        return {
+            idle: turnsRunning === 0 && outbox.inflight === 0 && webhooks.inflight === 0 && !dueNow,
+            turnsRunning,
+            deliveries: { outbox, webhooks },
+            ...(nextWakeAt === undefined ? {} : { nextWakeAt }),
+        }
     }
 
     /**
@@ -1207,6 +1299,7 @@ export class Runtime {
     async stop(reason = "requested"): Promise<void> {
         if (this.#stopped) return
         this.#stopped = true
+        markRuntimeLive(this.runtimeId, false)
         this.bus.emit("runtime.stopping", { reason })
 
         // In-flight turns are deliberately not cancelled here — a turn ends because it finished or
@@ -1217,6 +1310,7 @@ export class Runtime {
         // Before the channels, because a schedule firing mid-shutdown would enqueue a delivery into
         // an outbox that is about to stop draining.
         await this.scheduler.stop()
+        this.webhooks.stop()
         // Before the store closes, because stopping a transport can flush a final delivery and a
         // closed database would turn that into an exception during shutdown.
         await this.channels.stop()

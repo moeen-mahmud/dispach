@@ -108,6 +108,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // whose caller had supplied the actions, and the only symptom was a browser button that did
         // nothing. `serve.test.ts` walks this literal against `HandlerOptions` now.
         ...(options.channels === undefined ? {} : { channels: options.channels }),
+        ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
         // **Derived, not forwarded.** The bind host is already an argument here, so a caller cannot
         // hand over a policy that disagrees with what was actually bound — which is the whole input
         // to how strict the guard is. `origin` is `Omit`ted from `ServeOptions` for the same reason:

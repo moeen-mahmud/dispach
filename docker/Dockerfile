@@ -65,6 +65,9 @@ COPY packages/channel-whatsapp/package.json ./packages/channel-whatsapp/
 COPY packages/tools-system/package.json ./packages/tools-system/
 COPY packages/tools-composio/package.json ./packages/tools-composio/
 COPY packages/tools-web/package.json ./packages/tools-web/
+# The control plane is a workspace too, so the lockfile names it. Only its manifest matters here:
+# the runtime stage installs the CLI tarball and nothing else, so no FSL code reaches the image.
+COPY packages/control/package.json ./packages/control/
 # `--ignore-scripts` because the root `prepare` runs husky, which installs git hooks: a devDependency
 # acting on a `.git` that is not in the build context anyway. A lifecycle script has no business
 # running in an image build.

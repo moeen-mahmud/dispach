@@ -20,6 +20,8 @@ export {
     type HandlerOptions,
     type Provisioner,
     type ProvisionStepWire,
+    type SecretAdmin,
+    type TemplateWire,
 } from "./handler.ts"
 export {
     browsableHost,

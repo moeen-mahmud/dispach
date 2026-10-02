@@ -32,6 +32,11 @@ export function agentsDir(env?: Readonly<Record<string, string | undefined>>): s
     return join(sandboxRoot(env), "agents")
 }
 
+/** Agent templates: one directory per template, written by the operator, read by `POST /v1/agents`. */
+export function templatesDir(env?: Readonly<Record<string, string | undefined>>): string {
+    return join(sandboxRoot(env), "templates")
+}
+
 export function storePath(env?: Readonly<Record<string, string | undefined>>): string {
     return join(sandboxRoot(env), "store.db")
 }

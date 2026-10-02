@@ -1,0 +1,18 @@
+name: follow-up
+description: A second turn answers from the first turn's result without calling again.
+steps:
+  - prompt: What's on my calendar today?
+    expected_calls:
+      - slug: calendar_list_events
+    mocks:
+      calendar_list_events:
+        events:
+          - { start: "10:00", end: "10:15", title: "Standup" }
+          - { start: "15:30", end: "16:30", title: "Dentist" }
+    criteria:
+      - Mentions the standup and the dentist
+  - prompt: Which of those comes first?
+    order: exact
+    expected_calls: []
+    criteria:
+      - Says the standup comes first

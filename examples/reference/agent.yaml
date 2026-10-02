@@ -350,6 +350,13 @@ limits:
   toolTimeoutMs: 120000
   # Read-only tools only. Mutating tools always serialize, whatever this says.
   maxParallelTools: 4
+  # Governor limits, for running many agents in one silo. Absent means unlimited. Over either, a
+  # new turn is refused (429 over HTTP, a short reply on a channel) — never queued, never cut off
+  # mid-turn: the token budget is checked when a turn starts.
+  # maxConcurrentTurns: 4
+  # tokens:
+  #   max: 2000000
+  #   windowMs: 86400000        # a rolling day
 
 # ── Phase 7B: phase-scoped tool visibility ────────────────────────────────────────────────
 # The strongest published small-model lever: constraining the tool space per phase took local

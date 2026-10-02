@@ -215,6 +215,38 @@ describe("claiming a lease", () => {
     })
 
     /**
+     * The container case. The runtime is pid 1, so a container killed rather than stopped leaves a
+     * lease naming pid 1 — and the replacement, also pid 1, used to find that pid "alive" (it is:
+     * it is itself) and refuse to serve for forty-five minutes, restarting in a loop meanwhile.
+     */
+    test("a holder carrying this process's own pid is dead, whatever the probe says", async () => {
+        const store = await openMemoryStore()
+        await claimLeases({
+            store,
+            agentIds: ["a"],
+            runtimeId: "rt_killed",
+            mode: "daemon",
+            now: NOW,
+            pid: 1,
+            exclusive: true,
+            isAlive: alive,
+        })
+        const out = await claimLeases({
+            store,
+            agentIds: ["a"],
+            runtimeId: "rt_replacement",
+            mode: "daemon",
+            now: NOW + 5_000,
+            pid: 1,
+            exclusive: true,
+            isAlive: alive,
+        })
+        expect(out.owned).toEqual(["a"])
+        expect(out.tookOver.map((lease) => lease.runtimeId)).toEqual(["rt_killed"])
+        await store.close()
+    })
+
+    /**
      * The other half. A pid still resolving after forty-five minutes without a heartbeat is far
      * more likely to be an unrelated program that inherited the number than the original holder,
      * and refusing forever on that evidence leaves a lease recoverable only by editing the

@@ -42,7 +42,7 @@ import type { DisplacedArtifact, Tool, ToolResult, WorkspaceWriteTarget } from "
 import { newStepId, newTurnId } from "./ids.ts"
 import { allowFor, otherPhases, type PhaseMap } from "./phases.ts"
 import { frameSenderInput, senderLabel, type TurnSender, trustOfSender } from "./sender.ts"
-import { runStep } from "./step.ts"
+import { runStep, type StepUsage } from "./step.ts"
 
 export interface TurnLimits {
     readonly maxSteps: number
@@ -120,6 +120,8 @@ export interface ToolRuntime {
 
 export interface TurnInput {
     readonly agentId: string
+    /** Handed to every `runStep` this turn makes. See `StepInput.meter`. */
+    readonly meter?: (usage: StepUsage) => void
     readonly sessionKey: string
     readonly input: string
     readonly history: readonly ChatMessage[]
@@ -905,6 +907,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     bus: input.bus,
                     context: stepContext,
                     signal: link.signal,
+                    ...(input.meter === undefined ? {} : { meter: input.meter }),
                 }),
             )
             const step = await callStep({
