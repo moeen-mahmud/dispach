@@ -427,6 +427,7 @@ export {
     prepareScheduleWrite,
     reconcileSchedules,
     scheduleRunner,
+    scheduleSendOptions,
     scheduleSessionKey,
 } from "./runtime/schedules.ts"
 export type { CronSpec } from "./schedule/cron.ts"

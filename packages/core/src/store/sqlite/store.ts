@@ -602,6 +602,9 @@ interface ScheduleRow {
     deliver_to: string | null
     session_mode: string
     role: string | null
+    tools_allow: string | null
+    timeout_ms: number | null
+    max_steps: number | null
     enabled: number
     origin: string
     anchor_at: string
@@ -636,6 +639,10 @@ function toSchedule(row: ScheduleRow): ScheduleRecord {
         deliverTo: row.deliver_to ?? undefined,
         sessionMode: row.session_mode,
         role: row.role ?? undefined,
+        toolsAllow:
+            row.tools_allow === null ? undefined : (JSON.parse(row.tools_allow) as string[]),
+        timeoutMs: row.timeout_ms ?? undefined,
+        maxSteps: row.max_steps ?? undefined,
         enabled: row.enabled !== 0,
         origin: row.origin as ScheduleOrigin,
         anchorAt: row.anchor_at,
@@ -1839,9 +1846,9 @@ export class SqliteStore implements Store {
             upsert: db.prepare(
                 `INSERT INTO schedules (
                      agent_id, id, kind, expr, timezone, task, deliver_channel, deliver_to,
-                     session_mode, role, enabled, origin, anchor_at, next_run_at, source_path,
-                     created_at, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     session_mode, role, tools_allow, timeout_ms, max_steps, enabled, origin,
+                     anchor_at, next_run_at, source_path, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (agent_id, id) DO UPDATE SET
                      kind = excluded.kind,
                      expr = excluded.expr,
@@ -1851,6 +1858,9 @@ export class SqliteStore implements Store {
                      deliver_to = excluded.deliver_to,
                      session_mode = excluded.session_mode,
                      role = excluded.role,
+                     tools_allow = excluded.tools_allow,
+                     timeout_ms = excluded.timeout_ms,
+                     max_steps = excluded.max_steps,
                      enabled = excluded.enabled,
                      origin = excluded.origin,
                      anchor_at = excluded.anchor_at,
@@ -1989,6 +1999,9 @@ export class SqliteStore implements Store {
                     schedule.deliverTo ?? null,
                     schedule.sessionMode,
                     schedule.role ?? null,
+                    schedule.toolsAllow === undefined ? null : JSON.stringify(schedule.toolsAllow),
+                    schedule.timeoutMs ?? null,
+                    schedule.maxSteps ?? null,
                     schedule.enabled ? 1 : 0,
                     schedule.origin,
                     schedule.anchorAt,

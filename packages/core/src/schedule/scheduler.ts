@@ -25,6 +25,7 @@
  * rather than to a growing backlog or to unbounded concurrent model calls.
  */
 
+import { isHarnessError } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import { newRunId } from "../loop/ids.ts"
 import type { ScheduleRecord, ScheduleStore } from "../store/store.ts"
@@ -332,13 +333,18 @@ export class Scheduler {
         } catch (cause) {
             status = "error"
             error = cause instanceof Error ? cause.message : String(cause)
+            // The cause's own code when it has one, so a run that timed out says `turn_timeout`
+            // rather than a generic failure an embedder has to parse the message to tell apart.
+            const known = isHarnessError(cause)
             this.#bus.emit(
                 "schedule.error",
                 {
                     scheduleId: schedule.id,
-                    code: "schedule_run_failed",
+                    code: known ? cause.code : "schedule_run_failed",
                     message: error,
-                    hint: "The schedule itself is unaffected and will run again at its next occurrence. The failure is in the turn it started.",
+                    hint: known
+                        ? cause.hint
+                        : "The schedule itself is unaffected and will run again at its next occurrence. The failure is in the turn it started.",
                 },
                 { agentId: schedule.agentId },
             )

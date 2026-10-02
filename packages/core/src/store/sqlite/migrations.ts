@@ -1115,6 +1115,20 @@ CREATE TABLE memory_reads (
 CREATE INDEX memory_reads_by_scope ON memory_reads (scope, at);
 `,
     },
+    {
+        version: 25,
+        name: "schedule_limits",
+        /**
+         * Limits per schedule (pilot.5, VelaCrew #15): a tool allow-list (JSON array), a turn timeout
+         * and a step cap. Nullable, and null is "the agent's own", so every existing row keeps
+         * running exactly as it did.
+         */
+        sql: `
+ALTER TABLE schedules ADD COLUMN tools_allow TEXT;
+ALTER TABLE schedules ADD COLUMN timeout_ms INTEGER;
+ALTER TABLE schedules ADD COLUMN max_steps INTEGER;
+`,
+    },
 ]
 
 export interface MigrationReport {

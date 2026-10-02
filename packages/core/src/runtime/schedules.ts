@@ -14,7 +14,10 @@
  * channel is a new package and no change here at all.
  */
 
-import { ConfigError } from "../errors.ts"
+import { ConfigError, HarnessError, scheduleToolUnknown } from "../errors.ts"
+import { unmatchedEntries } from "../loop/phases.ts"
+import type { TurnResult } from "../loop/turn.ts"
+import { endedBadly, endNote } from "../loop/turn-end.ts"
 import type { ScheduleConfig } from "../manifest/schema.ts"
 import { ScheduleSchema } from "../manifest/schema.ts"
 import { decideDue, parseSchedule } from "../schedule/kinds.ts"
@@ -25,7 +28,8 @@ import type {
     ScheduleStore,
     UpsertSchedule,
 } from "../store/store.ts"
-import type { Agent } from "./agent.ts"
+import type { ToolSpec } from "../tools/types.ts"
+import type { Agent, AgentSendOptions } from "./agent.ts"
 import type { ChannelHub } from "./channels.ts"
 
 /** The channel segment every scheduled session carries. */
@@ -153,6 +157,10 @@ export async function reconcileSchedules(input: {
                 : { deliverChannel: deliver.channel, deliverTo: deliver.to }),
             sessionMode: declared.session,
             ...(declared.role === undefined ? {} : { role: declared.role }),
+            // Assigned, never spread: a spread that drops one of these type-checks and loses it.
+            toolsAllow: declared.tools?.allow,
+            timeoutMs: declared.timeoutMs,
+            maxSteps: declared.maxSteps,
             enabled: declared.enabled,
             origin: "manifest",
             // Keeping the anchor is what stops a restart resetting the sequence.
@@ -194,6 +202,8 @@ export function prepareScheduleWrite(input: {
     readonly channelIds: readonly string[]
     /** Role names declared under `model:`, for the role check. */
     readonly roleNames: readonly string[]
+    /** The agent's resolved catalogue, for the `tools.allow` check. Absent skips it. */
+    readonly toolSpecs?: readonly ToolSpec[]
     readonly now: number
     readonly origin: ScheduleOrigin
     /** Carried through unchanged on a patch, so an edit does not reset the sequence. */
@@ -237,6 +247,19 @@ export function prepareScheduleWrite(input: {
         })
     }
 
+    const allow = declared.tools?.allow
+    if (allow !== undefined && input.toolSpecs !== undefined) {
+        const unknown = unmatchedEntries(allow, input.toolSpecs)
+        if (unknown.length > 0) {
+            throw scheduleToolUnknown(
+                declared.id,
+                unknown,
+                input.toolSpecs.map((spec) => spec.slug),
+                "tools.allow",
+            )
+        }
+    }
+
     const parsed = parseSchedule({
         id: declared.id,
         kind: declared.kind,
@@ -262,6 +285,9 @@ export function prepareScheduleWrite(input: {
             : { deliverChannel: deliver.channel, deliverTo: deliver.to }),
         sessionMode: declared.session,
         ...(declared.role === undefined ? {} : { role: declared.role }),
+        toolsAllow: declared.tools?.allow,
+        timeoutMs: declared.timeoutMs,
+        maxSteps: declared.maxSteps,
         enabled: declared.enabled,
         origin: input.origin,
         anchorAt: decision.anchor === undefined ? nowIso : new Date(decision.anchor).toISOString(),
@@ -271,6 +297,24 @@ export function prepareScheduleWrite(input: {
         // for an API row anyway: `removeManifestExcept` is scoped to `origin = 'manifest'`.
         sourcePath: "",
         now: nowIso,
+    }
+}
+
+/**
+ * What a schedule's row says about the turn it starts: the role and its limits.
+ *
+ * One function for the scheduler and for `POST …/schedules/:sid/run`, because a manual run is how a
+ * schedule is tested, and one that ran with other tools than the real run would test nothing. Found
+ * in the image: the manual route sent the role and nothing else.
+ */
+export function scheduleSendOptions(
+    schedule: ScheduleRecord,
+): Pick<AgentSendOptions, "role" | "toolsAllow" | "maxSteps" | "timeoutMs"> {
+    return {
+        ...(schedule.role === undefined ? {} : { role: schedule.role }),
+        ...(schedule.toolsAllow === undefined ? {} : { toolsAllow: schedule.toolsAllow }),
+        ...(schedule.maxSteps === undefined ? {} : { maxSteps: schedule.maxSteps }),
+        ...(schedule.timeoutMs === undefined ? {} : { timeoutMs: schedule.timeoutMs }),
     }
 }
 
@@ -300,23 +344,61 @@ export function scheduleRunner(options: ScheduleRunnerOptions) {
         const result = await agent.send(schedule.task, {
             sessionKey,
             source: `schedule:${schedule.id}`,
-            ...(schedule.role === undefined ? {} : { role: schedule.role }),
+            ...scheduleSendOptions(schedule),
         })
 
-        // `deliver: "none"` is a real answer rather than a missing one: the reply reaches the event
-        // stream and the store, and no channel is involved.
-        if (schedule.deliverChannel === undefined || schedule.deliverTo === undefined) return
-        const attachments = result.attachments ?? []
-        if (result.text.trim() === "" && attachments.length === 0) return
+        await deliverResult(options.hub, schedule, sessionKey, result)
 
-        await options.hub.deliver({
-            agentId: schedule.agentId,
-            sessionKey,
-            channelId: schedule.deliverChannel,
-            recipient: schedule.deliverTo,
-            text: result.text,
-            turnId: result.turnId,
-            ...(attachments.length === 0 ? {} : { attachments }),
-        })
+        // After delivery, so what the turn did produce still reaches its recipient. A turn that ran
+        // out of time or steps returns rather than throws, and the run used to be recorded `ok`; now
+        // the scheduler records it as an error with the turn's own code (`turn_timeout`, …).
+        if (endedBadly(result.reason)) throw turnEndedBadly(schedule, result)
     }
+}
+
+async function deliverResult(
+    hub: ChannelHub,
+    schedule: ScheduleRecord,
+    sessionKey: string,
+    result: TurnResult,
+): Promise<void> {
+    // `deliver: "none"` is a real answer rather than a missing one: the reply reaches the event
+    // stream and the store, and no channel is involved.
+    if (schedule.deliverChannel === undefined || schedule.deliverTo === undefined) return
+    const attachments = result.attachments ?? []
+    if (result.text.trim() === "" && attachments.length === 0) return
+    await hub.deliver({
+        agentId: schedule.agentId,
+        sessionKey,
+        channelId: schedule.deliverChannel,
+        recipient: schedule.deliverTo,
+        text: result.text,
+        turnId: result.turnId,
+        ...(attachments.length === 0 ? {} : { attachments }),
+    })
+}
+
+function turnEndedBadly(schedule: ScheduleRecord, result: TurnResult): HarnessError {
+    const detail = result.error
+    const why = (
+        detail?.message ??
+        endNote(result.reason, { steps: result.steps }) ??
+        "it did not finish"
+    ).replace(/\.+$/, "")
+    // The schedule's own limit is the one to name when it set one: the turn's error talks about
+    // `limits`, which is not what a person editing this schedule should change.
+    const own =
+        result.reason === "timeout" && schedule.timeoutMs !== undefined
+            ? `This schedule's timeoutMs is ${schedule.timeoutMs} ms, capped by limits.turnTimeoutMs; raise it if the task needs longer.`
+            : result.reason === "max_steps" && schedule.maxSteps !== undefined
+              ? `This schedule's maxSteps is ${schedule.maxSteps}, capped by limits.maxSteps; raise it if the task needs more.`
+              : undefined
+    return new HarnessError({
+        code: detail?.code ?? `turn_${result.reason}`,
+        message: `Schedule "${schedule.id}" ran and its turn ended "${result.reason}": ${why}.`,
+        hint:
+            own ??
+            detail?.hint ??
+            "The schedule runs again at its next occurrence. Its timeoutMs and maxSteps are capped by the manifest's limits; raise either if the task needs more.",
+    })
 }

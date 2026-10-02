@@ -13,6 +13,8 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - Nova Micro, Lite and Pro resolve to their own capability rows (window, output, tools) instead of the 8,192-token fallback.
 - A release run from a branch says it built and pushed nothing, and tags its build with the version.
 - `POST /messages` takes `images`: a path inside the agent's directory (or inline base64), PNG, JPEG, GIF or WebP. The model sees them on that turn through Bedrock or an OpenAI-compatible endpoint; history keeps `[image: <path>]`. A model without vision refuses with `model_no_vision`, and `capabilities.vision` can say otherwise. The client's `send` takes `images` too.
+- A schedule takes `tools.allow` (the phase grammar), `timeoutMs` and `maxSteps`, in the manifest and over the API. They only narrow the agent's own tools and `limits`; an allow entry naming nothing is `schedule_tool_unknown`. `POST …/schedules/:sid/run` runs with the same limits as a timed fire.
+- A scheduled run that ends `timeout`, `max_steps`, `no_progress` or `error` is recorded as an error, and `schedule.error` carries the turn's code (`turn_timeout`, …). It used to be recorded `ok`.
 
 ### Since 0.2.0-pilot.3
 

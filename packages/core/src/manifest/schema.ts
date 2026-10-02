@@ -703,6 +703,18 @@ export const ScheduleSchema = z
          * author wrote something they did not.
          */
         role: slug.optional(),
+        /**
+         * Limits for this schedule's runs (pilot.5). They only narrow what the agent already has:
+         * `tools.allow` selects from its catalogue with the phase grammar (`slug`, `tag:read`, `*`),
+         * and the two numbers are capped by `limits`. A schedule may be written by the agent itself
+         * (`config_set`), so one that could raise them would be a way round its own budget.
+         */
+        tools: z
+            .object({ allow: z.array(z.string().min(1)).min(1) })
+            .strict()
+            .optional(),
+        timeoutMs: z.number().int().positive().optional(),
+        maxSteps: z.number().int().positive().optional(),
         enabled: z.boolean().default(true),
         /** IANA name. Defaults to `TZ`, then UTC. */
         timezone: z.string().min(1).optional(),

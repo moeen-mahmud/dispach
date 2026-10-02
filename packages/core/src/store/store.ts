@@ -1254,6 +1254,14 @@ export interface ScheduleRecord {
     readonly sessionMode: string
     /** Model role override. Absent is `main`. */
     readonly role: string | undefined
+    /**
+     * Limits for this schedule's runs (pilot.5, #15). They only narrow: `toolsAllow` selects from the
+     * agent's own catalogue with the phase grammar, and the two numbers are capped by the manifest's
+     * `limits`. Absent is the agent's own.
+     */
+    readonly toolsAllow: readonly string[] | undefined
+    readonly timeoutMs: number | undefined
+    readonly maxSteps: number | undefined
     readonly enabled: boolean
     readonly origin: ScheduleOrigin
     /**
@@ -1309,6 +1317,10 @@ export interface UpsertSchedule {
     readonly deliverTo?: string
     readonly sessionMode: string
     readonly role?: string
+    /** Absent is "the agent's own". Optional so existing callers compile; see `ScheduleRecord`. */
+    readonly toolsAllow?: readonly string[] | undefined
+    readonly timeoutMs?: number | undefined
+    readonly maxSteps?: number | undefined
     readonly enabled: boolean
     readonly origin: ScheduleOrigin
     readonly anchorAt: string

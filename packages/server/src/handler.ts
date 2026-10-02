@@ -54,6 +54,7 @@ import {
     SENDER_KINDS,
     SETTINGS,
     type SenderKind,
+    scheduleSendOptions,
     scheduleSessionKey,
     settingByPath,
     type TurnRecord,
@@ -3177,7 +3178,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         sessionKey,
                         turnId,
                         source: `schedule:${row.id}:manual`,
-                        ...(row.role === undefined ? {} : { role: row.role }),
+                        ...scheduleSendOptions(row),
                     })
                     .catch(() => {
                         // Reported on the bus by the turn itself; swallowed here so an unhandled
@@ -4066,6 +4067,9 @@ async function writeSchedule(
             body: body as Record<string, unknown>,
             channelIds: agent.manifest.channels.map((channel) => channel.id),
             roleNames: Object.keys(agent.manifest.model),
+            // The resolved catalogue, so a `tools.allow` naming nothing is refused now rather than
+            // running quietly with fewer tools than its author wrote.
+            toolSpecs: agent.tools.specs(),
             now: Date.now(),
             // Never `manifest`: a row written here must survive a reload, and marking it as the
             // manifest's would let the next reconciliation delete something no file describes.

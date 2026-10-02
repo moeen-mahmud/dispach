@@ -232,6 +232,12 @@ export interface TurnInput {
     readonly runtimeNote?: string
     /** Images sent with the input. Sent on every step of this turn, stored as references. */
     readonly images?: readonly ImageInput[]
+    /**
+     * A schedule's `tools.allow`: the agent's own catalogue narrowed for this turn, with the phase
+     * grammar. Applied before a skill's scripts and the turn's own tools are layered on, so it narrows
+     * what the agent may call without breaking what the turn itself brings.
+     */
+    readonly toolsAllow?: readonly string[]
     /** Every mutating call is queued rather than run: a stand-in's turn. See `ExecuteInput.defer`. */
     readonly deferMutations?: ExecuteInput["defer"]
     /** Forwarded to `ToolContext.writeNote`: set when this agent is the space writer (Phase 29). */
@@ -488,6 +494,27 @@ function withRenderedTools(
     }
 }
 
+/**
+ * The catalogue a schedule's `tools.allow` leaves, re-rendered like a phase view: slot 1 and the wire
+ * schemas both shrink, so the model is told about exactly the tools it may call. A different slot 1
+ * means no cache hit on the agent's usual prefix, which costs nothing here: a schedule run's session
+ * is its own.
+ */
+function narrowedTools(tools: ToolRuntime, allow: readonly string[]): ToolRuntime {
+    const registry = tools.registry.inPhase(allow)
+    if (registry === tools.registry) return tools
+    const specs = registry.specs()
+    const requestTools = tools.dialect.requestTools(specs)
+    const { requestTools: _wide, ...rest } = tools
+    return {
+        ...rest,
+        registry,
+        blocks: tools.dialect.renderCatalogue(specs, registry.notEnabled),
+        ...(requestTools === undefined ? {} : { requestTools }),
+        wireTokens: requestTools === undefined ? 0 : nativeWireTokens(requestTools),
+    }
+}
+
 async function runTurnCore(input: TurnInput): Promise<TurnResult> {
     const turnId = input.turnId ?? newTurnId()
     const context = { agentId: input.agentId, sessionKey: input.sessionKey, turnId }
@@ -660,10 +687,14 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
          */
         const rendered = input.turnTools ?? []
         const layered = [...turnScripts, ...rendered]
-        const baseTools =
-            input.tools === undefined || layered.length === 0
+        const ownTools =
+            input.tools === undefined || input.toolsAllow === undefined
                 ? input.tools
-                : withRenderedTools(input.tools, layered, rendered.length > 0)
+                : narrowedTools(input.tools, input.toolsAllow)
+        const baseTools =
+            ownTools === undefined || layered.length === 0
+                ? ownTools
+                : withRenderedTools(ownTools, layered, rendered.length > 0)
 
         /**
          * The catalogue as one phase sees it, rebuilt only when the phase changes.

@@ -872,6 +872,14 @@ API-initiated turns.
 | `enabled` | no | Default true. Disabled schedules are listed by default. |
 | `timezone` | no | IANA name. Defaults to `TZ` then UTC. Applies to `cron` only: `every` is interval-anchored and does not participate in DST. |
 | `role` | no | A model role from `model:` to run this turn on instead of `main`. Omit for `main`. |
+| `tools.allow` | no | Since 0.2.0-pilot.5. The agent's own tools this run may use, in the phase grammar: a slug, `tag:<name>`, or `*`. It narrows the catalogue the run's model is shown; a skill's scripts and a turn's own tools still apply. An entry naming nothing the agent has is refused (`schedule_tool_unknown`), at load for a manifest schedule and at write for an API one. |
+| `timeoutMs` | no | Since 0.2.0-pilot.5. This run's turn timeout. Capped by `limits.turnTimeoutMs`: a schedule may lower it, never raise it, since the agent can write its own schedules. A run that runs out ends `turn_timeout`. |
+| `maxSteps` | no | Since 0.2.0-pilot.5. This run's step cap, capped by `limits.maxSteps` the same way. |
+
+**A run that does not finish is recorded as an error.** Since 0.2.0-pilot.5 a run whose turn ends
+`timeout`, `max_steps`, `no_progress` or `error` sets the schedule's `lastStatus` to `error` and
+emits `schedule.error` with the turn's own code (`turn_timeout`, `turn_max_steps`, …). Whatever text
+the turn produced is still delivered first. Before, such a run was recorded `ok`.
 
 **A recurring schedule fires a little after its time, on purpose.** `cron` and `every` carry a fixed
 offset of up to a tenth of their interval, capped at 15 minutes: a daily `0 8 * * *` fires somewhere

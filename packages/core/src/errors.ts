@@ -1303,3 +1303,18 @@ export function modelNoVision(model: string): HarnessError {
         field: "images",
     })
 }
+
+/** A schedule's `tools.allow` names nothing this agent has (pilot.5, #15). Same rule as a phase. */
+export function scheduleToolUnknown(
+    scheduleId: string,
+    entries: readonly string[],
+    available: readonly string[],
+    field: string,
+): ConfigError {
+    return new ConfigError({
+        code: "schedule_tool_unknown",
+        message: `Schedule "${scheduleId}" allows ${entries.join(", ")}, which ${entries.length === 1 ? "names" : "name"} nothing this agent has.`,
+        hint: `A schedule can only narrow the agent's own tools: name a pinned or local slug, a tag: annotation, or *. Available: ${available.join(", ") || "none"}. Refused rather than ignored, because a run with fewer tools than its author wrote fails quietly turns later.`,
+        field,
+    })
+}

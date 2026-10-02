@@ -68,6 +68,7 @@ and WebSocket surfaces can return:
 | `claim_spent` | 401 | The boot claim was recognised and has already been exchanged. A claim from an earlier boot is `unauthorized` instead — this process has never seen it. |
 | `web_asset_missing` | 500 | The routes serving the browser surface and the table backing them diverged. A broken build, not a missing file. |
 | `schedule_invalid` | 400 | The schedule failed validation — a bad cron expression, or a field the schema refuses. |
+| `schedule_tool_unknown` | 400 | A schedule's `tools.allow` names nothing this agent has. A schedule can only narrow the agent's own tools. |
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
 | `agent_turn_in_flight` | 409 | A stop was asked for while a turn is running. It names the count; retry when the turn ends. A reload no longer answers this: it waits (`reload_pending`). |
 | `reload_pending` | — | Returned *inside* a `200` as `pending`: the manifest was written and applies when the running turns finish. Not an error. |

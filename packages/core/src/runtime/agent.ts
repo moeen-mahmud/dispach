@@ -32,6 +32,7 @@ import {
     modelWindowUnknown,
     phaseAllowUnmatched,
     privateMemoryRefused,
+    scheduleToolUnknown,
     tokenBudgetExhausted,
     toolGatedAfterFirstUse,
     turnsAtCapacity,
@@ -39,7 +40,7 @@ import {
 } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import { newCallId, newTurnId } from "../loop/ids.ts"
-import { entryPhase, isPhased, unmatchedAllows } from "../loop/phases.ts"
+import { entryPhase, isPhased, unmatchedAllows, unmatchedEntries } from "../loop/phases.ts"
 import {
     type ActingParticipant,
     frameSenderInput,
@@ -101,7 +102,7 @@ import { nltDialect } from "../tools/dialect/nlt.ts"
 import { type ApprovalRequest, type ExecuteInput, executeIntents } from "../tools/execute.ts"
 import { onceOnlyTools } from "../tools/policy.ts"
 import { ToolRegistry } from "../tools/registry.ts"
-import type { ScriptRunner, Tool } from "../tools/types.ts"
+import type { ScriptRunner, Tool, ToolSpec } from "../tools/types.ts"
 import { activateKnowledge, type KnowledgeBase, loadKnowledge } from "../workspace/knowledge.ts"
 import {
     loadWorkspace,
@@ -279,6 +280,13 @@ export interface AgentSendOptions {
     readonly runtimeNote?: string
     /** Images sent with this message, already read (`readImages`). See `ChatMessage.images`. */
     readonly images?: readonly ImageInput[]
+    /**
+     * A schedule's limits (pilot.5, #15). They only narrow: `toolsAllow` selects from this agent's
+     * catalogue with the phase grammar, and the numbers are capped by the manifest's `limits`.
+     */
+    readonly toolsAllow?: readonly string[]
+    readonly maxSteps?: number
+    readonly timeoutMs?: number
     /** A slot from `admit()`. Absent: `send` admits for itself, and throws the refusal. */
     readonly admission?: AdmittedTurn
 }
@@ -568,6 +576,7 @@ export class Agent {
         // `requestTools` is built here too, and not only for symmetry: under native it is where a slug
         // the wire format cannot carry is refused, and "at load" is the only useful place to refuse it.
         if (init.tools.size === 0) {
+            this.#checkScheduleAllows([])
             this.#toolRuntime = undefined
             // No catalogue, so nothing in slot 1 — kept that way. But a turn can still bring its own
             // tools (a handoff's `submit_artifact`), and with no runtime to layer them onto they were
@@ -634,6 +643,7 @@ export class Agent {
                     specs.map((spec) => spec.slug),
                 )
             }
+            this.#checkScheduleAllows(specs)
         }
     }
 
@@ -1200,6 +1210,27 @@ export class Agent {
     #inFlight = 0
 
     /**
+     * A manifest schedule's `tools.allow`, checked by the phase rule at the moment phases are: only
+     * once the catalogue is resolved. An API-written one is checked when it is written
+     * (`prepareScheduleWrite`). An agent with no tools gets an empty catalogue, so any entry refuses.
+     */
+    #checkScheduleAllows(specs: readonly ToolSpec[]): void {
+        for (const [index, schedule] of this.manifest.schedules.entries()) {
+            const allow = schedule.tools?.allow
+            if (allow === undefined) continue
+            const unknown = unmatchedEntries(allow, specs)
+            if (unknown.length > 0) {
+                throw scheduleToolUnknown(
+                    schedule.id,
+                    unknown,
+                    specs.map((spec) => spec.slug),
+                    `schedules.${index}.tools.allow`,
+                )
+            }
+        }
+    }
+
+    /**
      * Why a message with images would be refused for this role, or `undefined` when it would not.
      * Public so a route can answer before it detaches the turn.
      */
@@ -1290,9 +1321,14 @@ export class Agent {
             // Named field by field rather than spread, so the compiler names anything the manifest
             // grows and this forgets — which is what it did for `noProgress`.
             limits: {
-                maxSteps: this.manifest.limits.maxSteps,
+                // A schedule may lower these and never raise them: the agent can write its own
+                // schedules (`config_set`), and a cap it could lift is not a cap.
+                maxSteps: Math.min(this.manifest.limits.maxSteps, options.maxSteps ?? Infinity),
                 noProgress: this.manifest.limits.noProgress,
-                turnTimeoutMs: this.manifest.limits.turnTimeoutMs,
+                turnTimeoutMs: Math.min(
+                    this.manifest.limits.turnTimeoutMs,
+                    options.timeoutMs ?? Infinity,
+                ),
                 toolTimeoutMs: this.manifest.limits.toolTimeoutMs,
                 maxParallelTools: this.manifest.limits.maxParallelTools,
             },
@@ -1324,6 +1360,7 @@ export class Agent {
             ...(options.images === undefined || options.images.length === 0
                 ? {}
                 : { images: options.images }),
+            ...(options.toolsAllow === undefined ? {} : { toolsAllow: options.toolsAllow }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             // A turn that may not read private memory may not write it either (QA 0.2.0): the
