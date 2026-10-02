@@ -940,6 +940,206 @@ CREATE INDEX webhook_deliveries_due ON webhook_deliveries (status, next_attempt_
 CREATE INDEX webhook_deliveries_agent ON webhook_deliveries (agent_id);
 `,
     },
+    {
+        version: 20,
+        name: "model_calls_billing",
+        /**
+         * What a biller needs to be idempotent and complete (Phase 26c, doc 16 R6).
+         *
+         * `call_id` is the model call's own identity, the key a ledger debits on: minted once per
+         * call before its retries and fallbacks, so a redelivered `model.result` and a row share it.
+         * UNIQUE, and SQLite lets any number of NULLs through, so rows from before this migration
+         * keep their NULL and stay aggregable. `cache_write_tokens` is NULL when the endpoint
+         * reported no figure — the same third state `cached_prompt_tokens` keeps.
+         */
+        sql: `
+ALTER TABLE model_calls ADD COLUMN call_id TEXT;
+ALTER TABLE model_calls ADD COLUMN cache_write_tokens INTEGER;
+CREATE UNIQUE INDEX model_calls_call_id ON model_calls (call_id);
+`,
+    },
+    {
+        version: 21,
+        name: "media",
+        /**
+         * Media calls and attachments (Phase 26j, doc 16 R8).
+         *
+         * A media call is a `model_calls` row rather than a table of its own, so every grouping,
+         * scope and window `/v1/usage` already has applies to it with nothing new: its tokens are
+         * zero and reported, and its quantity is `images` or `audio_seconds`. NULL in both is a
+         * model call, and NULL `audio_seconds` on a transcription row is "not reported" — the same
+         * third state the cache columns keep.
+         *
+         * An outbox row may carry one attachment, a file under the agent's directory sent after the
+         * text chunks of the same reply; `body` is its caption, usually empty.
+         */
+        sql: `
+ALTER TABLE model_calls ADD COLUMN images INTEGER;
+ALTER TABLE model_calls ADD COLUMN audio_seconds REAL;
+ALTER TABLE outbox ADD COLUMN attachment_path TEXT;
+ALTER TABLE outbox ADD COLUMN attachment_type TEXT;
+`,
+    },
+    {
+        version: 22,
+        name: "conversations",
+        /**
+         * Participants, conversations, their messages and agent assignments (Phase 27).
+         *
+         * Server-wide rather than keyed by agent: a room holds several agents, and a person is a
+         * participant of the silo, not of one agent. An agent is a participant implicitly
+         * (`agent:<id>`) and has no row here; `purgeAgent` removes its memberships and its
+         * assignment. A room's text reaches each member agent through its own `room:<id>` session,
+         * so the history, compaction and memory an agent already has apply with nothing new — this
+         * log is the room as the embedder shows it.
+         */
+        sql: `
+CREATE TABLE participants (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL CHECK (kind IN ('human')),
+    name       TEXT,
+    role       TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE conversations (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL CHECK (kind IN ('room', 'dm')),
+    title      TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE conversation_members (
+    conversation_id TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    participant_id  TEXT NOT NULL,
+    PRIMARY KEY (conversation_id, participant_id)
+);
+CREATE INDEX conversation_members_by_participant ON conversation_members (participant_id);
+CREATE TABLE conversation_messages (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT NOT NULL UNIQUE,
+    conversation_id TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    author_id       TEXT NOT NULL,
+    origin          TEXT NOT NULL CHECK (origin IN ('human', 'agent')),
+    text            TEXT NOT NULL,
+    mentions        TEXT NOT NULL,
+    hop             INTEGER NOT NULL,
+    turn_id         TEXT,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX conversation_messages_by_conversation ON conversation_messages (conversation_id, seq);
+CREATE TABLE agent_assignments (
+    agent_id       TEXT PRIMARY KEY,
+    participant_id TEXT NOT NULL,
+    assigned_by    TEXT,
+    assigned_at    TEXT NOT NULL
+);
+`,
+    },
+    {
+        version: 23,
+        name: "stand_ins",
+        /**
+         * Presence, stand-in replies, and the actions a stand-in queued for its owner (Phase 28).
+         *
+         * `presence` is NULL until the embedder pushes one, and NULL reads as online: an agent never
+         * speaks for someone it was not told is away. A deferred action is a mutating call a stand-in
+         * wanted to make, recorded with its exact arguments and run only when the owner approves.
+         */
+        sql: `
+ALTER TABLE participants ADD COLUMN presence TEXT CHECK (presence IN ('online', 'offline'));
+ALTER TABLE participants ADD COLUMN presence_at TEXT;
+ALTER TABLE conversation_messages ADD COLUMN on_behalf_of TEXT;
+CREATE TABLE deferred_actions (
+    id              TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    owner_id        TEXT NOT NULL,
+    requested_by    TEXT NOT NULL,
+    slug            TEXT NOT NULL,
+    args            TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed', 'denied')),
+    result          TEXT,
+    created_at      TEXT NOT NULL,
+    decided_at      TEXT
+);
+CREATE INDEX deferred_actions_by_owner ON deferred_actions (owner_id, status);
+`,
+    },
+    {
+        version: 24,
+        name: "memory_scopes",
+        /**
+         * Team memory scopes (Phase 29): notes shared beyond one agent, the projects that group agents,
+         * the one designated space writer, and the audit of who read a person's owner scope.
+         *
+         * `memory_notes` is canonical and the index is a projection of it, the relationship `messages`
+         * has with an indexed conversation, so a rebuild can always restore a scope. `scope` is `space`,
+         * `owner:<participant>` or `project:<id>`. `memory_reads` names its reader `reader` rather than
+         * `agent_id` on purpose: purging an agent must not erase a person's record of what was read.
+         */
+        sql: `
+CREATE TABLE memory_notes (
+    id         TEXT PRIMARY KEY,
+    scope      TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    written_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX memory_notes_by_scope ON memory_notes (scope, created_at);
+CREATE TABLE projects (
+    id         TEXT PRIMARY KEY,
+    name       TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE project_members (
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    agent_id   TEXT NOT NULL,
+    PRIMARY KEY (project_id, agent_id)
+);
+CREATE TABLE memory_space_writer (
+    slot       TEXT PRIMARY KEY CHECK (slot = 'space'),
+    writer     TEXT NOT NULL,
+    set_by     TEXT,
+    set_at     TEXT NOT NULL
+);
+CREATE TABLE memory_reads (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope        TEXT NOT NULL,
+    reader       TEXT NOT NULL,
+    turn_id      TEXT NOT NULL,
+    session_key  TEXT NOT NULL,
+    requested_by TEXT,
+    on_behalf_of TEXT,
+    sources      TEXT NOT NULL,
+    at           TEXT NOT NULL
+);
+CREATE INDEX memory_reads_by_scope ON memory_reads (scope, at);
+`,
+    },
+    {
+        version: 25,
+        name: "schedule_limits",
+        /**
+         * Limits per schedule (pilot.5, VelaCrew #15): a tool allow-list (JSON array), a turn timeout
+         * and a step cap. Nullable, and null is "the agent's own", so every existing row keeps
+         * running exactly as it did.
+         */
+        sql: `
+ALTER TABLE schedules ADD COLUMN tools_allow TEXT;
+ALTER TABLE schedules ADD COLUMN timeout_ms INTEGER;
+ALTER TABLE schedules ADD COLUMN max_steps INTEGER;
+`,
+    },
+    {
+        version: 26,
+        name: "turn_note",
+        /**
+         * The embedder's note about one message (pilot.5, VelaCrew #13), kept on the turn row for
+         * debugging and replay. Never in `messages`: it is about the message, not part of it.
+         */
+        sql: `
+ALTER TABLE turns ADD COLUMN note TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

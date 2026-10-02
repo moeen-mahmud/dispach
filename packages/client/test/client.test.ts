@@ -779,6 +779,64 @@ describe("webhooks", () => {
     })
 })
 
+describe("conversations", () => {
+    test("participants, conversations and the message log are the shapes the server sends", async () => {
+        const { client, runtime } = await harness()
+        const agentId = (await client.agents())[0]?.id ?? ""
+        await client.registerParticipant({ id: "user:ada", role: "admin" })
+        const participants = await client.participants()
+        expect(Array.isArray(participants)).toBe(true)
+        expect(participants.map((p) => p.id)).toEqual(["user:ada"])
+
+        const room = await client.createConversation({
+            kind: "room",
+            members: ["user:ada", `agent:${agentId}`],
+        })
+        expect(Array.isArray(room.members)).toBe(true)
+        const listed = await client.conversations()
+        expect(Array.isArray(listed)).toBe(true)
+        expect((await client.conversation(room.id)).id).toBe(room.id)
+
+        // No mention, so no agent answers: the log holds exactly what was posted.
+        const posted = await client.postMessage(room.id, { text: "hello", authorId: "user:ada" })
+        expect(posted.hop).toBe(0)
+        const log = await client.conversationMessages(room.id)
+        expect(Array.isArray(log.messages)).toBe(true)
+        expect(log.messages.map((m) => m.text)).toEqual(["hello"])
+        expect(log.nextAfter).toBe(posted.seq)
+
+        expect((await client.setPresence("user:ada", "offline")).presence).toBe("offline")
+        const actions = await client.actions({ status: "pending" })
+        expect(Array.isArray(actions)).toBe(true)
+
+        const assigned = await client.agent(agentId).assign("user:ada")
+        expect(assigned.participantId).toBe("user:ada")
+        expect((await client.agent(agentId).unassign()).unassigned).toBe(true)
+
+        // Shared memory scopes (Phase 29): lists are lists, records are records.
+        const note = await client.addNote({ scope: "space", text: "The launch is on Friday" })
+        expect(note.scope).toBe("space")
+        const notes = await client.notes("space")
+        expect(Array.isArray(notes)).toBe(true)
+        expect(notes.map((n) => n.id)).toEqual([note.id])
+        expect(Array.isArray(await client.memoryReads("user:ada"))).toBe(true)
+        const project = await client.putProject("apollo", { agents: [agentId] })
+        expect(Array.isArray(project.agents)).toBe(true)
+        expect((await client.projects()).map((p) => p.id)).toEqual(["apollo"])
+        expect((await client.setSpaceWriter("user:ada")).writer).toBe("user:ada")
+        expect((await client.deleteNote(note.id)).deleted).toBe(true)
+        expect((await client.deleteProject("apollo")).deleted).toBe(true)
+
+        // An agent bundle (R11): a list of files out, a report with lists in.
+        const bundle = await client.agent(agentId).exportBundle()
+        expect(Array.isArray(bundle.files)).toBe(true)
+        const report = await client.agent(agentId).importBundle(bundle)
+        expect(Array.isArray(report.added)).toBe(true)
+        expect(report.reload).toBe("none")
+        await runtime.stop()
+    })
+})
+
 describe("usage and turns", () => {
     test("usage buckets and the turn list are the shapes the server sends", async () => {
         const { client, runtime } = await harness()

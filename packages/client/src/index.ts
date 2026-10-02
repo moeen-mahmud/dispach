@@ -162,6 +162,21 @@ export interface SendOptions {
      * replay of a message you did not send. Remembered by the server for 24 hours.
      */
     readonly idempotencyKey?: string
+    /**
+     * Images sent with this message: PNG, JPEG, GIF or WebP, at most five, 3.75 MB each. A path
+     * relative to the agent's directory is preferred; inline base64 must fit the 1 MB body limit.
+     * A model without vision refuses with `model_no_vision`.
+     */
+    /**
+     * Your application's note about this message (the active project, today's date in the person's
+     * zone). Shown to the model in its own block before the text, labelled as not the person's, for
+     * this turn only; kept on the turn record and never in history. At most 8,000 characters.
+     */
+    readonly runtimeNote?: string
+    readonly images?: readonly (
+        | { readonly path: string }
+        | { readonly data: string; readonly mediaType?: string }
+    )[]
     readonly signal?: AbortSignal
 }
 
@@ -196,10 +211,17 @@ export interface AgentClient {
      * Re-read the manifest by **replacing** the agent — a new instance, not a mutated one.
      *
      * `adopted` lists everything that came back, which is more than one agent when the target is a
-     * supervisor: a team loads from one manifest as one unit. Answers 409 while a turn is running
-     * rather than aborting it, so a caller applying a config change retries instead of assuming.
+     * supervisor: a team loads from one manifest as one unit. While a turn is running the reload is
+     * `pending` (202): the running turns finish on the old settings and the swap follows, announced
+     * by `agent.reloaded`; `adopted` is then empty.
      */
-    reload(): Promise<{ readonly id: string; readonly adopted: readonly string[] }>
+    reload(): Promise<{
+        readonly id: string
+        readonly adopted: readonly string[]
+        readonly status?: "loaded" | "pending"
+        readonly running?: number
+        readonly holdAfterMs?: number
+    }>
     /** What this agent cost, from the per-call meter. */
     usage(options?: UsageOptions): Promise<UsageReportLike & { readonly id: string }>
     /**
@@ -323,6 +345,15 @@ export interface AgentClient {
      * passes none on purpose.
      */
     start(): Promise<AgentLifecycleState>
+    /** Record which member this agent works for. An admin participant's act (Phase 27). */
+    assign(participantId: string): Promise<AssignmentLike>
+    unassign(): Promise<{ readonly id: string; readonly unassigned: boolean }>
+    /** A slice of this agent — its carried memory, archive and knowledge — as a bundle (R11). */
+    exportBundle(
+        paths?: readonly ("MEMORY.md" | "memory/" | "knowledge/")[],
+    ): Promise<AgentBundleLike>
+    /** Merge a bundle into this agent. Memory note by note; knowledge kept (`skip`) or `overwrite`n. */
+    importBundle(bundle: AgentBundleLike, mode?: "skip" | "overwrite"): Promise<ImportReportLike>
 }
 
 /** What `stop` and `start` report back. */
@@ -687,6 +718,109 @@ export interface ActivityLike {
     readonly nextWakeAt?: string
 }
 
+/** A human the embedder registered (Phase 27). Agents are participants too, as `agent:<id>`. */
+export interface ParticipantLike {
+    readonly id: string
+    readonly kind: "human"
+    readonly name?: string
+    readonly role: "admin" | "member"
+    readonly createdAt: string
+    /** Pushed by the embedder; absent reads as online. */
+    readonly presence?: "online" | "offline"
+    readonly presenceAt?: string
+}
+
+/** A slice of one agent: the carried memory file, the memory archive and knowledge (R11). */
+export interface AgentBundleLike {
+    readonly version: 1
+    readonly agentId: string
+    readonly exportedAt: string
+    readonly files: readonly { readonly path: string; readonly content: string }[]
+}
+
+export interface ImportReportLike {
+    readonly id: string
+    readonly added: readonly string[]
+    readonly merged: readonly { readonly path: string; readonly notes: number }[]
+    readonly skipped: readonly string[]
+    readonly overwritten: readonly string[]
+    readonly evicted: number
+    readonly reload: "none" | "loaded" | "pending"
+}
+
+/** A note in a shared memory scope (Phase 29): `space`, `owner:<participantId>` or `project:<id>`. */
+export interface MemoryNoteLike {
+    readonly id: string
+    readonly scope: string
+    readonly text: string
+    readonly writtenBy: string
+    readonly createdAt: string
+}
+
+/** One recall of someone's owner scope made for somebody else. */
+export interface MemoryReadLike {
+    readonly scope: string
+    readonly reader: string
+    readonly turnId: string
+    readonly sessionKey: string
+    readonly requestedBy?: string
+    readonly onBehalfOf?: string
+    readonly sources: readonly string[]
+    readonly at: string
+}
+
+export interface ProjectLike {
+    readonly id: string
+    readonly name?: string
+    readonly agents: readonly string[]
+    readonly createdAt: string
+}
+
+export interface ConversationLike {
+    readonly id: string
+    readonly kind: "room" | "dm"
+    readonly title?: string
+    readonly members: readonly string[]
+    readonly createdAt: string
+}
+
+export interface ConversationMessageLike {
+    readonly id: string
+    readonly conversationId: string
+    readonly authorId: string
+    readonly origin: "human" | "agent"
+    readonly text: string
+    readonly mentions: readonly string[]
+    readonly hop: number
+    readonly turnId?: string
+    /** The absent owner a stand-in answered for. */
+    readonly onBehalfOf?: string
+    readonly seq: number
+    readonly createdAt: string
+}
+
+/** A mutating call a stand-in queued for its absent owner (Phase 28). */
+export interface DeferredActionLike {
+    readonly id: string
+    readonly agentId: string
+    readonly conversationId: string
+    readonly ownerId: string
+    readonly requestedBy: string
+    readonly slug: string
+    readonly args: Readonly<Record<string, unknown>>
+    readonly status: "pending" | "done" | "failed" | "denied"
+    readonly result?: string
+    readonly createdAt: string
+    readonly decidedAt?: string
+}
+
+export interface AssignmentLike {
+    readonly agentId: string
+    readonly participantId: string
+    readonly assignedBy?: string
+    readonly assignedAt: string
+}
+
 /** A webhook subscription as the server reports it. Never the secret. */
 export interface WebhookLike {
     readonly subscriptionId: string
@@ -722,6 +856,8 @@ export interface UsageBucketLike {
     readonly calls: number
     readonly promptTokens: number
     readonly cachedPromptTokens: number
+    /** Prompt tokens written to a cache (Bedrock, Anthropic). Zero where nothing reports it. */
+    readonly cacheWriteTokens: number
     readonly outputTokens: number
     /** Calls where either figure was an estimate. Non-zero means the totals are partly a guess. */
     readonly estimatedCalls: number
@@ -739,6 +875,8 @@ export interface KeyScopeLike {
     /** A session-key prefix; a trailing `*` is accepted and ignored. */
     readonly sessions?: string
     readonly can?: readonly ("read" | "chat" | "write" | "admin")[]
+    /** The one participant this key speaks for: every turn it starts acts for them. */
+    readonly participant?: string
 }
 
 /** A credential as a listing shows it. Never the secret — no route returns one twice. */
@@ -784,6 +922,67 @@ export interface DispachClient {
      * the server token or an unscoped operator key.
      */
     activity(): Promise<ActivityLike>
+    /** Registered human participants. */
+    participants(): Promise<readonly ParticipantLike[]>
+    registerParticipant(input: {
+        readonly id: string
+        readonly name?: string
+        readonly role?: "admin" | "member"
+    }): Promise<ParticipantLike>
+    /** The rooms and DMs this credential can see. */
+    conversations(): Promise<readonly ConversationLike[]>
+    createConversation(input: {
+        readonly kind: "room" | "dm"
+        readonly members: readonly string[]
+        readonly title?: string
+    }): Promise<ConversationLike>
+    conversation(conversationId: string): Promise<ConversationLike>
+    setMembers(
+        conversationId: string,
+        change: { readonly add?: readonly string[]; readonly remove?: readonly string[] },
+    ): Promise<ConversationLike>
+    /**
+     * Post a human member's message. In a room only the mentioned agents answer; their replies come
+     * back as `conversation.message` events and in `conversationMessages`.
+     */
+    postMessage(
+        conversationId: string,
+        message: {
+            readonly text: string
+            readonly mentions?: readonly string[]
+            readonly authorId?: string
+        },
+    ): Promise<ConversationMessageLike>
+    conversationMessages(
+        conversationId: string,
+        options?: { readonly after?: number; readonly limit?: number },
+    ): Promise<{
+        readonly messages: readonly ConversationMessageLike[]
+        readonly nextAfter?: number
+    }>
+    /** Push whether a person is there. An offline person's agent stands in for them in a DM. */
+    setPresence(participantId: string, presence: "online" | "offline"): Promise<ParticipantLike>
+    /** Actions stand-ins queued for their owners. A member-bound key sees its own. */
+    actions(options?: {
+        readonly status?: DeferredActionLike["status"]
+    }): Promise<readonly DeferredActionLike[]>
+    /** Approve (runs the exact call) or decline a queued action. The owner's to decide. */
+    decideAction(actionId: string, approve: boolean): Promise<DeferredActionLike>
+    /** Add a note to a shared memory scope. Who may write which scope is the server's to decide. */
+    addNote(input: { readonly scope: string; readonly text: string }): Promise<MemoryNoteLike>
+    notes(scope: string): Promise<readonly MemoryNoteLike[]>
+    deleteNote(noteId: string): Promise<{ readonly id: string; readonly deleted: boolean }>
+    /** A person's audit of reads of their owner scope. Theirs, or an admin's. */
+    memoryReads(participantId: string): Promise<readonly MemoryReadLike[]>
+    projects(): Promise<readonly ProjectLike[]>
+    /** Define a project; `agents`, when given, replaces its membership. */
+    putProject(
+        projectId: string,
+        input: { readonly name?: string; readonly agents?: readonly string[] },
+    ): Promise<ProjectLike>
+    deleteProject(projectId: string): Promise<{ readonly id: string; readonly deleted: boolean }>
+    /** Name the space's one non-admin writer: a participant, or `agent:<id>`. */
+    setSpaceWriter(writer: string): Promise<{ readonly writer: string }>
     /** The webhook subscriptions this credential can see. */
     webhooks(): Promise<readonly WebhookLike[]>
     /**
@@ -1001,6 +1200,10 @@ export function createClient(options: ClientOptions): DispachClient {
                         ...(opts?.sessionKey === undefined ? {} : { sessionKey: opts.sessionKey }),
                         ...(opts?.deliver === undefined ? {} : { deliver: opts.deliver }),
                         ...(opts?.from === undefined ? {} : { from: opts.from }),
+                        ...(opts?.images === undefined ? {} : { images: opts.images }),
+                        ...(opts?.runtimeNote === undefined
+                            ? {}
+                            : { runtimeNote: opts.runtimeNote }),
                     },
                     ...(opts?.idempotencyKey === undefined
                         ? {}
@@ -1041,7 +1244,13 @@ export function createClient(options: ClientOptions): DispachClient {
                 ),
 
             reload: () =>
-                json<{ id: string; adopted: readonly string[] }>("POST", at("/reload"), {
+                json<{
+                    id: string
+                    adopted: readonly string[]
+                    status?: "loaded" | "pending"
+                    running?: number
+                    holdAfterMs?: number
+                }>("POST", at("/reload"), {
                     body: {},
                 }),
 
@@ -1170,6 +1379,20 @@ export function createClient(options: ClientOptions): DispachClient {
                 }),
 
             start: () => json<AgentLifecycleState>("POST", at("/start"), { body: {} }),
+            assign: (participantId) =>
+                json<AssignmentLike>("PUT", at("/assignee"), { body: { participantId } }),
+            unassign: () => json<{ id: string; unassigned: boolean }>("DELETE", at("/assignee")),
+            exportBundle: (paths) =>
+                json<AgentBundleLike>(
+                    "GET",
+                    at(
+                        `/export${paths === undefined ? "" : `?paths=${encodeURIComponent(paths.join(","))}`}`,
+                    ),
+                ),
+            importBundle: (bundle, mode) =>
+                json<ImportReportLike>("POST", at("/import"), {
+                    body: { bundle, ...(mode === undefined ? {} : { mode }) },
+                }),
 
             context: (opts) => {
                 const params = new URLSearchParams()
@@ -1222,6 +1445,93 @@ export function createClient(options: ClientOptions): DispachClient {
         // page crashed to black on `schedules.map is not a function`.
         usage: (options) => json<UsageReportLike>("GET", `/v1/usage${usageQuery(options)}`),
         activity: () => json<ActivityLike>("GET", "/v1/activity"),
+        participants: async () =>
+            (await json<{ participants: readonly ParticipantLike[] }>("GET", "/v1/participants"))
+                .participants,
+        registerParticipant: (input) =>
+            json<ParticipantLike>("POST", "/v1/participants", { body: input }),
+        conversations: async () =>
+            (await json<{ conversations: readonly ConversationLike[] }>("GET", "/v1/conversations"))
+                .conversations,
+        createConversation: (input) =>
+            json<ConversationLike>("POST", "/v1/conversations", { body: input }),
+        conversation: (conversationId) =>
+            json<ConversationLike>(
+                "GET",
+                `/v1/conversations/${encodeURIComponent(conversationId)}`,
+            ),
+        setMembers: (conversationId, change) =>
+            json<ConversationLike>(
+                "PATCH",
+                `/v1/conversations/${encodeURIComponent(conversationId)}/members`,
+                { body: change },
+            ),
+        postMessage: (conversationId, message) =>
+            json<ConversationMessageLike>(
+                "POST",
+                `/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+                { body: message },
+            ),
+        conversationMessages: (conversationId, options = {}) => {
+            const query = new URLSearchParams()
+            if (options.after !== undefined) query.set("after", String(options.after))
+            if (options.limit !== undefined) query.set("limit", String(options.limit))
+            const suffix = query.size === 0 ? "" : `?${query}`
+            return json<{ messages: readonly ConversationMessageLike[]; nextAfter?: number }>(
+                "GET",
+                `/v1/conversations/${encodeURIComponent(conversationId)}/messages${suffix}`,
+            )
+        },
+        setPresence: (participantId, presence) =>
+            json<ParticipantLike>(
+                "PUT",
+                `/v1/participants/${encodeURIComponent(participantId)}/presence`,
+                { body: { presence } },
+            ),
+        actions: async (options = {}) =>
+            (
+                await json<{ actions: readonly DeferredActionLike[] }>(
+                    "GET",
+                    `/v1/actions${options.status === undefined ? "" : `?status=${options.status}`}`,
+                )
+            ).actions,
+        decideAction: (actionId, approve) =>
+            json<DeferredActionLike>("POST", `/v1/actions/${encodeURIComponent(actionId)}`, {
+                body: { approve },
+            }),
+        addNote: (input) => json<MemoryNoteLike>("POST", "/v1/memory/notes", { body: input }),
+        notes: async (scope) =>
+            (
+                await json<{ notes: readonly MemoryNoteLike[] }>(
+                    "GET",
+                    `/v1/memory/notes?scope=${encodeURIComponent(scope)}`,
+                )
+            ).notes,
+        deleteNote: (noteId) =>
+            json<{ id: string; deleted: boolean }>(
+                "DELETE",
+                `/v1/memory/notes/${encodeURIComponent(noteId)}`,
+            ),
+        memoryReads: async (participantId) =>
+            (
+                await json<{ reads: readonly MemoryReadLike[] }>(
+                    "GET",
+                    `/v1/participants/${encodeURIComponent(participantId)}/memory/reads`,
+                )
+            ).reads,
+        projects: async () =>
+            (await json<{ projects: readonly ProjectLike[] }>("GET", "/v1/projects")).projects,
+        putProject: (projectId, input) =>
+            json<ProjectLike>("PUT", `/v1/projects/${encodeURIComponent(projectId)}`, {
+                body: input,
+            }),
+        deleteProject: (projectId) =>
+            json<{ id: string; deleted: boolean }>(
+                "DELETE",
+                `/v1/projects/${encodeURIComponent(projectId)}`,
+            ),
+        setSpaceWriter: (writer) =>
+            json<{ writer: string }>("PUT", "/v1/memory/space/writer", { body: { writer } }),
         webhooks: async () =>
             (await json<{ webhooks: readonly WebhookLike[] }>("GET", "/v1/webhooks")).webhooks,
         createWebhook: (input) =>

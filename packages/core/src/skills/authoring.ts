@@ -44,6 +44,24 @@ const DESCRIPTION_MIN = 40
 const SCAFFOLD_MARKERS: readonly string[] = ["Replace this", "Replace everything below"]
 
 /**
+ * Still the scaffold `init` wrote: its description is instructions to a person, not a skill.
+ *
+ * Also what keeps it out of selection (`activateSkills`). Ranked, its placeholder description
+ * matched ordinary turns ("file", "tool", "error"), and the model was handed "replace everything
+ * below with the steps" and complained about it to the person (QA 0.2.0).
+ */
+export function isScaffold(frontmatter: {
+    readonly description: string
+    readonly whenNotToUse?: string
+}): boolean {
+    return SCAFFOLD_MARKERS.some(
+        (marker) =>
+            frontmatter.description.includes(marker) ||
+            (frontmatter.whenNotToUse ?? "").includes(marker),
+    )
+}
+
+/**
  * A term is discriminating within this workspace when it appears in at most half of the descriptions.
  *
  * The same rule the selector applies, deliberately: an authoring warning that used a different definition
@@ -74,12 +92,7 @@ export function checkSkillAuthoring(skills: readonly Skill[]): readonly ErrorDet
 
         // Reported first and on its own: every other finding about a scaffold is noise, since the text
         // being judged is text nobody wrote.
-        const unfilled = SCAFFOLD_MARKERS.some(
-            (marker) =>
-                frontmatter.description.includes(marker) ||
-                (frontmatter.whenNotToUse ?? "").includes(marker),
-        )
-        if (unfilled) {
+        if (isScaffold(frontmatter)) {
             findings.push(
                 skillAuthoring(
                     skill.name,

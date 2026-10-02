@@ -14,7 +14,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Runtime } from "@dispach/core"
+import { type BuiltInPlugins, Runtime } from "@dispach/core"
 import { createHandler, type Provisioner, type SecretAdmin } from "../src/handler.ts"
 import type { ClaimTicket } from "../src/keys.ts"
 import type { Principal } from "../src/principal.ts"
@@ -188,14 +188,22 @@ export async function harness(
         provision?: Provisioner
         /** The credential writer `GET`/`PUT /v1/agents/:id/secrets` need. Omitted means `501`. */
         secrets?: SecretAdmin
+        /** Plugins a manifest may name by spec, the way the CLI supplies its first-party ones. */
+        builtInPlugins?: BuiltInPlugins
+        /** Workspace files beside the manifest, written before the runtime boots. */
+        files?: Record<string, string | Uint8Array>
     } = {},
 ) {
     const dir = workspace(options.manifest)
+    for (const [name, content] of Object.entries(options.files ?? {})) {
+        writeFileSync(join(dir, name), content)
+    }
     const runtime = await Runtime.create({
         agents: [join(dir, "agent.yaml")],
         env: ENV,
         fetch: options.fetch ?? replyFetch(),
         ...(options.streams === undefined ? {} : { streams: options.streams }),
+        ...(options.builtInPlugins === undefined ? {} : { builtInPlugins: options.builtInPlugins }),
     })
     const handler = createHandler({
         runtime,

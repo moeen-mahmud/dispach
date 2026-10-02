@@ -32,7 +32,7 @@
  * one and reporting success.
  */
 
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises"
 import { dirname, isAbsolute, resolve } from "node:path"
 import { stripControl, type Tool, type ToolHandler } from "@dispach/core"
 import {
@@ -43,10 +43,11 @@ import {
     fileOutsideRoot,
     filePathEmpty,
     fileProtected,
+    fileSecret,
     fileTooLarge,
 } from "./errors.ts"
 import { SYSTEM_PROVIDER_ID } from "./paths.ts"
-import { protectedReason } from "./protect.ts"
+import { protectedReason, secretReason } from "./protect.ts"
 import { expandTilde, isWritable, locate, type Roots, writable } from "./root.ts"
 import type { ShellSessions } from "./session.ts"
 
@@ -92,6 +93,7 @@ export const FILE_READ_SPEC: Tool["spec"] = {
     mutating: false,
     trust: "untrusted",
     policyArg: "path",
+    policyArgIsPath: true,
     tags: ["read", "file"],
     parameters: {
         type: "object",
@@ -127,6 +129,7 @@ export const FILE_WRITE_SPEC: Tool["spec"] = {
     trustReason:
         "It reports what it wrote — the path, the line count — and never any of the content, so nothing from the file reaches the model through it.",
     policyArg: "path",
+    policyArgIsPath: true,
     tags: ["write", "file"],
     parameters: {
         type: "object",
@@ -154,6 +157,7 @@ export const FILE_EDIT_SPEC: Tool["spec"] = {
     trustReason:
         "It reports which occurrence changed and how long the file now is, never the text on either side of the change.",
     policyArg: "path",
+    policyArgIsPath: true,
     tags: ["write", "file"],
     parameters: {
         type: "object",
@@ -227,6 +231,10 @@ export function fileReadHandler(options: FileOptions): ToolHandler {
             context.sessionKey,
             options.roots.primary,
         )
+
+        // The real path: a symlink named `notes.txt` that points at `.env` is still `.env`.
+        const secret = secretReason(await realpath(path).catch(() => path)) ?? secretReason(path)
+        if (secret !== undefined) throw fileSecret(path, secret)
 
         let size: number
         try {

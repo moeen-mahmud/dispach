@@ -69,7 +69,7 @@ function fixtureProvider(): ToolProvider {
 const FIXTURE_PLUGIN: Plugin = {
     name: "fixture",
     version: "1.0.0",
-    dispachApi: "^0.1",
+    dispachApi: "^0.2",
     permissions: [{ kind: "network", hosts: ["example.invalid"] }],
     setup(context) {
         context.defineToolProvider("fixture", () => fixtureProvider())
@@ -202,7 +202,7 @@ describe("middleware through a real turn", () => {
     const MIDDLEWARE_PLUGIN: Plugin = {
         name: "gate",
         version: "1.0.0",
-        dispachApi: "^0.1",
+        dispachApi: "^0.2",
         setup(context) {
             context.use({
                 name: "refuse-everything",

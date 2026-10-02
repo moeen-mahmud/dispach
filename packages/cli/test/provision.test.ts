@@ -293,6 +293,22 @@ describe("the branches a single walk cannot reach", () => {
 })
 
 describe("creating an agent from a partial answer set", () => {
+    test("two agents in one sandbox share its host token (QA 0.2.0)", () => {
+        // One host serves every sandbox agent with one token. Each got its own random one, so a
+        // client for any but the first sent a token the host had never heard of.
+        const base = defaults()
+        const tokenOf = (dir: string) =>
+            /API_TOKEN=(\S+)/.exec(readFileSync(join(dir, ".env"), "utf8"))?.[1]
+        const first = provisionAgent({ answers: { user: "Ada", name: "Ann" }, defaults: base })
+        const second = provisionAgent({ answers: { user: "Ada", name: "Bob" }, defaults: base })
+        expect(tokenOf(first.dir)).toMatch(/^[0-9a-f]{64}$/)
+        expect(tokenOf(second.dir)).toBe(tokenOf(first.dir))
+        expect(readFileSync(join(base.agentDirBase, ".api-token"), "utf8").trim()).toBe(
+            tokenOf(first.dir) ?? "missing",
+        )
+        expect(statSync(join(base.agentDirBase, ".api-token")).mode & 0o777).toBe(0o600)
+    })
+
     test("defaults fill the rest, and the files land in the sandbox", () => {
         const base = defaults()
         const result = provisionAgent({ answers: { user: "Ada", name: "Milo" }, defaults: base })

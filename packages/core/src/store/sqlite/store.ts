@@ -21,6 +21,7 @@ import type {
     AgentStateStore,
     ArtifactRecord,
     ArtifactStore,
+    ConversationStore,
     DeliveryBacklog,
     DeliveryRecord,
     DeliveryStatus,
@@ -63,6 +64,7 @@ import type {
     WebhookSubscription,
 } from "../store.ts"
 import { DEFAULT_KEY_TOUCH_MS } from "../store.ts"
+import { sqliteConversations } from "./conversations.ts"
 import type { OpenOptions, SqlDatabase, SqlParam, SqlStatement } from "./driver.ts"
 import { openDatabase } from "./driver.ts"
 import { type MigrationReport, migrate } from "./migrations.ts"
@@ -221,6 +223,7 @@ interface TurnRow {
     sender: string | null
     sender_name: string | null
     sender_kind: string | null
+    note: string | null
     error_code: string | null
     error_message: string | null
     error_hint: string | null
@@ -282,6 +285,8 @@ interface DeliveryRow {
     chunk_index: number
     chunk_total: number
     body: string
+    attachment_path: string | null
+    attachment_type: string | null
     status: string
     attempts: number
     next_attempt_at: string
@@ -495,7 +500,10 @@ function toKeyScope(raw: string | null): KeyScope | undefined {
         const scope = parsed as KeyScope
         // Every field optional, so an empty object is a legitimate "scoped to nothing in
         // particular" — which is an unscoped key by another name and is reported as one.
-        return scope.agents === undefined && scope.sessions === undefined && scope.can === undefined
+        return scope.agents === undefined &&
+            scope.sessions === undefined &&
+            scope.can === undefined &&
+            scope.participant === undefined
             ? undefined
             : scope
     } catch {
@@ -541,6 +549,7 @@ function toTurn(row: TurnRow): TurnRecord {
         ...(row.sender === null ? {} : { sender: row.sender }),
         ...(row.sender_name === null ? {} : { senderName: row.sender_name }),
         ...(row.sender_kind === null ? {} : { senderKind: row.sender_kind as SenderKind }),
+        ...(row.note === null ? {} : { note: row.note }),
         ...(row.error_code === null ? {} : { errorCode: row.error_code }),
         ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
         ...(row.error_hint === null ? {} : { errorHint: row.error_hint }),
@@ -564,6 +573,14 @@ function toDelivery(row: DeliveryRow): DeliveryRecord {
         chunkIndex: row.chunk_index,
         chunkTotal: row.chunk_total,
         body: row.body,
+        ...(row.attachment_path === null
+            ? {}
+            : {
+                  attachment: {
+                      path: row.attachment_path,
+                      mimeType: row.attachment_type ?? "application/octet-stream",
+                  },
+              }),
         status: row.status as DeliveryStatus,
         attempts: row.attempts,
         nextAttemptAt: row.next_attempt_at,
@@ -587,6 +604,9 @@ interface ScheduleRow {
     deliver_to: string | null
     session_mode: string
     role: string | null
+    tools_allow: string | null
+    timeout_ms: number | null
+    max_steps: number | null
     enabled: number
     origin: string
     anchor_at: string
@@ -621,6 +641,10 @@ function toSchedule(row: ScheduleRow): ScheduleRecord {
         deliverTo: row.deliver_to ?? undefined,
         sessionMode: row.session_mode,
         role: row.role ?? undefined,
+        toolsAllow:
+            row.tools_allow === null ? undefined : (JSON.parse(row.tools_allow) as string[]),
+        timeoutMs: row.timeout_ms ?? undefined,
+        maxSteps: row.max_steps ?? undefined,
         enabled: row.enabled !== 0,
         origin: row.origin as ScheduleOrigin,
         anchorAt: row.anchor_at,
@@ -686,6 +710,7 @@ export class SqliteStore implements Store {
     readonly outbox: OutboxStore
     readonly leases: LeaseStore
     readonly agentState: AgentStateStore
+    readonly conversations: ConversationStore
     readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
@@ -853,8 +878,8 @@ export class SqliteStore implements Store {
             turnInsert: db.prepare(
                 `INSERT INTO turns
                      (turn_id, agent_id, session_key, status, source, input,
-                      sender, sender_name, sender_kind, started_at)
-                 VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)`,
+                      sender, sender_name, sender_kind, note, started_at)
+                 VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)`,
             ),
             // `OR IGNORE` rather than `ON CONFLICT DO UPDATE`: a second claim must **not** move the
             // key onto the new turn id. The whole point is that the first turn keeps it.
@@ -885,10 +910,13 @@ export class SqliteStore implements Store {
                   ORDER BY rowid DESC LIMIT ?`,
             ),
             modelCallInsert: db.prepare(
-                `INSERT INTO model_calls
+                // OR IGNORE: a call recorded twice under one call_id is one row, which is what
+                // makes the id an idempotency key rather than a label.
+                `INSERT OR IGNORE INTO model_calls
                      (agent_id, session_key, turn_id, role, model, prompt_tokens, prompt_reported,
-                      cached_prompt_tokens, output_tokens, output_reported, sender, at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                      cached_prompt_tokens, output_tokens, output_reported, sender, at,
+                      call_id, cache_write_tokens, images, audio_seconds)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ),
             modelCallDeleteAll: db.prepare("DELETE FROM model_calls WHERE agent_id = ?"),
             webhookInsert: db.prepare(
@@ -1033,9 +1061,9 @@ export class SqliteStore implements Store {
             outboxInsert: db.prepare(
                 `INSERT INTO outbox
                      (agent_id, dedupe_key, group_key, session_key, turn_id, channel_id, recipient,
-                      thread, chunk_index, chunk_total, body, status, next_attempt_at,
-                      created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                      thread, chunk_index, chunk_total, body, attachment_path, attachment_type,
+                      status, next_attempt_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                  ON CONFLICT (agent_id, dedupe_key) DO NOTHING`,
             ),
             outboxById: db.prepare("SELECT * FROM outbox WHERE id = ?"),
@@ -1361,6 +1389,7 @@ export class SqliteStore implements Store {
                         record.sender?.id ?? null,
                         record.sender?.name ?? null,
                         record.sender?.kind ?? null,
+                        record.note ?? null,
                         ts,
                     )
                 })
@@ -1517,6 +1546,8 @@ export class SqliteStore implements Store {
                             d.chunkIndex,
                             d.chunkTotal,
                             d.body,
+                            d.attachment?.path ?? null,
+                            d.attachment?.mimeType ?? null,
                             // Due immediately unless the caller says otherwise. A first attempt
                             // that waited would add latency to every reply to buy nothing —
                             // backoff starts at the first failure.
@@ -1818,9 +1849,9 @@ export class SqliteStore implements Store {
             upsert: db.prepare(
                 `INSERT INTO schedules (
                      agent_id, id, kind, expr, timezone, task, deliver_channel, deliver_to,
-                     session_mode, role, enabled, origin, anchor_at, next_run_at, source_path,
-                     created_at, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     session_mode, role, tools_allow, timeout_ms, max_steps, enabled, origin,
+                     anchor_at, next_run_at, source_path, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (agent_id, id) DO UPDATE SET
                      kind = excluded.kind,
                      expr = excluded.expr,
@@ -1830,6 +1861,9 @@ export class SqliteStore implements Store {
                      deliver_to = excluded.deliver_to,
                      session_mode = excluded.session_mode,
                      role = excluded.role,
+                     tools_allow = excluded.tools_allow,
+                     timeout_ms = excluded.timeout_ms,
+                     max_steps = excluded.max_steps,
                      enabled = excluded.enabled,
                      origin = excluded.origin,
                      anchor_at = excluded.anchor_at,
@@ -1968,6 +2002,9 @@ export class SqliteStore implements Store {
                     schedule.deliverTo ?? null,
                     schedule.sessionMode,
                     schedule.role ?? null,
+                    schedule.toolsAllow === undefined ? null : JSON.stringify(schedule.toolsAllow),
+                    schedule.timeoutMs ?? null,
+                    schedule.maxSteps ?? null,
                     schedule.enabled ? 1 : 0,
                     schedule.origin,
                     schedule.anchorAt,
@@ -2085,6 +2122,8 @@ export class SqliteStore implements Store {
             lease: q.leaseGet.get(agentId) !== undefined,
         })
 
+        const conversations = sqliteConversations(db)
+        this.conversations = conversations
         this.agentState = {
             get: async (agentId) => {
                 const row = q.agentStateGet.get<AgentStateRow>(agentId)
@@ -2259,6 +2298,10 @@ export class SqliteStore implements Store {
                     call.outputReported ? 1 : 0,
                     call.sender ?? null,
                     call.at,
+                    call.callId ?? null,
+                    call.cacheWriteTokens ?? null,
+                    call.images ?? null,
+                    call.audioSeconds ?? null,
                 )
             },
             report: async (query) => usageReport(db, query),
@@ -2296,6 +2339,9 @@ export class SqliteStore implements Store {
                 // the whole argument for the column. A state row surviving its agent would make a
                 // re-provisioned agent of the same name silently arrive switched off.
                 q.agentStateDeleteAll.run(agentId)
+                // Its room memberships and who it was assigned to: an agent removed from the silo is no
+                // longer in any conversation, and a re-provisioned one of the same name starts unassigned.
+                conversations.purgeAgent(agentId)
                 scheduleQ.deleteAll.run(agentId)
                 return went
             })
@@ -2354,7 +2400,10 @@ interface UsageRow {
     readonly calls: number
     readonly prompt_tokens: number
     readonly cached_prompt_tokens: number
+    readonly cache_write_tokens: number
     readonly output_tokens: number
+    readonly images: number
+    readonly audio_seconds: number
     readonly estimated_calls: number
 }
 
@@ -2404,7 +2453,10 @@ function usageReport(
                 "COUNT(*) AS calls",
                 "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens",
                 "COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens",
+                "COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens",
                 "COALESCE(SUM(output_tokens), 0) AS output_tokens",
+                "COALESCE(SUM(images), 0) AS images",
+                "COALESCE(SUM(audio_seconds), 0) AS audio_seconds",
                 "COALESCE(SUM(CASE WHEN prompt_reported = 0 OR output_reported = 0 THEN 1 ELSE 0 END), 0) AS estimated_calls",
             ].join(", ")}
                FROM model_calls ${clause(where)} ${groupBy}
@@ -2425,7 +2477,10 @@ function usageReport(
             calls: row.calls,
             promptTokens: row.prompt_tokens,
             cachedPromptTokens: row.cached_prompt_tokens,
+            cacheWriteTokens: row.cache_write_tokens,
             outputTokens: row.output_tokens,
+            images: row.images,
+            audioSeconds: row.audio_seconds,
             estimatedCalls: row.estimated_calls,
         }))
     return {

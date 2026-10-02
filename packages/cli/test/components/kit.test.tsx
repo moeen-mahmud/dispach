@@ -409,6 +409,25 @@ describe("Transcript", () => {
 })
 
 describe("WizardFrame", () => {
+    test('keeps a gap after the longest label (QA B2: "Background serviceservice")', () => {
+        const frame = renderFrame(
+            <WizardFrame
+                step={15}
+                total={15}
+                answered={[
+                    { label: "Your name", value: "Moeen" },
+                    { label: "Background service", value: "service" },
+                ]}
+                hint="enter accepts"
+            >
+                <></>
+            </WizardFrame>,
+            { columns: 80 },
+        )
+        expect(frame.text).toContain("Background service  service")
+        expect(frame.text).not.toContain("serviceservice")
+    })
+
     // JSX rather than `createElement` here, and only here: `WizardFrame` requires `children`, which
     // TypeScript will not accept from createElement's third argument and biome will not accept inside
     // the props object. JSX passes children the way the component declares them, so neither rule has to

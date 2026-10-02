@@ -13,7 +13,14 @@ import { type Agent, Runtime, type SessionSummary } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { DEFAULT_ROW_LIMIT, EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { onExit } from "#lib/exit"
-import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MEDIA_PROVIDERS,
+    MODEL_TRANSPORTS,
+    scriptRunner,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { ago } from "#lib/render"
 import { pluginRoot, storePath } from "#lib/sandbox"
 import type { SessionsOptions } from "#lib/schema"
@@ -154,6 +161,8 @@ export async function sessionsCommand(options: SessionsOptions): Promise<number>
         // The sandbox store — the same default `run` writes to, or `sessions` inspects nothing.
         store: options.store ?? storePath(),
         toolProviders: TOOL_PROVIDERS,
+        modelTransports: MODEL_TRANSPORTS,
+        mediaProviders: MEDIA_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
         pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),

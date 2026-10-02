@@ -13,7 +13,14 @@ import { ambientEnv } from "#lib/ambient"
 import { EXIT_OK } from "#lib/const"
 import { onExit } from "#lib/exit"
 import { agentStateOf, liveHosts } from "#lib/lifecycle"
-import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MEDIA_PROVIDERS,
+    MODEL_TRANSPORTS,
+    scriptRunner,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { duration, keyValue, type Row } from "#lib/render"
 import { listAgents, pluginRoot, type SandboxAgent, storePath } from "#lib/sandbox"
 import type { AgentsOptions } from "#lib/schema"
@@ -83,6 +90,8 @@ export async function agentsCommand(options: AgentsOptions): Promise<number> {
     const runtime = await Runtime.create({
         agents: [...options.manifestPaths],
         toolProviders: TOOL_PROVIDERS,
+        modelTransports: MODEL_TRANSPORTS,
+        mediaProviders: MEDIA_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
         pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),

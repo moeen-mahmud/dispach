@@ -12,7 +12,7 @@
  */
 
 import { afterAll, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { cleanupWorkspaces, harness, MANIFEST } from "./harness.ts"
 
@@ -215,4 +215,37 @@ test("a schedule the API created is still fully editable", async () => {
     expect(((await patched.json()) as { task: string }).task).toBe("Check the queue twice.")
 
     expect((await call("DELETE", "/v1/agents/assistant/schedules/hourly")).status).toBe(200)
+})
+
+test("a misread rule count no longer wedges the agent: onExceed is settable to warn (pilot.5)", async () => {
+    // VelaCrew: one "I never…" line in AGENTS.md put the rule count over budget, so every reload's
+    // trial build refused and every PATCH stayed unapplied. The count is a heuristic, so the person
+    // gets the escape over the wire; the agent itself still can't relax it.
+    const { call, dir } = await harness({
+        manifest: `${MANIFEST}context:
+  workspace: .
+  static: [AGENTS.md]
+  rules:
+    perRuleSuccess: 0.9
+    reliabilityTarget: 0.85
+`,
+        files: { "AGENTS.md": "You help." },
+    })
+    writeFileSync(
+        join(dir, "AGENTS.md"),
+        "You must reply in English.\nNever share keys.\nAlways cite sources.\nI never guess.",
+    )
+
+    const stuck = await call("PATCH", "/v1/agents/assistant/config", {
+        body: { path: "limits.maxSteps", value: "12" },
+    })
+    const stuckBody = JSON.stringify(await stuck.json())
+    expect(stuckBody).toContain("workspace_rule_budget")
+    expect(stuckBody).toContain("AGENTS.md: Never share keys.")
+
+    const freed = await call("PATCH", "/v1/agents/assistant/config", {
+        body: { path: "context.rules.onExceed", value: "warn" },
+    })
+    expect(freed.status).toBe(200)
+    expect(await freed.json()).toMatchObject({ after: "warn", applied: true })
 })

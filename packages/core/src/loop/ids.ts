@@ -27,6 +27,14 @@ export function newStepId(now = Date.now()): string {
     return id("s", now)
 }
 
+/**
+ * One model call's identity: the idempotency key an embedder's ledger debits on. Minted once per
+ * call, before its retries and fallbacks, so one call is one debit however many requests it took.
+ */
+export function newCallId(now = Date.now()): string {
+    return id("mc", now)
+}
+
 /** One delegation's identity. Time-prefixed, so a turn's handoffs sort in the order they ran. */
 export function newHandoffId(now = Date.now()): string {
     return id("h", now)

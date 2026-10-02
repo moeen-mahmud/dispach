@@ -65,7 +65,7 @@ export function forbidden(capability: string, what: string): Response {
         {
             code: "capability_required",
             message: `This credential cannot ${what}.`,
-            hint: `The key is scoped, and "${capability}" is not among its capabilities. GET /v1/keys shows what each key may do; mint another with POST /v1/keys, or use the server token. An unscoped key has all four.`,
+            hint: `The key is scoped, and "${capability}" is not among its capabilities. GET /v1/keys shows what each key may do; mint another with POST /v1/keys, or use the server token. An unscoped key has all of them.`,
             field: "scope.can",
         },
         403,

@@ -2351,7 +2351,10 @@ function envFor(answers: InitAnswers): string {
     // exactly what someone does by hand at this point.
     if (answers.serverToken !== undefined && answers.serverToken !== "") {
         lines.push("")
-        lines.push(`# The HTTP API's bearer token. Generated — replace it whenever you like.`)
+        lines.push(
+            `# The HTTP API's bearer token. Generated. In the sandbox every agent shares the host's,`,
+        )
+        lines.push(`# kept in agents/.api-token — change it there and restart the server.`)
         lines.push(`${BRAND.envPrefix}API_TOKEN=${answers.serverToken}`)
     }
     return `${lines.join("\n")}\n`

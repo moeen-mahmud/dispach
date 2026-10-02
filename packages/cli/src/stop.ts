@@ -39,7 +39,7 @@ import { homedir } from "node:os"
 import { BRAND, HarnessError, processAlive, readManifestHeader, SqliteStore } from "@dispach/core"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { labelFor } from "#lib/launchd"
-import { liveHostOf, postToHost, writeAgentState } from "#lib/lifecycle"
+import { HOST_LEASE, liveHostOf, postToHost, writeAgentState } from "#lib/lifecycle"
 import { bullet, keyValue, type Row } from "#lib/render"
 import { storePath } from "#lib/sandbox"
 import { type Exec, resolveServiceManager, type ServiceManager } from "#lib/service"
@@ -242,7 +242,7 @@ async function stopEverything(options: StopOptions): Promise<number> {
         process.stdout.write(`${JSON.stringify({ stopped: outcomes }, null, 2)}\n`)
     } else {
         const rows: Row[] = outcomes.map((outcome) => ({
-            label: outcome.agentId,
+            label: nameOf(outcome.agentId),
             value: outcome.stopped ? "stopped" : "STILL RUNNING",
             note: outcome.note,
         }))
@@ -376,7 +376,11 @@ function describe(target: Target): string {
     if (target.service) parts.push("background service")
     if (target.pid !== undefined)
         parts.push(`pid ${target.pid}${target.mode === undefined ? "" : ` (${target.mode})`}`)
-    return `${target.agentId} — ${parts.join(", ")}`
+    return `${nameOf(target.agentId)} — ${parts.join(", ")}`
+}
+
+function nameOf(agentId: string): string {
+    return agentId === HOST_LEASE ? "(host, no agents)" : agentId
 }
 
 function agentIdOf(manifestPath: string): string {

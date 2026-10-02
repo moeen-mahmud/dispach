@@ -11,16 +11,20 @@
 import { dirname, isAbsolute, resolve } from "node:path"
 import {
     agentPluginSupply,
+    BUILT_IN_TRANSPORTS,
     brokenChannels,
     buildChannels,
     buildRegistry,
     describeWindowSource,
     EventBus,
-    HarnessError,
+    fallbackWarnings,
+    isHarnessError,
     loadKnowledge,
     loadManifest,
     readManifestHeader,
     resolveCapabilities,
+    resolveMedia,
+    resolveRoles,
     resolveWorkspace,
     ruleBudgetFailure,
     scheduleDeliveryWarnings,
@@ -29,7 +33,13 @@ import {
 import { ambientEnv } from "#lib/ambient"
 import { describeOrigin, envProvenance } from "#lib/config-env"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import { BUILT_IN_PLUGINS, CHANNELS, TOOL_PROVIDERS } from "#lib/providers"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MEDIA_PROVIDERS,
+    MODEL_TRANSPORTS,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { pluginRoot } from "#lib/sandbox"
 import type { ValidateOptions } from "#lib/schema"
 
@@ -61,7 +71,12 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
             bus: new EventBus({ runtimeId: "validate" }),
             builtIn: BUILT_IN_PLUGINS,
             pluginRoot: pluginRoot(),
-            base: { toolProviders: TOOL_PROVIDERS, channels: CHANNELS },
+            base: {
+                toolProviders: TOOL_PROVIDERS,
+                modelTransports: MODEL_TRANSPORTS,
+                mediaProviders: MEDIA_PROVIDERS,
+                channels: CHANNELS,
+            },
         })
 
         const loaded = loadManifest(options.manifestPath, {
@@ -111,11 +126,31 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
          */
         const built = await buildRegistry(loaded, {
             toolProviders: supply.toolProviders,
+            modelTransports: supply.modelTransports,
+            mediaProviders: supply.mediaProviders,
             channels: supply.channels,
             scriptRunner: supply.scriptRunner,
             middleware: supply.middleware,
         })
         for (const provider of built.providers) await provider.stop?.()
+
+        // The model roles, resolved the way `Agent.create` resolves them: an unknown `api` or options
+        // its transport refuses is a boot failure, so it is a validation failure too. Building a
+        // provider opens no socket.
+        const resolvedRoles = resolveRoles(manifest, {
+            env: loaded.env,
+            transports: new Map([
+                ...BUILT_IN_TRANSPORTS,
+                ...Object.entries(supply.modelTransports),
+            ]),
+        })
+
+        // Media, resolved by the function `Agent.create` calls: an unknown provider, a missing key or
+        // options the provider refuses fail the boot, so they fail here. Opens no socket.
+        resolveMedia(manifest, {
+            env: loaded.env,
+            providers: new Map(Object.entries(supply.mediaProviders)),
+        })
 
         // The same check `run` applies, applied here for the same reason it exists at all: a
         // validator that accepts a manifest the runtime refuses is worse than no validator.
@@ -136,6 +171,7 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
             ...built.registry.warnings,
             ...channelFindings,
             ...scheduleDeliveryWarnings(manifest),
+            ...fallbackWarnings(manifest),
             ...(ruleFailure === undefined ? [] : [ruleFailure.toDetail()]),
         ]
 
@@ -247,12 +283,15 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
                                   `  ${entry.role.padEnd(12)} ${entry.modelId} · window ${entry.window.contextWindow} ${describeWindowSource(entry.window)}\n`,
                           )
                           .join("")}`) +
-                `  capabilities thinking=${capabilities.thinking} promptCache=${capabilities.promptCache} nativeTools=${capabilities.nativeTools} strictSchema=${capabilities.strictSchema}\n` +
+                // The role's capabilities as its transport resolves them, not the bare registry row:
+                // Claude caches on Bedrock and not on the compatible endpoint, and only the transport
+                // knows which one this is.
+                `  capabilities thinking=${resolvedRoles.main.capabilities.thinking} promptCache=${resolvedRoles.main.capabilities.promptCache} nativeTools=${resolvedRoles.main.capabilities.nativeTools} strictSchema=${resolvedRoles.main.capabilities.strictSchema}\n` +
                 // A bare value is what let a false one sit unread for phases: the Claude rows declared
                 // `promptCache: "anthropic"` directly beneath a comment saying they describe the
                 // OpenAI-compatible endpoint, which does not support caching at all. This line is the
                 // field's *only* consumer, so if it does not explain the value nothing does.
-                cacheNote(capabilities.promptCache, manifest.model.main.id) +
+                cacheNote(resolvedRoles.main.capabilities.promptCache, manifest.model.main.id) +
                 `  dialect      ${manifest.tools.dialect}\n` +
                 `  workspace    ${tiers === "" ? "(none)" : tiers}\n` +
                 (knowledge === undefined
@@ -303,7 +342,7 @@ export async function validateCommand(options: ValidateOptions): Promise<number>
         )
         return EXIT_OK
     } catch (error) {
-        if (options.json === true && error instanceof HarnessError) {
+        if (options.json === true && isHarnessError(error)) {
             process.stdout.write(
                 `${JSON.stringify({ ok: false, error: error.toDetail(), details: error.details }, null, 2)}\n`,
             )

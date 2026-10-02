@@ -44,21 +44,42 @@ export const ModelCapabilitiesSchema = z
         nativeTools: z.boolean().optional(),
         strictSchema: z.boolean().optional(),
         thinking: z.enum(["none", "anthropic", "openai", "deepseek"]).optional(),
-        promptCache: z.enum(["none", "anthropic", "openai"]).optional(), // deepseek has no prompt cache, server-side -> refer packages/core/src/model/capabilities.ts
+        promptCache: z.enum(["none", "anthropic", "openai", "bedrock"]).optional(), // deepseek has no prompt cache, server-side -> refer packages/core/src/model/capabilities.ts
         parallelToolCalls: z.boolean().optional(),
         contextWindow: z.number().int().positive().optional(),
         maxOutput: z.number().int().positive().optional(),
+        vision: z.boolean().optional(),
         /** Merged field by field over the shipped default — set one without restating the rest. */
         promptStyle: PromptStyleSchema.optional(),
     })
     .strict()
 
-export const ModelRoleSchema = z
+/** The transport every manifest used before `api` existed, and the default when it is omitted. */
+export const DEFAULT_MODEL_API = "chat-completions"
+
+const ModelRoleFields = z
     .object({
         /** Sent verbatim as the `model` parameter. */
         id: z.string().min(1),
-        /** Must end at the version segment; the runtime appends `/chat/completions`. */
-        baseUrl: z.string().min(1),
+        /**
+         * Which transport speaks to this model. Omitted, it is `chat-completions` — every manifest
+         * written before this field existed, unchanged. Another value names a transport a plugin
+         * registered with `defineModelTransport` (`bedrock-converse` from the Bedrock package); an
+         * unknown one refuses the load rather than falling back, the same rule as an unknown tool.
+         */
+        api: z.string().min(1).optional(),
+        /**
+         * Transport-specific settings, validated by that transport's own schema at load (for
+         * Bedrock: `region`, `profile`). Never a credential: a transport reads those from its
+         * environment, the way `apiKeyEnv` names a variable rather than holding a key.
+         */
+        options: z.record(z.string(), z.unknown()).optional(),
+        /**
+         * Must end at the version segment; the runtime appends `/chat/completions`. Required for
+         * `chat-completions`; a transport that addresses its endpoint another way (a region) may
+         * omit it.
+         */
+        baseUrl: z.string().min(1).optional(),
         /** The *name* of an env var. A literal key here fails validation. */
         apiKeyEnv: z.string().min(1).optional(),
         temperature: z.number().min(0).max(2).optional(),
@@ -90,6 +111,35 @@ export const ModelRoleSchema = z
         capabilities: ModelCapabilitiesSchema.optional(),
     })
     .strict()
+
+/** `baseUrl` is optional in the shape and required for the transport that cannot work without one. */
+function requireBaseUrl(
+    role: { readonly api?: string | undefined; readonly baseUrl?: string | undefined },
+    ctx: z.RefinementCtx,
+): void {
+    if ((role.api ?? DEFAULT_MODEL_API) === DEFAULT_MODEL_API && role.baseUrl === undefined) {
+        ctx.addIssue({
+            code: "custom",
+            path: ["baseUrl"],
+            message: "baseUrl is required for the chat-completions transport",
+        })
+    }
+}
+
+/** One `fallbacks` entry: a complete role of its own, minus a chain of its own. */
+const ModelFallbackSchema = ModelRoleFields.superRefine(requireBaseUrl)
+
+export const ModelRoleSchema = ModelRoleFields.extend({
+    /**
+     * Tried in order when this role's model fails in a way that is the endpoint's rather than the
+     * request's — unreachable, a 5xx, or 408/429 once its retries are spent — and only before the
+     * first chunk. Never on a 4xx the caller caused and never on a 403, which an embedder may use as
+     * its budget stop. Each entry is a whole role (id, api, baseUrl or options, key), so a fallback
+     * can be another provider entirely. The primary's capabilities, dialect and window still apply:
+     * a fallback is a stand-in for the same job, and `validate` warns when one is smaller.
+     */
+    fallbacks: z.array(ModelFallbackSchema).min(1).optional(),
+}).superRefine(requireBaseUrl)
 
 export const ModelSchema = z
     .object({
@@ -321,6 +371,13 @@ export const ToolsSchema = z
         local: z.array(z.string().min(1)).default([]),
         untrusted: ToolsUntrustedSchema.prefault({}),
         policy: ToolsPolicySchema.prefault({}),
+        /**
+         * What `tool.call` and `tool.result` carry (pilot.5, VelaCrew #16). `none` is the hash and
+         * the size, as always. `redacted` adds the arguments and the first 2 KB of the output, with
+         * values under secret-looking keys and the values of secret-named environment variables
+         * replaced. Person-only: it decides what every event subscriber and webhook receives.
+         */
+        eventDetail: z.enum(["none", "redacted"]).default("none"),
     })
     .strict()
 
@@ -537,6 +594,103 @@ export const TeamSchema = z
     })
     .strict()
 
+/**
+ * One media capability: which provider does it, with what model, bounded by a hard timeout.
+ *
+ * `provider` names a media provider the way `api` names a model transport — `openai` is built in (any
+ * endpoint speaking `/audio/transcriptions` and `/images/generations`), `aws` comes from the
+ * `media-aws` plugin (Amazon Transcribe, Nova Canvas), and an unknown one refuses the load.
+ */
+const MediaSectionFields = {
+    provider: z.string().min(1),
+    /** Sent to the provider as its model id: `whisper-1`, `gpt-image-1`, `amazon.nova-canvas-v1:0`. */
+    model: z.string().min(1).optional(),
+    /** For `openai`: the endpoint's base URL ending at the version segment. */
+    baseUrl: z.string().min(1).optional(),
+    /** The *name* of an env var. A literal key here fails validation. */
+    apiKeyEnv: z.string().min(1).optional(),
+    /** Provider-specific settings, validated by that provider (for `aws`: `region`, `languageCode`). */
+    options: z.record(z.string(), z.unknown()).optional(),
+}
+
+export const MediaSchema = z
+    .object({
+        /**
+         * Voice notes on channels become text before the turn. The timeout covers the download and
+         * the transcription together and is **hard**: a provider that never answers is abandoned and
+         * the sender is told, because a hung transcription holds that conversation's queue and
+         * silences the person for good.
+         */
+        transcription: z
+            .object({
+                ...MediaSectionFields,
+                timeoutMs: z.number().int().positive().default(60_000),
+                /** A voice note larger than this is refused before it is downloaded. */
+                maxBytes: z
+                    .number()
+                    .int()
+                    .positive()
+                    .default(25 * 1024 * 1024),
+            })
+            .strict()
+            .optional(),
+        /** Declaring it registers the `image_generate` tool; images land in the agent's `media/`. */
+        image: z
+            .object({
+                ...MediaSectionFields,
+                timeoutMs: z.number().int().positive().default(120_000),
+                /** `WIDTHxHEIGHT`, passed to the provider. */
+                size: z
+                    .string()
+                    .regex(/^[0-9]+x[0-9]+$/)
+                    .default("1024x1024"),
+            })
+            .strict()
+            .optional(),
+    })
+    .strict()
+
+/**
+ * Answering for the owner while they are away (Phase 28). Only in a DM between two people, and only
+ * for the human the agent is assigned to. Off unless declared.
+ */
+export const StandInSchema = z
+    .object({
+        enabled: z.boolean().default(false),
+        /**
+         * How long after a message to an offline owner the agent answers for them. 0 answers at once.
+         * The owner coming online, or replying, before then cancels it.
+         */
+        escalateAfterMs: z.number().int().nonnegative().default(0),
+    })
+    .strict()
+
+/**
+ * Handing work to other members' agents in the same silo (Phase 28). A target declares what it
+ * offers; a coordinator declares whom it may use. The handoff that results is the team one: a fresh
+ * session, a typed artifact, the same depth limit.
+ */
+export const DelegationSchema = z
+    .object({
+        /** What this agent takes on for others: a task line and the artifact it returns. */
+        offer: z
+            .object({
+                task: z.string().min(1),
+                artifact: z
+                    .object({
+                        type: z.literal("object"),
+                        properties: z.record(z.string(), JsonSchemaNodeSchema),
+                        required: z.array(z.string()).optional(),
+                    })
+                    .strict(),
+            })
+            .strict()
+            .optional(),
+        /** The agents this one may delegate to, by id, or "*" for every agent that offers. */
+        to: z.union([z.literal("*"), z.array(slug).min(1)]).optional(),
+    })
+    .strict()
+
 export const ScheduleSchema = z
     .object({
         id: slug,
@@ -556,6 +710,18 @@ export const ScheduleSchema = z
          * author wrote something they did not.
          */
         role: slug.optional(),
+        /**
+         * Limits for this schedule's runs (pilot.5). They only narrow what the agent already has:
+         * `tools.allow` selects from its catalogue with the phase grammar (`slug`, `tag:read`, `*`),
+         * and the two numbers are capped by `limits`. A schedule may be written by the agent itself
+         * (`config_set`), so one that could raise them would be a way round its own budget.
+         */
+        tools: z
+            .object({ allow: z.array(z.string().min(1)).min(1) })
+            .strict()
+            .optional(),
+        timeoutMs: z.number().int().positive().optional(),
+        maxSteps: z.number().int().positive().optional(),
         enabled: z.boolean().default(true),
         /** IANA name. Defaults to `TZ`, then UTC. */
         timezone: z.string().min(1).optional(),
@@ -618,6 +784,20 @@ export const LimitsSchema = z
          */
         maxConcurrentTurns: z.number().int().positive().optional(),
         /**
+         * How long a pending reload lets new turns keep running on the old configuration, in ms,
+         * before they wait for the swap instead. Turns already running always finish on the old one;
+         * this bound is what stops a constantly busy agent postponing a reload forever. 0 holds new
+         * turns at once.
+         */
+        reloadHoldMs: z.number().int().nonnegative().default(30_000),
+        /**
+         * In a room, how many agent replies deep a message may be and still make this agent answer
+         * (Phase 27). A human's message is hop 0; each agent reply is one more. Past it the agent
+         * reads the message and does not answer, and `conversation.skipped` says why — the guard
+         * against two agents replying to each other forever.
+         */
+        maxHops: z.number().int().nonnegative().default(4),
+        /**
          * Model tokens (prompt + output, every call the meter records) this agent may spend in a
          * rolling window. Checked when a turn **starts**: a turn under the budget runs to its end, so
          * the overshoot is bounded by one turn and stopping mid-work is never the outcome. Absent is
@@ -666,7 +846,12 @@ export const ServerSchema = z
 export const AgentManifestSchema = z
     .object({
         apiVersion: z.string().min(1),
-        id: slug,
+        // `~` is reserved: a shared memory scope's corpus key starts with one (`memory/scopes.ts`), and
+        // an agent sharing that key would read and reconcile a team's notes as its own.
+        id: slug.refine((value) => !value.startsWith("~"), {
+            message:
+                "An agent id may not start with `~`; that prefix is reserved for shared memory scopes.",
+        }),
         name: z.string().min(1).optional(),
         /** Path to a base manifest. Shallow merge; arrays replace. */
         extends: z.string().min(1).optional(),
@@ -682,6 +867,9 @@ export const AgentManifestSchema = z
         delivery: DeliverySchema.optional(),
         schedules: z.array(ScheduleSchema).default([]),
         team: TeamSchema.optional(),
+        media: MediaSchema.optional(),
+        standIn: StandInSchema.optional(),
+        delegation: DelegationSchema.optional(),
         plugins: z.array(PluginRefSchema).default([]),
         limits: LimitsSchema.prefault({}),
         server: ServerSchema.prefault({}),
@@ -706,6 +894,11 @@ export type DeliveryConfig = z.infer<typeof DeliverySchema>
 export type ScheduleConfig = z.infer<typeof ScheduleSchema>
 export type TeamMemberConfig = z.infer<typeof TeamMemberSchema>
 export type TeamConfig = z.infer<typeof TeamSchema>
+export type MediaConfig = z.infer<typeof MediaSchema>
+export type StandInConfig = z.infer<typeof StandInSchema>
+export type DelegationConfig = z.infer<typeof DelegationSchema>
+export type TranscriptionConfig = NonNullable<MediaConfig["transcription"]>
+export type ImageConfig = NonNullable<MediaConfig["image"]>
 export type PluginRef = z.infer<typeof PluginRefSchema>
 export type LimitsConfig = z.infer<typeof LimitsSchema>
 export type ServerConfig = z.infer<typeof ServerSchema>

@@ -34,7 +34,7 @@
  */
 
 import { estimateTokens } from "../../context/tokens.ts"
-import { nativeToolNameInvalid } from "../../errors.ts"
+import { nativeToolNameCollision, nativeToolNameInvalid } from "../../errors.ts"
 import type { ChatMessage, ToolDefinition } from "../../model/provider.ts"
 import { renderTrusted } from "../trust.ts"
 import type { FieldError, ToolIntent, ToolSpec } from "../types.ts"
@@ -49,12 +49,28 @@ import { renderNotEnabledBlock } from "./not-enabled.ts"
 /**
  * The function-name grammar every OpenAI-compatible endpoint enforces.
  *
- * A slug outside it — anything with a dot or a space — is refused at load rather than mapped to
- * something legal. A lossy rewrite is worse than a refusal in both directions: `a.b` and `a_b`
- * collide on the way out, and the reply names the rewritten form, so the loop would have to guess
- * which tool the model meant. Refusing says exactly what to change.
+ * One rewrite is made, and only one: a dot becomes `__`, because skill scripts are named
+ * `skill.<skill>.<script>` and they join the catalogue when their skill activates, so a native agent
+ * loaded fine and failed on the first turn that picked a scripted skill (VelaCrew, pilot.4). The slug
+ * is unchanged everywhere else (policy, events, the store); only the name on the wire differs.
+ *
+ * The way back needs no map. The model's reply names the wire form, and `ToolRegistry.resolve` finds
+ * the slug through its normalised lookup, which ignores `.`, `_` and `-`. That lookup is exactly where
+ * a rewrite would turn ambiguous (`a.b` and `a_b` are one normalised name), so `requestTools` refuses
+ * a catalogue in which two slugs share one: the reason the rewrite was refused before, kept, but
+ * checked rather than assumed. Anything else outside the grammar (a space, a slash) is still refused.
  */
 const WIRE_NAME = /^[A-Za-z0-9_-]{1,64}$/
+
+/** The name a slug is sent under. Exported for the transports' tests; nothing else should need it. */
+export function wireName(slug: string): string {
+    return slug.replaceAll(".", "__")
+}
+
+/** As `ToolRegistry`'s normalised lookup sees a name. Kept identical to it, or the check is a guess. */
+function lookupKey(name: string): string {
+    return name.toLowerCase().replace(/[\s_.-]+/g, "")
+}
 
 /** The guidance a catalogue entry carries, in the one field the wire format has for it. */
 export function renderNativeDescription(spec: ToolSpec): string {
@@ -76,9 +92,10 @@ export function renderNativeDescription(spec: ToolSpec): string {
 }
 
 function toDefinition(spec: ToolSpec): ToolDefinition {
-    if (!WIRE_NAME.test(spec.slug)) throw nativeToolNameInvalid(spec.slug, spec.provider)
+    const name = wireName(spec.slug)
+    if (!WIRE_NAME.test(name)) throw nativeToolNameInvalid(spec.slug, spec.provider)
     return {
-        name: spec.slug,
+        name,
         description: renderNativeDescription(spec),
         // Passed through unchanged. The tool declares one schema; this dialect is the rendering that
         // hands it over verbatim, which is what keeps an eval comparing the same tools.
@@ -203,6 +220,18 @@ export const nativeDialect: ToolDialect = {
 
     requestTools(specs) {
         if (specs.length === 0) return undefined
+        const seen = new Map<string, ToolSpec>()
+        for (const spec of specs) {
+            const key = lookupKey(spec.slug)
+            const other = seen.get(key)
+            if (other !== undefined && spec.slug !== wireName(spec.slug)) {
+                throw nativeToolNameCollision(spec.slug, other.slug)
+            }
+            if (other !== undefined && other.slug !== wireName(other.slug)) {
+                throw nativeToolNameCollision(other.slug, spec.slug)
+            }
+            seen.set(key, spec)
+        }
         return specs.map(toDefinition)
     },
 

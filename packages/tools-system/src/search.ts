@@ -29,6 +29,7 @@ import { stripControl, type Tool, type ToolHandler } from "@dispach/core"
 import { grepPatternInvalid } from "./errors.ts"
 import { resolvePath } from "./files.ts"
 import { SYSTEM_PROVIDER_ID } from "./paths.ts"
+import { secretReason } from "./protect.ts"
 import { locate, type Roots } from "./root.ts"
 import type { ShellSessions } from "./session.ts"
 import { globToRegExp, walk } from "./walk.ts"
@@ -184,6 +185,9 @@ export function grepHandler(options: SearchOptions): ToolHandler {
                 capped = true
                 break
             }
+            // Never searched, so a match cannot quote a secret line (`grep KEY` over a workspace with
+            // a `.env` in it).
+            if (secretReason(`${root}/${relative}`) !== undefined) continue
             let text: string
             try {
                 const bytes = await readFile(`${root}/${relative}`)

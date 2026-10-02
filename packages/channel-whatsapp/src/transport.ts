@@ -32,6 +32,7 @@
  */
 
 import { chmodSync, mkdirSync, readdirSync, rmSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 // Types only: a runtime import would bundle a second copy of core into this plugin. See index.ts.
 import type {
@@ -159,7 +160,7 @@ export interface WhatsAppSocket {
     }
     sendMessage(
         jid: string,
-        content: { text: string },
+        content: { text: string } | { image: Uint8Array; mimetype: string; caption?: string },
     ): Promise<{ key?: { id?: string } } | undefined>
     sendPresenceUpdate(presence: string, jid?: string): Promise<void>
     logout(): Promise<void>
@@ -222,6 +223,12 @@ export interface WhatsAppMessage {
         imageMessage?: { caption?: string | null } | null
         videoMessage?: { caption?: string | null } | null
         documentMessage?: { caption?: string | null } | null
+        /** A voice note (`ptt`) or an audio file. OGG/Opus for a voice note. */
+        audioMessage?: {
+            mimetype?: string | null
+            seconds?: number | null
+            fileLength?: number | { toNumber(): number } | null
+        } | null
     } | null
 }
 
@@ -235,6 +242,11 @@ export interface BaileysApi {
         readonly onCreds: () => void | Promise<void>
         readonly onMessages: (upsert: MessagesUpsert) => void
     }): Promise<WhatsAppSocket>
+    /**
+     * A message's media, decrypted. Optional so a test double need not implement it; without it a
+     * voice note is reported to the sender as one that could not be fetched.
+     */
+    download?(message: WhatsAppMessage): Promise<Uint8Array>
 }
 
 export interface WhatsAppTransportOptions {
@@ -287,6 +299,7 @@ export class WhatsAppTransport implements ChannelTransport {
         // visible `uncertain` flag into a silent duplicate, which is strictly worse than the
         // ambiguity it would be hiding.
         idempotentSend: false,
+        attachments: true,
         minSendIntervalMs: MIN_SEND_INTERVAL_MS,
     }
 
@@ -300,6 +313,8 @@ export class WhatsAppTransport implements ChannelTransport {
     readonly #deviceName: string | undefined
     readonly #pairingDelayMs: number
     readonly #api: BaileysApi | undefined
+    /** The API the connect loop is using, injected or loaded — what downloads a voice note. */
+    #loaded: BaileysApi | undefined
 
     #host: ChannelHost | undefined
     #socket: WhatsAppSocket | undefined
@@ -423,9 +438,17 @@ export class WhatsAppTransport implements ChannelTransport {
             }
         }
         try {
-            const sent = await socket.sendMessage(jidOf(message.recipient), {
-                text: message.text,
-            })
+            const attachment = message.attachment
+            const sent = await socket.sendMessage(
+                jidOf(message.recipient),
+                attachment === undefined
+                    ? { text: message.text }
+                    : {
+                          image: await readFile(attachment.path),
+                          mimetype: attachment.mimeType,
+                          ...(message.text === "" ? {} : { caption: message.text }),
+                      },
+            )
             const id = sent?.key?.id
             if (id !== undefined && id !== null) {
                 this.#sentIds.push(id)
@@ -489,6 +512,7 @@ export class WhatsAppTransport implements ChannelTransport {
         while (this.#running && !this.#pairingGivenUp) {
             try {
                 const api = this.#api ?? (await loadBaileys())
+                this.#loaded = api
                 mkdirSync(this.#authDir, { recursive: true, mode: 0o700 })
                 // **Decided before the socket exists, not once a code is in hand.** The intent to
                 // pair by code is known from the configuration, and Baileys starts emitting QRs as
@@ -693,7 +717,25 @@ export class WhatsAppTransport implements ChannelTransport {
         if (upsert.type !== "notify") return
         for (const message of upsert.messages) {
             const raw = toInbound(message, { ownJids: this.#ownJids, sentIds: this.#sentIds })
-            if (raw !== undefined) host.receive(raw)
+            if (raw === undefined) continue
+            const heard = audioOf(message)
+            if (heard === undefined) {
+                host.receive(raw)
+                continue
+            }
+            const baileys = this.#loaded
+            host.receive({
+                ...raw,
+                audio: {
+                    ...heard,
+                    fetch: async () => {
+                        if (baileys?.download === undefined) {
+                            throw new Error("this Baileys build cannot download media")
+                        }
+                        return baileys.download(message)
+                    },
+                },
+            })
         }
     }
 
@@ -813,7 +855,8 @@ export function toInbound(
         body?.videoMessage?.caption ??
         body?.documentMessage?.caption ??
         ""
-    if (text.trim() === "") return undefined
+    // A voice note has no words of its own; the runtime transcribes it into some.
+    if (text.trim() === "" && (body?.audioMessage ?? undefined) === undefined) return undefined
 
     const stamp = message.messageTimestamp
     const seconds =
@@ -838,6 +881,26 @@ export function toInbound(
         ...(name === null || name === undefined || name === "" ? {} : { senderName: name }),
         text,
         receivedAt: new Date(seconds === undefined ? Date.now() : seconds * 1000).toISOString(),
+    }
+}
+
+/** A voice note's description, without its bytes: those are fetched only if it is transcribed. */
+export function audioOf(
+    message: WhatsAppMessage,
+): { mimeType: string; durationS?: number; sizeBytes?: number } | undefined {
+    const audio = message.message?.audioMessage
+    if (audio === null || audio === undefined) return undefined
+    const length = audio.fileLength
+    const size =
+        typeof length === "number"
+            ? length
+            : typeof length?.toNumber === "function"
+              ? length.toNumber()
+              : undefined
+    return {
+        mimeType: audio.mimetype ?? "audio/ogg",
+        ...(typeof audio.seconds === "number" ? { durationS: audio.seconds } : {}),
+        ...(size === undefined ? {} : { sizeBytes: size }),
     }
 }
 
@@ -892,6 +955,9 @@ async function loadBaileys(): Promise<BaileysApi> {
     const useMultiFileAuthState =
         module.useMultiFileAuthState ??
         (typeof exported === "function" ? exported.useMultiFileAuthState : undefined)
+    const downloadMediaMessage =
+        module.downloadMediaMessage ??
+        (typeof exported === "function" ? exported.downloadMediaMessage : undefined)
     if (typeof make !== "function" || typeof useMultiFileAuthState !== "function") {
         throw new Error(
             "the installed baileys package does not export makeWASocket and useMultiFileAuthState",
@@ -899,6 +965,9 @@ async function loadBaileys(): Promise<BaileysApi> {
     }
 
     return {
+        ...(downloadMediaMessage === undefined
+            ? {}
+            : { download: (message) => downloadMediaMessage(message, "buffer", {}) }),
         connect: async ({ authDir, deviceName, onUpdate, onCreds, onMessages }) => {
             const { state, saveCreds } = await useMultiFileAuthState(authDir)
             const socket = make({
@@ -941,10 +1010,21 @@ async function loadBaileys(): Promise<BaileysApi> {
 }
 
 interface BaileysModule {
-    default?: BaileysFactory & { default?: BaileysFactory; useMultiFileAuthState?: AuthStateLoader }
+    default?: BaileysFactory & {
+        default?: BaileysFactory
+        useMultiFileAuthState?: AuthStateLoader
+        downloadMediaMessage?: MediaDownloader
+    }
     makeWASocket?: BaileysFactory
     useMultiFileAuthState?: AuthStateLoader
+    downloadMediaMessage?: MediaDownloader
 }
+
+type MediaDownloader = (
+    message: WhatsAppMessage,
+    type: "buffer",
+    options: Record<string, unknown>,
+) => Promise<Uint8Array>
 
 type BaileysFactory = (config: Record<string, unknown>) => WhatsAppSocket
 type AuthStateLoader = (

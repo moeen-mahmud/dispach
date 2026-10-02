@@ -355,7 +355,8 @@ describe("every reachable failure carries a hint", () => {
         },
         {
             name: "wrong method",
-            method: "DELETE",
+            // DELETE was the example until it became a route (pilot.4).
+            method: "PUT",
             path: "/v1/agents/assistant",
             code: "method_not_allowed",
         },

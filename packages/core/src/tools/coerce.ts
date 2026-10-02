@@ -154,8 +154,11 @@ function splitList(value: string): string[] {
 
 function convert(node: JsonSchemaNode, value: unknown, field: string): Converted {
     if (node.type === "array") {
-        const items = Array.isArray(value)
-            ? value.map((item) => String(item))
+        // Items keep their own type and are converted against the item schema below. Stringifying
+        // them first turned every object in a list into "[object Object]", so a native call passing
+        // a list of objects failed coercion and then its repair (pilot.3).
+        const items: readonly unknown[] | undefined = Array.isArray(value)
+            ? value
             : typeof value === "string"
               ? splitList(value)
               : undefined

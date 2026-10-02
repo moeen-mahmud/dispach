@@ -1,6 +1,6 @@
 {
     "name": "dispach",
-    "version": "0.1.3",
+    "version": "0.2.0-pilot.5",
     "description": "A lightweight, model-agnostic AI agent runtime — the CLI, the server, and a typed client.",
     "license": "Apache-2.0",
     "author": "Moeen Mahmud",
@@ -40,11 +40,11 @@
     },
     "scripts": {
         "dev": "bun run ./src/index.ts",
-        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --splitting --production --sourcemap=linked --external ink --external react --external 'react/*' --banner '#!/usr/bin/env node' && bun build ./src/client.ts ./src/wire.ts --outdir dist --target node --format esm --production --sourcemap=linked && tsc -p tsconfig.build.json",
+        "build": "rm -rf dist && bun build ./src/index.ts --outdir dist --target node --format esm --splitting --production --sourcemap=linked --external ink --external react --external 'react/*' --banner '#!/usr/bin/env node' && bun build ./src/client.ts ./src/wire.ts --outdir dist --target node --format esm --production --sourcemap=linked && tsc -p tsconfig.build.json && dts-bundle-generator --silent --config dts-bundle.json",
         "typecheck": "tsc -p tsconfig.json",
         "prepack": "cp ../../README.md ./README.md"
     },
-    "dependencies": {
+    "optionalDependencies": {
         "ink": "7.1.1",
         "react": "19.2.8"
     },
@@ -52,15 +52,22 @@
         "access": "public"
     },
     "devDependencies": {
+        "@dispach/channel-a2a": "workspace:*",
+        "@dispach/channel-slack": "workspace:*",
+        "@dispach/channel-teams": "workspace:*",
         "@dispach/channel-telegram": "workspace:*",
         "@dispach/channel-whatsapp": "workspace:*",
         "@dispach/client": "workspace:*",
         "@dispach/core": "workspace:*",
+        "@dispach/media-aws": "workspace:*",
+        "@dispach/model-bedrock": "workspace:*",
         "@dispach/server": "workspace:*",
         "@dispach/tools-composio": "workspace:*",
+        "@dispach/tools-mcp": "workspace:*",
         "@dispach/tools-system": "workspace:*",
         "@dispach/tools-web": "workspace:*",
         "@types/react": "19.2.18",
+        "dts-bundle-generator": "9.5.1",
         "ink-testing-library": "4.0.0",
         "react-devtools-core": "6.1.5",
         "ws": "^8"

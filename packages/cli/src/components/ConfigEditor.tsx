@@ -45,7 +45,7 @@ import {
     typing,
 } from "#lib/config-editor"
 import { FIELD_ROWS, MIN_SCREEN_ROWS, SCREEN_CHROME_ROWS } from "#lib/const"
-import { clip, viewport } from "#lib/rows"
+import { clip, viewportByHeight } from "#lib/rows"
 import type { SelectMove } from "#lib/select"
 import { THEME } from "#lib/theme"
 
@@ -181,7 +181,12 @@ export function ConfigEditor({
         )
     }
 
-    const { from, to } = viewport(state.rows.length, state.cursor, visible)
+    // A heading draws two lines (a gap and its label), so the window is budgeted in lines, not rows.
+    const { from, to } = viewportByHeight(
+        state.rows.map((row) => (row.kind === "heading" ? 2 : 1)),
+        state.cursor,
+        visible,
+    )
     return (
         <Box flexDirection="column">
             {from > 0 ? <Text dimColor wrap="truncate">{`  ↑ ${from} above`}</Text> : undefined}

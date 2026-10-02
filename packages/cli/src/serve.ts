@@ -15,6 +15,8 @@
  * in a log file.
  */
 
+import { rmSync } from "node:fs"
+import { dirname } from "node:path"
 import {
     AgentManifestSchema,
     BRAND,
@@ -25,6 +27,7 @@ import {
     Runtime,
 } from "@dispach/core"
 import {
+    type AgentRemover,
     browsableHost,
     claimCommand,
     claimUrl,
@@ -33,16 +36,32 @@ import {
     serve,
 } from "@dispach/server"
 import { secretStatus, writeSecrets } from "#lib/agent-secrets"
-import { listTemplates, provisionFromTemplate } from "#lib/agent-template"
+import { listTemplates, provisionFromTemplate, rerenderFromTemplate } from "#lib/agent-template"
 import { ambientEnv } from "#lib/ambient"
 import { inContainer } from "#lib/bootstrap"
 import { setChannelCredential, setChannelEnabled, unpairChannel } from "#lib/channel-actions"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
-import { hostableAgents, manifestForId } from "#lib/lifecycle"
-import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import { claimHostLease, HOST_LEASE, hostableAgents, manifestForId } from "#lib/lifecycle"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MEDIA_PROVIDERS,
+    MODEL_TRANSPORTS,
+    scriptRunner,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { provisionAgent, provisionSteps } from "#lib/provision"
-import { agentsDir, pluginRoot, storePath, templatesDir } from "#lib/sandbox"
+import {
+    agentsDir,
+    insideSandbox,
+    listAgents,
+    pluginRoot,
+    readHostToken,
+    storePath,
+    templatesDir,
+    writeHostToken,
+} from "#lib/sandbox"
 
 export interface ServeOptions {
     /**
@@ -80,6 +99,7 @@ function defaultServerConfig(): ReturnType<typeof AgentManifestSchema.parse>["se
 
 export async function serveCommand(options: ServeOptions): Promise<number> {
     const env = ambientEnv(options.manifestPaths)
+    const drainMs = drainFrom(env)
 
     /**
      * What to host, and what is switched off.
@@ -241,7 +261,19 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     // `.env` beside the manifest is layered in by `loadManifest`. With no manifest at all there is
     // no agent env to layer, so the process environment is the only source there is — which is the
     // service unit's shape, where the variable comes from the unit definition.
-    const token = loaded === undefined ? env[config.tokenEnv] : loaded.env[config.tokenEnv]
+    const own = loaded === undefined ? env[config.tokenEnv] : loaded.env[config.tokenEnv]
+    // A sandbox host serves with the sandbox's token, not the first manifest's (QA 0.2.0: every
+    // other agent's `run`, `stop` and `start` sent its own and got 401). An export still wins —
+    // that is how a container is configured. With no file yet, the token this host would have used
+    // becomes the sandbox's, so nothing that authenticates today stops working.
+    const exported = env[config.tokenEnv]
+    const inSandbox = manifests.every((entry) => insideSandbox(dirname(entry.path), env))
+    let token = own
+    if (inSandbox && (exported === undefined || exported === "")) {
+        const shared = readHostToken(agentsDir(env))
+        if (shared !== undefined) token = shared
+        else if (own !== undefined && own !== "") writeHostToken(agentsDir(env), own)
+    }
 
     // Set by the generated service definition and by nothing else, so this is a fact rather than a
     // guess. `ppid === 1` would also be true of any orphaned process, and getting it wrong means
@@ -343,8 +375,8 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
      */
     const approvals = createApprovalRegistry()
 
-    const runtime = await Runtime.create({
-        agents: manifests.map((entry) => entry.path),
+    const createOptions = (paths: readonly string[]): Parameters<typeof Runtime.create>[0] => ({
+        agents: paths,
         // The seam `ToolContext.approve` declared in Phase 3 and nothing ever filled. A blocked
         // call now emits `approval.requested` and waits for a POST; an unanswered one ends with the
         // turn, because core races the approver against the turn's own signal rather than starting
@@ -353,6 +385,8 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         env,
         bus,
         toolProviders: TOOL_PROVIDERS,
+        modelTransports: MODEL_TRANSPORTS,
+        mediaProviders: MEDIA_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
         pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),
@@ -377,6 +411,48 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         // than a guess — `ppid === 1` would also be true of any orphaned process.
         mode: asDaemon ? "daemon" : "terminal",
     })
+
+    /**
+     * **One agent the runtime refuses to build does not take the host down either (QA K14).**
+     *
+     * The pre-check above only sees what `loadManifest` refuses. `Agent.create` refuses more — a media
+     * provider whose key is not set yet (enabled first and filled second, on purpose), a workspace
+     * file `memory_write` grew past its budget — and one such agent made `serve` exit 1 for every
+     * agent in the sandbox. So when a *discovered* set fails, each agent is built alone in a
+     * throwaway, in-memory runtime; the ones that fail join `broken` and are reported beside the
+     * others, and the host starts with the rest. Only the failure path pays for it.
+     */
+    let runtime: Runtime
+    try {
+        runtime = await Runtime.create(createOptions(manifests.map((entry) => entry.path)))
+    } catch (error) {
+        if (!discovered || manifests.length === 0) throw error
+        const survivors: typeof manifests = []
+        for (const entry of manifests) {
+            try {
+                const probe = await Runtime.create({
+                    ...createOptions([entry.path]),
+                    store: ":memory:",
+                    startChannels: false,
+                    startSchedules: false,
+                })
+                await probe.stop()
+                survivors.push(entry)
+            } catch (alone) {
+                broken.push({
+                    path: entry.path,
+                    detail: isHarnessError(alone) ? alone.message : String(alone),
+                    ...(isHarnessError(alone) && alone.hint !== undefined
+                        ? { hint: alone.hint }
+                        : {}),
+                })
+            }
+        }
+        // Every agent builds alone, so the failure is not any one agent's: say it as it was.
+        if (survivors.length === manifests.length) throw error
+        manifests.splice(0, manifests.length, ...survivors)
+        runtime = await Runtime.create(createOptions(survivors.map((entry) => entry.path)))
+    }
 
     // Claimed and *registered* before the socket binds, and that ordering is the bug this fixes.
     //
@@ -463,6 +539,8 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                             templatesDir: templatesDir(env),
                             agentDirBase: agentsDir(env),
                         }),
+                    rerender: (input) =>
+                        rerenderFromTemplate({ ...input, templatesDir: templatesDir(env) }),
                 },
                 /**
                  * `GET`/`PUT /v1/agents/:id/secrets`. The allowed names come from the agent's own
@@ -470,6 +548,8 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                  * `applySecret`, the same one `config env` uses.
                  */
                 secrets: { status: secretStatus, write: writeSecrets },
+                /** `DELETE /v1/agents/:id`: sandbox agents only, and never an id two directories share. */
+                remover: sandboxRemover(env),
                 /**
                  * The same functions the `channels` command calls, injected for the same reason the
                  * provisioner is: *how* a channel is switched off or re-credentialled is the CLI's —
@@ -490,7 +570,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
         // The runtime is already up; leaving it running after a failed bind would hold the store
         // open and keep channels polling with nothing serving.
         await runtime.stop("server failed to bind")
-        if (error instanceof HarnessError) throw error
+        if (isHarnessError(error)) throw error
         const looked = attempted.length > 1 ? ` — also tried ${attempted.slice(1).join(", ")}` : ""
         throw new HarnessError({
             code: "server_bind_failed",
@@ -511,6 +591,13 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
      * and this is the whole mechanism behind `stop <agent>`: one process hosts several agents, so
      * stopping one has to be a request naming it rather than a signal to the process.
      */
+    // Claimed before the address is published, so `publish` puts the address on it too.
+    const hostLease =
+        runtime.owned.length === 0 &&
+        (await claimHostLease(runtime.store.leases, {
+            runtimeId: runtime.runtimeId,
+            mode: asDaemon ? "daemon" : "terminal",
+        }))
     await runtime.publishAddress(running.url)
 
     const agents = runtime.list()
@@ -774,7 +861,22 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     const shutdown = async () => {
         if (stopped) return
         stopped = true
+        // Before the server closes, so a readiness probe sees `draining` and a client watching a
+        // turn's stream sees it end.
+        if (drainMs > 0 && runtime.all().some((agent) => agent.inFlight > 0)) {
+            const started = Date.now()
+            process.stdout.write(`draining — waiting up to ${drainMs} ms for running turns\n`)
+            const left = await runtime.drain(drainMs)
+            process.stdout.write(
+                left === 0
+                    ? `drained in ${Date.now() - started} ms\n`
+                    : `${left} turn(s) still running after ${drainMs} ms; the next start marks them interrupted\n`,
+            )
+        }
         await running.stop()
+        if (hostLease) {
+            await runtime.store.leases.release(HOST_LEASE, runtime.runtimeId).catch(() => {})
+        }
         await runtime.stop("interrupted")
     }
     onExit(shutdown)
@@ -787,6 +889,26 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
     // fault, and the generated service definition restarts only on a crash signal — so a non-zero
     // exit here would be read by the supervisor as "this configuration is broken, stay down".
     return EXIT_OK
+}
+
+/**
+ * `<PREFIX>DRAIN_MS`: how long a stop waits for running turns. Unset is 0, today's behaviour — a
+ * stop never waits. Refused at start when malformed, since a typo found at the first SIGTERM is a
+ * drain that silently did not happen.
+ */
+function drainFrom(env: Record<string, string | undefined>): number {
+    const name = `${BRAND.envPrefix}DRAIN_MS`
+    const raw = env[name]
+    if (raw === undefined || raw === "") return 0
+    if (!/^\d+$/.test(raw)) {
+        throw new HarnessError({
+            code: "serve_drain_invalid",
+            message: `${name} is "${raw}", which is not a number of milliseconds.`,
+            hint: `Set it to a whole number, a few seconds under the orchestrator's grace period — 25000 beside Kubernetes' default terminationGracePeriodSeconds of 30. Unset, a stop does not wait.`,
+            field: name,
+        })
+    }
+    return Number(raw)
 }
 
 /**
@@ -849,4 +971,47 @@ function portIsTaken(error: unknown): boolean {
         if ((error as { code?: unknown }).code === "EADDRINUSE") return true
     const message = error instanceof Error ? error.message : String(error)
     return message.includes("EADDRINUSE") || message.includes("in use")
+}
+
+/**
+ * What `DELETE /v1/agents/:id` may delete: an agent inside the sandbox whose id no other directory
+ * declares. The same two refusals `remove` makes — a path outside the sandbox is somebody's project,
+ * and a shared id shares one store, so deleting it would take the other agent's history too.
+ */
+export function sandboxRemover(env: Readonly<Record<string, string | undefined>>): AgentRemover {
+    return {
+        locate(agentId) {
+            const matches = listAgents(env).filter((agent) => agent.id === agentId)
+            const first = matches[0]
+            if (first === undefined) {
+                return {
+                    ok: false,
+                    status: 404,
+                    error: {
+                        code: "agent_remove_not_in_sandbox",
+                        message: `No agent "${agentId}" in the sandbox, so there are no files here to delete.`,
+                        hint: "Only sandbox agents are deleted over the API. An agent elsewhere is removed by deleting its directory yourself.",
+                    },
+                }
+            }
+            if (matches.length > 1) {
+                return {
+                    ok: false,
+                    status: 409,
+                    error: {
+                        code: "agent_remove_shared_id",
+                        message: `${matches.length} sandbox directories declare id "${agentId}": ${matches.map((agent) => agent.dir).join(", ")}.`,
+                        hint: "They share one conversation history, so deleting either would delete the other's too. Give one a different id first.",
+                    },
+                }
+            }
+            return { ok: true, dir: first.dir }
+        },
+        async deleteDir(dir) {
+            if (!insideSandbox(dir, env)) {
+                throw new Error(`refusing to delete ${dir}: it is outside the sandbox`)
+            }
+            rmSync(dir, { recursive: true, force: true })
+        },
+    }
 }

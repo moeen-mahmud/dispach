@@ -959,7 +959,7 @@ export const COMMANDS: readonly CommandSpec[] = [
                 kind: "string",
                 placeholder: "list",
                 help: "narrow it to these capabilities: read | chat | write | admin",
-                defaultHelp: "all four",
+                defaultHelp: "all of them",
             },
             {
                 name: "expires",

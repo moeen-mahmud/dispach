@@ -13,11 +13,17 @@ import { describe, expect, test } from "./_harness.ts"
 
 describe("caret, which is what a plugin actually declares", () => {
     test("0.x is pinned to its minor", () => {
-        // The case that matters today: the host is 0.1.0 and every first-party plugin says ^0.1.
+        // The minor is the compatibility line under 0.x: a 0.2 host refuses a plugin still on ^0.1.
         expect(satisfies("0.1.0", "^0.1")).toBe(true)
         expect(satisfies("0.1.7", "^0.1")).toBe(true)
         expect(satisfies("0.2.0", "^0.1")).toBe(false)
         expect(satisfies("0.0.9", "^0.1")).toBe(false)
+        // A pre-release host is judged as its release: a pilot of 0.2.0 carries 0.2's plugin API.
+        expect(satisfies("0.2.0-pilot.1", "^0.2")).toBe(true)
+        expect(satisfies("0.2.0-pilot.1", "^0.1")).toBe(false)
+        expect(satisfies("0.2.0-", "^0.2")).toBe(undefined)
+        // A pre-release in the *range* is still refused rather than approximated.
+        expect(satisfies("0.2.0", "^0.2.0-pilot.1")).toBe(undefined)
     })
 
     test("1.x allows the whole major", () => {
@@ -74,9 +80,11 @@ describe("what it refuses to decide", () => {
         expect(satisfies("1.2.3", "not a range")).toBeUndefined()
     })
 
-    test("a host version that is not a plain triple is undecided", () => {
+    test("a host version that is not a triple, or a triple with a pre-release, is undecided otherwise", () => {
         expect(satisfies("1.2", "^1")).toBeUndefined()
-        expect(satisfies("1.2.3-rc.1", "^1")).toBeUndefined()
+        expect(satisfies("1.2.3+build", "^1")).toBeUndefined()
+        // Since the first pilot tag a pre-release host is judged as its release (see above).
+        expect(satisfies("1.2.3-rc.1", "^1")).toBe(true)
     })
 })
 

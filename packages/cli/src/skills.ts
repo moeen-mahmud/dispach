@@ -31,7 +31,7 @@ import {
     checkSkillAuthoring,
     type ErrorDetail,
     editManifestSync,
-    HarnessError,
+    isHarnessError,
     isSkillName,
     loadManifest,
     loadSkills,
@@ -186,7 +186,7 @@ export function skillsCommand(options: SkillsOptions): number {
                 return validate(catalogue.skills, options)
         }
     } catch (error) {
-        if (options.json === true && error instanceof HarnessError) {
+        if (options.json === true && isHarnessError(error)) {
             process.stdout.write(
                 `${JSON.stringify({ ok: false, error: error.toDetail(), details: error.details }, null, 2)}\n`,
             )
@@ -740,7 +740,7 @@ function locate(
     try {
         parsed = parseSkillRef(ref)
     } catch (error) {
-        if (!(error instanceof HarnessError)) throw error
+        if (!isHarnessError(error)) throw error
         process.stdout.write(`${error.message}\n\n  ${error.hint}\n`)
         return undefined
     }

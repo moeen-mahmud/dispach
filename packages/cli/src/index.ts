@@ -20,7 +20,7 @@
  * without a command, reporting failure for the one thing that had worked.
  */
 
-import { HarnessError, VERSION } from "@dispach/core"
+import { BRAND, HarnessError, isHarnessError, VERSION } from "@dispach/core"
 import { agentsCommand } from "#agents"
 import { browseCommand } from "#browse"
 import { daemonCommand } from "#daemon"
@@ -35,6 +35,7 @@ import { readEnv } from "#lib/env"
 import { finishNow, installGuards } from "#lib/exit"
 import { helpText } from "#lib/help"
 import { installServerUnit } from "#lib/host-actions"
+import { missingInterface } from "#lib/interface-missing"
 import { resolveAgentRef } from "#lib/sandbox"
 import { quietAcceptedWarnings } from "#lib/warnings"
 import { memoryCommand } from "#memory"
@@ -58,7 +59,15 @@ import { validateCommand } from "#validate"
 import { workspaceCommand } from "#workspace"
 
 function report(error: unknown): number {
-    if (error instanceof HarnessError) {
+    const missing = missingInterface(error)
+    if (missing !== undefined) {
+        process.stderr.write(
+            `cli_interface_missing: this command draws the terminal UI, and ${missing} is not installed.\n` +
+                `  hint: it is an optional dependency, left out by an install with --omit=optional. Reinstall without it (npm i -g ${BRAND.slug}), or pass --plain where the command has it.\n`,
+        )
+        return EXIT_FAILURE
+    }
+    if (isHarnessError(error)) {
         // `format()` prints the code, the field, the hint, and every sub-failure — so a command line
         // with two mistakes in it reports both rather than one at a time.
         process.stderr.write(`${error.format()}\n`)

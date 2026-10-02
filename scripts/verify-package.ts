@@ -21,6 +21,7 @@
 
 import {
     existsSync,
+    mkdirSync,
     mkdtempSync,
     readdirSync,
     readFileSync,
@@ -118,7 +119,16 @@ try {
 
     process.stdout.write("using it\n")
     const cli = run(join(work, "node_modules", ".bin", "dispach"), ["--version"], work).trim()
-    check("the bin runs", /^\d+\.\d+\.\d+$/.test(cli), cli)
+    // The exact version being released, not a shape: `^\d+\.\d+\.\d+$` refused the first
+    // pre-release (`0.2.0-pilot.1`) whose bin was working perfectly.
+    const expected = (
+        JSON.parse(readFileSync(join(CLI, "package.json"), "utf8")) as { version: string }
+    ).version
+    check(
+        "the bin runs",
+        cli === expected,
+        `${cli}${cli === expected ? "" : ` (expected ${expected})`}`,
+    )
 
     /**
      * A readme, and a non-empty one.
@@ -178,6 +188,71 @@ console.log(JSON.stringify({
     check("`dispach/client` is the same module", probe.sameModule)
     check("`dispach/wire` carries the event schema", probe.events > 20, `${probe.events} types`)
     check("an error reports its own name", probe.errorName === "DispachError", probe.errorName)
+
+    /**
+     * The types resolve from a clean install, under a strict consumer that checks libraries too.
+     *
+     * `client.d.ts` was `export * from "@dispach/client"` — a package nobody can install — so every
+     * type an embedder imported was unresolved, and VelaCrew wrote an ambient shim (pilot.3). The
+     * declarations are bundled now; this is the check that would have caught it.
+     */
+    writeFileSync(
+        join(work, "types.ts"),
+        `import { createClient, type DispachClient } from "dispach/client"
+import { EVENT_TYPES, type AnyEvent } from "dispach/wire"
+const client: DispachClient = createClient({ baseUrl: "http://127.0.0.1:7420" })
+const first: AnyEvent["type"] | undefined = EVENT_TYPES[0]
+export { client, first }
+`,
+    )
+    const tsc = Bun.spawnSync(
+        [
+            join(ROOT, "node_modules", ".bin", "tsc"),
+            "--noEmit",
+            "--strict",
+            "--skipLibCheck",
+            "false",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+            "--target",
+            "es2022",
+            "--lib",
+            "es2022,dom",
+            "types.ts",
+        ],
+        { cwd: work, stdout: "pipe", stderr: "pipe" },
+    )
+    const said = `${tsc.stdout.toString()}${tsc.stderr.toString()}`.trim().split("\n")[0] ?? ""
+    check("the client and wire types resolve, strictly", tsc.exitCode === 0, said)
+
+    /**
+     * An embedder's install: no terminal UI (VelaCrew #26). `ink` and `react` are optional, so
+     * `--omit=optional` leaves them out, and the client must still load and the bin still answer.
+     */
+    const lean = join(work, "lean")
+    mkdirSync(lean)
+    writeFileSync(join(lean, "package.json"), JSON.stringify({ name: "embedder", type: "module" }))
+    run(
+        "npm",
+        ["install", "--no-audit", "--no-fund", "--omit=optional", join(work, tarball.filename)],
+        lean,
+    )
+    check(
+        "--omit=optional leaves the terminal UI out",
+        !existsSync(join(lean, "node_modules", "ink")) &&
+            !existsSync(join(lean, "node_modules", "react")),
+    )
+    writeFileSync(
+        join(lean, "probe.mjs"),
+        `import { createClient } from "dispach/client"\nconsole.log(typeof createClient)\n`,
+    )
+    check("the client loads without it", run("node", ["probe.mjs"], lean).trim() === "function")
+    check(
+        "the bin answers without it",
+        run(join(lean, "node_modules", ".bin", "dispach"), ["--version"], lean).trim() === expected,
+    )
 } finally {
     rmSync(work, { recursive: true, force: true })
 }

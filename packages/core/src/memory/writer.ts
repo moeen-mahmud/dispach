@@ -218,7 +218,20 @@ export async function appendNote(input: AppendNoteInput): Promise<NoteResult> {
     const line = `\n- **${input.now.toISOString()}**${labels} ${input.text}\n`
 
     await appendFile(input.path, line, "utf8")
+    return await evictToBudget(input)
+}
 
+/**
+ * Move the oldest notes out of the carried file until it fits its budget. What `appendNote` does after
+ * every save, and what an import does after appending a bundle's notes (R11).
+ */
+export async function evictToBudget(input: {
+    readonly path: string
+    readonly name: string
+    readonly budget: number
+    readonly archiveDir: string
+    readonly now: Date
+}): Promise<NoteResult> {
     const raw = await readFile(input.path, "utf8")
     const plan = planEviction(raw, input.budget)
     if (plan.evict.length === 0) {

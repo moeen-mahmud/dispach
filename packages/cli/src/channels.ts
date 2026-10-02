@@ -276,6 +276,8 @@ async function reloadNote(manifestPath: string): Promise<string> {
     switch (reloaded.kind) {
         case "reloaded":
             return `pid ${reloaded.pid} reloaded it — the change is live.`
+        case "pending":
+            return `pid ${reloaded.pid} applies it when its ${reloaded.running} running turn(s) finish.`
         case "busy":
             return `pid ${reloaded.pid} has a turn in flight; \`${BRAND.slug} restart ${agentIdFor(manifestPath)}\` once it finishes.`
         case "failed":

@@ -55,6 +55,13 @@ export interface TurnSender {
     /** A human-facing name, for the prompt's frame and for a listing. Decoration, not identity. */
     readonly name?: string
     readonly kind: SenderKind
+    /**
+     * The conversation this was said in, when it was a room (Phase 27). Stamped by the runtime, never
+     * accepted from a client — the wire schema strips it. Room text is **untrusted** to every agent
+     * that reads it, a human's included: a room is several people's text, and the write gate is what
+     * holds. A mutating call from a room therefore needs a `policy.allow` rule or an approval.
+     */
+    readonly room?: string
 }
 
 /**
@@ -65,7 +72,7 @@ export interface TurnSender {
  * assembled before.
  */
 export function trustOfSender(from: TurnSender | undefined): Trust {
-    return from?.kind === "agent" ? "untrusted" : "trusted"
+    return from?.kind === "agent" || from?.room !== undefined ? "untrusted" : "trusted"
 }
 
 /**
@@ -75,7 +82,9 @@ export function trustOfSender(from: TurnSender | undefined): Trust {
  * naming `agent:ops-bot` — and a name is attacker-supplied in exactly the case that matters.
  */
 export function senderLabel(from: TurnSender): string {
-    return `${from.kind} ${from.id}`
+    return from.room === undefined
+        ? `${from.kind} ${from.id}`
+        : `${from.kind} ${from.id} in room ${from.room}`
 }
 
 /**
@@ -91,4 +100,38 @@ export function frameSenderInput(input: string, from: TurnSender | undefined): s
     if (trustOfSender(from) === "trusted" || from === undefined) return input
     const named = from.name === undefined ? "" : `${from.name}\n`
     return wrapUntrusted(senderLabel(from), `${named}${input}`)
+}
+
+/**
+ * Who a turn acts for, as a tool sees it: the person whose permission an embedder intersects with
+ * the agent's (doc 16 R7).
+ *
+ * **Stamped by the runtime, never read from the model.** It comes from the surface the turn arrived
+ * through: an API sender, or the peer a channel authenticated. Nothing the model writes reaches it,
+ * so an agent told to "act as B" still calls its tools as whoever sent the message. A key bound to
+ * a participant (`KeyScope.participant`) is what stops an API caller claiming someone else.
+ *
+ * `null` when the turn acts for nobody in particular: a schedule, a peer agent, the operator's own
+ * token with no `from`. An embedder tells those apart from a person by the absence, which is why it
+ * is `null` rather than a stand-in value.
+ */
+export interface ActingParticipant {
+    /** The caller's id (`user:018f…`) or `<channel>:<peerId>` (`telegram:12345678`). Opaque here. */
+    readonly id: string
+    /** Decoration for a log line; never an identity. */
+    readonly name?: string
+    /** Which surface vouched for `id`. */
+    readonly via: "api" | "channel"
+    /**
+     * Whose agent is answering, when it is standing in for its owner (Phase 28). `id` stays the real
+     * sender; this names the absent owner the reply is on behalf of. A tool authorises the sender and
+     * reads the owner's scope.
+     */
+    readonly onBehalfOf?: string
+}
+
+/** A user sender acts for themselves; a peer agent acts for nobody, whatever it claims. */
+export function participantOf(from: TurnSender | undefined): ActingParticipant | null {
+    if (from === undefined || from.kind !== "user") return null
+    return { id: from.id, ...(from.name === undefined ? {} : { name: from.name }), via: "api" }
 }

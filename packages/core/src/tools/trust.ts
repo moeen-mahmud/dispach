@@ -86,6 +86,32 @@ export function neutraliseMarkers(body: string): string {
     return body.replace(MARKER_PATTERN, "untrusted-tool-output")
 }
 
+/**
+ * Whether text already carries an untrusted fence.
+ *
+ * Only the opening line is matched. A payload cannot forge one, because `neutraliseMarkers` defangs the
+ * token inside every body it wraps, and a forged one would only make text *less* trusted.
+ */
+export function holdsUntrusted(text: string): boolean {
+    return text.includes(`--- BEGIN ${MARKER} (`)
+}
+
+/**
+ * The id prefix of a stored observation, which also records its trust.
+ *
+ * `artifact_read` is a trusted local tool. Reading untrusted text back through it would therefore
+ * clear the turn's taint, and the write gate with it. Carrying the trust in the id needs no store
+ * column, and the id is derived from the content, so the prefix can't be chosen independently of the
+ * text it names.
+ */
+export function artifactPrefix(trust: Trust): string {
+    return trust === "untrusted" ? "obu" : "obs"
+}
+
+export function artifactTrust(id: string): Trust {
+    return id.startsWith(`${artifactPrefix("untrusted")}_`) ? "untrusted" : "trusted"
+}
+
 export function wrapUntrusted(slug: string, body: string): string {
     const { open, close } = untrustedFence(slug)
     return `${NOTICE}\n${open}\n${neutraliseMarkers(body)}\n${close}`

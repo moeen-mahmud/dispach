@@ -34,7 +34,10 @@
 
 import type { EventBus } from "../events/bus.ts"
 import type { EnvSource } from "../manifest/env.ts"
+import type { MediaProviderFactory } from "../media/provider.ts"
+import type { ModelTransport } from "../model/transport.ts"
 import type { ChannelFactory } from "../runtime/channels.ts"
+import type { Capability } from "../store/store.ts"
 import type { ScriptRunner, ToolProviderFactory } from "../tools/types.ts"
 import type { Middleware } from "./middleware.ts"
 
@@ -95,11 +98,64 @@ export interface Logger {
  * still has to ask for it. That separation is why `plugins: ["@dispach/tools-system"]` does not hand
  * an agent a shell.
  */
+/**
+ * Who called a plugin route, as the server authenticated them. The plugin never sees a credential.
+ *
+ * `operator` is the server's own token, or a server that requires none; `key` is an operator key,
+ * named by its id and label so a plugin can map a key to someone it knows (a peer, for A2A).
+ */
+export type PluginCaller =
+    | { readonly kind: "operator" }
+    | { readonly kind: "key"; readonly keyId: string; readonly label: string }
+    | { readonly kind: "anonymous" }
+
+export interface PluginRouteRequest {
+    readonly request: Request
+    readonly url: URL
+    /** The path below the plugin's mount, always starting with `/`. */
+    readonly path: string
+    readonly caller: PluginCaller
+}
+
+/**
+ * An HTTP route a plugin answers (Phase 30), mounted at `/v1/agents/<agentId>/plugins/<name>/<path>`.
+ *
+ * Bound by the rules every first-party route is: the server authenticates the caller, checks
+ * `capability`, and answers an agent the key does not reach exactly as it answers a missing one — the
+ * plugin is handed a caller that has already passed all three. `open` is a route anybody may call,
+ * which is right for a public description (an Agent Card) and wrong for anything that acts.
+ */
+export interface PluginRoute {
+    readonly method: "GET" | "POST"
+    /** Below the mount; starts with `/`. `"/"` is the mount itself. */
+    readonly path: string
+    readonly capability: Capability | "open"
+    /**
+     * Also answer at this root path (`/.well-known/agent-card.json`) — but only while exactly one hosted
+     * agent declares it, since a root path cannot say which agent it means.
+     */
+    readonly root?: string
+    readonly handler: (request: PluginRouteRequest) => Promise<Response>
+}
+
 export interface PluginContext {
     /** Register a channel transport under the `type` a `channels[]` entry names. */
     defineChannel(id: string, factory: ChannelFactory): void
     /** Register a tool provider under the id `tools.provider` names. */
     defineToolProvider(id: string, factory: ToolProviderFactory): void
+    /**
+     * Register a model transport under the name `model.<role>.api` selects.
+     *
+     * For a wire protocol `chat-completions` does not speak — Bedrock's Converse is the first. The
+     * transport's `create` runs at load and must not touch the network; its first request is the
+     * first model call, after `runtime.ready`.
+     */
+    defineModelTransport(api: string, transport: ModelTransport): void
+    /**
+     * Register a media provider under the name `media.transcription.provider` or
+     * `media.image.provider` selects. `create` runs at load and must not touch the network.
+     */
+    defineMediaProvider(name: string, factory: MediaProviderFactory): void
     /**
      * Supply the runner for skill scripts.
      *
@@ -116,6 +172,12 @@ export interface PluginContext {
      * call first and its result last.
      */
     use(middleware: Middleware): void
+    /**
+     * Answer HTTP under this agent's plugin mount (`PluginRoute`). The plugin's `name` must be a
+     * lowercase slug, because it is a path segment; a second route with the same method and path is a
+     * load failure naming both.
+     */
+    defineRoute(route: PluginRoute): void
 
     /** Validated against `configSchema` when one is declared; `{}` when the entry carried no config. */
     readonly config: unknown

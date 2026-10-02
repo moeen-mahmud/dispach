@@ -125,6 +125,14 @@ export function unmatchedAllows(
  * error anywhere, which is the shape of failure this project cares most about. Leaving it to authors to
  * remember in every phase is leaving a trap in the manifest format.
  */
+/** Entries of one allow list that match nothing in this catalogue. A schedule's `tools.allow` too. */
+export function unmatchedEntries(
+    allow: readonly string[],
+    specs: readonly ToolSpec[],
+): readonly string[] {
+    return allow.filter((entry) => !specs.some((spec) => allowMatches(entry, spec)))
+}
+
 export function allowFor(phases: PhaseMap, phase: string): readonly string[] {
     const config = phases[phase]
     if (config === undefined) return [ALLOW_ALL]

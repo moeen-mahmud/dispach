@@ -42,6 +42,12 @@ import {
 import { hrefFor, type PanelName, placeFrom } from "./lib/deep-link.ts"
 import { type LiveStream, liveStream } from "./lib/live.ts"
 import { initialAnswers, missingAnswers, payloadFor } from "./lib/provision-form.ts"
+import {
+    newConversationKey,
+    OPEN_SESSION,
+    rememberedSession,
+    rememberSession,
+} from "./lib/session.ts"
 import { EMPTY, emptyFor, reduce, type Transcript, withUser } from "./lib/transcript.ts"
 import { Onboarding } from "./onboarding.tsx"
 import {
@@ -438,14 +444,36 @@ function Workspace(props: {
      */
     useEffect(() => {
         if (agent === undefined) return
+        let stored: string | null = null
+        try {
+            stored = sessionStorage.getItem(OPEN_SESSION)
+        } catch {}
+        // A reload reopens the conversation this tab had open (QA C1), and its history lands before
+        // the reattached stream does — the other order would replace rows the stream had written.
+        const key = agentId === undefined ? undefined : rememberedSession(stored, agentId)
         const parked = sessionStorage.getItem(LIVE_TURN)
-        if (parked === null) return
-        setState((previous) => ({ ...previous, running: true }))
-        void follow(parked, agent)
+        let cancelled = false
+        void (async () => {
+            if (key !== undefined) {
+                setSessionKey(key)
+                try {
+                    const messages = await history(props.baseUrl, props.token, agentId ?? "", key)
+                    if (!cancelled) setState({ ...EMPTY, rows: messages })
+                } catch {
+                    // A conversation that no longer exists opens empty, as a new one would.
+                }
+            }
+            if (parked === null || cancelled) return
+            setState((previous) => ({ ...previous, running: true }))
+            void follow(parked, agent)
+        })()
         // The cleanup this never had. Without it, a change of agent left the previous agent's
         // stream writing into a transcript the page had already replaced.
-        return () => liveRef.current.abort()
-    }, [agent, follow])
+        return () => {
+            cancelled = true
+            liveRef.current.abort()
+        }
+    }, [agent, agentId, follow, props.baseUrl, props.token])
 
     useEffect(() => {
         if (agent === undefined) return
@@ -480,11 +508,16 @@ function Workspace(props: {
         setDraft("")
         setError(undefined)
         setState((previous) => withUser(previous, text))
+        // A new conversation gets its own key rather than the server's `api:default` (QA C1).
+        const key =
+            sessionKey ??
+            newConversationKey((count) => crypto.getRandomValues(new Uint8Array(count)))
         try {
-            const handle = await agent.send(text, {
-                ...(sessionKey === undefined ? {} : { sessionKey }),
-            })
-            if (sessionKey === undefined) setSessionKey(handle.sessionKey)
+            const handle = await agent.send(text, { sessionKey: key })
+            if (sessionKey === undefined) {
+                setSessionKey(handle.sessionKey)
+                remember(handle.sessionKey)
+            }
             await follow(handle.turnId, agent)
         } catch (caught) {
             setError(describe(caught))
@@ -505,6 +538,15 @@ function Workspace(props: {
         }
     }
 
+    const remember = (key: string | undefined) => {
+        try {
+            if (key === undefined || agentId === undefined) sessionStorage.removeItem(OPEN_SESSION)
+            else sessionStorage.setItem(OPEN_SESSION, rememberSession(agentId, key))
+        } catch {
+            // Storage refused (a private window): the tab simply forgets, as before.
+        }
+    }
+
     const openSession = async (key: string | undefined) => {
         // Close the live stream *before* replacing the transcript it is writing into. Without this
         // a turn started in one conversation went on appending rows to the next one — the
@@ -512,6 +554,7 @@ function Workspace(props: {
         liveRef.current.abort()
         setPanel("chat")
         setSessionKey(key)
+        remember(key)
         setState(EMPTY)
         setDraft("")
         if (key === undefined || agent === undefined) return
@@ -711,7 +754,7 @@ function Workspace(props: {
                         ? `${path} saved. The manifest was re-serialised, so its comments have moved — worth a look at the diff.`
                         : undefined
                 }
-                return `${path} was written to the manifest and is not in force yet: ${result.pending?.message ?? "the agent could not be replaced"} It takes effect at the next start.`
+                return `${path} was written to the manifest and is not in force yet: ${result.pending?.message ?? "the agent could not be replaced"}`
             }),
         [write],
     )
@@ -1137,16 +1180,17 @@ function Tail(props: { readonly state: Transcript }): React.ReactElement {
     // every render of the whole tree instead of when the transcript actually grew — the recorded
     // `trim` trigger mistake, one component over.
     const depth = props.state.rows.length + props.state.live.length
-    // `depth` is never read inside the body, so the rule offers to delete it — and taking that
-    // offer scrolls once at mount and never again, which lints clean and does nothing. Recorded in
-    // CLAUDE.md for the TUI's `trim` action and true here for the same reason.
-    // biome-ignore lint/correctness/useExhaustiveDependencies: a deliberate trigger dependency
+    // A transcript that grew from nothing is a conversation just opened: it starts at its newest
+    // reply, not at the top (QA C1). Only growth after that respects a reader who scrolled up.
+    const previous = useRef(0)
     useEffect(() => {
         const node = anchor.current
         const box = node?.closest(".scroll")
+        const opened = previous.current === 0
+        previous.current = depth
         if (node === null || box === null || box === undefined) return
         const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40
-        if (atBottom) node.scrollIntoView({ block: "end" })
+        if (opened || atBottom) node.scrollIntoView({ block: "end" })
     }, [depth])
     return <div ref={anchor} />
 }

@@ -16,6 +16,7 @@ import { STAGE_ORDER } from "../src/context/compaction/stages.ts"
 import type { AnyEvent } from "../src/events/types.ts"
 import type { FetchLike } from "../src/model/provider.ts"
 import { Runtime } from "../src/runtime/runtime.ts"
+import type { ToolProviderFactory } from "../src/tools/types.ts"
 import { describe, expect, test } from "./_harness.ts"
 
 const ENV = { MODEL_API_KEY: "test-key" }
@@ -390,5 +391,82 @@ describe("the pressure gauge describes the prompt that was sent", () => {
             expect(data.peak ?? 0).toBeGreaterThan(data.fraction)
             expect(data.fraction).toBeLessThanOrEqual(1)
         }
+    })
+})
+
+describe("a cut observation inside a real turn (pilot.5)", () => {
+    test("the next request names the stored artifact, and the store holds the whole result", async () => {
+        // The far end of `keepFull`: it reaches `executeIntents` through a conditional spread in
+        // `turn.ts`, which TypeScript does not check, so only a request body proves it arrived.
+        const dir = mkdtempSync(join(tmpdir(), "cut-observation-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: test
+model:
+  main:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+context:
+  observationMaxTokens: 100
+  files:
+    - IDENTITY.md
+tools:
+  providers:
+    external: {}
+  pinned:
+    - plan_fetch
+  local:
+    - artifact_read
+limits:
+  maxSteps: 3
+  turnTimeoutMs: 5000
+`,
+        )
+        writeFileSync(join(dir, "IDENTITY.md"), "You are a test fixture.")
+        const plan = `HEAD ${"row ".repeat(400)}MIDDLE-ID-42 ${"row ".repeat(400)}TAIL`
+        const external: ToolProviderFactory = () => ({
+            id: "external",
+            resolve: async (slugs) =>
+                slugs.includes("plan_fetch")
+                    ? [
+                          {
+                              spec: {
+                                  slug: "plan_fetch",
+                                  provider: "external",
+                                  summary: "Fetch the plan.",
+                                  whenToUse: "When the test asks for the plan.",
+                                  whenNotToUse: "For anything else.",
+                                  mutating: false,
+                                  tags: [],
+                                  parameters: { type: "object", properties: {} },
+                              },
+                              handler: () => plan,
+                          },
+                      ]
+                    : [],
+        })
+        const bodies: string[] = []
+        const fetch: FetchLike = async (_url, init) => {
+            bodies.push(String(init?.body ?? ""))
+            const content = bodies.length === 1 ? "ACTION: plan_fetch\nEND" : "Done."
+            return sse([delta(content), "data: [DONE]\n\n"])
+        }
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: ENV,
+            fetch,
+            toolProviders: { external },
+        })
+        await runtime.agent("test")?.send("fetch the plan", { sessionKey: "local:cut000" })
+
+        const match = /artifact_read\(\\"(obu_[^\\]+)\\"\)/.exec(bodies[1] ?? "")
+        expect(match?.[1]).toBeDefined()
+        const stored = await runtime
+            .agent("test")
+            ?.store.artifacts.get("test", "local:cut000", match?.[1] ?? "")
+        expect(stored?.content).toBe(plan)
+        await runtime.stop()
     })
 })

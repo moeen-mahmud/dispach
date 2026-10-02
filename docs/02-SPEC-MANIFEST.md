@@ -139,7 +139,7 @@ server:
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `apiVersion` | `"dispach/v1"` | yes | Refused if unknown. Never silently upgraded. |
-| `id` | string | yes | Slug. Unique within a runtime. Used in session keys and API paths. |
+| `id` | string | yes | Slug. Unique within a runtime. Used in session keys and API paths. May not start with `~`, which keys a shared memory scope (Phase 29). |
 | `name` | string | no | Display only. |
 | `extends` | string | no | Path to a base manifest. Shallow merge, arrays replace. |
 
@@ -150,7 +150,9 @@ Three roles. `main` required; `selector` and `compactor` fall back to `main`.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `id` | string | Sent verbatim as the `model` parameter. |
-| `baseUrl` | string | Must end at the version segment, e.g. `.../v1`. Requests go to `{baseUrl}/chat/completions`, so a URL pasted from a provider's docs **with** that path is refused — by the wizard, by the loader, and by a comment in the generated file. Any OpenAI-compatible endpoint works and there is no provider branch in the transport; `init --preset` carries the ones worth not typing from memory (OpenAI, Anthropic, DeepSeek, OpenRouter, Groq, NVIDIA NIM, Ollama local and hosted), and `custom` is a first-class answer rather than a fight with the nearest preset. |
+| `api` | string | Which transport speaks to the model. **Omitted, `chat-completions`**, so every manifest written before this field existed is unchanged. `bedrock-converse` is AWS Bedrock (Phase 26c). An unknown value refuses the load, naming the registered transports. |
+| `options` | map | Transport settings, checked by that transport at load. `bedrock-converse` takes `region` and an optional `profile`. Never a credential. |
+| `baseUrl` | string | **Required for `chat-completions`** and ignored by a transport that addresses its endpoint another way. Must end at the version segment, e.g. `.../v1`. Requests go to `{baseUrl}/chat/completions`, so a URL pasted from a provider's docs **with** that path is refused — by the wizard, by the loader, and by a comment in the generated file. Any OpenAI-compatible endpoint works and there is no provider branch in the transport; `init --preset` carries the ones worth not typing from memory (OpenAI, Anthropic, DeepSeek, OpenRouter, Groq, NVIDIA NIM, Ollama local and hosted), and `custom` is a first-class answer rather than a fight with the nearest preset. |
 | `apiKeyEnv` | string | **Name of the env var**, never the key itself. A literal key in the manifest fails validation. **Omit it entirely for an endpoint that needs no key** — a local Ollama — and the provider then sends no `authorization` header at all. Absent and empty are different things: absent is a keyless endpoint, and a named variable that is unset fails the load. |
 | `temperature`, `topP` | number | Optional passthrough. |
 | `maxTokens` | number | The cap on what the endpoint may generate. **Omitted from the request entirely when unset** — not derived from `reserveOutput`, which answers a different question. Bounded by `capabilities.maxOutput` and by the window. |
@@ -158,6 +160,7 @@ Three roles. `main` required; `selector` and `compactor` fall back to `main`.
 | `headers` | map | Extra headers. Values may use `${ENV_VAR}`. |
 | `streamUsage` | bool | Ask for token usage in a streamed response. **On by default**; set `false` to stop asking. |
 | `capabilities` | object | Override the shipped registry. See below. |
+| `fallbacks` | list of roles | Tried in order when this role's model fails in a way that is the endpoint's: unreachable, a 5xx, or 408/429 once its retries are spent. Only before the first chunk. **Never on another 4xx, and never on a 403**, which an embedder may use as its budget stop. Each entry is a whole role (`id`, `api`, `baseUrl` or `options`, `apiKeyEnv`), so a fallback can be another provider. The primary's capabilities, dialect and window govern the turn; a smaller fallback is a warning. The answering model is reported in `model.fallback` and billed under its own id (Phase 26c). |
 
 `streamUsage` sends `stream_options: {include_usage: true}`, which is an OpenAI extension rather than
 part of `/chat/completions`, so an endpoint that does not know it may reject the whole request. It was
@@ -183,10 +186,11 @@ capabilities:
   nativeTools: false
   strictSchema: false
   thinking: none          # none | anthropic | openai | deepseek
-  promptCache: none       # none | anthropic | openai
+  promptCache: none       # none | anthropic | openai | bedrock
   parallelToolCalls: false
   contextWindow: 32768
   maxOutput: 4096
+  vision: false           # reads images sent with a message; absent is false (since 0.2.0-pilot.5)
   promptStyle:            # workspace rendering. Every field optional and merged individually
     delimiters: plain     # xml | markdown | plain
     intensity: emphatic   # emphatic | neutral | soft
@@ -302,6 +306,7 @@ case-insensitive and whole-word against the current input. See `07-SPEC-WORKSPAC
 | `policy.onNoApprover` | `deny` | What `ask` means with nobody to ask — a schedule, a pipe, a channel with no approver. |
 | `model.<name>` | — | Beyond `main`, `selector` and `compactor`, any key under `model:` is a **custom role** a schedule may name with `role:`. A role nothing references is warned about, because that is also what a misspelled `compactor` looks like. |
 | `untrusted.onMutate` | `refuse` | What to do when untrusted content is in the turn and a mutating tool is requested: `refuse \| confirm \| allow`. A tainted mutating call needs **explicit** authorization — a matching `policy.allow` rule or a live approval; `mode: allow` is the absence of a rule, not one. `confirm` asks when an approver is reachable and refuses when none is. |
+| `eventDetail` | `none` | Since 0.2.0-pilot.5. `redacted` adds the call's arguments to `tool.call` and the first 2 KB of its output to `tool.result`. Values under credential-named keys (`token`, `password`, `apiKey`, …) and the values of secret-named environment variables (`*_KEY`, `*_TOKEN`, …) are replaced with `[redacted]` wherever they appear. That is a floor, not a guarantee: a secret the agent was told in conversation is in neither list. Settable by a person over `PATCH /config`, not by the agent. |
 
 **Configuring a remote provider and pinning nothing from it is a valid, startable agent.** A remote
 provider resolves from an on-disk cache during boot, where hard rule 4 permits no network call, so
@@ -443,6 +448,54 @@ put the security fields out of reach; and two edits are refused whatever the pol
 
 A guard the agent can switch off on request is not a guard. Everything else, including `onMutate:
 confirm`, is settable.
+
+### The `mcp` provider
+
+Tools from remote MCP servers over **Streamable HTTP**, from `@dispach/tools-mcp`. Registered by the
+`dispach` binary and the container, so a manifest needs no `plugins:` entry.
+
+```yaml
+tools:
+  providers:
+    mcp:
+      servers:
+        huly:
+          url: http://127.0.0.1:3000/mcp
+          headersEnv: { Authorization: HULY_MCP_AUTH }   # header → env var NAME, never a value
+          participantHeader: X-Acting-Participant        # the person the turn acts for
+          policyArgs: { invoke_tool: toolName }          # what a policy rule matches, per tool
+          timeoutMs: 30000                                # default
+  pinned: [huly__search_tools, huly__get_tool_schema, huly__invoke_tool]
+  policy:
+    deny: ["huly__invoke_tool(delete_*)"]
+```
+
+| Field | Notes |
+| --- | --- |
+| `servers.<name>` | Lowercase letters, digits and hyphens. It prefixes every tool: `<name>__<tool>`, the separator being two underscores because a native tool name may not contain a dot. |
+| `url` | `http` or `https`. A URL carrying a credential is refused; put it in `headersEnv`. stdio is not supported: give the server an HTTP front. |
+| `headersEnv` | Header name → the variable holding its value, from the environment the agent loaded with. A missing variable fails the call that needs it, naming the variable. |
+| `participantHeader` | Sent with every call as the turn's acting participant id, and absent for a schedule, a peer agent or the operator, which is how the server tells the two apart. |
+| `policyArgs` | Tool name → the argument a `tools.policy` rule matches. For a proxy tool (`invoke_tool(toolName, arguments)`) this is the inner tool's name, so a rule can reach the call the proxy would make. |
+
+Tools are **pinned by name** like every other provider's, never exposed wholesale, so a server adding
+a tool changes nothing until a manifest pins it. A tool is **mutating unless the server annotates it
+`readOnlyHint: true`**, and its output is **untrusted**, so the write gate and the fence apply. Boot
+resolves from `.dispach/mcp.cache.json` and contacts no server, so a server that is down cannot hold
+`runtime.ready`; `tools --warm` fills a cold cache, and the post-ready refresh keeps it current. A
+server's refusal (`isError`) reaches the model as a failed call carrying the server's own words.
+
+**Configured through settings, not `init`.** `tools.providers` and `tools.pinned` are settings on the
+TUI editor, the web app and `PATCH /v1/agents/:id/config`. A value the provider refuses (a malformed
+server, a credential in a URL) is refused **before** it is written, with the provider's own error.
+Adding a server and pinning its tools needs no `tools --warm`: the agent loads without them, the
+post-ready refresh fetches them, and the agent reloads itself once to pick them up (`agent.reloaded`).
+
+**A proxy tool is only as narrow as the server makes it.** Measured on `@firfi/huly-mcp` 0.52.6: in
+its default proxy mode `TOOLS=list_issues` adds `list_issues` to the listing and **does not stop**
+`invoke_tool` dispatching `delete_issue`. Only `HULY_TOOL_MODE=native` with `TOOLS` enforces the
+list (`Unknown tool: delete_issue`, and no `invoke_tool` at all). With proxy mode, a `policy.deny`
+rule on `invoke_tool` is the guard.
 
 ### Tools that exist and were not enabled
 
@@ -590,6 +643,15 @@ carried, and one from June is found by searching. Nothing is deleted at either s
 | `budget` | 2000 | Total tokens across injected passages. Outside the workspace cap — this tier is retrieved, not carried. |
 | `includeHistory` | true | Index the person's messages and clean agent replies as well as the notes, under `session:<key>`. Never tool observations, runtime-authored messages, or tainted assistant prose. |
 
+**Shared scopes (Phase 29) need no field.** Beside its own memory — everything above, which is the
+agent's *private* scope — an agent recalls the team's shared scopes: its owner's (`owner:<participant>`,
+from the agent's assignment), the `space`, and each `project:<id>` it belongs to. They are written over
+`/v1/memory/notes` (`04-SPEC-WIRE.md`), recalled with the same `maxActive`, `threshold` and `budget`,
+and framed in slot 10 as shared memory. What a turn reads depends on where it came from: a stand-in
+reads its owner's scope and the space and never private; a room turn reads shared scopes only; the
+agent's DM with its owner, and every other turn, read everything. A turn that may not read private
+memory also goes without the `volatile` tier, since that tier is private memory too.
+
 **`maxActive` and `budget` were raised from 3 and 600 when `includeHistory` was implemented**, and the
 change was required rather than generous. Those numbers were sized for note bullets, which are one
 line. A conversation exchange is a question plus a reply, each capped at 600 characters, so a full one
@@ -706,6 +768,86 @@ person's by definition — the same rule that floors `writeRoots`. A `config_set
 `tokenEnv` reports that the agent will not start until that variable is set in the `.env`, which only
 a person can write.
 
+#### `teams` — Microsoft Teams, from `@dispach/channel-teams`
+
+```yaml
+channels:
+  - type: teams
+    id: teams
+    appId: 00000000-0000-0000-0000-000000000000    # the Azure Bot's Microsoft App ID (not a secret)
+    passwordEnv: TEAMS_APP_PASSWORD                # its client secret, by env var name (default)
+    tenantId: 11111111-1111-1111-1111-111111111111  # single-tenant bots; also drops other tenants
+    allowFrom: ["*"]                               # or Entra object ids
+```
+
+Webhook only: register the bot's messaging endpoint as `https://<host>/v1/channels/<id>/webhook/<agent>`.
+Every activity's Bot Framework JWT is verified (issuer, audience = `appId`, lifetime, the key's
+channel endorsement, and the signed `serviceUrl` the reply goes to) before a word of it is read.
+The agent answers every message in a personal chat and, in a group chat or a channel, only when it
+is **@mentioned**, replying in that thread, which is its own session. The sender is their Entra
+object id, the handle `allowFrom` matches and the acting participant (`teams:<id>`). Where each
+conversation's replies go is kept beside the agent, so a schedule can deliver to a chat that has
+messaged the bot at least once.
+
+#### `slack` — Slack, from `@dispach/channel-slack`
+
+```yaml
+channels:
+  - type: slack
+    id: slack
+    appTokenEnv: SLACK_APP_TOKEN   # xapp-…, scope connections:write (default name)
+    botTokenEnv: SLACK_BOT_TOKEN   # xoxb-…, scope chat:write (default name)
+    allowFrom: ["*"]               # or member ids (U…)
+```
+
+Socket Mode: the app-level token opens a WebSocket that Slack pushes events down, so no public
+endpoint is needed. Enable Socket Mode on the app and subscribe to the bot events `message.im` and
+`app_mention`. The agent answers every direct message and, in a channel or group DM, only when
+**@mentioned**, replying in that thread, which is its own session (`slack:<channel>:<thread ts>`).
+The sender is their member id, the handle `allowFrom` matches and the acting participant
+(`slack:<id>`). Replies go through `chat.postMessage` as a `markdown` block, so the model's markdown
+renders as written. A token in the wrong slot (`xoxb-` where `xapp-` belongs) is refused at load.
+
+### `media`
+
+```yaml
+media:
+  transcription:                 # voice notes on channels become text before the turn
+    provider: openai             # openai (any /audio/transcriptions endpoint) | aws (media-aws)
+    model: whisper-1
+    baseUrl: https://api.openai.com/v1
+    apiKeyEnv: OPENAI_API_KEY    # a variable name, never a key
+    timeoutMs: 60000             # hard: download and transcription together
+    maxBytes: 26214400           # refused before downloading when the channel reports a size
+  image:                         # declaring it registers the image_generate tool
+    provider: aws
+    model: amazon.nova-canvas-v1:0
+    options: { region: eu-west-1 }
+    size: 1024x1024
+    timeoutMs: 120000
+```
+
+Both sections are optional and each names its own provider, so voice can go to one backend and
+images to another. `aws` takes `options: {region, profile?, languageCode?, sampleRate?}` and the
+default AWS credential chain; Transcribe streaming reads OGG/Opus (Telegram, WhatsApp) and FLAC, so
+Slack's WebM clips and Teams' M4A memos need `openai`.
+
+**A voice note** is transcribed after `allowFrom` and before the turn, framed for the model as
+`[Voice note, transcribed]` and followed by any caption. If no transcription is configured, the
+download or the provider fails, or the deadline passes, the sender gets a short reply saying so and
+`agent.channel.error` carries the cause and its hint. No turn runs. A provider that never answers is
+abandoned at `timeoutMs`, so the conversation is never stuck behind it.
+
+**`image_generate`** takes one argument, `prompt`, saves a PNG under the agent's `media/` and attaches
+it to the reply: Telegram, WhatsApp and Slack send it after the text; on Teams (which shows only
+images at a URL it can fetch) and on any channel without attachments, the reply names the file.
+`turn.end` lists it for an API client. It is `mutating`, so it serialises and is never retried.
+
+Each call is a usage row: `images` or `audioSeconds` in `/v1/usage`, and a `media.result` event with
+its `callId`. `media` is a setting like `channels`: `config_set`, the `config` command, the settings
+editor and `PATCH /v1/agents/:id/config` all write it, and a provider that does not exist is refused
+before anything is written. `init` does not ask about it.
+
 ### `delivery`
 
 ```yaml
@@ -731,6 +873,21 @@ API-initiated turns.
 | `enabled` | no | Default true. Disabled schedules are listed by default. |
 | `timezone` | no | IANA name. Defaults to `TZ` then UTC. Applies to `cron` only: `every` is interval-anchored and does not participate in DST. |
 | `role` | no | A model role from `model:` to run this turn on instead of `main`. Omit for `main`. |
+| `tools.allow` | no | Since 0.2.0-pilot.5. The agent's own tools this run may use, in the phase grammar: a slug, `tag:<name>`, or `*`. It narrows the catalogue the run's model is shown; a skill's scripts and a turn's own tools still apply. An entry naming nothing the agent has is refused (`schedule_tool_unknown`), at load for a manifest schedule and at write for an API one. |
+| `timeoutMs` | no | Since 0.2.0-pilot.5. This run's turn timeout. Capped by `limits.turnTimeoutMs`: a schedule may lower it, never raise it, since the agent can write its own schedules. A run that runs out ends `turn_timeout`. |
+| `maxSteps` | no | Since 0.2.0-pilot.5. This run's step cap, capped by `limits.maxSteps` the same way. |
+
+**A run that does not finish is recorded as an error.** Since 0.2.0-pilot.5 a run whose turn ends
+`timeout`, `max_steps`, `no_progress` or `error` sets the schedule's `lastStatus` to `error` and
+emits `schedule.error` with the turn's own code (`turn_timeout`, `turn_max_steps`, …). Whatever text
+the turn produced is still delivered first. Before, such a run was recorded `ok`.
+
+**A recurring schedule fires a little after its time, on purpose.** `cron` and `every` carry a fixed
+offset of up to a tenth of their interval, capped at 15 minutes: a daily `0 8 * * *` fires somewhere
+between 08:00 and 08:15, the same minute every day, and a `15m` moves by at most 90 seconds. It is
+derived from the schedule's `id` (decision 9.10), so it never moves between runs or restarts, and
+`dispach schedules` shows the real next run. It keeps a fleet of agents from all calling the model
+at 08:00:00. An `at` carries none, because a person who wrote an instant meant that instant.
 
 **Timing.** `cron` is wall-clock-anchored and `every` is interval-anchored. On a DST spring-forward a
 `cron` occurrence whose local time does not exist is **skipped entirely** — a daily 02:15 does not
@@ -799,6 +956,8 @@ Load order is manifest order; middleware composes outermost-first. A plugin whos
 | `toolTimeoutMs` | 120000 | Per tool execution. |
 | `maxParallelTools` | 4 | Read-only tools only; mutating tools always serialise. |
 | `maxConcurrentTurns` | unlimited | Turns of this agent running at once, across sessions. Over it a new turn is **refused, not queued**: `429 agent_at_capacity` over HTTP, a short reply on a channel, an error on a schedule run. Nothing is recorded for a refused turn. Not settable by `config_set` — an agent cannot raise its own cap. |
+| `maxHops` | 4 | In a room, how many agent replies deep a message may be and still make this agent answer. A human's message is hop 0 and each agent reply one more; past it the agent reads the message and does not answer, and `conversation.skipped` says why. The guard against agents replying to each other forever — a count, not a check on names. |
+| `reloadHoldMs` | 30000 | While a reload waits for running turns, how long new turns keep running on the old settings before they wait for the swap and start on the new ones. The bound that stops a busy agent postponing a reload forever; `0` holds new turns at once. Running turns always finish on the settings they started with. See `POST /v1/agents/:id/reload`. |
 | `tokens` | unlimited | `{ max, windowMs }`: prompt + output tokens across every metered model call (compactor included) in a rolling window. Checked when a turn **starts**, so a running turn is never cut off and the overshoot is at most one turn. Over it: `429 agent_token_budget_exhausted`, same paths as above. Not settable by `config_set`. |
 
 ### `server`
@@ -808,7 +967,7 @@ Load order is manifest order; middleware composes outermost-first. A plugin whos
 | `enabled` | false | Library use needs no server, so the **schema** default is off. **`init` writes `true`** since 0.1.2 — an always-on server is the product and the TUI and web UI are views onto it, so it stopped being a question; `--server none` is the opt-out. The two defaults answer different questions: this one is "what does an embedder get when the block is absent", and that one is "what does a generated agent get". |
 | `port` | 7420 | |
 | `host` | `127.0.0.1` | Binds loopback by default. Public binding is explicit. |
-| `tokenEnv` | `DISPACH_API_TOKEN` | Bearer token env var name. Server refuses to start on a non-loopback host without a token. |
+| `tokenEnv` | `DISPACH_API_TOKEN` | Bearer token env var name. Server refuses to start on a non-loopback host without a token. For an agent in the sandbox, the token is the sandbox's, in `agents/.api-token`: one host serves every agent there. `init` writes the same value into each `.env`, an exported variable still wins, and on upgrade the file takes the token the host was already using. |
 | `allowedOrigins` | `[]` | Origins a browser may call from, written in full (`https://app.example.com`). **No wildcard.** Only widens what is already allowed. |
 | `allowedHosts` | `[]` | Extra `Host` values a **loopback** bind will answer to. Ignored on a public bind. |
 
@@ -827,6 +986,39 @@ it was never given access to, and the browser cannot hide the name it resolved. 
 **before** authentication, because `POST /v1/channels/…` needs no credential and changes state.
 
 ---
+
+### `standIn` and `delegation` (Phase 28)
+
+```yaml
+standIn:
+  enabled: true           # answer for my assigned owner in a DM while they are offline
+  escalateAfterMs: 0      # how long an offline owner's silence lasts before I answer; 0 = at once
+
+delegation:
+  offer:                  # what I take on for other members' agents
+    task: Looks things up in the research archive.
+    artifact:
+      type: object
+      properties: { finding: { type: string } }
+      required: [finding]
+  to: "*"                 # or [agent ids]: whom I may delegate to (only agents that offer)
+```
+
+**`standIn`** applies only in a DM between two people, and only to the agent assigned to the absent
+one (`PUT /v1/agents/:id/assignee`). It answers when its owner's pushed presence is `offline` and
+stays so for `escalateAfterMs` after the message; the owner coming online, or writing in the DM,
+withdraws it and the agent only reads the message. Presence nobody pushed reads as online. Each reply
+is marked `onBehalfOf` the owner and its first carries a disclosure the runtime writes, not the model
+(`(Ada's agent, answering while Ada is away.)`). **It never commits**: every mutating call is queued as
+an action for the owner, whatever `policy.allow` says (a `deny` rule still refuses), and runs only
+when they approve it with `POST /v1/actions/:actionId`, its outcome posted in the DM.
+
+**`delegation`** lets a coordinator hand work to another member's agent in the silo. The handoff is
+the team one — `handoff(member, task)`, a fresh session, a typed artifact through `submit_artifact`,
+the same depth limit — resolved among agents that declare an `offer` and match `to`. The delegate's
+turn acts for the person who asked the coordinator, so they stay accountable. A cycle across members
+(`A` offers to `B`, `B` to `A`) is refused at load. Targets are fixed when the coordinator loads; an
+agent adopted later is reachable after the coordinator reloads.
 
 ### `team`
 

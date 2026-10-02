@@ -343,6 +343,37 @@ function coerce(args: Record<string, unknown>) {
 }
 
 describe("coercion", () => {
+    test("a list of objects keeps its objects (pilot.3)", () => {
+        // Items were stringified before their own schema was checked, so a native call passing a
+        // list of objects failed coercion, then its repair, and the turn ended `tool_repair_failed`.
+        const BOARD = spec({
+            slug: "update_board",
+            mutating: true,
+            parameters: {
+                type: "object",
+                properties: {
+                    ops: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: { id: { type: "string" }, status: { type: "string" } },
+                        },
+                    },
+                },
+                required: ["ops"],
+            },
+        })
+        const ops = [
+            { id: "T-1", status: "done" },
+            { id: "T-2", status: "doing" },
+        ]
+        const result = coerceArgs(BOARD, { ops })
+        expect(result.ok && result.args.ops).toEqual(ops)
+        // A string list still takes native numbers and booleans as text.
+        const mixed = coerce({ to: "a@b.com", labels: [1, true, "x"] })
+        expect(mixed.ok && mixed.args.labels).toEqual(["1", "true", "x"])
+    })
+
     test("matches a field name written in another case or separator", () => {
         const result = coerce({ To: "a@b.com" })
         expect(result.ok).toBe(true)
@@ -562,6 +593,38 @@ async function runTools(
 }
 
 describe("execution", () => {
+    test("a path rule sees the normalised path, so ../ cannot walk past it (pilot.4)", async () => {
+        const read = tool(
+            {
+                slug: "file_read",
+                mutating: false,
+                policyArg: "path",
+                policyArgIsPath: true,
+                parameters: {
+                    type: "object",
+                    properties: { path: { type: "string" } },
+                    required: ["path"],
+                },
+            },
+            async () => "the secret",
+        )
+        const registry = await ToolRegistry.create({
+            pinned: ["file_read"],
+            providers: [provider("fake", [read])],
+        })
+        const policy = { ...DEFAULT_POLICY, mode: "allow" as const, deny: ["file_read(.env)"] }
+        for (const path of [".env", "./.env", "workspace/../.env", "a/b/../../.env"]) {
+            const { outcome } = await runTools(registry, [intent("file_read", { path })], {
+                policy,
+            })
+            expect([path, outcome.results[0]?.ok]).toEqual([path, false])
+        }
+        const { outcome } = await runTools(registry, [intent("file_read", { path: "notes.md" })], {
+            policy,
+        })
+        expect(outcome.results[0]?.ok).toBe(true)
+    })
+
     test("a built-in tool runs and its observation is the output", async () => {
         const registry = await ToolRegistry.create({ local: ["now"] })
         const { outcome } = await runTools(registry, [intent("now")])

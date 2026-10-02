@@ -28,9 +28,15 @@
  * enqueuer running twice. See `deliveryKey`.
  */
 
+import { basename } from "node:path"
 import type { ErrorDetail } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
-import type { DeliveryRecord, EnqueueDelivery, OutboxStore } from "../store/store.ts"
+import type {
+    DeliveryAttachment,
+    DeliveryRecord,
+    EnqueueDelivery,
+    OutboxStore,
+} from "../store/store.ts"
 import type { ChannelTransport, OutboundMessage } from "./channel.ts"
 import { splitMessage } from "./split.ts"
 
@@ -127,6 +133,11 @@ export interface EnqueueReply {
     readonly key?: string
     readonly thread?: string
     readonly text: string
+    /**
+     * Files sent after the text, one chunk each, in order. On a channel whose transport declares no
+     * `limits.attachments`, each is named in the text instead — never dropped without a word.
+     */
+    readonly attachments?: readonly DeliveryAttachment[]
 }
 
 export interface DrainReport {
@@ -172,6 +183,13 @@ export class Outbox {
      * collision that makes replay safe would stop happening.
      */
     async enqueue(reply: EnqueueReply): Promise<readonly DeliveryRecord[]> {
+        return (await this.enqueueReport(reply)).records
+    }
+
+    /** `enqueue`, saying whether anything was new — false when every chunk's key already existed. */
+    async enqueueReport(
+        reply: EnqueueReply,
+    ): Promise<{ readonly records: readonly DeliveryRecord[]; readonly inserted: boolean }> {
         const transport = this.#channels.get(reply.channelId)
         if (transport === undefined) {
             throw new Error(
@@ -197,15 +215,33 @@ export class Outbox {
                 : { turnId: reply.turnId }),
         })
 
-        const chunks = splitMessage(reply.text, {
-            maxChars: transport.limits.maxMessageChars,
-            fenceAware: true,
-        })
+        const attachments = reply.attachments ?? []
+        const carried = transport.limits.attachments === true ? attachments : []
+        const named =
+            carried.length === attachments.length
+                ? ""
+                : attachments
+                      .map(
+                          (file) =>
+                              `\n\n(${basename(file.path)} is in my workspace; this channel cannot carry files.)`,
+                      )
+                      .join("")
+        const text = `${reply.text}${named}`.trim()
+        // An empty text with an attachment is an image on its own, not an empty message before it.
+        const chunks: { body: string; attachment?: DeliveryAttachment }[] = [
+            ...(text === ""
+                ? []
+                : splitMessage(text, {
+                      maxChars: transport.limits.maxMessageChars,
+                      fenceAware: true,
+                  }).map((body) => ({ body }))),
+            ...carried.map((attachment) => ({ body: "", attachment })),
+        ]
 
         // The engine's clock, not the store's. `due` is asked with this same clock, and two
         // different ones make readiness depend on wall-clock time rather than on the queue.
         const stampedAt = new Date(this.#now()).toISOString()
-        const deliveries: EnqueueDelivery[] = chunks.map((body, index) => ({
+        const deliveries: EnqueueDelivery[] = chunks.map(({ body, attachment }, index) => ({
             agentId: reply.agentId,
             nextAttemptAt: stampedAt,
             dedupeKey: deliveryKey(groupKey, index),
@@ -218,10 +254,14 @@ export class Outbox {
             chunkIndex: index,
             chunkTotal: chunks.length,
             body,
+            ...(attachment === undefined ? {} : { attachment }),
         }))
 
         const results = await this.#store.enqueue(deliveries)
-        return results.map((result) => result.record)
+        return {
+            records: results.map((result) => result.record),
+            inserted: results.some((result) => result.inserted),
+        }
     }
 
     /**
@@ -351,6 +391,7 @@ export class Outbox {
             idempotencyKey: row.dedupeKey,
             chunkIndex: row.chunkIndex,
             chunkTotal: row.chunkTotal,
+            ...(row.attachment === undefined ? {} : { attachment: row.attachment }),
         }
 
         const controller = new AbortController()

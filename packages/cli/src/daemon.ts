@@ -51,7 +51,7 @@ import {
     serverLabel,
     THROTTLE_SECONDS,
 } from "#lib/launchd"
-import { liveHosts } from "#lib/lifecycle"
+import { HOST_LEASE, liveHosts } from "#lib/lifecycle"
 import { type FollowIO, followLogs } from "#lib/log-follow"
 import { bytes, indent, keyValue, tildify } from "#lib/render"
 import { listAgents, logPaths, sandboxRoot, serverLogPaths, storePath } from "#lib/sandbox"
@@ -180,11 +180,13 @@ async function serverInstallAction(
         ...serverFindings({
             binary,
             retiring,
-            servedElsewhere: (await liveHosts(options.store)).map((lease) => ({
-                agentId: lease.agentId,
-                pid: lease.pid,
-                mode: lease.mode,
-            })),
+            servedElsewhere: (await liveHosts(options.store))
+                .filter((lease) => lease.agentId !== HOST_LEASE)
+                .map((lease) => ({
+                    agentId: lease.agentId,
+                    pid: lease.pid,
+                    mode: lease.mode,
+                })),
         }),
         /**
          * Plus each agent's own, which is how "per-agent findings stay per-agent" survives the
@@ -472,7 +474,10 @@ async function statusAction(
     // switched-off list below, so "3 agents, 1 disabled" reads as one thought.
     const hosted =
         options.manifestPath === undefined && hosts.length > 0
-            ? hosts.map((lease) => lease.agentId).sort()
+            ? hosts
+                  .map((lease) => lease.agentId)
+                  .filter((id) => id !== HOST_LEASE)
+                  .sort()
             : []
     /**
      * Agents that are switched off, which no other source here can see.

@@ -10,7 +10,7 @@ import { expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { setInSource, toolContext } from "@dispach/core"
+import { ConfigError, setInSource, type ToolProviderFactory, toolContext } from "@dispach/core"
 import {
     CONFIG_READ_SPEC,
     CONFIG_SET_SPEC,
@@ -545,4 +545,78 @@ test("a schedule the runtime would refuse is refused at the edit, not at the nex
             toolContext({}),
         ),
     ).rejects.toThrow(/not a channel id on this agent/)
+})
+
+test("a tools.providers value the provider refuses is refused before it is written, in the provider's words", async () => {
+    // The agent's editor gets the same check as the person's (decision 14.24). Without the factories
+    // it wrote a credential-bearing URL into the manifest and the next load dropped the provider.
+    const dir = mkdtempSync(join(tmpdir(), "config-test-"))
+    const file = join(dir, "agent.yaml")
+    writeFileSync(file, MANIFEST)
+    const strict: ToolProviderFactory = (context) => {
+        if (String((context.config as { url?: unknown }).url ?? "").includes("@")) {
+            throw new ConfigError({
+                code: "fake_config_invalid",
+                message: "The url carries a credential.",
+                hint: "Name an env var in headersEnv instead.",
+            })
+        }
+        return { id: "fake", resolve: async () => [] }
+    }
+    const set = configSetHandler({ agentDir: dir, file, providers: { fake: strict } })
+    const before = readFileSync(file, "utf8")
+    let message = ""
+    try {
+        await set(
+            { path: "tools.providers", value: '{"fake": {"url": "http://u:p@host/mcp"}}' },
+            toolContext({}),
+        )
+    } catch (error) {
+        message = (error as Error).message
+    }
+    expect(message).toContain("The url carries a credential.")
+    expect(message).toContain("headersEnv")
+    expect(readFileSync(file, "utf8")).toBe(before)
+})
+
+test("through a real runtime, config_set is handed the runtime's providers and uses them", async () => {
+    // The table crosses three hand-built objects on its way here (the provider context, the
+    // provider's options, the config tool's options), and a field dropped by any of them type-checks.
+    // So the assertion is at the far end: the tool the agent would actually call.
+    const { Runtime, BRAND } = await import("@dispach/core")
+    const { systemFromConfig } = await import("../src/index.ts")
+    const dir = mkdtempSync(join(tmpdir(), "config-runtime-"))
+    const file = join(dir, "agent.yaml")
+    writeFileSync(
+        file,
+        `apiVersion: ${BRAND.apiVersion}\nid: cfg\nmodel:\n  main:\n    id: m\n    baseUrl: http://127.0.0.1:9/v1\ntools:\n  providers:\n    system: {}\n  pinned: [config_set]\n`,
+    )
+    const strict: ToolProviderFactory = (context) => {
+        if (String((context.config as { url?: unknown }).url ?? "").includes("@")) {
+            throw new ConfigError({
+                code: "fake_config_invalid",
+                message: "Refused by fake.",
+                hint: "h",
+            })
+        }
+        return { id: "fake", resolve: async () => [] }
+    }
+    const runtime = await Runtime.create({
+        agents: [file],
+        env: {},
+        store: ":memory:",
+        toolProviders: { system: systemFromConfig, fake: strict },
+    })
+    const tool = runtime.agent("cfg").tools.resolve("config_set")
+    let message = ""
+    try {
+        await tool.handler(
+            { path: "tools.providers", value: '{"system": {}, "fake": {"url": "http://u:p@h"}}' },
+            toolContext({ agentId: "cfg", dir }),
+        )
+    } catch (error) {
+        message = (error as Error).message
+    }
+    await runtime.stop()
+    expect(message).toContain("Refused by fake.")
 })

@@ -33,7 +33,7 @@ function workspace(): string {
         `export default {
   name: "metrics",
   version: "0.2.0",
-  dispachApi: "^0.1",
+  dispachApi: "^0.2",
   setup(ctx) {
     ctx.defineToolProvider("metrics", () => ({
       id: "metrics",
@@ -103,5 +103,45 @@ describe("a provider id that only a plugin supplies", () => {
         })
         expect(runtime.plugins.get("validateplugins")?.[0]?.name).toBe("metrics")
         await runtime.stop()
+    })
+})
+
+describe("a model transport nothing registers", () => {
+    test("validate refuses it, as the runtime does", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "validate-transport-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: validatetransport
+model:
+  main:
+    id: some.model-v1:0
+    api: nobody-speaks-this
+`,
+        )
+        const written: string[] = []
+        const original = process.stdout.write.bind(process.stdout)
+        const originalErr = process.stderr.write.bind(process.stderr)
+        // biome-ignore lint/suspicious/noExplicitAny: capturing output for one call
+        ;(process.stdout as any).write = (chunk: string) => {
+            written.push(String(chunk))
+            return true
+        }
+        // biome-ignore lint/suspicious/noExplicitAny: capturing output for one call
+        ;(process.stderr as any).write = (chunk: string) => {
+            written.push(String(chunk))
+            return true
+        }
+        let code: number
+        try {
+            code = await validateCommand({ manifestPath: join(dir, "agent.yaml"), json: true })
+        } finally {
+            // biome-ignore lint/suspicious/noExplicitAny: restoring
+            ;(process.stdout as any).write = original
+            // biome-ignore lint/suspicious/noExplicitAny: restoring
+            ;(process.stderr as any).write = originalErr
+        }
+        expect(code).not.toBe(0)
+        expect(written.join("")).toContain("model_transport_unknown")
     })
 })

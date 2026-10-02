@@ -24,7 +24,14 @@
 import { Runtime } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MEDIA_PROVIDERS,
+    MODEL_TRANSPORTS,
+    scriptRunner,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { keyValue } from "#lib/render"
 import { pluginRoot, storePath } from "#lib/sandbox"
 import type { MemoryOptions } from "#lib/schema"
@@ -38,6 +45,8 @@ export async function memoryCommand(options: MemoryOptions): Promise<number> {
         // The sandbox store — the same one `run` writes to, or this searches an index nothing built.
         store: options.store ?? storePath(),
         toolProviders: TOOL_PROVIDERS,
+        modelTransports: MODEL_TRANSPORTS,
+        mediaProviders: MEDIA_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
         pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),
@@ -68,6 +77,11 @@ export async function memoryCommand(options: MemoryOptions): Promise<number> {
                             report.sessions.length === 0
                                 ? "none indexed — memory.includeHistory is off, or there are no sessions yet"
                                 : String(report.sessions.length),
+                    },
+                    // Shared scopes are the team's, rebuilt from their notes beside this agent's own.
+                    {
+                        label: "shared scopes",
+                        value: report.scopes.length === 0 ? "none" : report.scopes.join(", "),
                     },
                     {
                         label: "dropped",

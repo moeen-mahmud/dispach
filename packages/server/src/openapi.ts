@@ -37,12 +37,26 @@ import { VERSION } from "@dispach/core"
 import { z } from "zod"
 import {
     ApprovalBody,
+    AssigneeBody,
+    ConversationBody,
+    ConversationMessageBody,
+    DecisionBody,
+    DeliveryBody,
+    ImportBody,
     KeyBody,
+    MembersBody,
     MessageBody,
+    NoteBody,
+    ParticipantBody,
     PhaseBody,
+    PresenceBody,
+    ProjectBody,
     ProvisionBody,
     SecretsBody,
+    SpaceWriterBody,
     StopBody,
+    ToolsRefreshBody,
+    VarsBody,
     WebhookBody,
 } from "./wire-schemas.ts"
 
@@ -78,6 +92,53 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         summary: "Every agent this server knows about, hosted or switched off.",
     },
     "GET /v1/agents/:id": { summary: "One agent, with its dialect, window, counts and warnings." },
+    "GET /v1/agents/:id/export": {
+        summary:
+            "A slice of the agent as a JSON bundle: its carried memory file, memory archive and knowledge. Never the manifest, secrets or skills.",
+    },
+    "POST /v1/agents/:id/import": {
+        summary:
+            "Merge a bundle into the agent: memory note by note, knowledge kept or overwritten. Reloads when the carried file or knowledge changed, and restores everything if that reload refuses.",
+        body: ImportBody,
+        statuses: [
+            {
+                code: 400,
+                when: "a path a bundle cannot carry, or a bundle the agent would not load",
+            },
+        ],
+    },
+    "PATCH /v1/agents/:id/vars": {
+        summary:
+            "Apply changed template variables: re-render the files nobody edited since they were rendered, then reload.",
+        body: VarsBody,
+        statuses: [
+            {
+                code: 202,
+                when: "files changed and a turn is running: the reload lands when it ends",
+            },
+            {
+                code: 400,
+                when: "a secret or undeclared variable, or a result the agent would not load (every file is put back)",
+            },
+            { code: 409, when: "the agent was not made from a template on 0.2.0-pilot.5 or later" },
+            { code: 501, when: "this server has no templates" },
+        ],
+    },
+    "POST /v1/agents/:id/tools/refresh": {
+        summary:
+            "Fetch the tool providers' catalogues and schemas now, and reload the agent only if what it serves changed.",
+        body: ToolsRefreshBody,
+        statuses: [
+            {
+                code: 202,
+                when: "something changed and a turn is running: the reload lands when it ends",
+            },
+            {
+                code: 400,
+                when: "a provider the agent does not have, or a reload the agent refuses",
+            },
+        ],
+    },
     "POST /v1/agents/:id/reload": {
         summary: "Re-read the manifest by replacing the agent with a new instance.",
         statuses: [
@@ -109,6 +170,98 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             },
         ],
     },
+    "POST /v1/participants": {
+        summary: "Register a human participant under the embedder's own id. No account is stored.",
+        body: ParticipantBody,
+        statuses: [{ code: 201, when: "registered, or updated if the id existed" }],
+    },
+    "GET /v1/participants": { summary: "The registered human participants." },
+    "DELETE /v1/participants/:participantId": {
+        summary: "Remove a participant and their conversation memberships.",
+    },
+    "POST /v1/conversations": {
+        summary: "Create a room or a DM among participants and agents (agent:<id>).",
+        body: ConversationBody,
+        statuses: [
+            { code: 201, when: "created" },
+            { code: 403, when: "a participant-bound key creating a conversation it is not in" },
+        ],
+    },
+    "GET /v1/conversations": { summary: "The conversations this credential can see." },
+    "GET /v1/conversations/:conversationId": { summary: "One conversation and its members." },
+    "PATCH /v1/conversations/:conversationId/members": {
+        summary: "Add or remove members of a room.",
+        body: MembersBody,
+    },
+    "POST /v1/conversations/:conversationId/messages": {
+        summary:
+            "Post a human member's message. In a room only the mentioned agents answer; in a DM the agent always does. Their replies arrive as conversation.message.",
+        body: ConversationMessageBody,
+        statuses: [
+            { code: 202, when: "logged; the turns it starts run behind the response" },
+            { code: 403, when: "a participant-bound key naming another author" },
+        ],
+    },
+    "GET /v1/conversations/:conversationId/messages": {
+        summary: "The conversation's log, oldest first, after a sequence number.",
+    },
+    "PUT /v1/participants/:participantId/presence": {
+        summary:
+            "Push whether a person is there. In a DM between two people, an offline person's agent stands in for them.",
+        body: PresenceBody,
+        statuses: [{ code: 403, when: "a participant-bound key setting someone else's presence" }],
+    },
+    "POST /v1/memory/notes": {
+        summary:
+            "Add a note to a shared memory scope — the space, a person's owner scope, or a project. Agents recall it when a turn is about it.",
+        body: NoteBody,
+        statuses: [
+            { code: 403, when: "this participant may not write that scope" },
+            { code: 404, when: "the scope's owner or project does not exist" },
+        ],
+    },
+    "GET /v1/memory/notes": {
+        summary:
+            "Every note in one shared scope, oldest first. An owner scope is readable by its owner.",
+    },
+    "DELETE /v1/memory/notes/:noteId": {
+        summary: "Remove a note. Whoever may write its scope may remove it.",
+    },
+    "GET /v1/participants/:participantId/memory/reads": {
+        summary:
+            "The person's audit: every time an agent recalled their owner scope for somebody else, stand-ins included.",
+    },
+    "GET /v1/projects": { summary: "Projects, each with the agents that share its memory." },
+    "PUT /v1/projects/:projectId": {
+        summary: "Define a project, or replace which agents share its memory. An admin's act.",
+        body: ProjectBody,
+    },
+    "DELETE /v1/projects/:projectId": {
+        summary: "Remove a project and its notes.",
+    },
+    "PUT /v1/memory/space/writer": {
+        summary:
+            "Name the one non-admin who may write the space. An agent named here saves its memory_write to the space.",
+        body: SpaceWriterBody,
+    },
+    "GET /v1/actions": {
+        summary:
+            "Mutating calls stand-ins queued for their owners. A member-bound key sees its own.",
+    },
+    "POST /v1/actions/:actionId": {
+        summary:
+            "Approve or decline a queued action. Approved, the exact call runs as the owner's agent and the outcome is posted in the DM.",
+        body: DecisionBody,
+        statuses: [
+            { code: 404, when: "no such action, or not this key's to decide" },
+            { code: 409, when: "already decided" },
+        ],
+    },
+    "PUT /v1/agents/:id/assignee": {
+        summary: "Record which member an agent works for. An admin participant's act.",
+        body: AssigneeBody,
+    },
+    "DELETE /v1/agents/:id/assignee": { summary: "Clear an agent's assignment." },
     "GET /v1/webhooks": {
         summary:
             "The subscriptions this credential can see, with their delivery health. Never a secret.",
@@ -148,6 +301,15 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             { code: 501, when: "this server has no credential writer" },
         ],
     },
+    "DELETE /v1/agents/:id": {
+        summary:
+            "Delete an agent for good: off this host, its rows out of the store, its directory off disk. Needs ?confirm=<id>.",
+        statuses: [
+            { code: 400, when: "no ?confirm=<id>" },
+            { code: 409, when: "two sandbox directories declare this id" },
+            { code: 501, when: "this server cannot delete agents" },
+        ],
+    },
     "POST /v1/agents/:id/stop": {
         summary: "Switch an agent off durably and drop it from this host now.",
         body: StopBody,
@@ -166,6 +328,15 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
                 code: 429,
                 when: "over limits.maxConcurrentTurns or limits.tokens; nothing recorded",
             },
+        ],
+    },
+    "POST /v1/agents/:id/deliveries": {
+        summary:
+            "Send exact text on one of the agent's channels, with no turn. It joins that conversation's history as the agent's.",
+        body: DeliveryBody,
+        statuses: [
+            { code: 202, when: "queued, or already queued under this key" },
+            { code: 404, when: "the agent has no running channel with that id" },
         ],
     },
     "POST /v1/agents/:id/turns/:turnId/stop": {

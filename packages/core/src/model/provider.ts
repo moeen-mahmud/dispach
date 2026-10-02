@@ -38,6 +38,23 @@ export interface ToolDefinition {
     readonly parameters: Readonly<Record<string, unknown>>
 }
 
+/**
+ * One block of a model's extended thinking, as the endpoint signed it.
+ *
+ * Anthropic-family models (directly or through Bedrock) require the thinking that led to a tool call
+ * to be sent back, **unaltered and with its signature**, alongside the tool's result; without it the
+ * next step either is refused or reasons from nothing about why it called the tool. A transport that
+ * produces these emits a `thinking_block` chunk when one completes; the loop attaches the step's
+ * blocks to the assistant message that made the call, and a transport replays them. Opaque to
+ * everything in between: the text is not re-rendered and the signature is never inspected.
+ */
+export interface ThinkingBlock {
+    readonly text: string
+    readonly signature?: string
+    /** Encrypted thinking the endpoint would not show, replayed as-is. */
+    readonly redacted?: string
+}
+
 export interface ChatMessage {
     /** `tool` carries an observation answering a specific `toolCalls` entry. Native only. */
     readonly role: "system" | "user" | "assistant" | "tool"
@@ -69,6 +86,36 @@ export interface ChatMessage {
      * prose so an indirect prompt injection cannot be laundered into a clean cross-session passage.
      */
     readonly tainted?: boolean
+    /**
+     * The model's signed thinking before this assistant message's tool calls. Set only within a
+     * turn, only when `capabilities.thinking` is `anthropic`, and never stored: it is replayed to the
+     * transport for the rest of the tool loop and has no meaning after it. `chat-completions` does
+     * not send it.
+     */
+    readonly thinking?: readonly ThinkingBlock[]
+    /**
+     * The cache-stable prefix ends at this message. Harness metadata: a transport with an explicit
+     * cache protocol (Bedrock's `cachePoint`) places a marker after it; `chat-completions` never sends
+     * it. Set by context assembly on the last message of the static slots (breakpoint A) and on the
+     * active skill (breakpoint B) — positions only assembly knows, which is why it travels with the
+     * message rather than being recomputed by each transport.
+     */
+    readonly cacheBreakpoint?: true
+    /**
+     * Images sent with this message (pilot.5, #12). Set only on the current turn's input, never stored:
+     * history keeps a `[image: <ref>]` line in `content` instead, so a later turn neither pays for the
+     * image again nor loses the fact that one was sent. Each transport maps it to its own shape.
+     */
+    readonly images?: readonly ImageInput[]
+}
+
+/** One image, ready for a transport. */
+export interface ImageInput {
+    readonly mediaType: "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    /** Base64, no `data:` prefix. */
+    readonly data: string
+    /** What the stored message says was sent: the workspace path, or `upload` for inline data. */
+    readonly ref: string
 }
 
 export interface ChatRequest {
@@ -123,7 +170,16 @@ export type ChatChunk =
           readonly cachedPromptTokens?: number
           /** Which wire field the figure came from, so a surprising ratio can be traced to its source. */
           readonly cacheSource?: string
+          /** Prompt tokens this call wrote to the cache, when the endpoint says so. Same third state. */
+          readonly cacheWriteTokens?: number
       }
+    /**
+     * Which model answered, when it was not the one requested: a fallback (`model/fallback.ts`)
+     * emits this before its first chunk. Absent, the requested model answered.
+     */
+    | { readonly type: "model"; readonly id: string }
+    /** A signed thinking block, once complete. The `reasoning` deltas still stream beside it. */
+    | { readonly type: "thinking_block"; readonly block: ThinkingBlock }
     | { readonly type: "finish"; readonly reason: string }
 
 export interface ModelProvider {

@@ -133,6 +133,12 @@ export const DeliverSchema = refuse(
 // ─── one schema per body ────────────────────────────────────────────────────────────────
 
 /** `POST /v1/agents/:id/messages` */
+/**
+ * The cap on `runtimeNote`. A note is billed on every step of its turn, and one big enough to need
+ * more is a document, which `images` or a workspace file carry better.
+ */
+export const MAX_NOTE_CHARS = 8000
+
 export const MessageBody = z.object({
     text: refuse(z.string().trim().min(1), {
         code: "message_text_required",
@@ -142,6 +148,31 @@ export const MessageBody = z.object({
     sessionKey: annotate(
         z.string().min(1).optional(),
         "Which conversation this belongs to. Defaults to `api:default`.",
+    ),
+    runtimeNote: refuse(z.string().trim().min(1).max(MAX_NOTE_CHARS).optional(), {
+        code: "message_note_invalid",
+        hint: `Send runtimeNote as non-empty text of at most ${MAX_NOTE_CHARS} characters: the active project, today's date in the person's zone, an attachment's extracted text.`,
+        description:
+            "Your application's note about this message: shown to the model in its own block before the text, labelled as not written by the person, for this turn only. Kept on the turn record (`GET …/turns`), never in history. Refused when `from` is an agent.",
+    }),
+    images: refuse(
+        z
+            .array(
+                z
+                    .object({
+                        path: z.string().optional(),
+                        data: z.string().optional(),
+                        mediaType: z.string().optional(),
+                    })
+                    .strict(),
+            )
+            .optional(),
+        {
+            code: "message_images_invalid",
+            hint: 'Send images as [{ "path": "files/…/shot.png" }] (relative to the agent\'s directory), or [{ "data": "<base64>", "mediaType": "image/png" }].',
+            description:
+                "Images sent with this message: PNG, JPEG, GIF or WebP, at most five, 3.75 MB each. A path inside the agent's directory, or inline base64 (within the 1 MB body limit). The model receives them on this turn; history keeps an `[image: <path>]` line.",
+        },
     ),
     deliver: DeliverSchema.optional(),
     from: SenderSchema.optional(),
@@ -153,6 +184,59 @@ export const MessageBody = z.object({
         z.boolean().optional(),
         "Include per-token `model.chunk` frames. Off by default — the reader decides.",
     ),
+})
+
+/** `PATCH /v1/agents/:id/vars` */
+export const VarsBody = z.object({
+    vars: refuse(
+        z.record(
+            z.string(),
+            refuse(z.string(), {
+                code: "template_value_invalid",
+                hint: "Template values are one line of text, sent as strings.",
+                description: "One variable's value.",
+            }),
+        ),
+        {
+            code: "vars_required",
+            hint: 'Send { "vars": { "userName": "…" } }: the template variables to change. The rest keep the values the agent was made with.',
+            description:
+                "The template variables to change. Only files nobody has edited since they were rendered are rewritten.",
+        },
+    ),
+})
+
+/** `POST /v1/agents/:id/tools/refresh` */
+export const ToolsRefreshBody = z.object({
+    providers: refuse(z.array(z.string().min(1)).min(1).optional(), {
+        code: "tools_refresh_providers_invalid",
+        hint: 'Name provider ids from the agent\'s tools.providers, e.g. { "providers": ["composio"] }, or send {} to refresh every one.',
+        description: "Which providers to refresh. Omit for all of them.",
+    }),
+})
+
+/** `POST /v1/agents/:id/deliveries` */
+export const DeliveryBody = z.object({
+    channel: refuse(z.string().min(1), {
+        code: "delivery_channel_required",
+        hint: 'Name a channel id from the agent\'s manifest, e.g. { "channel": "tg", ... } — the id, not the type.',
+        description: "The channel id to send on.",
+    }),
+    to: refuse(z.string().min(1), {
+        code: "delivery_recipient_required",
+        hint: "The channel's own address for the conversation: a Telegram chat id, a WhatsApp JID, a Slack channel id. The peer id an inbound message arrived with is always right.",
+        description: "Who to send it to, in the channel's own addressing.",
+    }),
+    text: refuse(z.string().trim().min(1), {
+        code: "delivery_text_required",
+        hint: 'Send { "text": "..." }. An empty message has nothing to deliver.',
+        description: "The exact text to send. No model turn runs.",
+    }),
+    key: refuse(z.string().min(1), {
+        code: "delivery_key_required",
+        hint: "Any string unique to this send, such as your own message id. A retry with the same key is not sent or recorded twice.",
+        description: "Idempotency key: a repeated key is accepted and does nothing.",
+    }),
 })
 
 /** `POST /v1/agents/:id/approvals/:approvalId` */
@@ -186,13 +270,18 @@ export const KeyScopeBody = z.object({
         description: "Session-key prefix. Absent means every session.",
     }),
     can: z
-        .array(z.enum(["read", "chat", "write", "admin"]))
+        .array(z.enum(["read", "chat", "write", "admin", "peer"]))
         .optional()
         .meta({
             code: "key_scope_can_invalid",
-            hint: 'Send { "can": ["chat", "read"] }. The four are read (every GET), chat (send a message, answer an approval, stop a turn), write (schedules, phase, clearing a session) and admin (keys, provisioning, start/stop/reload). Absent means all four; an empty array means none, and is honoured as written.',
-            description: "Capabilities this key may exercise. Absent means all four.",
+            hint: 'Send { "can": ["chat", "read"] }. read (every GET), chat (send a message, answer an approval, stop a turn), write (schedules, phase, clearing a session), admin (keys, provisioning, start/stop/reload), and peer (a plugin route that asks for it — an A2A endpoint — and nothing else). Absent means all five; an empty array means none, and is honoured as written.',
+            description: "Capabilities this key may exercise. Absent means all of them.",
         }),
+    participant: z.string().min(1).optional().meta({
+        code: "key_scope_participant_invalid",
+        hint: 'Send { "participant": "user:018f…" } — the id this key speaks for. Every turn it starts acts for that participant: a from naming anyone else is refused, and an omitted one is filled in. Omit it for a backend that names senders itself.',
+        description: "The participant every turn this key starts acts for. Absent: any sender.",
+    }),
     expiresIn: z.number().int().positive().optional().meta({
         code: "key_scope_expires_invalid",
         hint: 'Send { "expiresIn": 3600 } — whole seconds from now, as a number. Relative rather than an absolute instant, because that would need the caller and this server to agree about the clock; the response reports the absolute expiresAt this server computed.',
@@ -344,6 +433,137 @@ export const ProvisionBody = z.object({
 })
 
 /** `POST /v1/webhooks`. Which types exist is `EVENT_TYPES`'s answer, checked by the route. */
+const participantId = (field: string) =>
+    refuse(z.string().trim().min(1), {
+        code: "participant_id_invalid",
+        hint: 'A participant id as your system knows the person, e.g. "user:018f…". Agents are "agent:<agentId>".',
+        description: `The participant id${field === "" ? "" : ` (${field})`}.`,
+    })
+
+export const ParticipantBody = z.object({
+    id: participantId(""),
+    name: annotate(z.string().min(1).optional(), "A display name, shown to agents beside the id."),
+    role: refuse(z.enum(["admin", "member"]).optional(), {
+        code: "participant_role_invalid",
+        hint: 'Either "admin" (may assign agents to members) or "member". Omitted is "member".',
+        description: 'What the participant may do: "admin" also assigns agents.',
+    }),
+})
+
+export const ConversationBody = z.object({
+    kind: refuse(z.enum(["room", "dm"]), {
+        code: "conversation_kind_invalid",
+        hint: '"dm" is one human and one agent and is always answered; "room" is anyone, and an agent answers only when mentioned.',
+        description: "A room or a direct conversation.",
+    }),
+    members: refuse(z.array(z.string().trim().min(1)).min(1), {
+        code: "conversation_members_required",
+        hint: 'Participant ids: registered humans, and agents as "agent:<agentId>".',
+        description: "Who is in it.",
+    }),
+    title: annotate(
+        z.string().min(1).optional(),
+        "A name for a room, for the embedder's own listing.",
+    ),
+})
+
+export const MembersBody = z.object({
+    add: refuse(z.array(z.string().trim().min(1)).optional(), {
+        code: "conversation_members_required",
+        hint: "Participant ids to add.",
+        description: "Participant ids to add.",
+    }),
+    remove: refuse(z.array(z.string().trim().min(1)).optional(), {
+        code: "conversation_members_required",
+        hint: "Participant ids to remove.",
+        description: "Participant ids to remove.",
+    }),
+})
+
+export const ConversationMessageBody = z.object({
+    text: refuse(z.string().trim().min(1), {
+        code: "message_text_required",
+        hint: 'Send { "text": "…" }.',
+        description: "What was said.",
+    }),
+    mentions: refuse(z.array(z.string().trim().min(1)).optional(), {
+        code: "conversation_mention_unknown",
+        hint: 'Member participant ids this message addresses, e.g. ["agent:crew"]. In a room only a mentioned agent answers.',
+        description: "Members this addresses. In a room, the agents that answer.",
+    }),
+    authorId: refuse(z.string().trim().min(1).optional(), {
+        code: "conversation_author_required",
+        hint: "Who said it. A key bound to a participant fills this in and may name no one else; an unbound key must name the author.",
+        description: "The human member who said it. Filled in from a participant-bound key.",
+    }),
+})
+
+export const AssigneeBody = z.object({ participantId: participantId("assignee") })
+
+export const PresenceBody = z.object({
+    presence: refuse(z.enum(["online", "offline"]), {
+        code: "presence_invalid",
+        hint: 'Send { "presence": "online" } or "offline". It is pushed by you, never inferred; until it is, a person reads as online and no agent stands in for them.',
+        description:
+            "Whether the person is there. Decides whether their agent stands in for them in a DM.",
+    }),
+})
+
+export const NoteBody = z.object({
+    scope: refuse(z.string().trim().min(1), {
+        code: "memory_scope_invalid",
+        hint: 'A shared scope: "space", "owner:<participantId>" or "project:<projectId>".',
+        description:
+            "Where the note goes. `owner:<id>` is written only by that person; `space` by an admin or the designated space writer; a project by an admin.",
+    }),
+    text: refuse(z.string().trim().min(1), {
+        code: "memory_note_empty",
+        hint: 'Send { "scope": "space", "text": "…" } — one or two sentences worth remembering.',
+        description: "The note. Recalled into an agent's prompt when a turn is about it.",
+    }),
+})
+
+export const ProjectBody = z.object({
+    name: annotate(z.string().min(1).optional(), "A display name for the embedder's own listing."),
+    agents: refuse(z.array(z.string().trim().min(1)).optional(), {
+        code: "project_agents_invalid",
+        hint: 'Agent ids, bare ("crew", not "agent:crew"). Given, it replaces the membership; omitted, it is left alone.',
+        description: "The agents that share this project's memory. Replaces the list when given.",
+    }),
+})
+
+export const SpaceWriterBody = z.object({
+    writer: refuse(z.string().trim().min(1), {
+        code: "space_writer_invalid",
+        hint: 'A registered participant id, or "agent:<agentId>" for an agent whose memory_write should go to the space.',
+        description:
+            "The one non-admin who may write the space. An agent named here saves every memory_write to the space, so name one that holds nobody's private context.",
+    }),
+})
+
+export const ImportBody = z.object({
+    bundle: refuse(z.record(z.string(), z.unknown()), {
+        code: "bundle_files_invalid",
+        hint: 'Send { "bundle": <the body GET /v1/agents/:id/export returned> }.',
+        description:
+            "A bundle from GET /v1/agents/:id/export: MEMORY.md, memory/<name>.md and knowledge/<name>.md, nothing else.",
+    }),
+    mode: refuse(z.enum(["skip", "overwrite"]).optional(), {
+        code: "bundle_mode_invalid",
+        hint: 'Either "skip" (keep a knowledge file that exists, the default) or "overwrite". Memory is always merged note by note.',
+        description:
+            "What to do with a knowledge file the agent already has. Memory is merged either way.",
+    }),
+})
+
+export const DecisionBody = z.object({
+    approve: refuse(z.boolean(), {
+        code: "action_decision_required",
+        hint: 'Send { "approve": true } to run the queued call as it was asked, or false to decline it.',
+        description: "Run the queued call (true) or decline it (false).",
+    }),
+})
+
 export const WebhookBody = z.object({
     url: refuse(z.string().min(1), {
         code: "webhook_url_invalid",
@@ -460,7 +680,10 @@ function metaAt(schema: z.ZodType, path: readonly string[]): Partial<Refusal> | 
     for (const key of path) {
         current = descend(current, key)
         if (current === undefined) break
-        best = readRefusal(current) ?? best
+        // The wrapper first: `z.string().optional().meta({...})` puts the refusal on the optional,
+        // and reading only the unwrapped string lost every such code — all four `scope.*` fields of
+        // `POST /v1/keys` answered `request_body_invalid` while the OpenAPI document named theirs.
+        best = readRefusal(current) ?? readRefusal(unwrap(current)) ?? best
     }
     return best
 }
@@ -484,11 +707,11 @@ function readRefusal(schema: z.ZodType | undefined): Partial<Refusal> | undefine
 function descend(schema: z.ZodType | undefined, key: string): z.ZodType | undefined {
     const inner = unwrap(schema)
     const shape = (inner as unknown as { shape?: Record<string, z.ZodType> } | undefined)?.shape
-    if (shape?.[key] !== undefined) return unwrap(shape[key])
+    if (shape?.[key] !== undefined) return shape[key]
     // A record has one value type for every key, so the key itself does not narrow anything.
     const valueType = (inner as unknown as { def?: { valueType?: z.ZodType } } | undefined)?.def
         ?.valueType
-    return valueType === undefined ? undefined : unwrap(valueType)
+    return valueType
 }
 
 /** `.optional()` and friends wrap the type the metadata is on. */

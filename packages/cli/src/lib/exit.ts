@@ -316,4 +316,16 @@ export function installGuards(): void {
     }
     process.on("uncaughtException", crash("uncaught exception"))
     process.on("unhandledRejection", crash("unhandled rejection"))
+
+    // A reader that closed early — `<cli> validate | head -1` — is the reader deciding it has what it
+    // wanted, not this command failing: every write after it raises EPIPE (then ERR_STREAM_DESTROYED)
+    // as an 'error' event, and unhandled that became "uncaught exception: write EPIPE" on stderr and,
+    // under some timings, exit 134. The command's own exit code stands. Anything else on these streams
+    // still goes to the crash path above, loudly.
+    for (const stream of [process.stdout, process.stderr]) {
+        stream.on("error", (error: NodeJS.ErrnoException) => {
+            if (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED") return
+            crash("output error")(error)
+        })
+    }
 }

@@ -75,7 +75,7 @@ export function parseCapabilities(raw: string): readonly Capability[] {
         throw new UsageError({
             code: "credential_usage",
             message: `--can names ${unknown.map((name) => JSON.stringify(name)).join(", ")}, which is not a capability.`,
-            hint: `The four are: ${CAPABILITIES.join(", ")}. read is every GET; chat sends a message, answers an approval and stops a turn; write covers schedules, phase and clearing a session; admin covers credentials, provisioning and start/stop.`,
+            hint: `They are: ${CAPABILITIES.join(", ")}. read is every GET; chat sends a message, answers an approval and stops a turn; write covers schedules, phase and clearing a session; admin covers credentials, provisioning and start/stop; peer reaches only a plugin route that asks for it (an A2A endpoint).`,
         })
     }
     // An empty list is *not* silently promoted to "everything": `--can ""` is a key that may do

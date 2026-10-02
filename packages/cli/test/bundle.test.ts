@@ -21,7 +21,7 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
-import { VERSION } from "@dispach/core"
+import { BRAND, VERSION } from "@dispach/core"
 import { spawnCaptureAsync } from "#lib/spawn"
 
 const ENTRY = resolve(import.meta.dirname, "..", "dist", "index.js")
@@ -102,6 +102,67 @@ describe("the built bundle", () => {
                 timeoutMs: 30_000,
             })
             expect(result.stderr.trim()).toBe("")
+            expect(result.code).toBe(0)
+        }
+    })
+
+    /**
+     * The same claim for AWS Bedrock's SDK, several megabytes that only an agent on
+     * `api: bedrock-converse` needs — and only on its first model call. Every command carries the
+     * transport, so the SDK must be a lazy chunk or every command would pay for it at startup.
+     */
+    test.each([
+        // The service's wire target name: in the SDK, and nowhere in the transport that calls it.
+        ["Bedrock", "AmazonBedrockFrontendService"],
+        // An exception name the SDK writes as a string, so minification keeps it; media-aws never
+        // names it. Transcribe is for voice notes only, so paying for it at startup is pure waste.
+        ["Transcribe", "TranscribeStreamingServiceException"],
+    ])("the %s SDK is behind a dynamic import, and still loads", async (_name, MARKER) => {
+        if (!existsSync(ENTRY)) return
+        const dist = dirname(ENTRY)
+        const read = (file: string) => readFileSync(join(dist, file), "utf8")
+        const statics = (source: string) =>
+            [...source.matchAll(/from\s*"\.\/([^"]+\.js)"/g)].map((match) => match[1] ?? "")
+        const reached = new Set<string>()
+        const queue = ["index.js"]
+        while (queue.length > 0) {
+            const file = queue.pop() ?? ""
+            if (reached.has(file)) continue
+            reached.add(file)
+            queue.push(...statics(read(file)))
+        }
+        expect([...reached].filter((file) => read(file).includes(MARKER))).toEqual([])
+        const lazy = readdirSync(dist).filter(
+            (file) => file.endsWith(".js") && !reached.has(file) && read(file).includes(MARKER),
+        )
+        expect(lazy.length).toBeGreaterThan(0)
+        for (const file of lazy) {
+            const result = await spawnCaptureAsync({
+                command: "node",
+                args: [
+                    "--input-type=module",
+                    "-e",
+                    `await import(${JSON.stringify(join(dist, file))})`,
+                ],
+                timeoutMs: 30_000,
+            })
+            expect(result.stderr.trim()).toBe("")
+            expect(result.code).toBe(0)
+        }
+    })
+
+    test("a reader that closes early is not a crash: no EPIPE on stderr, the command's own exit code", async () => {
+        // `dispach … | head` closes the pipe while the command is still writing. Unhandled, each write
+        // after that raised EPIPE into the crash guard, which printed "uncaught exception: write EPIPE"
+        // and sometimes exited 134. `pipefail` so the exit code is node's, not head's.
+        for (let run = 0; run < 3; run += 1) {
+            const result = await spawnCaptureAsync({
+                command: "bash",
+                args: ["-c", `set -o pipefail; node "${ENTRY}" --help | head -c 1 >/dev/null`],
+                env: { ...process.env, [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1" },
+                timeoutMs: 20_000,
+            })
+            expect(result.stderr).not.toContain("EPIPE")
             expect(result.code).toBe(0)
         }
     })

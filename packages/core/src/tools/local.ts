@@ -21,6 +21,7 @@ import {
 } from "../errors.ts"
 import { PHASE_SET } from "../loop/phases.ts"
 import { appendNote, injectedTokens } from "../memory/writer.ts"
+import { artifactTrust } from "./trust.ts"
 import type { Tool, ToolContext, ToolProvider } from "./types.ts"
 
 export const LOCAL_PROVIDER_ID = "local"
@@ -144,6 +145,13 @@ const memoryWrite: Tool = {
         const stamped = context.now().toISOString()
         const labels = tags.length === 0 ? "" : ` _(${tags.join(", ")})_`
         const line = `\n- **${stamped}**${labels} ${text}\n`
+
+        // The space writer's notes are the team's, and go where the team reads them.
+        if (context.writeNote !== undefined) {
+            return await context.writeNote(
+                tags.length === 0 ? text : `${text} (${tags.join(", ")})`,
+            )
+        }
 
         const target = context.writeTarget
 
@@ -286,6 +294,9 @@ const artifactRead: Tool = {
         // an offset gets it wrong and then reads the same page twice.
         return `${header}\n${slice}\n\n[cut here — ${artifact.content.length - end} characters remain; continue with artifact_read(id, from: ${end})]`
     },
+    // An untrusted observation read back is still untrusted. Without this the read cleared the turn's
+    // taint, and a write after it ran past the gate the original call had closed.
+    trustOf: (args) => artifactTrust(typeof args.id === "string" ? args.id.trim() : ""),
 }
 
 /**
@@ -401,6 +412,7 @@ export function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
         signal: overrides.signal ?? new AbortController().signal,
         deadlineMs: overrides.deadlineMs ?? 120_000,
         now: overrides.now ?? (() => new Date()),
+        actingParticipant: overrides.actingParticipant ?? null,
         ...(overrides.writeTarget === undefined ? {} : { writeTarget: overrides.writeTarget }),
         // Listed explicitly, and it was dropped once by being absent from this literal — the fourth
         // time that has happened in this repo (`apiKeyEnv`, `ChatMessage.toolCalls`,
@@ -410,5 +422,6 @@ export function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
         ...(overrides.readArtifact === undefined ? {} : { readArtifact: overrides.readArtifact }),
         ...(overrides.setPhase === undefined ? {} : { setPhase: overrides.setPhase }),
         ...(overrides.memoryDir === undefined ? {} : { memoryDir: overrides.memoryDir }),
+        ...(overrides.writeNote === undefined ? {} : { writeNote: overrides.writeNote }),
     }
 }

@@ -243,8 +243,9 @@ slot  content                                    pinned  cache          phase
  8    recent message window                        no
  9    workspace `reminder` tier                    yes
 10    retrieved memory passages (k)                no                      6
-11    current input + current task line            yes
-12    last error, if any                           yes
+11    the embedder's note about this message       yes     this turn only  0.2.0
+12    current input + current task line            yes
+13    last error, if any                           yes
 ```
 
 **Slot number equals prompt position.** The two are kept equal so this table can be read in
@@ -289,6 +290,11 @@ a rule stated once in slot 0 of a thirty-turn session is effectively in the midd
 Retrieved memory sits in slot 10, after the reminder and immediately before the current input:
 evidence next to the question. Measured on llama3.2:3b, the same correct passage in the old
 slot 7 (ahead of history) was ignored; adjacent to the question it was used.
+
+Slot 11 is `POST /messages {runtimeNote}`: what the embedding application knows about this one
+message — the active project, today's date in the person's zone. It is framed as not written by the
+person and exists for one turn. It is never history, because prepended to the text it was stored as
+the person's words and the model quoted it back as theirs.
 
 ### Budget
 
@@ -678,6 +684,13 @@ directory mtime disagrees with the cache.
 The agent writes memory through a built-in `memory_write` tool that appends to
 `memory/YYYY-MM-DD.md`. The agent is the author; the harness is the librarian.
 
+**Scopes (Phase 29).** An agent's own corpus is its *private* scope. Shared scopes — `space`,
+`owner:<participant>`, `project:<id>` — are rows in `memory_notes`, indexed under their own corpus key
+(`~<scope>`) so neither the file pass nor the conversation pass can drop them. `memory/scopes.ts`
+`readPlan` decides per turn which corpora are ranked together: a stand-in and a room turn leave out
+private memory and the volatile tier. A read of someone's owner scope for somebody else is written to
+`memory_reads` in the recall itself.
+
 ---
 
 ## Skills
@@ -739,6 +752,41 @@ substantially fewer tokens than the equivalent in-context skill in multi-domain 
 
 Handoff failure is a typed result, not an exception. The supervisor decides whether to
 retry, reassign, or surface it.
+
+### Rooms and DMs (Phase 27)
+
+Handoffs are one agent directing another. A **conversation** is several people and several agents
+talking, the shape a team space needs. `runtime/conversations.ts` owns it.
+
+```
+POST /v1/conversations/:id/messages (a human member)
+  → one row in the conversation log  → conversation.message
+  → for each member agent, serialised per (agent, conversation):
+       addressed?  agent.send(text, { session "room:<id>", from: {…, room} })  → its reply is a message
+       not?        agent.observe(text, …)   — appended to that session's history, no turn
+```
+
+- **Participants** are the embedder's: humans registered by id (`admin` or `member`), no account
+  stored; agents are `agent:<id>` implicitly. A key bound to a participant (`scope.participant`)
+  posts only as them and sees only their conversations.
+- **Addressed** means a `mentions` entry in a room, or any human message in a DM. An agent's reply
+  mentions others as `@id`.
+- **The loop guard is a hop count.** A human's message is hop 0; each agent reply is one more. An
+  agent past the addressed agent's `limits.maxHops` is read and not answered, and
+  `conversation.skipped` says why.
+- **Room text is untrusted to every agent**, a human's included — `TurnSender.room` makes
+  `trustOfSender` say so — so a mutating call from a room needs a `policy.allow` rule or an
+  approval. A DM between one human and their agent keeps the old, trusted behaviour.
+- An agent's own history, compaction and memory apply unchanged, because a room is a session.
+
+### Stand-ins and delegation (Phase 28)
+
+A DM may be two people with their assigned agents present. Each agent only reads, until its owner is
+offline (pushed presence) for `standIn.escalateAfterMs` after a message — then it answers, disclosed
+and marked `onBehalfOf`, and every mutating call it tries becomes a **deferred action** the owner
+approves or declines later (`ExecuteInput.defer`, ahead of `policy.allow`). A coordinator reaches
+other members' agents through the same `handoff` tool a team uses, resolved among agents that declare
+`delegation.offer`.
 
 ---
 

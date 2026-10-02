@@ -165,7 +165,7 @@ export const VERSION = "0.1.0"
 export default {
     name: "whatsapp",
     version: VERSION,
-    dispachApi: "^0.1",
+    dispachApi: "^0.2",
     permissions: [
         // Baileys talks to WhatsApp's own infrastructure. The hosts are the ones it dials; they are
         // recorded because `permissions` is the vocabulary decision 7.5 promised, and advisory

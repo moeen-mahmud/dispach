@@ -23,7 +23,13 @@
  * there would tell somebody holding a read-only key that the agent they can plainly read is gone.
  */
 
-import { CAPABILITIES, type Capability, type KeyScope } from "@dispach/core"
+import {
+    CAPABILITIES,
+    type Capability,
+    type ErrorDetail,
+    type KeyScope,
+    type TurnSender,
+} from "@dispach/core"
 
 /**
  * The caller.
@@ -39,7 +45,13 @@ export type Principal =
     /** The token from `server.tokenEnv`. The operator's own credential; unscoped by definition. */
     | { readonly kind: "token" }
     /** An operator key, with whatever scope it was minted under. */
-    | { readonly kind: "key"; readonly keyId: string; readonly scope?: KeyScope }
+    | {
+          readonly kind: "key"
+          readonly keyId: string
+          /** The key's label, for a plugin route mapping a key to someone it knows (Phase 30). */
+          readonly label?: string
+          readonly scope?: KeyScope
+      }
     /** A one-time claim. Opens `POST /v1/keys` and nothing else; `authorise` enforces that. */
     | { readonly kind: "claim" }
 
@@ -49,7 +61,7 @@ export const UNSCOPED: Principal = { kind: "open" }
 /**
  * May this caller do this kind of thing?
  *
- * A capability set that is absent means **all four**, which is what makes a scope opt-in narrowing
+ * A capability set that is absent means **all of them**, which is what makes a scope opt-in narrowing
  * and keeps an unscoped key byte-identical to one minted before 18.2. An empty array is a different
  * statement and is honoured as written: a key that may do nothing is a coherent thing to mint,
  * however useless, and quietly promoting it to "everything" would be the worst possible reading.
@@ -128,4 +140,34 @@ export function isScoped(principal: Principal): boolean {
 /** A capability name, or `undefined` for anything that is not one. For validating a request. */
 export function capabilityOf(value: string): Capability | undefined {
     return CAPABILITIES.find((entry) => entry === value)
+}
+
+/**
+ * The sender a turn starts with, once a bound key has had its say.
+ *
+ * One function for every verb that starts a turn (`POST /messages`, the socket's `message` frame),
+ * so the two cannot disagree about who a key may speak as. A bound key's own participant fills an
+ * absent `from`; a `from` naming anyone else — or claiming to be an agent — is refused rather than
+ * corrected, because silently replacing it would let the caller believe the turn was attributed as
+ * they asked.
+ */
+export function senderFor(
+    principal: Principal,
+    claimed: TurnSender | undefined,
+):
+    | { readonly ok: true; readonly from: TurnSender | undefined }
+    | { readonly ok: false; readonly error: ErrorDetail } {
+    const bound = principal.kind === "key" ? principal.scope?.participant : undefined
+    if (bound === undefined) return { ok: true, from: claimed }
+    if (claimed === undefined) return { ok: true, from: { id: bound, kind: "user" } }
+    if (claimed.id === bound && claimed.kind === "user") return { ok: true, from: claimed }
+    return {
+        ok: false,
+        error: {
+            code: "sender_not_bound_participant",
+            message: `This key speaks for ${bound}, and the message names ${claimed.kind} ${claimed.id}.`,
+            hint: `A key bound to a participant starts turns only as that participant, so the tools the turn calls act for them. Omit from (it is filled in), or send from.id "${bound}" with kind "user". A backend that names senders itself needs a key minted without scope.participant.`,
+            field: "from",
+        },
+    }
 }

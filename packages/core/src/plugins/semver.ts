@@ -21,8 +21,8 @@
  *     >=1.2  <2.0      comparators, space-separated, all must hold
  *     ^1 || ^2         alternatives, any may hold
  *
- * Not supported, and therefore refused rather than approximated: pre-release identifiers, build
- * metadata, hyphen ranges, and `x` inside a partial version (`1.x`). Each is a small amount of code
+ * Not supported **in a range**, and therefore refused rather than approximated: pre-release
+ * identifiers, build metadata, hyphen ranges, and `x` inside a partial version (`1.x`). Each is a small amount of code
  * and an opportunity to be subtly wrong about which versions match, which is the one thing this file
  * must not be.
  */
@@ -41,6 +41,18 @@ export function parseVersion(raw: string): Version | undefined {
     const match = EXACT.exec(raw.trim())
     if (match === null) return undefined
     return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) }
+}
+
+/**
+ * The host's own version, where a pre-release is judged as the release it precedes:
+ * `0.2.0-pilot.1` is checked as `0.2.0`. A pilot build carries that release's plugin API, and npm's
+ * strict reading (`^0.2` does not admit `0.2.0-pilot.1`) would refuse every first-party plugin on
+ * every pre-release — measured on the first pilot tag, where the release gate failed on all of them.
+ * This loosens nothing about a plugin's *range*, which still refuses pre-release identifiers.
+ */
+function parseHostVersion(raw: string): Version | undefined {
+    const match = /^(\d+\.\d+\.\d+)(?:-[0-9A-Za-z.-]+)?$/.exec(raw.trim())
+    return match === null ? undefined : parseVersion(match[1] ?? "")
 }
 
 function parsePartial(raw: string): { version: Version; specified: 1 | 2 | 3 } | undefined {
@@ -117,7 +129,7 @@ function satisfiesTerm(version: Version, term: string): boolean | undefined {
  * the wrong number.
  */
 export function satisfies(version: string, range: string): boolean | undefined {
-    const parsed = parseVersion(version)
+    const parsed = parseHostVersion(version)
     if (parsed === undefined) return undefined
 
     const alternatives = range.split("||")

@@ -129,6 +129,23 @@ export const SETTINGS: readonly Setting[] = [
     },
     { path: "model.main.id", means: "the model this agent runs on", agentListed: true },
     { path: "model.main.temperature", means: "0 to 2", agentListed: true },
+    // Cost decisions, so a person's (pilot.4): the agent raising its own output or thinking budget is
+    // the agent spending its owner's money.
+    {
+        path: "model.main.maxTokens",
+        means: "the most one reply may generate; unset lets the endpoint decide",
+        agentListed: false,
+    },
+    {
+        path: "tools.budget.max",
+        means: "how many tools the model is shown at once, built-ins included",
+        agentListed: false,
+    },
+    {
+        path: "model.main.reasoningEffort",
+        means: "none | minimal | low | medium | high — how hard a reasoning model thinks",
+        agentListed: false,
+    },
     { path: "limits.maxSteps", means: "tool calls allowed in one turn", agentListed: true },
     {
         path: "limits.toolTimeoutMs",
@@ -139,6 +156,20 @@ export const SETTINGS: readonly Setting[] = [
         path: "context.observationMaxTokens",
         means: "how much of a tool's output reaches the model",
         agentListed: true,
+    },
+    // Person-only: the agent can't relax a guard on its own instructions. An embedder needs it because
+    // the rule count is a heuristic, and a misread line otherwise refuses every reload and every
+    // PATCH (VelaCrew, pilot.4).
+    // Person-only: it decides what every event subscriber and webhook receives about a tool call.
+    {
+        path: "tools.eventDetail",
+        means: "none | redacted — whether tool events carry the call's arguments and output",
+        agentListed: false,
+    },
+    {
+        path: "context.rules.onExceed",
+        means: "fail | warn — whether too many counted rules in the workspace refuses the load",
+        agentListed: false,
     },
     {
         path: "channels",
@@ -175,6 +206,17 @@ export const SETTINGS: readonly Setting[] = [
         // one leaves the wrong one looking equally plausible.
         toAgent:
             "Only `serve` fires these; under `run` they are validated and listed and no timer starts. deliver.to is the address a reply is *sent* to — on Telegram the numeric chat id, never an @handle, which addresses a channel and not a person. It is the id inbound messages arrive on, so read it off your own session keys (tg:<id>); allowFrom holds handles and confers nothing here. Set role to name a model other than main. The whole list is replaced, so read it first",
+        agentListed: true,
+    },
+    {
+        // Settable for the reason `channels` is: turning on voice notes or image generation is a
+        // capability request, and init asks nothing about it (like MCP, it is a setting). The key is
+        // an env var *name*; `.env` is protected, so the agent can enable a provider and cannot
+        // supply its secret — which is the person's by construction.
+        path: "media",
+        means: "voice notes and images: {transcription, image}, each {provider: openai|aws, model, apiKeyEnv}",
+        toAgent:
+            "image adds image_generate after a restart; filling in the key variable is the person's",
         agentListed: true,
     },
     {

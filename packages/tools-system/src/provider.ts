@@ -30,10 +30,12 @@
 
 import {
     ConfigError,
+    type MediaProviderFactory,
     type Tool,
     type ToolAvailability,
     type ToolProvider,
     type ToolProviderContext,
+    type ToolProviderFactory,
 } from "@dispach/core"
 import { configTools } from "./config.ts"
 import { execTool } from "./exec.ts"
@@ -52,6 +54,10 @@ export interface SystemProviderOptions {
      * workspace files are identified by where they are rather than only by what they are called.
      */
     readonly dir: string
+    /** The runtime's provider factories, so `config_set` can have a `tools.providers` edit checked. */
+    readonly providers?: Readonly<Record<string, ToolProviderFactory>>
+    /** The runtime's media providers, so a `media` edit is checked before it is written. */
+    readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
     /**
      * Extra protected patterns from `tools.providerConfig.protect`.
      *
@@ -91,7 +97,13 @@ export class SystemProvider implements ToolProvider {
             execTool({ sessions: this.#sessions, env: options.env, roots }),
             ...fileTools(shared),
             ...searchTools({ sessions: this.#sessions, roots }),
-            ...configTools({ agentDir: options.dir }),
+            ...configTools({
+                agentDir: options.dir,
+                ...(options.providers === undefined ? {} : { providers: options.providers }),
+                ...(options.mediaProviders === undefined
+                    ? {}
+                    : { mediaProviders: options.mediaProviders }),
+            }),
         ]
     }
 
@@ -178,6 +190,8 @@ export function systemFromConfig(context: ToolProviderContext): SystemProvider {
     return new SystemProvider({
         env: context.env,
         dir: context.dir,
+        ...(context.providers === undefined ? {} : { providers: context.providers }),
+        ...(context.mediaProviders === undefined ? {} : { mediaProviders: context.mediaProviders }),
         ...(Array.isArray(protect) ? { protect: protect.map((entry) => String(entry)) } : {}),
         ...(Array.isArray(writeRoots)
             ? { writeRoots: writeRoots.map((entry) => String(entry)) }

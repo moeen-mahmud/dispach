@@ -38,11 +38,46 @@ export interface RawInbound {
      */
     readonly senderHandle?: string
     readonly senderName?: string
+    /**
+     * The provider's id for the *person*, when it differs from the conversation's: in a Telegram
+     * group `peerId` is the group and this is the member who wrote. It becomes the turn's acting
+     * participant (`telegram:<senderId>`), which an embedder authorises a tool call against — and a
+     * group is not somebody whose permissions exist. Absent means `peerId` already is the person.
+     */
+    readonly senderId?: string
+    /**
+     * `agent` when the sender is another agent rather than a person (Phase 30, A2A). Its text is then
+     * fenced as untrusted and the turn acts for nobody — the same treatment an agent sender gets
+     * everywhere — so a remote agent can never approve, configure or commit anything. Absent is a
+     * person, as every channel before this assumed.
+     */
+    readonly senderKind?: "agent"
     /** Thread, topic, or forum sub-id. Keeps a forum topic from sharing one session with its group. */
     readonly thread?: string
+    /** The words, or a voice note's caption. May be empty when `audio` is present. */
     readonly text: string
+    /**
+     * A voice note or audio clip. Transcribed by the runtime before the turn, when the agent
+     * declares `media.transcription`; otherwise the sender is told it cannot be listened to.
+     */
+    readonly audio?: InboundAudio
     /** RFC 3339 UTC. The provider's timestamp when it has one, ours otherwise. */
     readonly receivedAt: string
+}
+
+/**
+ * Audio a message carried, fetched only when it is going to be transcribed.
+ *
+ * Lazy, and the transport owns the download, because each provider authenticates it differently
+ * (a Telegram file path, Slack's bot token, WhatsApp's media keys) and because it must not happen
+ * for a sender `allowFrom` refuses — the gate runs first and a stranger's audio is never fetched.
+ */
+export interface InboundAudio {
+    readonly mimeType: string
+    readonly durationS?: number
+    /** When the provider says, so an oversized note is refused without downloading it. */
+    readonly sizeBytes?: number
+    fetch(signal: AbortSignal): Promise<Uint8Array>
 }
 
 /** A `RawInbound` that passed the allowlist, with its session resolved. */
@@ -72,6 +107,11 @@ export interface OutboundMessage {
     /** 0-based position within the reply. `total` lets a transport render "1/3" if it wants to. */
     readonly chunkIndex: number
     readonly chunkTotal: number
+    /**
+     * A file to send, with `text` as its caption (usually empty). Only handed to a transport whose
+     * `limits.attachments` is true; for any other, the reply names the file in words instead.
+     */
+    readonly attachment?: { readonly path: string; readonly mimeType: string }
 }
 
 export type SendResult =
@@ -121,6 +161,8 @@ export interface ChannelLimits {
      * chunked reply and avoids a 429 that would cost a full backoff cycle.
      */
     readonly minSendIntervalMs?: number
+    /** Whether `send` can carry `OutboundMessage.attachment` — an image the agent generated. */
+    readonly attachments?: boolean
 }
 
 /**

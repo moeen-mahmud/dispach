@@ -26,7 +26,8 @@ const manifest = JSON.parse(readFileSync(join(CLI, "package.json"), "utf8")) as 
     bin: Record<string, string>
     files: string[]
     exports: Record<string, unknown>
-    dependencies: Record<string, string>
+    dependencies?: Record<string, string>
+    optionalDependencies?: Record<string, string>
     private?: boolean
 }
 
@@ -77,9 +78,13 @@ describe("one published package", () => {
          * is bundled, which is what makes this one package rather than nine. `ink` and `react` stay
          * external **on purpose**: the lazy `import("ink")` is what keeps ~170-210 ms off the
          * startup path of every non-interactive command, and inlining them would defeat it.
+         *
+         * And they are **optional** since pilot.5 (VelaCrew #26): npm still installs them by default,
+         * so the CLI is whole, and an application using only the client can say `--omit=optional`.
+         * `verify:package` proves that install; this pins the shape.
          */
-        expect(Object.keys(manifest.dependencies).sort()).toEqual(["ink", "react"])
-        expect(Object.keys(manifest.dependencies).some((name) => name.startsWith("@"))).toBe(false)
+        expect(manifest.dependencies ?? {}).toEqual({})
+        expect(Object.keys(manifest.optionalDependencies ?? {}).sort()).toEqual(["ink", "react"])
     })
 })
 
@@ -103,7 +108,8 @@ describe("what the build needs", () => {
      */
     test("every workspace sibling the source imports is a declared dependency", () => {
         const declared = new Set([
-            ...Object.keys(manifest.dependencies),
+            ...Object.keys(manifest.dependencies ?? {}),
+            ...Object.keys(manifest.optionalDependencies ?? {}),
             ...Object.keys(
                 (manifest as { devDependencies?: Record<string, string> }).devDependencies ?? {},
             ),

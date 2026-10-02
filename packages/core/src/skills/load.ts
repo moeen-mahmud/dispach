@@ -18,6 +18,7 @@ import { activate } from "../context/activate.ts"
 import { estimateTokens } from "../context/tokens.ts"
 import { type ErrorDetail, skillNotApplied } from "../errors.ts"
 import { DEFAULT_PROMPT_STYLE, type PromptStyle, renderPromptStyle } from "../model/prompt-style.ts"
+import { isScaffold } from "./authoring.ts"
 import { parseSkillFile } from "./frontmatter.ts"
 import type { Skill, SkillCatalogue } from "./index.ts"
 import { bm25Selector, type SkillSelector } from "./select.ts"
@@ -65,7 +66,10 @@ export function activateSkills(options: ActivateSkillsOptions): Activation {
     const selector = options.selector ?? bm25Selector
     const style = options.style ?? DEFAULT_PROMPT_STYLE
 
-    const ranked = selector(options.input, catalogue.skills)
+    const ranked = selector(
+        options.input,
+        catalogue.skills.filter((skill) => !isScaffold(skill.frontmatter)),
+    )
     // The threshold is the caller's to apply, not the selector's — a selector that filtered would be
     // deciding one of the three limits it exists to be prevented from widening.
     const above = ranked.filter((scored) => scored.score >= catalogue.threshold)

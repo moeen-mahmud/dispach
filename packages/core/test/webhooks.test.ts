@@ -356,6 +356,59 @@ describe("delivery", () => {
         await store.close()
     })
 
+    test("a name that does not resolve for a moment is retried, not lost", async () => {
+        // A receiver container restarting drops out of Docker's DNS for seconds. That is not a
+        // refusal: nothing was sent, and the event must still arrive once it is back.
+        const store = await openMemoryStore()
+        const bus = new EventBus({ runtimeId: "rt" })
+        const sent: string[] = []
+        let resolvable = false
+        let now = Date.parse("2026-09-24T12:00:00Z")
+        const dispatcher = new WebhookDispatcher({
+            store: store.webhooks,
+            bus,
+            fetch: async (_url, init) => {
+                sent.push(
+                    String((init?.headers as Record<string, string> | undefined)?.["webhook-id"]),
+                )
+                return new Response("")
+            },
+            allow: EMPTY_ALLOWLIST,
+            lookup: async () => (resolvable ? [{ address: "93.184.215.14" }] : []),
+            agents: () => ["a"],
+            now: () => now,
+            backoffMs: [1_000],
+            userAgent: "test",
+        })
+        await store.webhooks.create({
+            subscriptionId: "wh",
+            url: "https://restarting.example/",
+            secret: "whsec_c2VjcmV0",
+            types: ["turn.end"],
+            createdAt: new Date(now).toISOString(),
+        })
+        await dispatcher.attach()
+        bus.emit(
+            "turn.end",
+            { reason: "final", steps: 1, tokens: { prompt: 1, output: 1 }, durationMs: 1 },
+            { agentId: "a" },
+        )
+        await settle()
+        await dispatcher.drain()
+        expect(sent).toEqual([])
+        const [down] = await store.webhooks.list()
+        expect(down?.lastError).toContain("webhook_target_unresolved")
+        expect(down?.pending).toBe(1)
+
+        resolvable = true
+        now += 1_000
+        await dispatcher.drain()
+        expect(sent.length).toBe(1)
+        const [up] = await store.webhooks.list()
+        expect(up?.pending).toBe(0)
+        await store.close()
+    })
+
     test("removing an agent removes its pending deliveries and keeps the subscription", async () => {
         const t = await setup()
         t.bus.emit(

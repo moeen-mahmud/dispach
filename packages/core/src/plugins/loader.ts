@@ -49,6 +49,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join, resolve as resolvePath, sep } from "node:path"
 import {
     type ErrorDetail,
+    HarnessError,
     isHarnessError,
     pluginApiMismatch,
     pluginApiRangeUnreadable,
@@ -62,11 +63,20 @@ import {
 import type { EventBus } from "../events/bus.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { PluginRef } from "../manifest/schema.ts"
+import type { MediaProviderFactory } from "../media/provider.ts"
+import type { ModelTransport } from "../model/transport.ts"
 import type { ChannelFactory } from "../runtime/channels.ts"
 import type { ScriptRunner, ToolProviderFactory } from "../tools/types.ts"
 import { VERSION } from "../version.ts"
 import type { Middleware } from "./middleware.ts"
-import type { Logger, Permission, Plugin, PluginContext, PluginPaths } from "./plugin.ts"
+import type {
+    Logger,
+    Permission,
+    Plugin,
+    PluginContext,
+    PluginPaths,
+    PluginRoute,
+} from "./plugin.ts"
 import { satisfies } from "./semver.ts"
 
 /** Past this, the loader says so. Not a refusal — a slow plugin still works and still costs boot. */
@@ -108,8 +118,18 @@ export interface LoadPluginsOptions {
     readonly importModule?: (specifier: string) => Promise<unknown>
 }
 
+/** A plugin route as the host mounts it: which plugin, and the route it declared. */
+export interface MountedRoute extends PluginRoute {
+    /** The plugin's `name`: the path segment after `/plugins/`. */
+    readonly plugin: string
+}
+
 export interface LoadedPlugins {
+    /** Every HTTP route the agent's plugins declared (Phase 30). */
+    readonly routes: readonly MountedRoute[]
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
+    readonly modelTransports: Readonly<Record<string, ModelTransport>>
+    readonly mediaProviders: Readonly<Record<string, MediaProviderFactory>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     /** In the order they were added: manifest order across plugins, declaration order within one. */
@@ -285,7 +305,10 @@ const SILENT_LOGGER: Logger = {
  */
 export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPlugins> {
     const toolProviders: Record<string, ToolProviderFactory> = {}
+    const modelTransports: Record<string, ModelTransport> = {}
+    const mediaProviders: Record<string, MediaProviderFactory> = {}
     const channels: Record<string, ChannelFactory> = {}
+    const routes: MountedRoute[] = []
     const loaded: LoadedPlugin[] = []
     const middleware: Middleware[] = []
     const bySpec = new Map<string, string>()
@@ -302,12 +325,18 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
         const staged: {
             channels: Record<string, ChannelFactory>
             toolProviders: Record<string, ToolProviderFactory>
+            modelTransports: Record<string, ModelTransport>
+            mediaProviders: Record<string, MediaProviderFactory>
             middleware: Middleware[]
+            routes: MountedRoute[]
             scriptRunner: ScriptRunner | undefined
             registered: string[]
         } = {
+            routes: [],
             channels: {},
             toolProviders: {},
+            modelTransports: {},
+            mediaProviders: {},
             middleware: [],
             scriptRunner: undefined,
             registered: [],
@@ -334,6 +363,14 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
                     staged.toolProviders[id] = factory
                     registered.push(`toolProvider:${id}`)
                 },
+                defineModelTransport: (api, transport) => {
+                    staged.modelTransports[api] = transport
+                    registered.push(`modelTransport:${api}`)
+                },
+                defineMediaProvider: (name, factory) => {
+                    staged.mediaProviders[name] = factory
+                    registered.push(`mediaProvider:${name}`)
+                },
                 defineScriptRunner: (runner) => {
                     staged.scriptRunner = runner
                     registered.push("scriptRunner")
@@ -341,6 +378,10 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
                 use: (item) => {
                     staged.middleware.push(item)
                     registered.push(`middleware:${item.name}`)
+                },
+                defineRoute: (route) => {
+                    staged.routes.push(checkedRoute(plugin.name, route, staged.routes))
+                    registered.push(`route:${route.method} ${route.path}`)
                 },
                 config: validateConfig(plugin, config),
                 agentId: options.agentId,
@@ -361,7 +402,10 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
             bySpec.set(plugin.name, spec)
             Object.assign(channels, staged.channels)
             Object.assign(toolProviders, staged.toolProviders)
+            Object.assign(modelTransports, staged.modelTransports)
+            Object.assign(mediaProviders, staged.mediaProviders)
             middleware.push(...staged.middleware)
+            routes.push(...staged.routes)
             if (staged.scriptRunner !== undefined) scriptRunner = staged.scriptRunner
 
             entry = {
@@ -412,7 +456,51 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
         }
     }
 
-    return { toolProviders, channels, scriptRunner, middleware, loaded, failed }
+    return {
+        routes,
+        toolProviders,
+        modelTransports,
+        mediaProviders,
+        channels,
+        scriptRunner,
+        middleware,
+        loaded,
+        failed,
+    }
+}
+
+const PLUGIN_SLUG = /^[a-z0-9][a-z0-9-]*$/
+
+/**
+ * A route is refused at registration, which fails its plugin's `setup` — a plugin whose routes cannot
+ * be mounted is a plugin that did not load, reported like any other.
+ */
+function checkedRoute(
+    plugin: string,
+    route: PluginRoute,
+    already: readonly MountedRoute[],
+): MountedRoute {
+    const refuse = (message: string, hint: string) =>
+        new HarnessError({ code: "plugin_route_invalid", message, hint, field: "plugins" })
+    if (!PLUGIN_SLUG.test(plugin)) {
+        throw refuse(
+            `Plugin "${plugin}" declared a route, and its name is not a path segment.`,
+            "A plugin that mounts routes needs a lowercase slug name (letters, digits, hyphens): it becomes /v1/agents/:id/plugins/<name>/.",
+        )
+    }
+    if (!route.path.startsWith("/") || route.path.includes("..") || route.path.includes("//")) {
+        throw refuse(
+            `Plugin "${plugin}" declared the route path "${route.path}".`,
+            'A route path starts with "/" and holds no "..": it is below the plugin\'s mount, and "/" is the mount itself.',
+        )
+    }
+    if (already.some((other) => other.method === route.method && other.path === route.path)) {
+        throw refuse(
+            `Plugin "${plugin}" declared ${route.method} ${route.path} twice.`,
+            "Each method and path is declared once.",
+        )
+    }
+    return { ...route, plugin }
 }
 
 /**
@@ -431,7 +519,10 @@ export async function loadPlugins(options: LoadPluginsOptions): Promise<LoadedPl
  * misconfigured. Anything load-bearing goes in one function both call.
  */
 export interface AgentPluginSupply {
+    readonly routes: readonly MountedRoute[]
     readonly toolProviders: Readonly<Record<string, ToolProviderFactory>>
+    readonly modelTransports: Readonly<Record<string, ModelTransport>>
+    readonly mediaProviders: Readonly<Record<string, MediaProviderFactory>>
     readonly channels: Readonly<Record<string, ChannelFactory>>
     readonly scriptRunner: ScriptRunner | undefined
     readonly middleware: readonly Middleware[]
@@ -454,6 +545,8 @@ export interface AgentPluginSupplyOptions {
     /** What the host registered directly. Plugin registrations layer over these. */
     readonly base?: {
         readonly toolProviders?: Readonly<Record<string, ToolProviderFactory>>
+        readonly modelTransports?: Readonly<Record<string, ModelTransport>>
+        readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
         readonly channels?: Readonly<Record<string, ChannelFactory>>
         readonly scriptRunner?: ScriptRunner
     }
@@ -465,7 +558,10 @@ export async function agentPluginSupply(
     const base = options.base ?? {}
     if (options.refs.length === 0) {
         return {
+            routes: [],
             toolProviders: base.toolProviders ?? {},
+            modelTransports: base.modelTransports ?? {},
+            mediaProviders: base.mediaProviders ?? {},
             channels: base.channels ?? {},
             scriptRunner: base.scriptRunner,
             middleware: [],
@@ -491,7 +587,10 @@ export async function agentPluginSupply(
     // host default rather than being shadowed by it. Manifest order already decided which plugin
     // wins a key, inside `loadPlugins`.
     return {
+        routes: result.routes,
         toolProviders: { ...(base.toolProviders ?? {}), ...result.toolProviders },
+        modelTransports: { ...(base.modelTransports ?? {}), ...result.modelTransports },
+        mediaProviders: { ...(base.mediaProviders ?? {}), ...result.mediaProviders },
         channels: { ...(base.channels ?? {}), ...result.channels },
         scriptRunner: result.scriptRunner ?? base.scriptRunner,
         middleware: result.middleware,

@@ -13,20 +13,31 @@
  * a rendering import costs more than the whole command.
  */
 
+import a2aPlugin from "@dispach/channel-a2a"
+import slackPlugin, { slackChannel } from "@dispach/channel-slack"
+import teamsPlugin, { teamsChannel } from "@dispach/channel-teams"
 import telegramPlugin, { telegramChannel } from "@dispach/channel-telegram"
 import whatsappPlugin, { whatsappChannel } from "@dispach/channel-whatsapp"
 import type {
     BuiltInPlugins,
     ChannelFactory,
+    MediaProviderFactory,
+    ModelTransport,
     ScriptRunner,
     ToolProviderFactory,
 } from "@dispach/core"
+import mediaAwsPlugin, { awsMedia } from "@dispach/media-aws"
+import bedrockPlugin, { bedrockTransport } from "@dispach/model-bedrock"
 import composioPlugin, { composioFromConfig } from "@dispach/tools-composio"
+import mcpPlugin, { mcpFromConfig } from "@dispach/tools-mcp"
 import systemPlugin, { SystemScriptRunner, systemFromConfig } from "@dispach/tools-system"
 import webPlugin, { webFromConfig } from "@dispach/tools-web"
 
 export const TOOL_PROVIDERS: Readonly<Record<string, ToolProviderFactory>> = {
     composio: composioFromConfig,
+    // Somebody else's tools, over Streamable HTTP (decision 14.22). A manifest names the servers and
+    // pins their tools; nothing is reached before readiness, so a server that is down cannot hold boot.
+    mcp: (context) => mcpFromConfig(context),
     // Registered, not implied. Naming `system` here means the binary *can* supply shell access; a
     // manifest still has to select the provider and pin `exec` before an agent has any. Availability
     // and grant are separate on purpose — the same separation that keeps `tools.local` opt-in.
@@ -36,6 +47,29 @@ export const TOOL_PROVIDERS: Readonly<Record<string, ToolProviderFactory>> = {
     // that runs commands are different grants, and a manifest should be able to make one and not the
     // other.
     web: webFromConfig,
+}
+
+/**
+ * Model transports beyond the built-in `chat-completions`, by the name `model.<role>.api` selects.
+ *
+ * Passed by every command that builds a runtime, beside `TOOL_PROVIDERS` — a command that forgot it
+ * would refuse, as an unknown `api`, an agent every other command accepts. `boundaries.test.ts`
+ * holds the pairing.
+ */
+export const MODEL_TRANSPORTS: Readonly<Record<string, ModelTransport>> = {
+    // AWS Bedrock. Its SDK loads on an agent's first model call, never at boot, so every command
+    // can carry it for free.
+    "bedrock-converse": bedrockTransport(),
+}
+
+/**
+ * Media providers beyond the built-in `openai`, by the name `media.*.provider` selects. Passed
+ * beside `MODEL_TRANSPORTS` by every command that builds a runtime, for the same reason, and held by
+ * the same guard in `boundaries.test.ts`.
+ */
+export const MEDIA_PROVIDERS: Readonly<Record<string, MediaProviderFactory>> = {
+    // Amazon Transcribe and Nova Canvas. Both SDKs load on the first media call, never at boot.
+    aws: awsMedia(),
 }
 
 /**
@@ -66,6 +100,10 @@ export const PROVIDER_IDS: readonly string[] = Object.keys(TOOL_PROVIDERS)
  * the asymmetry the tool-provider table already exists to prevent.
  */
 export const CHANNELS: Readonly<Record<string, ChannelFactory>> = {
+    // Webhook-only: Teams pushes activities to the runtime's channel route and nothing polls, so a
+    // manifest naming it costs nothing until the bot's endpoint is registered (decision 14.25).
+    teams: teamsChannel,
+    slack: slackChannel,
     telegram: telegramChannel,
     /**
      * **Bundled, and the two things that costs are stated rather than left to a README.**
@@ -111,9 +149,17 @@ export const CHANNEL_IDS: readonly string[] = Object.keys(CHANNELS)
  * different namespace on purpose: one plugin can register several.
  */
 export const BUILT_IN_PLUGINS: BuiltInPlugins = {
+    // Loaded only when a manifest names it: it mounts routes and a channel, so it is opt-in by
+    // name rather than a default table entry (Phase 30).
+    "@dispach/channel-a2a": a2aPlugin,
+    "@dispach/channel-teams": teamsPlugin,
+    "@dispach/channel-slack": slackPlugin,
     "@dispach/channel-telegram": telegramPlugin,
     "@dispach/channel-whatsapp": whatsappPlugin,
+    "@dispach/media-aws": mediaAwsPlugin,
+    "@dispach/model-bedrock": bedrockPlugin,
     "@dispach/tools-composio": composioPlugin,
+    "@dispach/tools-mcp": mcpPlugin,
     "@dispach/tools-system": systemPlugin,
     "@dispach/tools-web": webPlugin,
 }

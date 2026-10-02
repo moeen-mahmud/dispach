@@ -664,7 +664,7 @@ describe("a disposed agent's plugins stop watching", () => {
         const plugin: Plugin = {
             name: "watcher",
             version: "1.0.0",
-            dispachApi: "^0.1",
+            dispachApi: "^0.2",
             setup(context) {
                 context.use({
                     name: "watcher",

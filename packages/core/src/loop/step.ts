@@ -12,10 +12,12 @@ import type { EventContext } from "../events/types.ts"
 import type {
     ChatMessage,
     ModelProvider,
+    ThinkingBlock,
     ToolCallRequest,
     ToolDefinition,
 } from "../model/provider.ts"
 import type { ResolvedRole } from "../model/roles.ts"
+import { newCallId } from "./ids.ts"
 
 export interface StepInput {
     readonly role: ResolvedRole
@@ -29,6 +31,8 @@ export interface StepInput {
     readonly context: EventContext
     readonly signal: AbortSignal
     readonly attempt?: number
+    /** Who sent the turn, carried onto `model.result` for a biller. Absent for the operator. */
+    readonly sender?: string
     /**
      * Called once per completed call with what it cost. Optional so a caller that bills nothing (a
      * test, an eval) needs nothing, and **synchronous and non-throwing by contract**: the meter is
@@ -44,9 +48,12 @@ export interface StepUsage {
     readonly promptTokens: number
     readonly promptReported: boolean
     readonly cachedPromptTokens?: number
+    readonly cacheWriteTokens?: number
     readonly outputTokens: number
     readonly outputReported: boolean
     readonly context: EventContext
+    /** The same id `model.call` and `model.result` carry. */
+    readonly callId: string
 }
 
 export interface StepResult {
@@ -83,6 +90,10 @@ export interface StepResult {
      * `text` carries it — which is why the dialect gets both and decides which one it reads.
      */
     readonly calls: readonly ToolCallRequest[]
+    /** Signed thinking blocks, in order. Empty from a transport that produces none. */
+    readonly thinking: readonly ThinkingBlock[]
+    /** The model that answered: the requested one, or the fallback that stood in for it. */
+    readonly model: string
     /** True when the signal fired before the stream finished. */
     readonly aborted: boolean
 }
@@ -90,14 +101,17 @@ export interface StepResult {
 export async function runStep(input: StepInput): Promise<StepResult> {
     const started = performance.now()
 
+    const callId = newCallId()
     input.bus.emit(
         "model.call",
         {
+            callId,
             role: input.role.role,
             model: input.role.config.id,
             promptTokens: input.promptTokens,
-            // Prompt caching lands with slot 1 and the breakpoint placement it implies; reporting
-            // `false` now is honest, whereas omitting the field would make the event schema move.
+            // Kept false and kept present: whether a call hit a cache is only known once its usage
+            // arrives, which is `model.result.cachedPromptTokens`. Dropping the field would move a
+            // v1 schema.
             cached: false,
             attempt: input.attempt ?? 1,
         },
@@ -111,8 +125,11 @@ export async function runStep(input: StepInput): Promise<StepResult> {
     let promptTokensReported = false
     let cachedPromptTokens: number | undefined
     let cacheSource: string | undefined
+    let cacheWriteTokens: number | undefined
     let reportedOutputTokens: number | undefined
     const calls: ToolCallRequest[] = []
+    const thinking: ThinkingBlock[] = []
+    let model = input.role.config.id
     let firstTokenMs: number | undefined
 
     const stream = input.provider.chat(
@@ -169,6 +186,14 @@ export async function runStep(input: StepInput): Promise<StepResult> {
                         cachedPromptTokens = chunk.cachedPromptTokens
                         cacheSource = chunk.cacheSource
                     }
+                    if (chunk.cacheWriteTokens !== undefined)
+                        cacheWriteTokens = chunk.cacheWriteTokens
+                    break
+                case "model":
+                    model = chunk.id
+                    break
+                case "thinking_block":
+                    thinking.push(chunk.block)
                     break
                 case "finish":
                     finishReason = chunk.reason
@@ -197,6 +222,12 @@ export async function runStep(input: StepInput): Promise<StepResult> {
             finishReason: finishReason === "" ? (aborted ? "aborted" : "stop") : finishReason,
             latencyMs,
             ...(firstTokenMs === undefined ? {} : { firstTokenMs }),
+            callId,
+            model,
+            role: input.role.role,
+            ...(cachedPromptTokens === undefined ? {} : { cachedPromptTokens }),
+            ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
+            ...(input.sender === undefined ? {} : { sender: input.sender }),
         },
         input.context,
     )
@@ -205,13 +236,16 @@ export async function runStep(input: StepInput): Promise<StepResult> {
     // ponytail: a failed call counts as free. Record it once an endpoint reports usage on errors.
     input.meter?.({
         role: input.role.role,
-        model: input.role.config.id,
+        // The model that answered, so a fallback's call is billed under its own id.
+        model,
         promptTokens,
         promptReported: promptTokensReported,
         ...(cachedPromptTokens === undefined ? {} : { cachedPromptTokens }),
+        ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
         outputTokens,
         outputReported: reportedOutputTokens !== undefined,
         context: input.context,
+        callId,
     })
 
     return {
@@ -225,6 +259,8 @@ export async function runStep(input: StepInput): Promise<StepResult> {
         outputTokens,
         latencyMs,
         calls,
+        thinking,
+        model,
         aborted,
     }
 }

@@ -12,6 +12,7 @@
  * upstream has to remember to catch one.
  */
 
+import { relative } from "node:path"
 import { assembleContext, reassemble, slotReport } from "../context/assemble.ts"
 import type { ContextBlock } from "../context/blocks.ts"
 import { SLOT } from "../context/blocks.ts"
@@ -21,19 +22,21 @@ import type { Displaced } from "../context/compaction/stages.ts"
 import { estimateMessageTokens } from "../context/tokens.ts"
 import {
     type ErrorDetail,
-    HarnessError,
+    isHarnessError,
     toolRepairFailed,
     turnStopped,
     turnTimeout,
 } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import type { TurnEndReason } from "../events/types.ts"
-import type { ChatMessage, ToolDefinition } from "../model/provider.ts"
+import { imageReference } from "../media/image-input.ts"
+import type { ChatMessage, ImageInput, ToolDefinition } from "../model/provider.ts"
 import { type ResolvedRole, requestParamsFor } from "../model/roles.ts"
 import { compose, type Middleware } from "../plugins/middleware.ts"
 import type { ParsedOutput, StepOutput, ToolDialect } from "../tools/dialect/dialect.ts"
 import { nativeWireTokens } from "../tools/dialect/native.ts"
-import { type ApprovalRequest, executeIntents } from "../tools/execute.ts"
+import type { EventDetail } from "../tools/event-detail.ts"
+import { type ApprovalRequest, type ExecuteInput, executeIntents } from "../tools/execute.ts"
 import { phaseSetTool } from "../tools/local.ts"
 import type { PolicyConfig } from "../tools/policy.ts"
 import type { ToolRegistry } from "../tools/registry.ts"
@@ -41,7 +44,13 @@ import type { OnMutate } from "../tools/trust.ts"
 import type { DisplacedArtifact, Tool, ToolResult, WorkspaceWriteTarget } from "../tools/types.ts"
 import { newStepId, newTurnId } from "./ids.ts"
 import { allowFor, otherPhases, type PhaseMap } from "./phases.ts"
-import { frameSenderInput, senderLabel, type TurnSender, trustOfSender } from "./sender.ts"
+import {
+    type ActingParticipant,
+    frameSenderInput,
+    senderLabel,
+    type TurnSender,
+    trustOfSender,
+} from "./sender.ts"
 import { runStep, type StepUsage } from "./step.ts"
 
 export interface TurnLimits {
@@ -98,6 +107,8 @@ export interface ToolRuntime {
      * `ChatMessage.toolCalls`, `TurnInput.skills`, `ToolContext.readArtifact`), and it cost one here.
      */
     readonly memoryDir?: string
+    /** `tools.eventDetail: redacted`. Absent: events carry the hash and sizes only. */
+    readonly eventDetail?: EventDetail
     readonly observationMaxTokens: number
     /**
      * What to do when untrusted content is in the turn and the model asks for a mutating tool.
@@ -122,6 +133,8 @@ export interface TurnInput {
     readonly agentId: string
     /** Handed to every `runStep` this turn makes. See `StepInput.meter`. */
     readonly meter?: (usage: StepUsage) => void
+    /** Who sent this turn, onto every `model.result` it produces. Absent for the operator. */
+    readonly sender?: string
     readonly sessionKey: string
     readonly input: string
     readonly history: readonly ChatMessage[]
@@ -213,6 +226,31 @@ export interface TurnInput {
      * no sender; a peer agent reaching the API has both.
      */
     readonly from?: TurnSender
+    /** Who the turn acts for, handed to every tool as `ToolContext.actingParticipant`. Absent: nobody. */
+    readonly participant?: ActingParticipant
+    /**
+     * A sentence the runtime puts before the input, outside any fence around it: a stand-in's
+     * instructions. Runtime-authored, so it is not the sender's text and is not framed as theirs.
+     */
+    readonly runtimeNote?: string
+    /**
+     * The embedder's note about this message (`POST /messages {runtimeNote}`). Its own block before
+     * the input, never in history: unlike `runtimeNote` above, which is a stand-in's instructions and
+     * is stored with the input because every later turn of that conversation needs it.
+     */
+    readonly turnNote?: string
+    /** Images sent with the input. Sent on every step of this turn, stored as references. */
+    readonly images?: readonly ImageInput[]
+    /**
+     * A schedule's `tools.allow`: the agent's own catalogue narrowed for this turn, with the phase
+     * grammar. Applied before a skill's scripts and the turn's own tools are layered on, so it narrows
+     * what the agent may call without breaking what the turn itself brings.
+     */
+    readonly toolsAllow?: readonly string[]
+    /** Every mutating call is queued rather than run: a stand-in's turn. See `ExecuteInput.defer`. */
+    readonly deferMutations?: ExecuteInput["defer"]
+    /** Forwarded to `ToolContext.writeNote`: set when this agent is the space writer (Phase 29). */
+    readonly writeNote?: (text: string) => Promise<string>
     /** Caller's cancellation. A disconnect must never be wired to this. */
     readonly signal?: AbortSignal
     readonly turnId?: string
@@ -299,6 +337,14 @@ export interface TurnResult {
     readonly resets?: number
     /** The phase the turn ended in. Absent when the agent declares no phases. */
     readonly phase?: string
+    /** Files tools produced for the reply, absolute paths. Absent when there are none. */
+    readonly attachments?: readonly TurnAttachmentFile[]
+}
+
+/** A file a tool handed to `ToolContext.attach`. */
+export interface TurnAttachmentFile {
+    readonly path: string
+    readonly mimeType: string
 }
 
 /**
@@ -457,6 +503,27 @@ function withRenderedTools(
     }
 }
 
+/**
+ * The catalogue a schedule's `tools.allow` leaves, re-rendered like a phase view: slot 1 and the wire
+ * schemas both shrink, so the model is told about exactly the tools it may call. A different slot 1
+ * means no cache hit on the agent's usual prefix, which costs nothing here: a schedule run's session
+ * is its own.
+ */
+function narrowedTools(tools: ToolRuntime, allow: readonly string[]): ToolRuntime {
+    const registry = tools.registry.inPhase(allow)
+    if (registry === tools.registry) return tools
+    const specs = registry.specs()
+    const requestTools = tools.dialect.requestTools(specs)
+    const { requestTools: _wide, ...rest } = tools
+    return {
+        ...rest,
+        registry,
+        blocks: tools.dialect.renderCatalogue(specs, registry.notEnabled),
+        ...(requestTools === undefined ? {} : { requestTools }),
+        wireTokens: requestTools === undefined ? 0 : nativeWireTokens(requestTools),
+    }
+}
+
 async function runTurnCore(input: TurnInput): Promise<TurnResult> {
     const turnId = input.turnId ?? newTurnId()
     const context = { agentId: input.agentId, sessionKey: input.sessionKey, turnId }
@@ -475,7 +542,15 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
      * and does not have to be baked into the evidence. History is the other way round — it is prompt
      * material, so it carries the fence, exactly as a rendered observation already does.
      */
-    const promptInput = frameSenderInput(input.input, input.from)
+    const framedInput = frameSenderInput(input.input, input.from)
+    const noted =
+        input.runtimeNote === undefined ? framedInput : `${input.runtimeNote}\n\n${framedInput}`
+    // The reference lines are in the text the prompt and the history both carry, so the model knows
+    // the image's path, and a later turn knows one was sent, after the bytes are gone.
+    const promptInput =
+        input.images === undefined || input.images.length === 0
+            ? noted
+            : `${noted}\n\n${input.images.map(imageReference).join("\n")}`
     const inputTrust = trustOfSender(input.from)
 
     const link = linkSignals(input.signal, input.limits.turnTimeoutMs)
@@ -579,6 +654,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
      * long as the peer is the one talking.
      */
     let untrustedSeen = inputTrust === "untrusted"
+    // Files a tool produced for the reply (`image_generate`). Collected across every step, carried
+    // out on the result, and sent by whichever surface delivers the text.
+    const attachments: TurnAttachmentFile[] = []
     let untrustedSource = input.from === undefined ? undefined : senderLabel(input.from)
 
     try {
@@ -618,10 +696,14 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
          */
         const rendered = input.turnTools ?? []
         const layered = [...turnScripts, ...rendered]
-        const baseTools =
-            input.tools === undefined || layered.length === 0
+        const ownTools =
+            input.tools === undefined || input.toolsAllow === undefined
                 ? input.tools
-                : withRenderedTools(input.tools, layered, rendered.length > 0)
+                : narrowedTools(input.tools, input.toolsAllow)
+        const baseTools =
+            ownTools === undefined || layered.length === 0
+                ? ownTools
+                : withRenderedTools(ownTools, layered, rendered.length > 0)
 
         /**
          * The catalogue as one phase sees it, rebuilt only when the phase changes.
@@ -705,6 +787,10 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     // replaced that array by the time this runs.
                     protectedTail: Math.max(0, messages.length - initialHistoryLength),
                     input: promptInput,
+                    ...(input.turnNote === undefined ? {} : { note: input.turnNote }),
+                    ...(input.images === undefined || input.images.length === 0
+                        ? {}
+                        : { inputImages: input.images }),
                     // Reduced by whatever the dialect puts in the request body rather than in a block.
                     // Zero under NLT, so this is the same arithmetic it always was.
                     window: windowForTurn,
@@ -908,6 +994,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     context: stepContext,
                     signal: link.signal,
                     ...(input.meter === undefined ? {} : { meter: input.meter }),
+                    ...(input.sender === undefined ? {} : { sender: input.sender }),
                 }),
             )
             const step = await callStep({
@@ -1079,7 +1166,17 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
             // Tagged here rather than in each dialect: `origin` is a fact about who produced the
             // message, and the loop is the only place that knows. Compaction reads it to tell a tool
             // observation from a human message, which under a text dialect the *role* cannot.
-            const call: ChatMessage = { ...tools.dialect.renderCall(output), origin: "call" }
+            //
+            // Signed thinking rides on the call when the model's family requires it back with the
+            // tool results (decision 14.18). Within the turn only: `history` reaches the store, which
+            // drops the field, and the next turn starts a fresh tool loop that needs none of it.
+            const call: ChatMessage = {
+                ...tools.dialect.renderCall(output),
+                origin: "call",
+                ...(input.role.capabilities.thinking === "anthropic" && step.thinking.length > 0
+                    ? { thinking: step.thinking }
+                    : {}),
+            }
             history.push(call)
             trace.push(call)
             pendingProse = ""
@@ -1125,6 +1222,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                               ...(tools.memoryDir === undefined
                                   ? {}
                                   : { memoryDir: tools.memoryDir }),
+                              ...(input.writeNote === undefined
+                                  ? {}
+                                  : { writeNote: input.writeNote }),
                               // Wired from the compaction seam rather than from `tools`, because the
                               // artifact store and the compaction that fills it are one capability:
                               // an agent with a store but no thresholds has no pointers to follow,
@@ -1158,17 +1258,33 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                               // the deadline actually in force. Seeded here so the shape is complete.
                               deadlineMs: input.limits.toolTimeoutMs,
                               now: tools.now ?? (() => new Date()),
+                              actingParticipant: input.participant ?? null,
+                              attach: (file) => {
+                                  attachments.push(file)
+                              },
                           },
                           bus: input.bus,
                           eventContext: stepContext,
                           timeoutMs: input.limits.toolTimeoutMs,
                           maxParallel: input.limits.maxParallelTools,
                           observationMaxTokens: tools.observationMaxTokens,
+                          ...(tools.eventDetail === undefined
+                              ? {}
+                              : { eventDetail: tools.eventDetail }),
+                          // Both halves or neither, for the reason `readArtifact` above gives: a stored
+                          // artifact nothing can read is a pointer to nowhere.
+                          ...(input.compaction?.persist === undefined ||
+                          input.compaction.read === undefined
+                              ? {}
+                              : { keepFull: input.compaction.persist }),
                           untrustedInTurn: untrustedSeen,
                           onMutate: tools.untrustedOnMutate,
                           policy: tools.policy,
                           ...(tools.approve === undefined ? {} : { approve: tools.approve }),
                           ...(untrustedSource === undefined ? {} : { untrustedSource }),
+                          ...(input.deferMutations === undefined
+                              ? {}
+                              : { defer: input.deferMutations }),
                       })
 
             if (outcome.results.some((result) => result.ok)) {
@@ -1249,7 +1365,11 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
             error = abortDetail(reason, turnId, input.limits.turnTimeoutMs)
         } else {
             reason = "error"
-            const harness = caught instanceof HarnessError ? caught : undefined
+            // `isHarnessError`, not `instanceof`: a model transport is a separate package (Bedrock's)
+            // carrying its own copy of core, and `instanceof` against this copy turned its typed
+            // error — `bedrock_credentials_missing`, hint and all — into "a bug worth reporting".
+            // Found running the image, where the two copies are real.
+            const harness = isHarnessError(caught) ? caught : undefined
             error = {
                 code: harness?.code ?? "turn_failed",
                 message: caught instanceof Error ? caught.message : String(caught),
@@ -1305,6 +1425,17 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                 ...(cacheSource === undefined ? {} : { cacheSource }),
             },
             durationMs,
+            ...(attachments.length === 0
+                ? {}
+                : {
+                      attachments: attachments.map((file) => ({
+                          path:
+                              input.tools === undefined
+                                  ? file.path
+                                  : relative(input.tools.dir, file.path),
+                          mimeType: file.mimeType,
+                      })),
+                  }),
         },
         context,
     )
@@ -1329,5 +1460,6 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
         // it too — `persist` inside the turn covers a crash mid-turn, and this covers the ordinary path
         // without making the caller subscribe to an event to learn where its own session got to.
         ...(input.phases === undefined ? {} : { phase }),
+        ...(attachments.length === 0 ? {} : { attachments }),
     }
 }

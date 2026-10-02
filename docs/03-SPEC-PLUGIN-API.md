@@ -16,7 +16,7 @@ import type { Plugin, PluginContext } from "@dispach/core"
 export default {
   name: "telegram",
   version: "0.1.0",
-  dispachApi: "^0.1",
+  dispachApi: "^0.2",
   permissions: [
     { kind: "network", hosts: ["api.telegram.org"] },
     { kind: "env", vars: ["TELEGRAM_BOT_TOKEN"] },
@@ -60,8 +60,11 @@ interface PluginContext {
   // registration
   defineChannel(id: string, factory: ChannelFactory): void
   defineToolProvider(id: string, factory: ToolProviderFactory): void
+  defineModelTransport(api: string, transport: ModelTransport): void   // Phase 26c
+  defineMediaProvider(name: string, factory: MediaProviderFactory): void // Phase 26j
   defineScriptRunner(runner: ScriptRunner): void
   use(middleware: Middleware): void          // Phase 9B
+  defineRoute(route: PluginRoute): void      // Phase 30
 
   // ambient
   readonly config: unknown          // validated against configSchema
@@ -92,7 +95,6 @@ liability rather than a convenience.
 
 | Point | Status |
 | --- | --- |
-| `defineModelProvider` | Deferred. The chat-completions transport is the only one, and a second implementation is what would tell us what the seam needs. |
 | `defineStore` | Deferred with the Postgres driver (open item O.5). The `Store` interface exists; nothing has needed to register one. |
 | `defineSkillSource` | Deferred. Skill sources resolve through `lib/sources.ts` in the CLI, which is a fetch a person triggers rather than something an agent boots with. |
 | `defineTools` | Deferred. `tools.local` covers the built-ins and a plugin wanting to add tools registers a provider, which is the same capability with a name a manifest can select. |
@@ -290,6 +292,7 @@ interface ChannelLimits {
   readonly maxMessageChars: number
   readonly idempotentSend: boolean
   readonly minSendIntervalMs?: number
+  readonly attachments?: boolean    // send() can carry OutboundMessage.attachment (Phase 26j)
 }
 
 interface ChannelHost {
@@ -399,18 +402,111 @@ that blames its cache forever turns every future typo into a misleading message.
 `whenNotToUse` is not optional. If you have nothing to say, say what the adjacent tool is
 for instead.
 
-### Model provider
+### Model transport
+
+**Built in Phase 26c.** Registered with `defineModelTransport(api, transport)` and selected by
+`model.<role>.api`:
 
 ```ts
-interface ModelProviderSpec {
-  id: string
-  create(config: unknown): ModelProvider
+interface ModelTransport {
+  optionsSchema?: ConfigSchema            // validates model.<role>.options at load
+  capabilities?(resolved, config): ModelCapabilities      // what this transport makes true
+  create(context: ModelTransportContext): ModelProvider   // no network: runs before ready
+}
+
+interface ModelTransportContext {
+  id: string                              // "<api>:<role>"
+  field: string                           // "model.main", for errors that name a field
+  config: ModelRoleConfig                 // the whole role, id and sampling included
+  options: unknown                        // options after optionsSchema
+  env?: EnvSource
+  fetch?: FetchLike
+  retry?: RetryPolicy
+  onRetry?(info): void                    // emit model.retry through this
+  onUsageUnsupported?(info): void
 }
 ```
 
-Core ships `chat-completions`. Implement this only for a genuinely different wire protocol
-(a native Messages-API adapter, a local in-process runner). Not for a different vendor —
-that's a base URL.
+Core ships `chat-completions`, registered the same way. A host may also supply transports
+directly (`RuntimeOptions.modelTransports`), which is how the CLI hands every agent
+`bedrock-converse` without a `plugins:` entry. An unknown `api` refuses the load; so do `options`
+the transport's schema rejects.
+
+Two harness-only fields reach a transport on `ChatMessage` and are its to act on or ignore:
+`cacheBreakpoint: true` marks where the cache-stable prefix ends (after the static slots, and at the
+active skill), and `thinking` carries signed thinking blocks on an assistant call when
+`capabilities.thinking` is `anthropic`. A transport that produces signed thinking emits a
+`{type: "thinking_block", block}` chunk when a block completes, beside the `reasoning` deltas it
+streams; the loop replays them for the rest of the turn. `chat-completions` sends neither field.
+
+Implement one only for a genuinely different wire protocol (Bedrock's Converse; later a native
+Messages-API adapter). Not for a different vendor on the same protocol: that's a base URL. A
+transport may carry a heavy dependency, since it lives outside core, but it `import()`s it on the
+first call, so boot never pays for it.
+
+### Media provider
+
+**Built in Phase 26j.** Registered with `defineMediaProvider(name, factory)` and selected by
+`media.transcription.provider` or `media.image.provider`:
+
+```ts
+interface MediaProviderFactory {
+  optionsSchema?: ConfigSchema                  // validates media.<section>.options at load
+  create(context: MediaProviderContext): MediaProvider   // no network: runs before ready
+}
+
+interface MediaProvider {
+  transcribe?(audio: AudioInput, signal: AbortSignal): Promise<Transcript>          // {text, durationS?}
+  generateImage?(request: ImageRequest, signal: AbortSignal): Promise<GeneratedImage> // {bytes, mimeType}
+}
+```
+
+One contract with two optional halves, because real backends come in pairs. Core ships `openai`
+(any endpoint with `/audio/transcriptions` and `/images/generations`); `media-aws` registers `aws`
+(Amazon Transcribe streaming, Nova Canvas). An unknown name, a provider lacking the half its
+section needs, or options its schema rejects refuses the load. The runtime owns the deadline and
+the metering, so a provider only answers.
+
+**On a channel.** A transport puts a voice note on `RawInbound.audio` as `{mimeType, durationS?,
+sizeBytes?, fetch(signal)}`: the bytes are fetched only if the note is transcribed, which happens
+after `allowFrom`, so a stranger's audio is never downloaded. A transport that can send a file
+declares `limits.attachments` and reads `OutboundMessage.attachment` (`{path, mimeType}`, with `text`
+as its caption); for one that does not, the outbox names the file in the reply instead. A tool
+produces such a file by calling `ToolContext.attach({path, mimeType})`.
+
+### HTTP route
+
+**Built in Phase 30.** A plugin that needs to answer HTTP — an A2A endpoint, a provider's callback —
+declares a route rather than reaching for the server:
+
+```ts
+interface PluginRoute {
+  method: "GET" | "POST"
+  path: string                       // below the mount; "/" is the mount itself
+  capability: Capability | "open"    // read | chat | write | admin | peer, or open
+  root?: string                      // also answer here while exactly one hosted agent declares it
+  handler(request: { request: Request; url: URL; path: string; caller: PluginCaller }): Promise<Response>
+}
+type PluginCaller =
+  | { kind: "operator" } | { kind: "key"; keyId: string; label: string } | { kind: "anonymous" }
+```
+
+It is mounted at `/v1/agents/<agentId>/plugins/<plugin name>/<path>`, so the plugin's `name` must be a
+lowercase slug; an invalid path or a route declared twice fails the plugin's `setup`, which is a
+warning like any failed plugin rather than an agent that will not start. **The gate is the one every
+first-party route has**: the server authenticates the caller, checks the declared capability (403), and
+answers an agent the key does not reach exactly as a missing one (404), all before the handler runs.
+The handler receives a *caller*, never the credential. Routes are rebuilt with the agent, so a reload
+changes them and a stopped agent answers none.
+
+`peer` is the capability for a remote agent's key: no first-party route asks for it, so a key minted
+with `can: ["peer"]` reaches a plugin route that declares it and nothing else — it cannot start a
+trusted turn through `POST /messages`. A route that throws answers `500 plugin_route_failed`, naming the
+plugin. `root` exists for `/.well-known/agent-card.json`, which a peer looks for at the host root; a root
+path that two agents claim is answered by neither, because it cannot say which one it means.
+
+A channel whose inbound text comes from another agent sets `RawInbound.senderKind: "agent"`: the text
+is fenced as untrusted and the turn acts for nobody, the treatment an agent sender gets everywhere.
 
 ### Store driver
 
@@ -454,6 +550,22 @@ interface LocalTool {
 ```
 
 In-process functions. Same catalogue, same budget, same phase rules as provider tools.
+
+A **tool provider factory** receives `{ dir, env, config, agentId, providers? }`. `providers` is every
+factory the runtime builds agents with, handed over so a provider whose tools edit the manifest
+(`config_set`) can have a `tools.providers` edit checked by the providers themselves before it is
+written: the same check the TUI, the web app and `PATCH /config` make (decision 14.24). A factory must
+construct without network I/O, which is what makes building one to validate its config safe.
+
+**`ctx.actingParticipant`** is who the turn acts for: `{ id, name?, via: "api" | "channel", onBehalfOf? }`, or
+`null` for a schedule, a peer agent, an in-process team handoff or the operator. A cross-member
+delegation (Phase 28) carries the person who asked the coordinator, who stays accountable; a
+stand-in's turn carries the real sender as `id` and the absent owner as `onBehalfOf`. Every tool receives it, local and
+provider alike. The runtime stamps it from the surface the turn arrived through; nothing the model
+writes reaches it. A tool that calls an embedder's API forwards it (a header, say) so the embedder
+can authorise the person as well as the agent. Optional in the type so a plugin's own test fixture
+keeps compiling, and absent reads as `null`. `04-SPEC-WIRE.md` has the table of which turn gets
+what, and how a key is bound to a participant.
 
 ---
 

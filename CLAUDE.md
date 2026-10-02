@@ -177,8 +177,14 @@ packages/core/       the loop, context, tools, skills, memory, store, schedule, 
 packages/cli/        `dispach` binary — lib/ plumbing, components/ Ink, pure reducers at top level
 packages/server/     HTTP/SSE/WS surface
 packages/client/     typed client for the API — reattach, streams, typed errors
-packages/channel-*/  Telegram. A second channel comes from a plugin, not from here
-packages/tools-*/    system (shell, files), Composio, web. No MCP package exists — see decision 4.7
+packages/channel-*/  Telegram, WhatsApp, Teams (Bot Framework, webhook-only), Slack (Socket Mode), A2A (JSON-RPC, peers
+                     are agents: untrusted, acting for nobody). Each is a plugin the binary bundles
+packages/tools-*/    system (shell, files), Composio, web, MCP (remote servers over Streamable HTTP — a provider,
+                     never the substrate: decisions 4.7, 14.22)
+packages/model-*/    model transports beyond chat-completions: Bedrock Converse. Its AWS SDK loads on
+                     the first model call, never at boot (`bundle.test.ts` holds it)
+packages/media-*/    media providers beyond the built-in openai: Amazon Transcribe and Nova Canvas.
+                     Same lazy-SDK rule, same guard
 packages/control/    the control plane: places, proxies, suspends and wakes one runtime per user.
                      **FSL-1.1, not Apache-2.0.** Imports nothing from the runtime and nothing
                      imports it (`check:deps`); read its own CLAUDE.md before touching it
@@ -239,8 +245,13 @@ Never claim a performance property without a number in `evals/` and a script to 
   error anywhere.
 - **Pinned blocks must survive every compaction stage including S5.** Anything that must
   always hold lives in slots 0/1, never in history.
-- **Thinking blocks must be replayed with tool results** when `capabilities.thinking !== "none"`,
-  or multi-step reasoning silently degrades with no error.
+- **Signed thinking blocks are replayed with tool results** when `capabilities.thinking` is
+  `anthropic`, or multi-step reasoning silently degrades with no error. This bullet claimed it for
+  three phases before it existed: reasoning was a concatenated string that reached `turns.reasoning`
+  and nothing else. It is built since 26c. A transport emits `thinking_block` chunks, the loop puts
+  them on the assistant call **within the turn only** (never stored; the next turn starts a fresh
+  tool loop), and the transport replays them. `thinking-replay.test.ts` reads the second step's
+  request, because every layer can be right while the value is dropped between them.
 - **`allowFrom` is inbound-only.** It confers nothing on outbound delivery. Conflating these
   produces a confusing "chat not found" class of failure.
 - **A tool result is not automatically trustworthy.** `ToolSpec.trust` separates text the runtime wrote
@@ -1253,6 +1264,30 @@ Never claim a performance property without a number in `evals/` and a script to 
   Telegram username is `[A-Za-z0-9_]{5,32}`, so `@ada-lovelace` cannot exist and matching nobody is
   the only possible outcome. Everything downstream was correct behaviour applied to a wrong fact,
   which is the hardest kind of bug to see: nothing failed anywhere.
+- **A volume mounted inside another makes the container runtime create the missing parent as root.**
+  The workspaces volume at `~/.dispach/agents` inside the home volume left `~/.dispach` root-owned 0755,
+  where `fsGroup` does not reach, so uid 1000 could not create `store.db` and the pod crash-looped with
+  `store_open_failed`, whose hint talks about Node versions. Docker never shows it, because a named
+  volume is seeded from the image's own directories and a Kubernetes volume is not. Found only by
+  applying the example to a real cluster (k3s in Docker); the example's `layout` init container
+  creates the directory first, as the same non-root user.
+- **A tool-less agent has no tool runtime, so anything a *turn* brings needs one made for it.**
+  `submit_artifact` arrives as a turn tool and was layered only onto a runtime that existed, so a team
+  member or delegate with no tools of its own could never return an artifact — every handoff to one
+  failed as "finished without returning an answer". Every unit test gave its members tools; the image
+  run with a bare delegate found it. `#bareToolRuntime` is used only for such a turn, so a tool-less
+  agent's ordinary prompt keeps no catalogue.
+- **A reload's trial has to build what the swap builds.** It built the tool registry only, so
+  anything `Agent.create` refuses and the schema accepts — an unknown media provider, a workspace file
+  over budget — passed the trial, the old instance was disposed, the rebuild threw, and the agent was
+  simply gone from a running silo. Found by writing a bad `media` block through `PATCH /config` in the
+  image. The trial calls `instantiateAgent` with a scratch bus and discards it.
+- **A turn held for a reload must not count against the instance it is waiting to leave.** The swap
+  waits for the old instance's `inFlight` to reach zero, so a held turn that took a slot there is a turn
+  waiting on itself: the reload never lands and the turn never starts, with nothing reporting either.
+  The held admission is a promise of the successor instead (`DEFERRED` in `agent.ts`), and `send`
+  follows it — which is also why a channel queue or an HTTP handler holding a *stale* `Agent` reaches
+  the new instance with no change of its own. Revert-checked: counting it deadlocks the hold test.
 - **In a container every runtime is pid 1, so "is the holder's pid alive" answers about itself.** A
   container killed rather than stopped left a lease saying pid 1, and its replacement refused to
   serve for 45 minutes because pid 1 was alive. A holder with *our* pid is dead unless it is a
@@ -1660,6 +1695,13 @@ Never claim a performance property without a number in `evals/` and a script to 
   behind a `--history` flag: `clear` wipes both, so an opt-in would make a plain rebuild delete every
   conversation and report success. `enumerateFiles` refuses a memory file named `session:*.md`, which
   would otherwise be dropped by whichever pass ran second and re-added by the other, forever.
+- **A shared memory scope is a separate corpus, never a third prefix, and private memory reaches a prompt two
+  ways.** Phase 29's scopes (`space`, `owner:<id>`, `project:<id>`) are indexed under `~<scope>` rather than
+  as sources in an agent's corpus, so `syncFiles` and `syncSessions` cannot see them and `syncNotes` may own
+  its whole corpus, provided it is handed the scope's whole note list every time. A turn barred from private
+  memory, a stand-in or a room, must also lose the **volatile tier**: `USER.md` and `MEMORY.md` are injected
+  every turn, so skipping recall alone still handed a stand-in every saved note. `memory-scopes.test.ts`
+  asserts both, and each goes red with its guard reverted.
 - **A retrieved conversation excerpt needs a different sentence from a retrieved note, and slot 2 needs a
   memory row.** Both were measured on the same live agent, and both are the "a fact with no frame is a fact
   a small model will not connect to a question" lesson again. With one frame for both, an agent holding
@@ -2243,7 +2285,9 @@ Never claim a performance property without a number in `evals/` and a script to 
   rule is not "add a binary test": it is **`instanceof` only where the throw and the catch are in one
   package**, `isHarnessError` (a `Symbol.for` mark, identical across copies by construction)
   everywhere else, and a boundaries test in `packages/server` refusing `instanceof HarnessError`
-  outright because every `catch` there is catching a foreign error. The mark is set in the constructor
+  outright because every `catch` there is catching a foreign error. The CLI has the same guard since
+  26d, after the image printed a public-bind refusal (`server_public_without_token`, whose hint names the
+  token) as `server_bind_failed`, claiming every port in the range was taken. The mark is set in the constructor
   rather than declared as a field: a symbol-keyed field reaches the `.d.ts` and makes the class
   *nominal*, at which point `tsc` reports the same duplication — a real finding, and the wrong place
   to spend it. The guard that works without a bundler imports the built `dist` beside the source, which

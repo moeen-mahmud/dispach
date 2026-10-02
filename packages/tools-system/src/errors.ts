@@ -87,6 +87,14 @@ export function fileIsBinary(path: string, size: number): ToolError {
  * Worded so the model reports rather than retries: there is no argument that gets past this, and a
  * refusal that reads like a transient failure produces the retry storm `memory_write` once caused.
  */
+export function fileSecret(path: string, reason: string): ToolError {
+    return new ToolError({
+        code: "file_secret",
+        message: `Refused to read ${path}: ${reason}.`,
+        hint: "Credentials are never read into a conversation. If a task needs a key, it is configured by name in the manifest and the tool that needs it reads it; ask the person rather than looking for the value.",
+    })
+}
+
 export function fileProtected(path: string, reason: string): ToolError {
     return new ToolError({
         code: "file_protected",

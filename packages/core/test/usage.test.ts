@@ -89,7 +89,11 @@ describe("every model call is metered", () => {
                 calls: 2,
                 promptTokens: 250,
                 cachedPromptTokens: 0,
+                cacheWriteTokens: 0,
                 outputTokens: 15,
+                // Zero rather than absent: a token-only history has no media, which is a measurement.
+                images: 0,
+                audioSeconds: 0,
                 estimatedCalls: 0,
             },
         ])
@@ -268,5 +272,91 @@ describe("listing an agent's turns", () => {
         const narrowed = await store.turns.listForAgent("a", { sessionPrefix: "team_2:" })
         expect(narrowed.turns.map((t) => t.turnId)).toEqual(["team_2:b-1", "team_2:b-0"])
         await store.close()
+    })
+})
+
+describe("billing fields (Phase 26c)", () => {
+    test("each model.result carries its call id, the answering model, the role and the sender", async () => {
+        let call = 0
+        const fetch: FetchLike = async () => {
+            call += 1
+            const written = `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, cache_creation_input_tokens: 80 } })}\n\n`
+            return call === 1
+                ? sse([delta("ACTION: now\n"), written, "data: [DONE]\n\n"])
+                : sse([delta("It is now."), usage(150, 5), "data: [DONE]\n\n"])
+        }
+        const runtime = await Runtime.create({
+            agents: [join(workspace(), "agent.yaml")],
+            env: ENV,
+            fetch,
+        })
+        const results: { callId: string; model: string; role: string; sender?: string }[] = []
+        const calls: string[] = []
+        runtime.bus.on("*", (event) => {
+            if (event.type === "model.result") results.push(event.data)
+            if (event.type === "model.call") calls.push(event.data.callId)
+        })
+        await runtime.agent("metered").send("what time is it?", {
+            from: { id: "user:ada", kind: "user" },
+        })
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        const [total] = (await runtime.store.usage.report({ by: [] })).buckets
+        await runtime.stop()
+
+        expect(results.length).toBe(2)
+        expect(new Set(results.map((r) => r.callId)).size).toBe(2)
+        expect(results.map((r) => r.callId)).toEqual(calls)
+        expect(results.every((r) => /^mc_/.test(r.callId))).toBe(true)
+        expect(results.map((r) => [r.model, r.role, r.sender])).toEqual([
+            ["gpt-4o-mini", "main", "user:ada"],
+            ["gpt-4o-mini", "main", "user:ada"],
+        ])
+        expect(total?.cacheWriteTokens).toBe(80)
+    })
+
+    test("a retried call is one call, one row", async () => {
+        let hits = 0
+        const runtime = await Runtime.create({
+            agents: [join(workspace(), "agent.yaml")],
+            env: ENV,
+            fetch: async () => {
+                hits += 1
+                return hits === 1
+                    ? new Response("busy", { status: 503 })
+                    : sse([delta("hi"), usage(10, 2), "data: [DONE]\n\n"])
+            },
+        })
+        const ids: string[] = []
+        runtime.bus.on("*", (event) => {
+            if (event.type === "model.result") ids.push(event.data.callId)
+        })
+        await runtime.agent("metered").send("hello")
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        const [total] = (await runtime.store.usage.report({ by: [] })).buckets
+        await runtime.stop()
+        expect(hits).toBe(2)
+        expect(ids.length).toBe(1)
+        expect(total?.calls).toBe(1)
+    })
+
+    test("the same call id recorded twice is one row; rows from before the id existed still count", async () => {
+        const store = await openMemoryStore()
+        const row = {
+            agentId: "a",
+            role: "main",
+            model: "m",
+            promptTokens: 10,
+            promptReported: true,
+            outputTokens: 1,
+            outputReported: true,
+            at: new Date().toISOString(),
+        }
+        await store.usage.record({ ...row, callId: "mc_same" })
+        await store.usage.record({ ...row, callId: "mc_same" })
+        await store.usage.record(row)
+        await store.usage.record(row)
+        const [total] = (await store.usage.report({ by: [] })).buckets
+        await store.close()
+        expect(total?.calls).toBe(3)
     })
 })

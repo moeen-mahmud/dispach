@@ -36,7 +36,7 @@ import {
     bearerHeaders,
     editManifest,
     endpointUrl,
-    HarnessError,
+    isHarnessError,
     loadManifest,
     modelsUrl,
     windowReport,
@@ -440,6 +440,15 @@ export async function modelCommand(options: ModelOptions): Promise<number> {
         const probes: RoleProbe[] = []
         for (const entry of roles) {
             const config = manifest.model[entry.role] ?? manifest.model.main
+            if (config.baseUrl === undefined) {
+                // Every probe here is a chat-completions request; another transport has no
+                // `/models` to read and no bearer to send. Saying so beats a request that cannot mean
+                // anything.
+                process.stdout.write(
+                    `model.${entry.role} uses the ${config.api ?? "chat-completions"} transport, which this probe does not speak. Its window comes from the capability registry: ${entry.window.contextWindow.toLocaleString("en-US")} tokens (${entry.window.source}).\n`,
+                )
+                continue
+            }
             const endpoint: Endpoint = {
                 chat: endpointUrl(config.baseUrl),
                 models: modelsUrl(config.baseUrl),
@@ -511,7 +520,7 @@ export async function modelCommand(options: ModelOptions): Promise<number> {
         )
         return EXIT_OK
     } catch (error) {
-        if (error instanceof HarnessError) {
+        if (isHarnessError(error)) {
             process.stderr.write(`${error.format()}\n`)
             return EXIT_FAILURE
         }

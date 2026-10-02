@@ -13,21 +13,29 @@
  */
 
 import { readFile } from "node:fs/promises"
-import type { Capability as Cap, KeyScope } from "@dispach/core"
+import type { Capability as Cap, KeyScope, ReloadOutcome } from "@dispach/core"
 import {
     type Agent,
     type AgentStateRecord,
     type AnyEvent,
+    agentOf,
+    bundleSections,
+    type ConversationRecord,
     type ErrorDetail,
     EVENT_TYPES,
     editManifest,
     entryPhase,
+    exportBundle,
+    formatSessionKey,
     HarnessError,
+    type ImageInput,
+    importBundle,
     isHarnessError,
     isPhased,
     keyFingerprint,
     keyLabelProblem,
     MAX_KEY_LABEL,
+    type MountedRoute,
     manifestValueAt,
     nearest,
     newKeyId,
@@ -36,14 +44,17 @@ import {
     newTurnId,
     newWebhookSecret,
     PERSON_SETTABLE_PATHS,
+    type PluginCaller,
     parseSettingValue,
     phasesFor,
     prepareScheduleWrite,
     type Runtime,
+    readImages,
     type ScheduleRecord,
     SENDER_KINDS,
     SETTINGS,
     type SenderKind,
+    scheduleSendOptions,
     scheduleSessionKey,
     settingByPath,
     type TurnRecord,
@@ -73,6 +84,7 @@ import {
     reachesAgent,
     reachesSession,
     scopeFilter,
+    senderFor,
 } from "./principal.ts"
 import { claimSpent, fail, forbidden } from "./respond.ts"
 import { Router } from "./router.ts"
@@ -80,20 +92,41 @@ import { sseResponse } from "./sse.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
 import {
     ApprovalBody,
+    AssigneeBody,
     ChannelPatchBody,
     ConfigBody,
+    ConversationBody,
+    ConversationMessageBody,
+    DecisionBody,
+    DeliveryBody,
+    ImportBody,
     KeyBody,
+    MembersBody,
     MessageBody,
+    NoteBody,
+    ParticipantBody,
     PhaseBody,
+    PresenceBody,
+    ProjectBody,
     ProvisionBody,
     parseBody,
     SecretsBody,
+    SpaceWriterBody,
     StopBody,
+    ToolsRefreshBody,
+    VarsBody,
     WebhookBody,
 } from "./wire-schemas.ts"
 
 /** Bodies larger than this are refused before a channel plugin sees them. */
 const MAX_BODY_BYTES = 1_000_000
+
+/**
+ * An agent bundle's cap (R11): memory and knowledge are markdown, and a year of notes is well under
+ * this. Its own number because a bundle is not a message, and raising the shared cap for it would
+ * raise it for every route a stranger's channel can reach.
+ */
+const MAX_BUNDLE_BYTES = 25_000_000
 
 /**
  * Caps on the sender fields and the idempotency key.
@@ -226,6 +259,14 @@ export interface HandlerOptions {
      */
     readonly channels?: ChannelAdmin
     /**
+     * What the CLI injects for `DELETE /v1/agents/:id`. Absent answers `501`.
+     *
+     * Injected because where an agent's files are, and whether they may be deleted, is the CLI's
+     * knowledge: only an agent inside the sandbox is ever deleted, and never one whose id another
+     * directory also declares — that delete would take the other agent's conversations with it.
+     */
+    readonly remover?: AgentRemover
+    /**
      * What the CLI injects for `GET` and `PUT /v1/agents/:id/secrets`. Absent answers `501`.
      *
      * Injected for `channels`' reason: the values go into the `.env` beside the manifest, and how is
@@ -281,6 +322,18 @@ export interface ChannelAdmin {
     unpair(manifestPath: string, channelId: string): { readonly note: string }
 }
 
+/** What the CLI injects for `DELETE /v1/agents/:id`. See `HandlerOptions.remover`. */
+export interface AgentRemover {
+    /** The agent's directory, or why it may not be deleted. Deletes nothing. */
+    locate(
+        agentId: string,
+    ):
+        | { readonly ok: true; readonly dir: string }
+        | { readonly ok: false; readonly error: ErrorDetail; readonly status: 404 | 409 }
+    /** Delete the directory. Called last, after the agent is gone and its rows are purged. */
+    deleteDir(dir: string): Promise<void>
+}
+
 /** What the CLI injects for `POST /v1/agents`. See `HandlerOptions.provision`. */
 export interface Provisioner {
     /** Every question, in asking order, with defaults and choices. Served as-is. */
@@ -306,6 +359,19 @@ export interface Provisioner {
         readonly name: string
         readonly vars: Readonly<Record<string, string>>
     }): ReturnType<Provisioner["create"]>
+    /**
+     * Apply changed vars to an agent made from a template (pilot.5): only files nobody edited since
+     * they were rendered are rewritten. Optional, so an embedder's provisioner without it still
+     * compiles; the route then answers 501.
+     */
+    rerender?(input: {
+        readonly agentDir: string
+        readonly vars: Readonly<Record<string, string>>
+    }): {
+        readonly rendered: readonly string[]
+        readonly skipped: readonly { readonly file: string; readonly reason: string }[]
+        readonly undo: () => void
+    }
 }
 
 /** One template as the wire carries it. Structural, so `packages/cli` needs no import from here. */
@@ -624,6 +690,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "/v1/ready",
         () => {
             if (runtime.ready) return json({ status: "ready", agents: runtime.list().length })
+            // A drain is the way down, not the way up: `"starting"` would read as a boot to wait for.
+            if (runtime.draining) {
+                return json({ status: "draining", agents: runtime.list().length }, 503)
+            }
             // `"starting"`, not `"stopped"`. A runtime that has not reached readiness is on its way up,
             // and "stopped" is what an orchestrator reads as "give up on this container". The
             // `pending: []` this used to carry was a promise nothing filled: agents load inside
@@ -684,9 +754,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * make a listing depend on credentials being present — the defect `readManifestHeader` exists
      * to avoid. The id and the reason are what a client can act on.
      *
-     * `GET /v1/agents/:id` still answers **404** for one of these, and the asymmetry is the point:
-     * the listing answers "what exists", the resource answers "what is running". A 200 there would
-     * have to invent a body for an agent with no tools, no window and no sessions in memory.
+     * `GET /v1/agents/:id` answers the same thin row for one of these since pilot.5. It used to
+     * answer 404, so a client holding an id saw the listing call it `disabled` and the resource call
+     * it nonexistent (VelaCrew). Every route that *acts* on the agent still answers 404: the row says
+     * what exists, and nothing pretends it is running.
      */
     router.add(
         "GET",
@@ -696,13 +767,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
             const live = new Set(hosted.map((entry) => entry.id))
             const stopped = (await runtime.store.agentState.list())
                 .filter((state) => !state.enabled && !live.has(state.agentId))
-                .map((state) => ({
-                    id: state.agentId,
-                    name: state.agentId,
-                    status: "disabled" as const,
-                    ...(state.reason === undefined ? {} : { reason: state.reason }),
-                    ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
-                }))
+                .map(stoppedRow)
             /**
              * **Filtered by scope, and the stopped rows with it.**
              *
@@ -721,8 +786,16 @@ export function createHandler(options: HandlerOptions): ServerHandler {
     router.add(
         "GET",
         "/v1/agents/:id",
-        (context) =>
-            withAgent(runtime, context, async (agent) => {
+        async (context) => {
+            const id = context.params.id ?? ""
+            if (
+                !runtime.list().some((agent) => agent.id === id) &&
+                reachesAgent(context.principal, id)
+            ) {
+                const state = await runtime.store.agentState.get(id)
+                if (state !== undefined && !state.enabled) return json(stoppedRow(state))
+            }
+            return withAgent(runtime, context, async (agent) => {
                 // Both of these were the literal `0`, for every agent, whatever was configured — and
                 // the spec advertises them as "tool count, skills indexed, schedule count". A number
                 // that is always zero is worse than an absent field: it reads as a measurement.
@@ -735,8 +808,22 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 // says which is which.
                 const schedules = await agent.store.schedules.list(agent.id)
                 const team = runtime.team(agent.id)
+                // Who it works for, when an admin recorded it (Phase 27): the person accountable for
+                // what it is asked to do.
+                const assignment = await runtime.store.conversations.assignment(agent.id)
                 return json({
                     ...summary(runtime, agent),
+                    ...(assignment === undefined
+                        ? {}
+                        : {
+                              assignedTo: {
+                                  participantId: assignment.participantId,
+                                  ...(assignment.assignedBy === undefined
+                                      ? {}
+                                      : { assignedBy: assignment.assignedBy }),
+                                  assignedAt: assignment.assignedAt,
+                              },
+                          }),
                     dialect: agent.describe().dialect,
                     window: agent.window,
                     tools: agent.tools.size,
@@ -769,7 +856,8 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                           }),
                     warnings: [...agent.warnings, ...agent.tools.warnings],
                 })
-            }),
+            })
+        },
         { capability: "read" },
     )
 
@@ -791,20 +879,200 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * not this route's: a reload that killed somebody's half-finished answer to pick up a setting
      * would be a worse trade than waiting. `agent_turn_in_flight` names the count.
      */
+    /**
+     * A slice of one agent, out and in (doc 16 R11): its memory and knowledge, as a JSON bundle. The
+     * embedder brokers it — scans for secrets, decides who may — so both are `admin`, and a key bound
+     * to a participant must be an admin participant's.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/export",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const refusal = await requireAdminParticipant(context.principal)
+                if (refusal !== undefined) return refusal
+                const paths = context.url.searchParams.get("paths")
+                try {
+                    const sections = bundleSections(
+                        paths === null ? undefined : paths.split(",").map((p) => p.trim()),
+                    )
+                    return json(exportBundle(agent, sections))
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    router.add(
+        "POST",
+        "/v1/agents/:id/import",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const refusal = await requireAdminParticipant(context.principal)
+                if (refusal !== undefined) return refusal
+                const body = await readJson(context.request, MAX_BUNDLE_BYTES)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(ImportBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                try {
+                    const report = await importBundle({
+                        agent,
+                        bundle: parsed.value.bundle,
+                        ...(parsed.value.mode === undefined ? {} : { mode: parsed.value.mode }),
+                        reload: async () => (await runtime.reload(agent.id)).status,
+                    })
+                    return json({ id: agent.id, ...report })
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    /**
+     * Re-render an agent's template files with changed vars (pilot.5, VelaCrew #21), then reload it.
+     *
+     * The engine rewrote persona files through `docker exec` and reloaded. Here the template's own
+     * renderer does it, and a file somebody edited since it was rendered is left alone and reported,
+     * which a rewrite from outside could not tell. If the agent refuses to load afterwards, every
+     * rewritten file is put back, so a bad value cannot leave an agent that will not start.
+     * Gated like provisioning, because it writes the agent's files.
+     */
+    router.add(
+        "PATCH",
+        "/v1/agents/:id/vars",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const rerender = options.provision?.rerender
+                if (rerender === undefined) {
+                    return fail(
+                        {
+                            code: "rerender_not_supported",
+                            message: "This server cannot re-render an agent's template.",
+                            hint: "`serve` provides it; an embedder mounting this handler has no templates directory. Edit the files and POST /reload instead.",
+                        },
+                        501,
+                    )
+                }
+                if (!mayProvision(context.principal)) {
+                    return fail(
+                        {
+                            code: "provisioning_not_local",
+                            message:
+                                "Re-rendering an agent's files needs either a loopback bind or a credential with the admin capability.",
+                            hint: "It writes the agent's files, like creating one. Present the server's token or an operator key minted with `can: [admin]`.",
+                        },
+                        403,
+                    )
+                }
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(VarsBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+
+                let result: ReturnType<NonNullable<Provisioner["rerender"]>>
+                try {
+                    result = rerender({ agentDir: agent.dir, vars: parsed.value.vars })
+                } catch (error) {
+                    if (isHarnessError(error)) {
+                        return fail(
+                            error.toDetail(),
+                            error.code === "agent_not_from_template" ? 409 : 400,
+                        )
+                    }
+                    throw error
+                }
+                const respond = (reload: "none" | "loaded" | "pending", status = 200) =>
+                    json(
+                        {
+                            id: agent.id,
+                            rendered: result.rendered,
+                            skipped: result.skipped,
+                            reload,
+                        },
+                        status,
+                    )
+                if (result.rendered.length === 0) return respond("none")
+                try {
+                    const outcome = await runtime.reload(agent.id)
+                    return respond(outcome.status, outcome.status === "pending" ? 202 : 200)
+                } catch (error) {
+                    result.undo()
+                    if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                    throw error
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    /**
+     * Fetch the tool providers now and reload only if the catalogue the agent serves moved (pilot.5,
+     * VelaCrew #20). The embedder used to PATCH `tools.pinned` or POST `/reload` after a connection,
+     * and retry the `pending` on the next chat open; this is one call that reloads only when needed.
+     * `admin`, like `/reload`: it can replace the agent.
+     */
+    router.add(
+        "POST",
+        "/v1/agents/:id/tools/refresh",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(ToolsRefreshBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                try {
+                    const outcome = await runtime.refreshTools(agent.id, {
+                        ...(parsed.value.providers === undefined
+                            ? {}
+                            : { providers: parsed.value.providers }),
+                    })
+                    return json(
+                        { id: agent.id, ...outcome },
+                        outcome.reload === "pending" ? 202 : 200,
+                    )
+                } catch (error) {
+                    if (isHarnessError(error)) {
+                        return fail(
+                            error.toDetail(),
+                            error.code === "agent_turn_in_flight" ? 409 : 400,
+                        )
+                    }
+                    throw error
+                }
+            }),
+        { capability: "admin" },
+    )
+
     router.add(
         "POST",
         "/v1/agents/:id/reload",
         (context) =>
             withAgent(runtime, context, async (agent) => {
                 try {
-                    const admitted = await runtime.replace(agent.id)
+                    const outcome = await runtime.reload(agent.id)
+                    // Busy: the running turns finish on the old configuration and the swap follows,
+                    // announced by `agent.reloaded`. 202, because the change is accepted and not yet
+                    // in force — a 409 here used to mean "try again", in a team silo, forever.
+                    if (outcome.status === "pending") {
+                        return json(
+                            {
+                                id: agent.id,
+                                status: "pending",
+                                adopted: [],
+                                running: outcome.running,
+                                holdAfterMs: outcome.holdAfterMs,
+                            },
+                            202,
+                        )
+                    }
                     return json({
                         id: agent.id,
                         status: "loaded",
                         // Every agent that came back, because replacing a supervisor replaces its team:
                         // they load from one manifest as one unit, so a caller holding a list needs to
                         // know the members are new instances too.
-                        adopted: admitted.map((entry) => entry.id),
+                        adopted: outcome.adopted.map((entry) => entry.id),
                     })
                 } catch (error) {
                     // The runtime's own refusals carry the field and the remedy — a team member has no
@@ -1143,12 +1411,22 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 return json({ ...written, applied: "none", adopted: [], stopped: true })
             }
             try {
-                const admitted = hosted
-                    ? await runtime.replace(found.id)
-                    : await runtime.adopt(found.manifestPath)
+                if (hosted) {
+                    const outcome = await runtime.reload(found.id)
+                    // A turn is running: the secret is written and in force once it finishes.
+                    if (outcome.status === "pending") {
+                        return json({ ...written, applied: "pending", adopted: [] })
+                    }
+                    return json({
+                        ...written,
+                        applied: "reloaded",
+                        adopted: outcome.adopted.map((agent) => agent.id),
+                    })
+                }
+                const admitted = await runtime.adopt(found.manifestPath)
                 return json({
                     ...written,
-                    applied: hosted ? "reloaded" : "adopted",
+                    applied: "adopted",
                     adopted: admitted.map((agent) => agent.id),
                 })
             } catch (error) {
@@ -1279,6 +1557,117 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         { capability: "admin" },
     )
 
+    /**
+     * Delete an agent: off this host, its rows out of the store, its directory off disk. Irreversible,
+     * so the request names the agent twice (`?confirm=<id>`), the way `remove` makes a person type it.
+     *
+     * The order is the CLI's `remove`, and the reason is the same: everything checkable is checked
+     * before anything happens, and the irreplaceable thing — the directory — goes last, so a failure
+     * part-way leaves an agent that still loads rather than data nothing can name.
+     */
+    router.add(
+        "DELETE",
+        "/v1/agents/:id",
+        async (context) => {
+            const id = context.params.id ?? ""
+            if (!reachesAgent(context.principal, id)) return notFound("agent", id)
+            const hosted = runtime.list().some((agent) => agent.id === id)
+            const known = await runtime.store.agentState.get(id)
+            const remover = options.remover
+            if (remover === undefined) {
+                return fail(
+                    {
+                        code: "agent_remove_unsupported",
+                        message: "This server cannot delete agents.",
+                        hint: "`serve` provides deletion; an embedded handler has no sandbox to delete from. Use the CLI's `remove`.",
+                    },
+                    501,
+                )
+            }
+            if (context.url.searchParams.get("confirm") !== id) {
+                return fail(
+                    {
+                        code: "agent_remove_unconfirmed",
+                        message: `Deleting ${id} needs ?confirm=${id}.`,
+                        hint: "It deletes the agent's conversations, memory and files for good, so the request names the agent twice. POST /v1/agents/:id/stop switches one off and keeps everything.",
+                        field: "confirm",
+                    },
+                    400,
+                )
+            }
+            const located = remover.locate(id)
+            if (!located.ok) {
+                if (!hosted && known === undefined && located.status === 404) {
+                    return notFound("agent", id)
+                }
+                return fail(located.error, located.status)
+            }
+            if (hosted) {
+                try {
+                    await runtime.dispose(id, "stopped")
+                } catch (error) {
+                    if (isHarnessError(error)) return fail(error.toDetail(), 409)
+                    throw error
+                }
+            }
+            const purged = await runtime.store.purgeAgent(id)
+            await remover.deleteDir(located.dir)
+            return json({ id, removed: true, dir: located.dir, ...purged })
+        },
+        { capability: "admin" },
+    )
+
+    // ─── Deliveries ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * Exact text out on one of the agent's channels, with no model turn — a reminder, an outreach
+     * message — through the same outbox as a reply, so retries and `key` idempotency are its own.
+     *
+     * `admin`, because it speaks as the agent to any recipient with nothing between the caller and
+     * the channel. Written into that conversation's history as the agent's, once: when the person
+     * answers, the agent sees what it "said". A repeated key is accepted, and neither sent nor
+     * recorded again.
+     */
+    router.add(
+        "POST",
+        "/v1/agents/:id/deliveries",
+        async (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(DeliveryBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const input = parsed.value
+                if (!runtime.channels.hasChannel(agent.id, input.channel)) {
+                    return fail(
+                        {
+                            code: "delivery_channel_unknown",
+                            message: `${agent.id} has no running channel "${input.channel}".`,
+                            hint: "Name a channel id from the agent's manifest (GET /v1/agents/:id lists them with their status). A disabled channel is not running and cannot send.",
+                            field: "channel",
+                        },
+                        404,
+                    )
+                }
+                // The key an inbound message from `to` on this channel resolves to, so a reply lands in
+                // the conversation the delivery was written into.
+                const sessionKey = formatSessionKey({ channel: input.channel, peerId: input.to })
+                const outside = outsideSession(context, sessionKey)
+                if (outside !== undefined) return outside
+                const { inserted } = await runtime.channels.deliver({
+                    agentId: agent.id,
+                    sessionKey,
+                    channelId: input.channel,
+                    recipient: input.to,
+                    text: input.text,
+                    key: input.key,
+                })
+                if (inserted) await agent.recordDelivered(input.text, { sessionKey })
+                return json({ sessionKey, key: input.key, duplicate: !inserted }, 202)
+            }),
+        { capability: "admin" },
+    )
+
     // ─── Turns ───────────────────────────────────────────────────────────────────────────
 
     router.add(
@@ -1319,11 +1708,41 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const deliver = parseDeliver(input.deliver)
                 if (deliver.kind === "error") return fail(deliver.error, 400)
 
-                const from = parseFrom(input.from)
-                if (from.kind === "error") return fail(from.error, 400)
+                const parsedFrom = parseFrom(input.from)
+                if (parsedFrom.kind === "error") return fail(parsedFrom.error, 400)
+                const from = senderFor(context.principal, parsedFrom.from)
+                if (!from.ok) return fail(from.error, 403)
 
                 const idempotency = parseIdempotencyKey(context.request)
                 if (idempotency.kind === "error") return fail(idempotency.error, 400)
+
+                // A peer's text is fenced as untrusted, and a note sits outside that fence as trusted
+                // framing: from a peer it would be a way to speak past the fence its own text is in.
+                if (input.runtimeNote !== undefined && from.from?.kind === "agent") {
+                    return fail(
+                        {
+                            code: "message_note_untrusted",
+                            message: "A message from an agent cannot carry a runtimeNote.",
+                            hint: "A note is trusted framing outside the fence a peer's text is shown in. Put what the peer has to say in text.",
+                            field: "runtimeNote",
+                        },
+                        400,
+                    )
+                }
+
+                // Images are read and checked now, for the governor's reason below: once the turn
+                // detaches, a missing file or a model that cannot see would be refused to nobody.
+                let images: readonly ImageInput[] = []
+                if (input.images !== undefined && input.images.length > 0) {
+                    const blind = agent.refusesImages()
+                    if (blind !== undefined) return fail(blind.toDetail(), 400)
+                    try {
+                        images = await readImages(agent.dir, input.images)
+                    } catch (error) {
+                        if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                        throw error
+                    }
+                }
 
                 // The governor answers now, while there is still a response to put it in. After this
                 // the turn detaches and a refusal would reach nobody. Nothing is recorded for a
@@ -1351,7 +1770,14 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         agentId: agent.id,
                         key: idempotency.key,
                         turnId,
-                        inputHash: await inputHash(sessionKey, text),
+                        // Images are part of what was sent, so a retry with different ones is a
+                        // different message rather than a replay of the first.
+                        inputHash: await inputHash(
+                            sessionKey,
+                            images.length === 0
+                                ? text
+                                : `${text}\n${images.map((image) => image.data).join("\n")}`,
+                        ),
                         now: new Date(),
                     })
                     if (claim.kind !== "claimed") admission.release()
@@ -1398,10 +1824,18 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         turnId,
                         source: "api",
                         ...(from.from === undefined ? {} : { from: from.from }),
+                        ...(images.length === 0 ? {} : { images }),
+                        ...(input.runtimeNote === undefined ? {} : { turnNote: input.runtimeNote }),
                         signal: controller.signal,
                     })
                     .then(async (result) => {
-                        if (deliver.target === undefined || result.text.trim() === "") return
+                        const attachments = result.attachments ?? []
+                        if (
+                            deliver.target === undefined ||
+                            (result.text.trim() === "" && attachments.length === 0)
+                        ) {
+                            return
+                        }
                         await runtime.channels.deliver({
                             agentId: agent.id,
                             sessionKey,
@@ -1409,6 +1843,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                             recipient: deliver.target.to,
                             turnId,
                             text: result.text,
+                            ...(attachments.length === 0 ? {} : { attachments }),
                         })
                     })
                     .catch(() => {
@@ -1733,6 +2168,9 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                           ...(scope.agents === undefined ? {} : { agents: scope.agents }),
                           ...(scope.sessions === undefined ? {} : { sessions: scope.sessions }),
                           ...(scope.can === undefined ? {} : { can: scope.can }),
+                          ...(scope.participant === undefined
+                              ? {}
+                              : { participant: scope.participant }),
                       }
 
             const secret = newKeySecret()
@@ -1947,6 +2385,621 @@ export function createHandler(options: HandlerOptions): ServerHandler {
             await runtime.store.webhooks.delete(id)
             await runtime.webhooks.changed()
             return json({ id, deleted: true })
+        },
+        { capability: "admin" },
+    )
+
+    /**
+     * Participants, rooms and DMs (Phase 27).
+     *
+     * **A bound key speaks only as its participant, and sees only its own conversations.** The same
+     * rule `senderFor` applies to a turn's sender, applied to a room's author: a key minted with
+     * `scope.participant` posts as that participant and no other, and a conversation it is not a
+     * member of answers 404, the same 404 as one that does not exist. An agent scope applies too: a
+     * key must reach every agent in a conversation to see it at all.
+     */
+    const boundParticipant = (principal: Principal): string | undefined =>
+        principal.kind === "key" ? principal.scope?.participant : undefined
+    const seesConversation = (principal: Principal, conversation: ConversationRecord): boolean => {
+        const bound = boundParticipant(principal)
+        if (bound !== undefined && !conversation.members.includes(bound)) return false
+        return conversation.members.every((member) => {
+            const agentId = agentOf(member)
+            return agentId === undefined || reachesAgent(principal, agentId)
+        })
+    }
+    const conversationNotFound = (id: string) =>
+        fail(
+            {
+                code: "conversation_not_found",
+                message: `No conversation "${id}".`,
+                hint: "GET /v1/conversations lists the ones this credential can see.",
+            },
+            404,
+        )
+    const withConversation = async (
+        context: RequestContext,
+        work: (conversation: ConversationRecord) => Promise<Response>,
+    ): Promise<Response> => {
+        const id = context.params.conversationId ?? ""
+        const conversation = await runtime.store.conversations.get(id)
+        if (conversation === undefined || !seesConversation(context.principal, conversation)) {
+            return conversationNotFound(id)
+        }
+        return work(conversation)
+    }
+    const refusedBy = (error: unknown): Response => {
+        if (!isHarnessError(error)) throw error
+        return fail(
+            error.toDetail(),
+            error.code.endsWith("_not_found") ? 404 : error.code.endsWith("_forbidden") ? 403 : 400,
+        )
+    }
+
+    router.add(
+        "POST",
+        "/v1/participants",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(ParticipantBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            try {
+                const input = parsed.value
+                return json(
+                    await runtime.conversations.registerParticipant({
+                        id: input.id,
+                        ...(input.name === undefined ? {} : { name: input.name }),
+                        ...(input.role === undefined ? {} : { role: input.role }),
+                    }),
+                    201,
+                )
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/participants",
+        async () => json({ participants: await runtime.store.conversations.participants() }),
+        { capability: "read" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/participants/:participantId",
+        async (context) => {
+            const id = context.params.participantId ?? ""
+            const deleted = await runtime.store.conversations.deleteParticipant(id)
+            if (!deleted) {
+                return fail(
+                    {
+                        code: "participant_not_found",
+                        message: `No participant "${id}".`,
+                        hint: "GET /v1/participants lists them.",
+                    },
+                    404,
+                )
+            }
+            return json({ id, deleted: true })
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "POST",
+        "/v1/conversations",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(ConversationBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const bound = boundParticipant(context.principal)
+            // A bound key creates only conversations it is in; otherwise it would make rooms it
+            // cannot read, and a stranger's room is not somebody's to start.
+            if (bound !== undefined && !parsed.value.members.includes(bound)) {
+                return fail(
+                    {
+                        code: "conversation_creator_not_member",
+                        message: `This key speaks for ${bound}, who is not among the members.`,
+                        hint: `Include "${bound}" in members. A backend creating rooms for others needs a key minted without scope.participant.`,
+                        field: "members",
+                    },
+                    403,
+                )
+            }
+            const outside = parsed.value.members
+                .map((member) => agentOf(member))
+                .filter(
+                    (id): id is string => id !== undefined && !reachesAgent(context.principal, id),
+                )
+            if (outside.length > 0) {
+                return fail(
+                    {
+                        code: "conversation_member_unknown",
+                        message: `No participant "agent:${outside[0]}".`,
+                        hint: "That agent is not hosted here. GET /v1/agents lists the ones that are.",
+                        field: "members",
+                    },
+                    400,
+                )
+            }
+            try {
+                return json(
+                    await runtime.conversations.create({
+                        kind: parsed.value.kind,
+                        members: parsed.value.members,
+                        ...(parsed.value.title === undefined ? {} : { title: parsed.value.title }),
+                    }),
+                    201,
+                )
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/conversations",
+        async (context) => {
+            const all = await runtime.store.conversations.list()
+            return json({
+                conversations: all.filter((conversation) =>
+                    seesConversation(context.principal, conversation),
+                ),
+            })
+        },
+        { capability: "read" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/conversations/:conversationId",
+        (context) => withConversation(context, async (conversation) => json(conversation)),
+        { capability: "read" },
+    )
+
+    router.add(
+        "PATCH",
+        "/v1/conversations/:conversationId/members",
+        (context) =>
+            withConversation(context, async (conversation) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(MembersBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                try {
+                    return json(
+                        await runtime.conversations.setMembers(
+                            conversation.id,
+                            parsed.value.add ?? [],
+                            parsed.value.remove ?? [],
+                        ),
+                    )
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    router.add(
+        "POST",
+        "/v1/conversations/:conversationId/messages",
+        (context) =>
+            withConversation(context, async (conversation) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(ConversationMessageBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const bound = boundParticipant(context.principal)
+                const claimed = parsed.value.authorId
+                if (bound !== undefined && claimed !== undefined && claimed !== bound) {
+                    return fail(
+                        {
+                            code: "sender_not_bound_participant",
+                            message: `This key speaks for ${bound}, and the message names ${claimed}.`,
+                            hint: `Omit authorId (it is filled in), or send "${bound}". A backend that posts for others needs a key minted without scope.participant.`,
+                            field: "authorId",
+                        },
+                        403,
+                    )
+                }
+                const authorId = bound ?? claimed
+                if (authorId === undefined) {
+                    return fail(
+                        {
+                            code: "conversation_author_required",
+                            message: "A message needs an author.",
+                            hint: "Send authorId, the human member who said it. A key bound to a participant fills it in.",
+                            field: "authorId",
+                        },
+                        400,
+                    )
+                }
+                try {
+                    const message = await runtime.conversations.post({
+                        conversationId: conversation.id,
+                        authorId,
+                        text: parsed.value.text,
+                        ...(parsed.value.mentions === undefined
+                            ? {}
+                            : { mentions: parsed.value.mentions }),
+                    })
+                    return json(message, 202)
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "chat" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/conversations/:conversationId/messages",
+        (context) =>
+            withConversation(context, async (conversation) => {
+                const after = Number(context.url.searchParams.get("after") ?? 0)
+                const limit = Number(context.url.searchParams.get("limit") ?? 200)
+                const messages = await runtime.store.conversations.messages(conversation.id, {
+                    after: Number.isFinite(after) && after > 0 ? after : 0,
+                    limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 500) : 200,
+                })
+                return json({
+                    conversationId: conversation.id,
+                    messages,
+                    ...(messages.length === 0 ? {} : { nextAfter: messages.at(-1)?.seq }),
+                })
+            }),
+        { capability: "read" },
+    )
+
+    router.add(
+        "PUT",
+        "/v1/participants/:participantId/presence",
+        async (context) => {
+            const id = context.params.participantId ?? ""
+            const bound = boundParticipant(context.principal)
+            // Pushed by the embedder for anyone, or by a member's own front end for them alone.
+            if (bound !== undefined && bound !== id) {
+                return fail(
+                    {
+                        code: "sender_not_bound_participant",
+                        message: `This key speaks for ${bound}, and the presence names ${id}.`,
+                        hint: "A key bound to a participant sets only that participant's presence. The embedder's backend, holding an unbound key, sets anyone's.",
+                    },
+                    403,
+                )
+            }
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(PresenceBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            try {
+                return json(await runtime.conversations.setPresence(id, parsed.value.presence))
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "chat" },
+    )
+
+    /** What a stand-in queued for its owner (Phase 28). A bound key sees only its own. */
+    router.add(
+        "GET",
+        "/v1/actions",
+        async (context) => {
+            const status = context.url.searchParams.get("status")
+            const bound = boundParticipant(context.principal)
+            const all = await runtime.store.conversations.actions({
+                ...(bound === undefined ? {} : { ownerId: bound }),
+                ...(status === "pending" ||
+                status === "done" ||
+                status === "failed" ||
+                status === "denied"
+                    ? { status }
+                    : {}),
+            })
+            return json({
+                actions: all.filter((action) => reachesAgent(context.principal, action.agentId)),
+            })
+        },
+        { capability: "read" },
+    )
+
+    router.add(
+        "POST",
+        "/v1/actions/:actionId",
+        async (context) => {
+            const id = context.params.actionId ?? ""
+            const action = await runtime.store.conversations.action(id)
+            const bound = boundParticipant(context.principal)
+            // Someone else's action answers exactly like a missing one.
+            if (
+                action === undefined ||
+                !reachesAgent(context.principal, action.agentId) ||
+                (bound !== undefined && bound !== action.ownerId)
+            ) {
+                return fail(
+                    {
+                        code: "action_not_found",
+                        message: `No action "${id}".`,
+                        hint: "GET /v1/actions lists the ones waiting on you.",
+                    },
+                    404,
+                )
+            }
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(DecisionBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            try {
+                return json(await runtime.conversations.decideAction(id, parsed.value.approve))
+            } catch (error) {
+                if (isHarnessError(error) && error.code === "action_already_decided") {
+                    return fail(error.toDetail(), 409)
+                }
+                return refusedBy(error)
+            }
+        },
+        { capability: "chat" },
+    )
+
+    router.add(
+        "PUT",
+        "/v1/agents/:id/assignee",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(AssigneeBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const bound = boundParticipant(context.principal)
+                // Assigning is an admin participant's act; a member's key cannot assign agents,
+                // themselves included. An unbound key is the embedder's own backend.
+                if (bound !== undefined) {
+                    const by = await runtime.store.conversations.participant(bound)
+                    if (by?.role !== "admin") {
+                        return fail(
+                            {
+                                code: "assignment_requires_admin",
+                                message: `${bound} is not an admin participant.`,
+                                hint: 'Only a participant registered with role "admin" assigns agents to members.',
+                            },
+                            403,
+                        )
+                    }
+                }
+                try {
+                    return json(
+                        await runtime.conversations.assign({
+                            agentId: agent.id,
+                            participantId: parsed.value.participantId,
+                            ...(bound === undefined ? {} : { assignedBy: bound }),
+                        }),
+                    )
+                } catch (error) {
+                    return refusedBy(error)
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/agents/:id/assignee",
+        (context) =>
+            withAgent(runtime, context, async (agent) =>
+                json({
+                    id: agent.id,
+                    unassigned: await runtime.store.conversations.unassign(agent.id),
+                }),
+            ),
+        { capability: "admin" },
+    )
+
+    /**
+     * Team memory scopes (Phase 29). Who may write which scope is decided in the hub; the route only
+     * says who is asking. A bound key is its participant. An unbound key is the embedder's backend,
+     * the operator — but only with `admin`: `chat` alone is not enough to write the whole team's memory.
+     */
+    const memoryActor = (
+        principal: Principal,
+    ):
+        | { readonly ok: true; readonly actor: string | undefined }
+        | { readonly ok: false; readonly response: Response } => {
+        const bound = boundParticipant(principal)
+        if (bound !== undefined || can(principal, "admin")) return { ok: true, actor: bound }
+        return {
+            ok: false,
+            response: fail(
+                {
+                    code: "memory_write_requires_admin",
+                    message: "This key is bound to no participant and does not carry admin.",
+                    hint: "A member writes through a key minted with scope.participant; the embedder's backend writes shared scopes with an admin key.",
+                },
+                403,
+            ),
+        }
+    }
+
+    router.add(
+        "POST",
+        "/v1/memory/notes",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(NoteBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const who = memoryActor(context.principal)
+            if (!who.ok) return who.response
+            try {
+                return json(
+                    await runtime.conversations.addNote({
+                        scope: parsed.value.scope,
+                        text: parsed.value.text,
+                        ...(who.actor === undefined ? {} : { authorId: who.actor }),
+                    }),
+                    201,
+                )
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "chat" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/memory/notes",
+        async (context) => {
+            const scope = context.url.searchParams.get("scope") ?? ""
+            try {
+                return json({
+                    notes: await runtime.conversations.notes(
+                        scope,
+                        boundParticipant(context.principal),
+                    ),
+                })
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "read" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/memory/notes/:noteId",
+        async (context) => {
+            const who = memoryActor(context.principal)
+            if (!who.ok) return who.response
+            try {
+                await runtime.conversations.deleteNote(context.params.noteId ?? "", who.actor)
+                return json({ id: context.params.noteId, deleted: true })
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "chat" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/participants/:participantId/memory/reads",
+        async (context) => {
+            try {
+                return json({
+                    reads: await runtime.conversations.reads(
+                        context.params.participantId ?? "",
+                        boundParticipant(context.principal),
+                    ),
+                })
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "read" },
+    )
+
+    /** An admin participant's act, like assignment. An unbound admin key is the embedder's backend. */
+    const requireAdminParticipant = async (principal: Principal): Promise<Response | undefined> => {
+        const bound = boundParticipant(principal)
+        if (bound === undefined) return undefined
+        const by = await runtime.store.conversations.participant(bound)
+        if (by?.role === "admin") return undefined
+        return fail(
+            {
+                code: "memory_scope_forbidden",
+                message: `${bound} is not an admin participant.`,
+                hint: 'Only a participant registered with role "admin" defines projects and names the space writer.',
+            },
+            403,
+        )
+    }
+
+    router.add(
+        "GET",
+        "/v1/projects",
+        async () => json({ projects: await runtime.store.conversations.projects() }),
+        { capability: "read" },
+    )
+
+    router.add(
+        "PUT",
+        "/v1/projects/:projectId",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(ProjectBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const refusal = await requireAdminParticipant(context.principal)
+            if (refusal !== undefined) return refusal
+            // An agent this key cannot reach answers like one that does not exist.
+            const unreachable = (parsed.value.agents ?? []).find(
+                (id) => !reachesAgent(context.principal, id),
+            )
+            if (unreachable !== undefined) {
+                return fail(
+                    {
+                        code: "agent_not_found",
+                        message: `No agent "${unreachable}".`,
+                        hint: "GET /v1/agents lists the ones hosted here.",
+                    },
+                    404,
+                )
+            }
+            try {
+                return json(
+                    await runtime.conversations.upsertProject({
+                        id: context.params.projectId ?? "",
+                        ...(parsed.value.name === undefined ? {} : { name: parsed.value.name }),
+                        ...(parsed.value.agents === undefined
+                            ? {}
+                            : { agents: parsed.value.agents }),
+                    }),
+                )
+            } catch (error) {
+                return refusedBy(error)
+            }
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "DELETE",
+        "/v1/projects/:projectId",
+        async (context) => {
+            const refusal = await requireAdminParticipant(context.principal)
+            if (refusal !== undefined) return refusal
+            const id = context.params.projectId ?? ""
+            return json({ id, deleted: await runtime.store.conversations.deleteProject(id) })
+        },
+        { capability: "admin" },
+    )
+
+    router.add(
+        "PUT",
+        "/v1/memory/space/writer",
+        async (context) => {
+            const body = await readJson(context.request)
+            if (body.kind === "error") return fail(body.error, 400)
+            const parsed = parseBody(SpaceWriterBody, body.value)
+            if (!parsed.ok) return fail(parsed.error, 400)
+            const refusal = await requireAdminParticipant(context.principal)
+            if (refusal !== undefined) return refusal
+            const bound = boundParticipant(context.principal)
+            try {
+                await runtime.conversations.setSpaceWriter(parsed.value.writer, bound)
+                return json({ writer: parsed.value.writer })
+            } catch (error) {
+                return refusedBy(error)
+            }
         },
         { capability: "admin" },
     )
@@ -2269,7 +3322,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         sessionKey,
                         turnId,
                         source: `schedule:${row.id}:manual`,
-                        ...(row.role === undefined ? {} : { role: row.role }),
+                        ...scheduleSendOptions(row),
                     })
                     .catch(() => {
                         // Reported on the bus by the turn itself; swallowed here so an unhandled
@@ -2400,6 +3453,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         // rather than guessing, because guessing is how `tools.pinned: "exec"`
                         // becomes a one-character tool list.
                         value: parseSettingValue(parsed.value.value),
+                        // Refuses a provider config the provider would refuse (an MCP server with a
+                        // credential in its URL), rather than writing it and dropping the provider.
+                        providers: runtime.toolProviderFactories,
+                        mediaProviders: runtime.mediaProviderFactories,
                     })
                 } catch (error) {
                     if (isHarnessError(error)) return fail(error.toDetail(), 400)
@@ -2421,7 +3478,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                  */
                 let applied: ErrorDetail | undefined
                 try {
-                    await runtime.replace(agent.id)
+                    applied = pendingDetail(await runtime.reload(agent.id))
                 } catch (error) {
                     if (!isHarnessError(error)) throw error
                     applied = error.toDetail()
@@ -2518,7 +3575,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
 
                 let applied: ErrorDetail | undefined
                 try {
-                    await runtime.replace(agent.id)
+                    applied = pendingDetail(await runtime.reload(agent.id))
                 } catch (error) {
                     if (!isHarnessError(error)) throw error
                     applied = error.toDetail()
@@ -2962,6 +4019,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
             }
         }
 
+        const mounted = pluginRouteFor(method, url.pathname)
+        if (mounted !== undefined) {
+            const crossOrigin = refuseOrigin(request)
+            if (crossOrigin !== undefined) return crossOrigin
+            return withCors(request, await dispatchPlugin(request, url, mounted))
+        }
+
         const match = router.match(method, url.pathname)
         if (match.kind === "method") {
             return fail(
@@ -2974,16 +4038,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 { allow: match.allowed.join(", ") },
             )
         }
-        if (match.kind === "none") {
-            return fail(
-                {
-                    code: "not_found",
-                    message: `No route for ${request.method} ${url.pathname}.`,
-                    hint: "Every path is under /v1. See docs/04-SPEC-WIRE.md for the surface.",
-                },
-                404,
-            )
-        }
+        if (match.kind === "none") return noRoute(request.method, url.pathname)
 
         // **Before the open-path check, not after.** `POST /v1/channels/…` is open by prefix and
         // changes state, so a guard sitting behind authentication would leave the one
@@ -3004,6 +4059,81 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 principal: who,
             }),
         )
+    }
+
+    /**
+     * A plugin's route (Phase 30): `/v1/agents/<agentId>/plugins/<plugin>/<path>`, or a root path one
+     * plugin route claims (`/.well-known/agent-card.json`) while exactly one hosted agent claims it.
+     *
+     * Looked up per request from the agents the runtime hosts right now, because a plugin's routes
+     * come and go with the agent — a table built at start would keep answering for an agent that was
+     * stopped, and never learn about one adopted later.
+     */
+    const pluginRouteFor = (
+        method: string,
+        pathname: string,
+    ):
+        | { readonly agent: Agent; readonly route: MountedRoute; readonly path: string }
+        | undefined => {
+        const prefix = /^\/v1\/agents\/([^/]+)\/plugins\/([^/]+)(\/.*)?$/.exec(pathname)
+        if (prefix !== null) {
+            const agent = runtime.list().find((a) => a.id === decodeURIComponent(prefix[1] ?? ""))
+            const plugin = prefix[2] ?? ""
+            const path = prefix[3] ?? "/"
+            const route = agent?.pluginRoutes.find(
+                (r) => r.plugin === plugin && r.method === method && r.path === path,
+            )
+            return agent === undefined || route === undefined ? undefined : { agent, route, path }
+        }
+        const claims = runtime
+            .list()
+            .flatMap((agent) =>
+                agent.pluginRoutes
+                    .filter((route) => route.root === pathname && route.method === method)
+                    .map((route) => ({ agent, route, path: route.path })),
+            )
+        return claims.length === 1 ? claims[0] : undefined
+    }
+
+    /**
+     * The same gate as every first-party route — authenticate, check the declared capability, then
+     * the agent scope, where an agent the key does not reach answers exactly as a missing one — and
+     * only then the plugin, handed a caller rather than a credential.
+     */
+    const dispatchPlugin = async (
+        request: Request,
+        url: URL,
+        mounted: { readonly agent: Agent; readonly route: MountedRoute; readonly path: string },
+    ): Promise<Response> => {
+        const { agent, route, path } = mounted
+        const who: Principal | Response =
+            route.capability === "open"
+                ? { kind: "open" }
+                : await resolve(request, url.pathname, route.capability)
+        if (who instanceof Response) return who
+        // Out of scope answers exactly as a path nothing is mounted at — which is what an agent that
+        // does not exist gets, since it falls through to the router — so no probe tells them apart.
+        if (who.kind === "claim" || !reachesAgent(who, agent.id))
+            return noRoute(request.method, url.pathname)
+        const caller: PluginCaller =
+            who.kind === "key"
+                ? { kind: "key", keyId: who.keyId, label: who.label ?? "" }
+                : route.capability === "open"
+                  ? { kind: "anonymous" }
+                  : { kind: "operator" }
+        try {
+            return await route.handler({ request, url, path, caller })
+        } catch (error) {
+            // A plugin that throws is the plugin's bug; the caller gets a 500 that says whose.
+            return fail(
+                {
+                    code: "plugin_route_failed",
+                    message: `Plugin "${route.plugin}" failed answering ${request.method} ${url.pathname}: ${error instanceof Error ? error.message : String(error)}`,
+                    hint: "This is the plugin's error, not the runtime's. The agent's own routes are unaffected.",
+                },
+                500,
+            )
+        }
     }
 
     /**
@@ -3081,6 +4211,9 @@ async function writeSchedule(
             body: body as Record<string, unknown>,
             channelIds: agent.manifest.channels.map((channel) => channel.id),
             roleNames: Object.keys(agent.manifest.model),
+            // The resolved catalogue, so a `tools.allow` naming nothing is refused now rather than
+            // running quietly with fewer tools than its author wrote.
+            toolSpecs: agent.tools.specs(),
             now: Date.now(),
             // Never `manifest`: a row written here must survive a reload, and marking it as the
             // manifest's would let the next reconciliation delete something no file describes.
@@ -3224,6 +4357,18 @@ async function runHandler(handler: Handler, context: RequestContext): Promise<Re
  * — advice about channel segments is noise on a turn id, and noise in a hint is what teaches people
  * to stop reading them.
  */
+/** Nothing answers at this path. One body for every such case, so a probe learns nothing from it. */
+function noRoute(method: string, pathname: string): Response {
+    return fail(
+        {
+            code: "not_found",
+            message: `No route for ${method} ${pathname}.`,
+            hint: "Every path is under /v1. See docs/04-SPEC-WIRE.md for the surface.",
+        },
+        404,
+    )
+}
+
 function notFound(kind: string, id: string, hint?: string): Response {
     return fail(
         {
@@ -3381,6 +4526,17 @@ function usageQuery(
     return { kind: "ok", value: { by: by as UsageGroup[], ...range } }
 }
 
+/** A stopped agent as the listing and its resource both show it: thin, because nothing is loaded. */
+function stoppedRow(state: AgentStateRecord) {
+    return {
+        id: state.agentId,
+        name: state.agentId,
+        status: "disabled" as const,
+        ...(state.reason === undefined ? {} : { reason: state.reason }),
+        ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+    }
+}
+
 function withAgent(
     runtime: Runtime,
     context: RequestContext,
@@ -3522,28 +4678,29 @@ function stateFields(state: AgentStateRecord): Record<string, string> {
 
 async function readJson(
     request: Request,
+    limit = MAX_BODY_BYTES,
 ): Promise<{ kind: "ok"; value: unknown } | { kind: "error"; error: ErrorDetail }> {
     // Checked before reading, so a declared 500 MB body is refused rather than buffered. A body
     // with no content-length is still bounded by the read below.
     const declared = Number.parseInt(request.headers.get("content-length") ?? "0", 10)
-    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    if (Number.isFinite(declared) && declared > limit) {
         return {
             kind: "error",
             error: {
                 code: "body_too_large",
-                message: `The request body declares ${declared} bytes; the limit is ${MAX_BODY_BYTES}.`,
+                message: `The request body declares ${declared} bytes; the limit is ${limit}.`,
                 hint: "This cap is enforced before a channel plugin sees anything, so a plugin never has to defend against a large POST.",
             },
         }
     }
 
     const raw = await request.text()
-    if (raw.length > MAX_BODY_BYTES) {
+    if (raw.length > limit) {
         return {
             kind: "error",
             error: {
                 code: "body_too_large",
-                message: `The request body is ${raw.length} bytes; the limit is ${MAX_BODY_BYTES}.`,
+                message: `The request body is ${raw.length} bytes; the limit is ${limit}.`,
                 hint: "Send less. A message longer than this is not a message.",
             },
         }
@@ -3838,4 +4995,17 @@ function streamTurn(
             return () => attachment.unsubscribe()
         },
     })
+}
+
+/**
+ * A reload waiting for running turns, as the `pending` a write reports: the file is written and
+ * the change is accepted, and it is in force once those turns finish — not "at the next start".
+ */
+function pendingDetail(outcome: ReloadOutcome): ErrorDetail | undefined {
+    if (outcome.status !== "pending") return undefined
+    return {
+        code: "reload_pending",
+        message: `It applies when the ${outcome.running} running turn(s) finish; they complete on the settings they started with.`,
+        hint: `New turns keep the old settings for ${outcome.holdAfterMs} ms, then wait and start on the new ones. The agent.reloaded event says when it is in force.`,
+    }
 }

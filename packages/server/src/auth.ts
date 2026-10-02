@@ -89,6 +89,7 @@ export async function authorise(input: {
             return {
                 kind: "key",
                 keyId: record.keyId,
+                label: record.label,
                 ...(record.scope === undefined ? {} : { scope: record.scope }),
             }
         }

@@ -48,11 +48,13 @@ import { join } from "node:path"
 import {
     AGENT_SETTABLE_PATHS,
     editManifest,
-    HarnessError,
+    isHarnessError,
+    type MediaProviderFactory,
     parseSettingValue,
     SETTINGS,
     type Tool,
     type ToolHandler,
+    type ToolProviderFactory,
 } from "@dispach/core"
 import { isMap, isSeq, parseDocument, stringify } from "yaml"
 import {
@@ -69,6 +71,10 @@ export interface ConfigOptions {
     readonly agentDir: string
     /** Overridden in tests; the runtime always uses the manifest the agent was loaded from. */
     readonly file?: string
+    /** Provider factories, so a `tools.providers` edit the provider would refuse is refused. */
+    readonly providers?: Readonly<Record<string, ToolProviderFactory>>
+    /** Media provider factories, so a `media` edit naming a provider that does not exist is refused. */
+    readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
 }
 
 /**
@@ -323,15 +329,30 @@ export function configSetHandler(options: ConfigOptions): ToolHandler {
         // only explanation it will have of why nothing happened.
         let result: Awaited<ReturnType<typeof editManifest>>
         try {
-            result = await editManifest({ file, path: path.split("."), value })
+            result = await editManifest({
+                file,
+                path: path.split("."),
+                value,
+                ...(options.providers === undefined ? {} : { providers: options.providers }),
+                ...(options.mediaProviders === undefined
+                    ? {}
+                    : { mediaProviders: options.mediaProviders }),
+            })
         } catch (cause) {
-            if (cause instanceof HarnessError && cause.code === "manifest_edit_unreadable") {
+            // `isHarnessError`, not `instanceof`: this package and core are separate copies in a
+            // bundle, and a class check across them fails silently (CLAUDE.md).
+            if (isHarnessError(cause) && cause.code === "manifest_edit_unreadable") {
                 throw configReadFailed(file, String(cause.cause ?? cause.message))
             }
-            if (cause instanceof HarnessError && cause.code === "manifest_edit_invalid") {
+            if (isHarnessError(cause) && cause.code === "manifest_edit_invalid") {
                 // The detail after the colon; the sentence around it is written for a person.
                 const detail = cause.message.slice(cause.message.indexOf(": ") + 2)
                 throw configInvalid(path, raw, detail)
+            }
+            // A provider refusing its own config (a malformed MCP server): its sentence and hint are
+            // the explanation the model has, so they reach it rather than a bare code.
+            if (isHarnessError(cause)) {
+                throw configInvalid(path, raw, `${cause.message} ${cause.hint ?? ""}`.trim())
             }
             throw cause
         }

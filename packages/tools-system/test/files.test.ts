@@ -8,7 +8,14 @@
  */
 
 import { expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { toolContext } from "@dispach/core"
@@ -351,6 +358,32 @@ test("the walk is breadth-first, so a cut-off answer is the shallow files", asyn
     const result = await walk(dir, { limit: 2 })
     expect(result.truncated).toBe(true)
     expect(result.files[0]).toBe("top.txt")
+})
+
+// ─── secrets are never read ──────────────────────────────────────────────────────────────
+
+test("file_read refuses a secret by name, through a symlink, and a process's environment (QA pilot.3)", async () => {
+    // Reads were unconfined: an agent could read its own .env or /proc/self/environ and put every
+    // secret the silo holds into its context.
+    const dir = tempDir()
+    writeFileSync(join(dir, ".env"), "MODEL_API_KEY=sk-live\n")
+    symlinkSync(join(dir, ".env"), join(dir, "notes.txt"))
+    writeFileSync(join(dir, "plain.txt"), "fine\n")
+    const read = (path: string) => tools(dir).read({ path }, toolContext({ dir }))
+    await expect(read(".env")).rejects.toThrow(/holds secrets/)
+    await expect(read("notes.txt")).rejects.toThrow(/holds secrets/)
+    await expect(read("/proc/self/environ")).rejects.toThrow(/environment/)
+    expect(await read("plain.txt")).toContain("fine")
+})
+
+test("grep never searches a secret file, so a match cannot quote one", async () => {
+    const dir = tempDir()
+    // Not a dotfile, which the walk skips anyway: `deploy.key` is reached, and must not be read.
+    writeFileSync(join(dir, "deploy.key"), "API_KEY=sk-live\n")
+    writeFileSync(join(dir, "app.ts"), "const API_KEY = process.env.API_KEY\n")
+    const output = await tools(dir).grep({ pattern: "API_KEY" }, toolContext({ dir }))
+    expect(output).toContain("app.ts:1:")
+    expect(output).not.toContain("sk-live")
 })
 
 // ─── grep ────────────────────────────────────────────────────────────────────────────────

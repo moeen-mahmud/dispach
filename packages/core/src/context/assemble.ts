@@ -11,9 +11,11 @@
  * something that summarizes before it forgets.
  */
 
+import { IMAGE_TOKENS } from "../media/image-input.ts"
 import { isSessionSource, SESSION_SOURCE_PREFIX } from "../memory/conversation.ts"
-import type { ChatMessage } from "../model/provider.ts"
-import { type ContextBlock, SLOT, skillHeader, VOLATILE_HEADER } from "./blocks.ts"
+import { describeScope, scopeOfSource } from "../memory/scopes.ts"
+import type { ChatMessage, ImageInput } from "../model/provider.ts"
+import { type ContextBlock, NOTE_HEADER, SLOT, skillHeader, VOLATILE_HEADER } from "./blocks.ts"
 import { isTurnStart } from "./compaction/stages.ts"
 import { estimateMessageTokens, estimateTokens } from "./tokens.ts"
 
@@ -122,6 +124,10 @@ export interface AssembleInput {
      */
     readonly protectedTail?: number
     readonly input: string
+    /** The embedder's note about this message, in `SLOT.note`. Trusted, this turn only. */
+    readonly note?: string
+    /** Images on the input message. Charged `IMAGE_TOKENS` each, since the estimate cannot see them. */
+    readonly inputImages?: readonly ImageInput[]
     /** Surfaced in the pinned error slot so a failure survives compaction. */
     readonly lastError?: string
     /** Total window, after capability resolution. */
@@ -231,9 +237,12 @@ export function assembleContext(input: AssembleInput): AssembledContext {
     // dropped by a conditional spread in another, and the source string already carries the answer.
     for (const passage of input.memory ?? []) {
         if (passage.text.trim() === "") continue
+        const scope = scopeOfSource(passage.source)
         const provenance = isSessionSource(passage.source)
             ? `From an earlier conversation in this session's store (${passage.source.slice(SESSION_SOURCE_PREFIX.length)}), on ${passage.at}:`
-            : `From ${passage.source}, learned ${passage.at}:`
+            : scope !== undefined
+              ? `From ${describeScope(scope)}, noted ${passage.at}:`
+              : `From ${passage.source}, learned ${passage.at}:`
         const because =
             passage.because === undefined || passage.because.trim() === ""
                 ? ""
@@ -251,7 +260,22 @@ export function assembleContext(input: AssembleInput): AssembledContext {
     if (input.reminder !== undefined && input.reminder.trim() !== "") {
         pinned.push(block(SLOT.reminder, "system", input.reminder, true, "workspace-reminder"))
     }
-    const inputBlock = block(SLOT.input, "user", input.input, true, "input")
+    if (input.note !== undefined && input.note !== "") {
+        pinned.push(block(SLOT.note, "system", `${NOTE_HEADER}\n\n${input.note}`, true, "note"))
+    }
+    const plainInput = block(SLOT.input, "user", input.input, true, "input")
+    const inputBlock =
+        input.inputImages === undefined || input.inputImages.length === 0
+            ? plainInput
+            : {
+                  ...plainInput,
+                  tokens: plainInput.tokens + IMAGE_TOKENS * input.inputImages.length,
+                  message: {
+                      role: "user" as const,
+                      content: input.input,
+                      images: input.inputImages,
+                  },
+              }
     pinned.push(inputBlock)
     if (input.lastError !== undefined && input.lastError !== "") {
         pinned.push(
@@ -343,6 +367,7 @@ export function assembleContext(input: AssembleInput): AssembledContext {
         ...historyBlocks,
         ...pinned.filter((b) => b.slot === SLOT.reminder),
         ...pinned.filter((b) => b.slot === SLOT.memory),
+        ...pinned.filter((b) => b.slot === SLOT.note),
         ...pinned.filter((b) => b.slot === SLOT.input || b.slot === SLOT.error),
     ]
 
@@ -366,11 +391,35 @@ export function assembleContext(input: AssembleInput): AssembledContext {
 
     return {
         blocks,
-        messages: blocks.map((b) => b.message ?? { role: b.role, content: b.content }),
+        messages: messagesOf(blocks),
         totalTokens: blocks.reduce((sum, b) => sum + b.tokens, 0),
         promptBudget,
         droppedMessages,
     }
+}
+
+/**
+ * The messages a set of blocks sends, with the cache breakpoints marked.
+ *
+ * One function for `assembleContext` and `reassemble`, so a middleware that returns blocks cannot
+ * lose the markers. Breakpoint A is the last message of the static slots (identity through examples);
+ * breakpoint B is the active skill. Marked whatever the model's cache protocol, because the marker is
+ * harness metadata: `chat-completions` never sends it, and a transport with an explicit cache protocol
+ * is the one that knows whether to act on it.
+ */
+function messagesOf(blocks: readonly ContextBlock[]): ChatMessage[] {
+    let lastStatic = -1
+    let skill = -1
+    blocks.forEach((b, index) => {
+        if (b.slot <= SLOT.examples) lastStatic = index
+        if (b.slot === SLOT.skill) skill = index
+    })
+    return blocks.map((b, index) => {
+        const message = b.message ?? { role: b.role, content: b.content }
+        return index === lastStatic || index === skill
+            ? { ...message, cacheBreakpoint: true as const }
+            : message
+    })
 }
 
 /**
@@ -402,7 +451,7 @@ export function reassemble(
     )
     return {
         blocks: counted,
-        messages: counted.map((b) => b.message ?? { role: b.role, content: b.content }),
+        messages: messagesOf(counted),
         totalTokens: counted.reduce((sum, b) => sum + b.tokens, 0),
         promptBudget,
         droppedMessages,

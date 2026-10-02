@@ -53,6 +53,7 @@ export {
     type IndexReport,
     MAX_INDEXED_SESSION_MESSAGES,
     syncFiles,
+    syncNotes,
     syncSessions,
 } from "./fts5.ts"
 export { document, impliedDate, type Passage, splitPassages } from "./passages.ts"
@@ -68,10 +69,23 @@ export {
     selectPassages,
 } from "./retriever.ts"
 export {
+    describeScope,
+    isScopeSource,
+    noteSource,
+    parseScope,
+    type ReadPlan,
+    readPlan,
+    SCOPE_SOURCE_PREFIX,
+    type SharedScope,
+    scopeCorpus,
+    scopeOfSource,
+} from "./scopes.ts"
+export {
     type AppendNoteInput,
     appendNote,
     archiveNameFor,
     entriesIn,
+    evictToBudget,
     injectedTokens,
     memoryTargetMissing,
     type NoteResult,

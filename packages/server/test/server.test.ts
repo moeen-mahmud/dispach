@@ -200,15 +200,14 @@ describe("agents", () => {
         await runtime.stop()
     })
 
-    test("a reload during a turn is 409, and the turn is not killed to make room", async () => {
+    test("a reload during a turn is pending, the turn finishes on the old instance, then the swap", async () => {
         /**
-         * `dispose` refuses while `inFlight > 0`, and this route inherits that rather than
-         * deciding it. The trade is deliberate: picking up a configuration change is not worth
-         * discarding somebody's half-finished answer, and a reload that aborted a turn would be
-         * indistinguishable from the runtime crashing from the caller's side.
+         * It used to be 409, and in a team silo with a turn almost always running that meant a reload
+         * nobody could land (doc 16 R4). The trade it protected still holds: picking up a setting is
+         * not worth discarding somebody's half-finished answer, so the turn is never killed. What
+         * changed is who waits: the reload does, instead of the caller retrying.
          *
-         * The model hangs until released, which is what makes the window real — a scripted reply
-         * completes faster than the request can be made.
+         * The model hangs until released, which is what makes the window real.
          */
         let release: (() => void) | undefined
         const held = new Promise<void>((resolve) => {
@@ -223,25 +222,36 @@ describe("agents", () => {
                 )
             }) as unknown as typeof fetch,
         })
-
-        const turn = call("POST", "/v1/agents/assistant/messages", {
-            body: { text: "hello", deliver: "none" },
+        const before = runtime.agent("assistant")
+        const reloaded = new Promise<Record<string, unknown>>((resolve) => {
+            runtime.bus.on("*", (event) => {
+                if (event.type === "agent.reloaded") resolve(event.data as Record<string, unknown>)
+            })
         })
-        // Wait for the turn to actually be in flight rather than merely requested: a 409 that
-        // arrived because nothing had started yet would pass for the wrong reason.
-        for (let i = 0; i < 200 && (runtime.list()[0]?.inFlight ?? 0) === 0; i += 1) {
+
+        const accepted = (await (
+            await call("POST", "/v1/agents/assistant/messages", {
+                body: { text: "hello", deliver: "none" },
+            })
+        ).json()) as { turnId: string }
+        // In flight rather than merely requested, or "pending" would be passing for the wrong reason.
+        for (let i = 0; i < 200 && before.inFlight === 0; i += 1) {
             await new Promise((resolve) => setTimeout(resolve, 5))
         }
-        expect(runtime.list()[0]?.inFlight).toBeGreaterThan(0)
+        expect(before.inFlight).toBeGreaterThan(0)
 
         const response = await call("POST", "/v1/agents/assistant/reload")
-        expect(response.status).toBe(409)
-        const body = (await response.json()) as { error: { code: string; hint: string } }
-        expect(body.error.code).toBe("agent_turn_in_flight")
-        expect(body.error.hint).not.toBe("")
+        expect(response.status).toBe(202)
+        expect(await response.json()).toMatchObject({ status: "pending", running: 1, adopted: [] })
+        // Still the old instance: nothing was torn down under the running turn.
+        expect(runtime.agent("assistant")).toBe(before)
 
         release?.()
-        await turn
+        expect(await reloaded).toMatchObject({ ok: true, adopted: ["assistant"], disposed: true })
+        const row = await runtime.store.turns.get(accepted.turnId)
+        expect(row?.status).toBe("final")
+        expect(row?.text).toBe("done")
+        expect(runtime.agent("assistant")).not.toBe(before)
         await runtime.stop()
     })
 

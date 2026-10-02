@@ -74,6 +74,30 @@ function segments(path: string): readonly string[] {
  * catch — a relative path resolved against the wrong base is a check performed on a different file
  * than the one about to be written.
  */
+/**
+ * Why this path may not be **read**, or `undefined` if it may (QA pilot.3).
+ *
+ * The credential half of the write list, plus a process's environment. Reading was unconfined, so an
+ * agent could `file_read` its own `.env` or `/proc/self/environ` and put every secret the silo holds
+ * into its context — and from there into a reply. Narrower than the write list on purpose: an agent
+ * reading its own `SOUL.md` or `agent.yaml` is fine, and `config_read` exists to do the second. Like
+ * the write list, it does not bind `exec`.
+ */
+export function secretReason(absolute: string): string | undefined {
+    const parts = segments(absolute)
+    const name = parts[parts.length - 1] ?? ""
+    for (const dir of PROTECTED_DIRS) {
+        if (parts.includes(dir)) return `${dir}/ holds credentials`
+    }
+    if (PROTECTED_FILE.test(name)) {
+        return `${name} holds secrets — the manifest names environment variables, and their values are not the agent's`
+    }
+    if (parts[0] === "proc" && (name === "environ" || name === "cmdline")) {
+        return `${absolute} is a process's environment, which holds this runtime's secrets`
+    }
+    return undefined
+}
+
 export function protectedReason(absolute: string, options: ProtectOptions): string | undefined {
     const parts = segments(absolute)
     const name = parts[parts.length - 1] ?? ""

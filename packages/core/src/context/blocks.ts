@@ -89,10 +89,19 @@ export const SLOT = {
      * drop it.
      */
     memory: 10,
+    /**
+     * The embedder's note about this one message (pilot.5, #13): the active project, today's date
+     * in the person's zone. Pinned, for this turn only, never stored in history.
+     *
+     * Its own block rather than prepended to the input, because prepended it was stored as if the
+     * person had typed it and the model quoted it back as theirs (VelaCrew). Just before the input,
+     * so the cached prefix is untouched and the note sits beside the text it is about.
+     */
+    note: 11,
     /** Current input and current task line. Pinned. */
-    input: 11,
+    input: 12,
     /** Last error, if any. Pinned. */
-    error: 12,
+    error: 13,
 } as const
 
 export type SlotName = keyof typeof SLOT
@@ -139,6 +148,10 @@ export interface ContextBlock {
  *
  * Deliberately short: it is paid on every turn, after breakpoint A, forever.
  */
+/** Frames a `SLOT.note` block, so the model can tell it from what the person wrote. */
+export const NOTE_HEADER =
+    "From the application this conversation runs in, about the next message. The person did not write this."
+
 export const VOLATILE_HEADER =
     "What I already know, carried from before this conversation and kept current. " +
     "Not a transcript — these are standing facts about the person I work for and my own working notes. " +

@@ -48,6 +48,7 @@ export interface HandoffTarget {
             readonly source?: string
             readonly signal?: AbortSignal
             readonly turnTools?: readonly import("../tools/types.ts").Tool[]
+            readonly participant?: import("../loop/sender.ts").ActingParticipant
         },
     ): Promise<{
         readonly text: string
@@ -126,6 +127,8 @@ export async function runHandoff(init: {
     readonly store?: HandoffStore
     readonly now?: () => Date
     readonly signal?: AbortSignal
+    /** Who the member's turn acts for: the delegating person, for a cross-member delegation. */
+    readonly participant?: import("../loop/sender.ts").ActingParticipant
 }): Promise<HandoffOutcome> {
     const now = init.now ?? (() => new Date())
     const handoffId = newHandoffId()
@@ -198,6 +201,7 @@ export async function runHandoff(init: {
             // tell them apart without joining against the handoffs table.
             source: "handoff",
             ...(init.signal === undefined ? {} : { signal: init.signal }),
+            ...(init.participant === undefined ? {} : { participant: init.participant }),
             turnTools: [
                 submitArtifactTool({
                     parameters: init.artifact,

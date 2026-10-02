@@ -18,12 +18,13 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { BRAND, SqliteStore } from "@dispach/core"
+import { hostToken } from "#lib/lifecycle"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BINARY = join(HERE, "..", "dist", "index.js")
@@ -437,9 +438,16 @@ describe("a broken agent does not take the host down", () => {
     function sandbox(): string {
         const home = mkdtempSync(join(tmpdir(), "serve-sandbox-"))
         const agents = join(home, BRAND.stateDir, "agents")
-        for (const [id, keyEnv] of [
-            ["fine", "MODEL_API_KEY"],
-            ["halfdone", "KEY_NOBODY_SET"],
+        // `mediahalf` loads and is refused by `Agent.create` instead (QA K14): a media provider whose
+        // key is not set yet. That refusal used to exit the host for every agent.
+        for (const [id, keyEnv, extra] of [
+            ["fine", "MODEL_API_KEY", ""],
+            ["halfdone", "KEY_NOBODY_SET", ""],
+            [
+                "mediahalf",
+                "MODEL_API_KEY",
+                "media:\n  transcription:\n    provider: openai\n    apiKeyEnv: MEDIA_KEY_NOBODY_SET\n",
+            ],
         ] as const) {
             const dir = join(agents, id)
             mkdirSync(dir, { recursive: true })
@@ -454,7 +462,7 @@ model:
     apiKeyEnv: ${keyEnv}
 server:
   enabled: true
-`,
+${extra}`,
                 "utf8",
             )
         }
@@ -484,6 +492,7 @@ server:
                     // Or the ambient environment satisfies the very variable this fixture
                     // withholds, and the broken agent loads perfectly.
                     KEY_NOBODY_SET: "",
+                    MEDIA_KEY_NOBODY_SET: "",
                 },
                 stdio: ["ignore", "pipe", "pipe"],
             },
@@ -525,6 +534,8 @@ server:
         expect(out).toContain("NOT served")
         expect(out).toContain("halfdone")
         expect(out).toContain("KEY_NOBODY_SET")
+        expect(out).toContain("mediahalf")
+        expect(out).toContain("MEDIA_KEY_NOBODY_SET")
     }, 30_000)
 
     test("a manifest named on the command line still refuses", async () => {
@@ -668,7 +679,7 @@ describe("a plugin-supplied channel loads under serve", () => {
     // The semver **range** this plugin claims, checked against the host's. A mismatch is a loud
     // load failure rather than a silent rollback, which is the one thing the runtime this replaces
     // got wrong badly enough to be worth copying the opposite of.
-    dispachApi: "^0.1",
+    dispachApi: "^0.2",
     setup(context) {
         context.defineChannel("smoke", (channel) => ({
             id: channel.id,
@@ -916,5 +927,132 @@ server:
         } finally {
             await held.release()
         }
+    }, 30_000)
+})
+
+describe("one token for the whole sandbox (QA 0.2.0)", () => {
+    test("any sandbox agent's client token opens the host that serves them all", async () => {
+        // Each `init` wrote its own random token and the host took the first manifest's, so `run`,
+        // `stop` and `start` for every other agent were refused with 401.
+        const home = mkdtempSync(join(tmpdir(), "serve-token-"))
+        const root = join(home, BRAND.stateDir)
+        const agents = join(root, "agents")
+        const tokenVar = `${BRAND.envPrefix}API_TOKEN`
+        for (const id of ["alpha", "beta"]) {
+            mkdirSync(join(agents, id), { recursive: true })
+            writeFileSync(
+                join(agents, id, "agent.yaml"),
+                `apiVersion: ${BRAND.apiVersion}\nid: ${id}\nmodel:\n  main:\n    id: test-model\n    baseUrl: https://example.invalid/v1\n    apiKeyEnv: MODEL_API_KEY\nserver:\n  enabled: true\n`,
+                "utf8",
+            )
+            writeFileSync(
+                join(agents, id, ".env"),
+                `MODEL_API_KEY=test-key\n${tokenVar}=token-${id}\n`,
+            )
+        }
+        const env: Record<string, string | undefined> = {
+            ...process.env,
+            HOME: home,
+            [`${BRAND.envPrefix}HOME`]: root,
+            [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+        }
+        delete env[tokenVar]
+        const child = spawn(
+            process.execPath,
+            [BINARY, "serve", "--port", "0", "--store", join(home, "store.db")],
+            // `cwd` away from the checkout: bun loads a `.env` from the cwd, and the repo's own
+            // token would arrive as an export and rightly win over the sandbox file.
+            { env, cwd: home, stdio: ["ignore", "pipe", "pipe"] },
+        )
+        try {
+            let out = ""
+            const base = await new Promise<string>((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error(`never served:\n${out}`)), 20_000)
+                child.stdout.on("data", (chunk: Buffer) => {
+                    out += chunk.toString()
+                    const match = /serving on (http:\/\/\S+?)\/?\s/.exec(out)
+                    if (match?.[1] !== undefined) {
+                        clearTimeout(timer)
+                        resolve(match[1])
+                    }
+                })
+            })
+            // The host adopted the token it was already serving with, so nothing that authenticates
+            // today stops working…
+            expect(readFileSync(join(agents, ".api-token"), "utf8").trim()).toBe("token-alpha")
+
+            // …and beta's client sends the sandbox's token rather than its own.
+            const saved = {
+                home: process.env[`${BRAND.envPrefix}HOME`],
+                token: process.env[tokenVar],
+            }
+            process.env[`${BRAND.envPrefix}HOME`] = root
+            delete process.env[tokenVar]
+            let token: string | undefined
+            try {
+                token = hostToken(join(agents, "beta", "agent.yaml"))
+            } finally {
+                if (saved.home === undefined) delete process.env[`${BRAND.envPrefix}HOME`]
+                else process.env[`${BRAND.envPrefix}HOME`] = saved.home
+                if (saved.token !== undefined) process.env[tokenVar] = saved.token
+            }
+            expect(token).toBe("token-alpha")
+            const reply = await fetch(`${base}/v1/agents`, {
+                headers: { authorization: `Bearer ${token}` },
+            })
+            expect(reply.status).toBe(200)
+        } finally {
+            child.kill("SIGTERM")
+            rmSync(home, { recursive: true, force: true })
+        }
+    }, 30_000)
+})
+
+describe("a host serving no agents can still be found (QA 0.2.0)", () => {
+    test("status sees it, and its lease goes with it", async () => {
+        const home = mkdtempSync(join(tmpdir(), "serve-empty-"))
+        const root = join(home, BRAND.stateDir)
+        const store = join(home, "store.db")
+        const env = {
+            ...process.env,
+            HOME: home,
+            [`${BRAND.envPrefix}HOME`]: root,
+            [`${BRAND.envPrefix}NO_BOOTSTRAP`]: "1",
+        }
+        const child = spawn(process.execPath, [BINARY, "serve", "--port", "0", "--store", store], {
+            env,
+            cwd: home,
+            stdio: ["ignore", "pipe", "pipe"],
+        })
+        try {
+            let out = ""
+            await new Promise<void>((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error(`never served:\n${out}`)), 20_000)
+                child.stdout.on("data", (chunk: Buffer) => {
+                    out += chunk.toString()
+                    if (out.includes("serving on")) {
+                        clearTimeout(timer)
+                        resolve()
+                    }
+                })
+            })
+            const status = spawnSync(process.execPath, [BINARY, "status", "--store", store], {
+                env,
+                cwd: home,
+                encoding: "utf8",
+            })
+            // It said "no server is installed and nothing is running" about a host that was up.
+            expect(status.stdout).not.toContain("nothing is running")
+            expect(status.stdout).toContain(`pid ${child.pid}`)
+            expect(status.stdout).not.toContain("~host")
+        } finally {
+            const exited = new Promise((resolve) => child.on("exit", resolve))
+            child.kill("SIGTERM")
+            await exited
+        }
+        const db = await SqliteStore.open({ path: store })
+        expect((await db.leases.all()).length).toBe(0)
+        await db.close()
+        rmSync(home, { recursive: true, force: true })
     }, 30_000)
 })

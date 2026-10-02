@@ -114,6 +114,7 @@ interface DeltaShape {
         prompt_cache_miss_tokens?: unknown
         /** Anthropic through an OpenAI-shaped shim. Reads are what were served; creation was billed. */
         cache_read_input_tokens?: unknown
+        cache_creation_input_tokens?: unknown
     } | null
 }
 
@@ -158,7 +159,20 @@ function wireMessage(message: ChatMessage): Record<string, unknown> {
         role: message.role,
         // `null` rather than `""` beside tool calls: the API documents null for a message that is
         // only a call, and some compat endpoints treat an empty string as a malformed turn.
-        content: message.content === "" && calls.length > 0 ? null : message.content,
+        // A message with images is the array form, the only one `image_url` exists in; every other
+        // message keeps the string, so a request without images is byte-identical to before.
+        content:
+            message.images !== undefined && message.images.length > 0
+                ? [
+                      { type: "text", text: message.content },
+                      ...message.images.map((image) => ({
+                          type: "image_url",
+                          image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+                      })),
+                  ]
+                : message.content === "" && calls.length > 0
+                  ? null
+                  : message.content,
         ...(message.toolCallId === undefined ? {} : { tool_call_id: message.toolCallId }),
         ...(calls.length === 0
             ? {}
@@ -336,6 +350,7 @@ function* chunksFromPayload(payload: DeltaShape, calls: ToolCallBuffer): Generat
     const usage = payload.usage
     if (usage !== undefined && usage !== null) {
         const cache = cacheUsage(usage)
+        const written = asNumber(usage.cache_creation_input_tokens)
         yield {
             type: "usage",
             promptTokens: asNumber(usage.prompt_tokens) ?? 0,
@@ -343,6 +358,9 @@ function* chunksFromPayload(payload: DeltaShape, calls: ToolCallBuffer): Generat
             ...(cache === undefined
                 ? {}
                 : { cachedPromptTokens: cache.cached, cacheSource: cache.source }),
+            // Anthropic-compatible endpoints report what the call wrote to the cache; nothing else
+            // does, so absent stays absent rather than a claimed zero.
+            ...(written === undefined ? {} : { cacheWriteTokens: written }),
         }
     }
 

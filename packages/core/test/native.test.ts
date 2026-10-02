@@ -20,6 +20,7 @@ import {
     renderNativeDescription,
 } from "../src/tools/dialect/native.ts"
 import { nltDialect, renderNltEntry } from "../src/tools/dialect/nlt.ts"
+import { ToolRegistry } from "../src/tools/registry.ts"
 import { renderTrusted, untrustedFence } from "../src/tools/trust.ts"
 import type { ToolResult, ToolSpec } from "../src/tools/types.ts"
 import { describe, expect, test } from "./_harness.ts"
@@ -119,13 +120,63 @@ describe("what goes on the wire", () => {
         expect(nativeWireTokens([])).toBe(0)
     })
 
+    test("a dotted slug goes out as __, and the reply resolves back to the slug (pilot.5)", async () => {
+        // Skill scripts are `skill.<skill>.<script>` and join mid-session, so a native agent failed on
+        // the first turn that activated a scripted skill.
+        const definitions =
+            nativeDialect.requestTools([{ ...SPEC, slug: "skill.pdf.extract" }]) ?? []
+        expect(definitions[0]?.name).toBe("skill__pdf__extract")
+
+        const registry = await ToolRegistry.create({
+            pinned: ["skill.pdf.extract"],
+            providers: [
+                {
+                    id: "skills",
+                    resolve: async () => [
+                        {
+                            spec: { ...SPEC, slug: "skill.pdf.extract", provider: "skills" },
+                            handler: () => "ok",
+                        },
+                    ],
+                    list: async () => ["skill.pdf.extract"],
+                },
+            ],
+        })
+        const parsed = nativeDialect.parse({
+            text: "",
+            calls: [{ id: "c1", name: "skill__pdf__extract", arguments: "{}" }],
+        })
+        // Policy and events read the resolved spec, so they see the dotted slug.
+        expect(registry.resolve(parsed.intents[0]?.slug ?? "").spec.slug).toBe("skill.pdf.extract")
+    })
+
+    test("a mapped name another slug would also answer to is refused, not guessed", () => {
+        let caught: unknown
+        try {
+            nativeDialect.requestTools([
+                { ...SPEC, slug: "skill.pdf.extract" },
+                { ...SPEC, slug: "skill_pdf_extract" },
+            ])
+        } catch (error) {
+            caught = error
+        }
+        expect((caught as { code?: string })?.code).toBe("native_tool_name_collision")
+        // Two plain slugs that collide only in normalisation were never mapped, so they are not this
+        // dialect's to refuse.
+        expect(() =>
+            nativeDialect.requestTools([
+                { ...SPEC, slug: "send_email" },
+                { ...SPEC, slug: "send-email" },
+            ]),
+        ).not.toThrow()
+    })
+
     test.each([
-        ["a dot", "gmail.send"],
         ["a space", "send email"],
         ["a colon", "tag:write"],
     ])("a slug the wire format cannot carry is refused at load — %s", (_label, slug) => {
-        // Refused rather than rewritten: `a.b` and `a_b` collide on the way out, so the reply would
-        // name a form the loop has to guess about.
+        // Refused rather than rewritten: only a dot has a mapping, because only a dot has a reason
+        // (skill scripts) and a way back the registry already provides.
         let caught: unknown
         try {
             nativeDialect.requestTools([{ ...SPEC, slug }])

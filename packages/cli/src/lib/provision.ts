@@ -27,7 +27,7 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join, resolve, sep } from "node:path"
 import {
     HarnessError,
     loadManifest,
@@ -51,6 +51,7 @@ import {
     slugify,
     validateAnswer,
 } from "#lib/init-flow"
+import { sharedHostToken } from "#lib/sandbox"
 
 export const FLAG_FOR: Record<InitStep, string> = {
     user: "--user",
@@ -280,7 +281,15 @@ export function complete(
         // the `.env` carried no token, and the agent would have refused to start. Caught by a test
         // that reads the generated `.env` rather than this object, which is the guard this repo has
         // needed for this exact shape six times.
-        ...(server === "local" ? { serverToken: randomToken() } : {}),
+        // Inside the sandbox the token is the sandbox's, because one host serves every agent there
+        // with one token (`sharedHostToken`). Anywhere else the agent is its own host.
+        ...(server === "local"
+            ? {
+                  serverToken: within(dir, defaults.agentDirBase)
+                      ? sharedHostToken(defaults.agentDirBase, randomToken)
+                      : randomToken(),
+              }
+            : {}),
         ...(keyVar === undefined ? {} : { apiKeyEnv: keyVar }),
         ...(answers.apiKey === undefined || answers.apiKey === ""
             ? {}
@@ -295,6 +304,12 @@ export function complete(
  *
  * Moved here verbatim with `complete`, its only caller. 256 bits of `crypto.getRandomValues`, hex.
  */
+function within(dir: string, base: string): boolean {
+    const target = resolve(dir)
+    const root = resolve(base)
+    return target === root || target.startsWith(root + sep)
+}
+
 function randomToken(): string {
     const bytes = new Uint8Array(32)
     crypto.getRandomValues(bytes)

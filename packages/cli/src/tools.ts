@@ -14,10 +14,17 @@
  * the cache never runs. This command is how the cache gets its first contents.
  */
 
-import { loadManifest, Runtime, resolveProviders } from "@dispach/core"
+import { isHarnessError, loadManifest, Runtime, resolveProviders } from "@dispach/core"
 import { ambientEnv } from "#lib/ambient"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
-import { BUILT_IN_PLUGINS, CHANNELS, scriptRunner, TOOL_PROVIDERS } from "#lib/providers"
+import {
+    BUILT_IN_PLUGINS,
+    CHANNELS,
+    MEDIA_PROVIDERS,
+    MODEL_TRANSPORTS,
+    scriptRunner,
+    TOOL_PROVIDERS,
+} from "#lib/providers"
 import { pluginRoot } from "#lib/sandbox"
 import { toolsReport, toolsView } from "#lib/session-commands"
 
@@ -73,27 +80,42 @@ async function warm(options: ToolsOptions): Promise<number> {
         const factory = TOOL_PROVIDERS[selection.id]
         if (factory === undefined) return EXIT_FAILURE
 
-        const provider = factory({
-            dir: loaded.dir,
-            env: loaded.env,
-            config: selection.config,
-            agentId: loaded.manifest.id,
-        })
+        // One provider that cannot be built or reached is reported and skipped, never the end of the
+        // run (QA K3): `init` names `composio: {}` with no key so the model knows the route exists,
+        // and its refusal used to abort the loop, so an MCP server listed after it was never warmed
+        // and the command exited 1 for a provider nothing pinned. Whether that matters is decided
+        // below, by whether every pinned slug is still covered.
+        let report: Awaited<ReturnType<NonNullable<ReturnType<typeof factory>["refresh"]>>>
+        try {
+            const provider = factory({
+                dir: loaded.dir,
+                env: loaded.env,
+                config: selection.config,
+                agentId: loaded.manifest.id,
+            })
 
-        if (provider.refresh === undefined) {
-            // Nothing to fetch, but it still answers for its own slugs — and without asking, every
-            // `exec` and `file_read` in `pinned` would be reported missing by a command that only
-            // ever looked at the provider with a cache.
-            for (const tool of await provider.resolve(pinned)) covered.add(tool.spec.slug)
-            if (options.json !== true) {
-                process.stdout.write(
-                    `${selection.id}: nothing to warm — it resolves without a cache.\n`,
-                )
+            if (provider.refresh === undefined) {
+                // Nothing to fetch, but it still answers for its own slugs — and without asking,
+                // every `exec` and `file_read` in `pinned` would be reported missing by a command
+                // that only ever looked at the provider with a cache.
+                for (const tool of await provider.resolve(pinned)) covered.add(tool.spec.slug)
+                if (options.json !== true) {
+                    process.stdout.write(
+                        `${selection.id}: nothing to warm — it resolves without a cache.\n`,
+                    )
+                }
+                continue
             }
+            report = await provider.refresh(pinned)
+        } catch (error) {
+            const detail = isHarnessError(error)
+                ? `${error.message}\n  hint: ${error.hint}`
+                : error instanceof Error
+                  ? error.message
+                  : String(error)
+            process.stdout.write(`${selection.id}: not warmed — ${detail}\n`)
             continue
         }
-
-        const report = await provider.refresh(pinned)
         for (const slug of pinned) {
             if (!report.missing.includes(slug)) covered.add(slug)
         }
@@ -140,6 +162,8 @@ async function show(options: ToolsOptions): Promise<number> {
     const runtime = await Runtime.create({
         agents: [options.manifestPath],
         toolProviders: TOOL_PROVIDERS,
+        modelTransports: MODEL_TRANSPORTS,
+        mediaProviders: MEDIA_PROVIDERS,
         builtInPlugins: BUILT_IN_PLUGINS,
         pluginRoot: pluginRoot(),
         scriptRunner: scriptRunner(),

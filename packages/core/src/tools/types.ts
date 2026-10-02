@@ -13,6 +13,8 @@
  */
 
 import type { ConfigError, ErrorDetail } from "../errors.ts"
+import type { ActingParticipant } from "../loop/sender.ts"
+import type { MediaProviderFactory } from "../media/provider.ts"
 import type { Trust } from "./trust.ts"
 
 export type JsonType = "string" | "number" | "integer" | "boolean" | "array" | "object"
@@ -88,6 +90,12 @@ export interface ToolSpec {
      * it simply cannot be narrowed, which is honest for something like `now`.
      */
     readonly policyArg?: string
+    /**
+     * `policyArg` is a filesystem path, so it is matched **normalised**: `./a/../.env` is `.env`.
+     * Matched raw, a `../` walked past any path rule — `deny: ["file_read(.env)"]` did not stop
+     * `file_read(workspace/../.env)` (pilot.4).
+     */
+    readonly policyArgIsPath?: true
     /** Matched by `phases.*.allow` as `tag:<name>`. */
     readonly tags: readonly string[]
     readonly parameters: ToolParameters
@@ -125,6 +133,22 @@ export interface ToolContext {
      */
     readonly deadlineMs: number
     readonly now: () => Date
+    /**
+     * Send a file with the reply: an image a tool generated. `path` is absolute and inside the
+     * agent's directory. Collected across the turn and delivered after the text by whichever surface
+     * delivers it — a channel sends it, the API reports it on `turn.end`. Optional so a plugin's own
+     * fixture keeps compiling; the runtime always supplies it.
+     */
+    readonly attach?: (file: { readonly path: string; readonly mimeType: string }) => void
+    /**
+     * Who this turn acts for, stamped by the runtime from the surface the turn arrived through, or
+     * `null` for a schedule, a peer agent or the operator. Never from model output. An HTTP tool that
+     * calls an embedder forwards it so the embedder can authorise the person, not only the agent.
+     * Optional so a plugin's own test fixture keeps compiling; absent reads as `null`. The runtime
+     * always sets it, and `acting-participant.test.ts` reads it from a real turn's tool call, because
+     * a field set in one layer and dropped by the next has cost this repo six debugging rounds.
+     */
+    readonly actingParticipant?: ActingParticipant | null
     /**
      * Where a durable note goes, when a workspace declares somewhere for it.
      *
@@ -166,6 +190,11 @@ export interface ToolContext {
      * dropping notes on the floor because nowhere was configured to keep them.
      */
     readonly memoryDir?: string
+    /**
+     * Where `memory_write` saves instead of the workspace file, when this agent is the team's
+     * designated space writer (Phase 29). Returns the observation. Absent: the workspace file, as ever.
+     */
+    readonly writeNote?: (text: string) => Promise<string>
 }
 
 /** What `artifact_read` needs to know about a displaced observation. Structural on purpose. */
@@ -223,6 +252,12 @@ export type ToolHandler = (
 export interface Tool {
     readonly spec: ToolSpec
     readonly handler: ToolHandler
+    /**
+     * The trust of one call's result, where the spec's single value can't answer for every call.
+     * `artifact_read` is the case: it returns whatever it stored, and the trust of that is a fact
+     * about the artifact, not about the tool. It can only lower trust; `untrusted` on the spec wins.
+     */
+    readonly trustOf?: (args: Readonly<Record<string, unknown>>) => Trust
 }
 
 /**
@@ -383,6 +418,14 @@ export interface ToolProviderContext {
     /** `tools.providerConfig`, verbatim. */
     readonly config: Readonly<Record<string, unknown>>
     readonly agentId: string
+    /**
+     * Every provider factory this runtime builds agents with. For a provider whose tools edit the
+     * manifest (`config_set`), so an edit to `tools.providers` is checked by the providers themselves
+     * before it is written — the same check the person's editors make (decision 14.24).
+     */
+    readonly providers?: Readonly<Record<string, ToolProviderFactory>>
+    /** The runtime's media providers, so a `media` edit from `config_set` is checked the same way. */
+    readonly mediaProviders?: Readonly<Record<string, MediaProviderFactory>>
 }
 
 export interface ToolIntent {

@@ -48,6 +48,10 @@ export async function restartCommand(options: RestartOptions): Promise<number> {
                 result.adopted.length > 0 ? ` · adopted ${result.adopted.join(", ")}` : ""
             }`
             break
+        case "pending":
+            value = "reload pending"
+            note = `pid ${result.pid} applies it when its ${result.running} running turn(s) finish`
+            break
         case "busy":
             value = "not reloaded"
             note = `pid ${result.pid} has a turn in flight — try again when it finishes`

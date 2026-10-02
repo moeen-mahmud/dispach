@@ -16,7 +16,14 @@
  * to prevent.
  */
 
-import { bm25Selector, HarnessError, nearest, type ScoredSkill, type Skill } from "@dispach/core"
+import {
+    bm25Selector,
+    HarnessError,
+    isHarnessError,
+    nearest,
+    type ScoredSkill,
+    type Skill,
+} from "@dispach/core"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { bullet, indent, keyValue, section } from "#lib/render"
 import {
@@ -77,7 +84,7 @@ export async function sourcesCommand(options: SourcesOptions): Promise<number> {
                 })
         }
     } catch (error) {
-        if (error instanceof HarnessError) {
+        if (isHarnessError(error)) {
             process.stdout.write(`${error.message}\n\n  ${error.hint}\n`)
             return EXIT_FAILURE
         }
@@ -309,7 +316,7 @@ async function update(options: SourcesOptions): Promise<number> {
             const reason = error instanceof Error ? error.message : String(error)
             failed.push({ name: spec.name, reason })
             if (options.json !== true) process.stdout.write(`failed\n`)
-            if (options.json !== true && error instanceof HarnessError) {
+            if (options.json !== true && isHarnessError(error)) {
                 process.stdout.write(`${indent(error.message)}\n${indent(error.hint, 4)}\n`)
             }
         }
@@ -352,8 +359,7 @@ async function search(options: SourcesOptions): Promise<number> {
         } catch (error) {
             if (options.json !== true) {
                 process.stdout.write(`failed\n`)
-                if (error instanceof HarnessError)
-                    process.stdout.write(`${indent(error.message)}\n`)
+                if (isHarnessError(error)) process.stdout.write(`${indent(error.message)}\n`)
             }
         }
     }
