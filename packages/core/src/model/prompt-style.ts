@@ -126,7 +126,7 @@ const EXAMPLE_OPEN = /^[ \t]*<example(?:\s[^>]*)?>[ \t]*$/
 const EXAMPLE_CLOSE = /^[ \t]*<\/example>[ \t]*$/
 const RULES_OPEN = /^[ \t]*<rules(?:\s[^>]*)?>[ \t]*$/
 const RULES_CLOSE = /^[ \t]*<\/rules>[ \t]*$/
-const HEADING = /^(#{1,6})\s+(.*)$/
+const HEADING = /^(#{1,6})\s+(\S.*)?$/
 
 /**
  * What `intensity` actually varies: one generated line in front of the author's rules.

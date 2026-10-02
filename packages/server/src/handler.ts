@@ -1061,11 +1061,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         adopted: [],
                         error: isHarnessError(error)
                             ? error.toDetail()
-                            : {
-                                  code: "provision_adopt_failed",
-                                  message: error instanceof Error ? error.message : String(error),
-                                  hint: "The agent was written and is not running. Fix what the message names and `start` it, or restart the host.",
-                              },
+                            : unexpected(
+                                  "provision_adopt_failed",
+                                  "The agent was written and is not running. Fix what the server's log names and `start` it, or restart the host.",
+                                  error,
+                              ),
                     },
                     201,
                 )
@@ -1158,11 +1158,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     adopted: [],
                     error: isHarnessError(error)
                         ? error.toDetail()
-                        : {
-                              code: "secrets_apply_failed",
-                              message: error instanceof Error ? error.message : String(error),
-                              hint: "The values were written and the agent is not running on them yet. Fix what the message names and reload or start it.",
-                          },
+                        : unexpected(
+                              "secrets_apply_failed",
+                              "The values were written and the agent is not running on them yet. Fix what the server's log names and reload or start it.",
+                              error,
+                          ),
                 })
             }
         },
@@ -3095,11 +3095,11 @@ async function writeSchedule(
     } catch (error) {
         const detail = isHarnessError(error)
             ? error.toDetail()
-            : {
-                  code: "schedule_invalid",
-                  message: error instanceof Error ? error.message : String(error),
-                  hint: "See docs/02-SPEC-MANIFEST.md for the schedule fields.",
-              }
+            : unexpected(
+                  "schedule_invalid",
+                  "See docs/02-SPEC-MANIFEST.md for the schedule fields; the server's log has the cause.",
+                  error,
+              )
         return fail(detail, 400)
     }
 }
@@ -3121,6 +3121,17 @@ function web(path: string, context: RequestContext): Response {
             hint: "The routes in handler.ts and the table in web.ts have diverged, which spec.test.ts asserts cannot happen — so this build is inconsistent. Rebuild with `bun run build`.",
         })
     return response
+}
+
+/**
+ * An unexpected throw as a caller sees it: a code and a hint, and the cause in the server's log. Its
+ * message can carry paths and internals, and the caller may be a scoped key's holder (code scanning).
+ */
+function unexpected(code: string, hint: string, error: unknown): ErrorDetail {
+    process.stderr.write(
+        `${code}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+    )
+    return { code, message: "An unexpected failure; the server's log has the cause.", hint }
 }
 
 function json(body: unknown, status = 200): Response {
@@ -3196,17 +3207,12 @@ async function runHandler(handler: Handler, context: RequestContext): Promise<Re
         return await handler(context)
     } catch (error) {
         if (isHarnessError(error)) return fail(error.toDetail(), 400)
-        // The cause goes to the server's stderr, not to the caller: an unexpected error's message can
-        // carry paths and internals, and the caller may be a scoped key's holder.
-        process.stderr.write(
-            `internal: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
-        )
         return fail(
-            {
-                code: "internal_error",
-                message: "An unexpected failure in the server.",
-                hint: "Not caused by the request. The server's log has the cause, and the runtime's event stream carries what happened around it.",
-            },
+            unexpected(
+                "internal_error",
+                "Not caused by the request. The server's log has the cause, and the runtime's event stream carries what happened around it.",
+                error,
+            ),
             500,
         )
     }
@@ -3551,9 +3557,7 @@ async function readJson(
             kind: "error",
             error: {
                 code: "body_not_json",
-                message: `The request body is not valid JSON: ${
-                    cause instanceof Error ? cause.message : String(cause)
-                }`,
+                message: "The request body is not valid JSON.",
                 hint: "Send application/json. A shell quoting mistake is the usual cause — check for unescaped quotes inside the payload.",
             },
         }

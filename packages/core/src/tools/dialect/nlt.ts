@@ -56,7 +56,8 @@ const ACTION_LINE = /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:<\s*)?action\s*:(.+)$/i
  * case is a stray line inside a value the tool then rejects with its own message, rather than a
  * silently truncated argument.
  */
-const KEY_LINE = /^\s*(?:[-*+]\s+|\d+[.)]\s+)?([A-Za-z_][\w.-]*?)\s*:\s*(.*)$/
+// No `\s*` before the value: it is trimmed where it is read, and the overlap backtracked.
+const KEY_LINE = /^\s*(?:[-*+]\s+|\d+[.)]\s+)?([A-Za-z_][\w.-]*?)\s*:(.*)$/
 const FENCE_LINE = /^\s*`{3,}\s*(?:[\w+-]+\s*)?$/
 const END_LINE = /^\s*end\s*$/i
 
@@ -158,11 +159,21 @@ function actionSlug(raw: string | undefined): string {
 
 /** Strip the decoration a model puts around a tool name: backticks, quotes, trailing full stop. */
 function cleanSlug(raw: string): string {
-    return raw
-        .replace(/^[`'"*<]+/, "")
-        .replace(/[`'"*>]+$/, "")
-        .replace(/[.,;:]+$/, "")
-        .trim()
+    // Loops rather than `/[…]+$/`: an unanchored-start character class against `$` rescans from
+    // every position, and a reply of commas or quotes made it quadratic (code scanning).
+    return dropTrailing(dropTrailing(dropLeading(raw, "`'\"*<"), "`'\"*>"), ".,;:").trim()
+}
+
+function dropLeading(text: string, chars: string): string {
+    let start = 0
+    while (start < text.length && chars.includes(text[start] ?? "")) start += 1
+    return text.slice(start)
+}
+
+function dropTrailing(text: string, chars: string): string {
+    let end = text.length
+    while (end > 0 && chars.includes(text[end - 1] ?? "")) end -= 1
+    return text.slice(0, end)
 }
 
 interface Block {

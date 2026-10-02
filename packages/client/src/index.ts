@@ -840,7 +840,10 @@ export function isEvent<K extends EventType>(
 }
 
 export function createClient(options: ClientOptions): DispachClient {
-    const base = options.baseUrl.replace(/\/+$/, "")
+    // A loop, not a trailing-slash regex, which rescans on a run of slashes (code scanning).
+    let end = options.baseUrl.length
+    while (end > 0 && options.baseUrl[end - 1] === "/") end -= 1
+    const base = options.baseUrl.slice(0, end)
     const doFetch = options.fetch ?? fetch
 
     const headers = (extra: Record<string, string> = {}): Record<string, string> => ({
