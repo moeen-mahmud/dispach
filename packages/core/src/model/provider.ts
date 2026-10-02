@@ -102,6 +102,12 @@ export interface ChatMessage {
      */
     readonly cacheBreakpoint?: true
     /**
+     * This is the current turn's input. Harness metadata like `cacheBreakpoint`, never sent: assembly
+     * puts the input after the turn's own calls and observations, which an endpoint with a strict
+     * conversation shape (Bedrock Converse: the first message must be the user's) needs to undo.
+     */
+    readonly turnInput?: true
+    /**
      * Images sent with this message (pilot.5, #12). Set only on the current turn's input, never stored:
      * history keeps a `[image: <ref>]` line in `content` instead, so a later turn neither pays for the
      * image again nor loses the fact that one was sent. Each transport maps it to its own shape.

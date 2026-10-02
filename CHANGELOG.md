@@ -10,6 +10,8 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - A child inherits its parent's taint, stand-in deferral, acting participant and cancellation, and never spawns one of its own. Its tools must be ones the parent pins.
 - `model.subagent` (or `subagents[].model`) runs children on a cheaper model. Their usage rows and `model.result` events say `role: subagent`.
 - A subagent's events carry `parentTurnId` and `parentSessionKey`, and `handoff.start`/`handoff.result` gain `kind`, `name` and the parent's `callId`. A turn's stream includes its subagents' events with `children: true` (also on the client's `stream()`), and still ends on its own `turn.end`. A key scoped to a session reaches the subagents that session ran.
+- Bedrock: a tool turn in a fresh session no longer fails on its second step with "A conversation must start with a user message" (Nova Micro under the NLT dialect). The turn's input is sent first whenever the request would otherwise open with the model's own call, under both dialects.
+- `run --plain` prints only its own conversation's events, so a subagent's reply no longer appears inside the parent's.
 - The release image builds its tarball once, natively, instead of once per platform under emulation.
 
 ### Since 0.2.0-pilot.4

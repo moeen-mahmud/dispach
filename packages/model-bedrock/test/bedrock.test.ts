@@ -378,6 +378,8 @@ limits:
 
         expect(reply.text).toBe("It is noon.")
         expect(inputs.length).toBe(2)
+        // A fresh session opens with the person's message under native too, not the model's call.
+        expect(inputs[1]?.messages?.map((m) => m.role)).toEqual(["user", "assistant", "user"])
         const second = inputs[1]
         expect(second?.system?.some((block) => block.cachePoint !== undefined)).toBe(true)
         const call = second?.messages?.find((m) => m.role === "assistant")
@@ -391,6 +393,63 @@ limits:
         ).toBe(true)
         expect(total?.cachedPromptTokens).toBe(1900)
         expect(total?.cacheWriteTokens).toBe(100)
+    })
+})
+
+describe("an NLT tool turn on Nova", () => {
+    /** One step of plain text, as Nova streams it. */
+    const said = (text: string): ConverseStreamOutput[] => [
+        { contentBlockDelta: { contentBlockIndex: 0, delta: { text } } },
+        { contentBlockStop: { contentBlockIndex: 0 } },
+        { messageStop: { stopReason: "end_turn" } },
+    ]
+
+    test("every request starts with a user message, step two included (VelaCrew, pilot.5)", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "bedrock-nova-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: nova
+model:
+  main:
+    id: amazon.nova-micro-v1:0
+    api: bedrock-converse
+    options:
+      region: eu-west-1
+tools:
+  local:
+    - now
+limits:
+  maxSteps: 4
+  turnTimeoutMs: 5000
+`,
+        )
+        const inputs: ConverseStreamCommandInput[] = []
+        const send: ConverseSend = async (input) => {
+            inputs.push(input)
+            return events(inputs.length === 1 ? said("ACTION: now\nEND") : said("It is noon."))
+        }
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: {},
+            store: ":memory:",
+            modelTransports: { "bedrock-converse": bedrockTransport(async () => send) },
+        })
+        const reply = await runtime
+            .agent("nova")
+            .send("Use your now tool to check the current time")
+        await runtime.stop()
+
+        expect(inputs.length).toBe(2)
+        for (const input of inputs) expect(input.messages?.[0]?.role).toBe("user")
+        // The question, then the call it led to, then what the call returned.
+        const second = inputs[1]?.messages ?? []
+        expect(second[0]?.content?.[0]).toEqual({
+            text: "Use your now tool to check the current time",
+        })
+        expect(second[1]?.role).toBe("assistant")
+        expect(JSON.stringify(second[2]?.content)).toContain("OBSERVATION now")
+        expect(reply.text).toBe("It is noon.")
     })
 })
 

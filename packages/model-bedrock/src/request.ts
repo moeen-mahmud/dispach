@@ -138,6 +138,29 @@ function contentOf(message: ChatMessage): { role: "user" | "assistant"; content:
     return { role: "user", content }
 }
 
+/**
+ * The messages with the turn's input moved ahead of its own trace when they would otherwise open with
+ * the assistant. Assembly puts the input last, after the calls and observations of the turn so far,
+ * so on a fresh session's second step the first non-system message is the model's own call, and
+ * Converse refuses that for Nova ("A conversation must start with a user message", VelaCrew, pilot.5)
+ * and tolerates it for Claude when the call is a `toolUse`. Moved in both cases, so every model gets
+ * the canonical order (the question, the call, the result); a request that already opened with the
+ * user is unchanged.
+ */
+export function conversationOrder(messages: readonly ChatMessage[]): readonly ChatMessage[] {
+    const first = messages.findIndex((message) => message.role !== "system")
+    if (first === -1 || messages[first]?.role === "user") return messages
+    const input = messages.findIndex((message) => message.turnInput === true)
+    if (input === -1 || input < first) return messages
+    const moved = messages[input] as ChatMessage
+    return [
+        ...messages.slice(0, first),
+        moved,
+        ...messages.slice(first, input),
+        ...messages.slice(input + 1),
+    ]
+}
+
 export function converseInput(
     request: ChatRequest,
     config: ModelRoleConfig,
@@ -147,7 +170,7 @@ export function converseInput(
     const messages: Message[] = []
 
     let leading = true
-    for (const message of request.messages) {
+    for (const message of conversationOrder(request.messages)) {
         if (leading && message.role === "system") {
             if (message.content !== "") system.push({ text: message.content })
             if (caching && message.cacheBreakpoint === true) system.push(CACHE_POINT)

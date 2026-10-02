@@ -1120,6 +1120,10 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
      * had to remember to ask.
      */
     const unsubscribe = wired.source.subscribe((event: AnyEvent) => {
+        // This conversation's events only, as the rich path filters: a channel turn for another peer
+        // shares the bus, and so does a subagent, whose own streamed text would otherwise print into
+        // this reply. An event with no session key is runtime-wide.
+        if (event.sessionKey !== undefined && event.sessionKey !== sessionKey) return
         switch (event.type) {
             case "model.result":
                 show(filter.endStep())

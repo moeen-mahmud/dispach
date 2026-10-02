@@ -154,6 +154,8 @@ describe("a routed call", () => {
         expect(after).toContain("Two unread, one from Ada about the numbers.")
         expect(after).toContain("ran in subagent inbox")
         expect(after).not.toContain("MAILBOX-RAW")
+        // Harness metadata never reaches a chat-completions body, on a later step either.
+        expect(after).not.toContain("turnInput")
         await runtime.stop()
     })
 

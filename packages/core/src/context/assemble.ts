@@ -415,7 +415,8 @@ function messagesOf(blocks: readonly ContextBlock[]): ChatMessage[] {
         if (b.slot === SLOT.skill) skill = index
     })
     return blocks.map((b, index) => {
-        const message = b.message ?? { role: b.role, content: b.content }
+        const plain = b.message ?? { role: b.role, content: b.content }
+        const message = b.slot === SLOT.input ? { ...plain, turnInput: true as const } : plain
         return index === lastStatic || index === skill
             ? { ...message, cacheBreakpoint: true as const }
             : message
