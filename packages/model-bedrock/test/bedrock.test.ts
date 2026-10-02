@@ -146,6 +146,33 @@ describe("request mapping", () => {
         )
         expect(off.system).toEqual([{ text: "s" }])
     })
+
+    test("an image becomes an image block of raw bytes after the text (pilot.5)", () => {
+        const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2])
+        const input = converseInput(
+            {
+                model: MODEL,
+                messages: [
+                    {
+                        role: "user",
+                        content: "what is this?\n\n[image: files/c1/shot.png]",
+                        images: [
+                            {
+                                mediaType: "image/png",
+                                data: Buffer.from(png).toString("base64"),
+                                ref: "files/c1/shot.png",
+                            },
+                        ],
+                    },
+                ],
+            },
+            CONFIG,
+        )
+        expect(input.messages?.[0]?.content).toEqual([
+            { text: "what is this?\n\n[image: files/c1/shot.png]" },
+            { image: { format: "png", source: { bytes: png } } },
+        ])
+    })
 })
 
 describe("stream mapping", () => {

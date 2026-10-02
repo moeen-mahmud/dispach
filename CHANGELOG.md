@@ -12,6 +12,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - Under `tools.dialect: native` a skill script (`skill.pdf.extract`) is sent as `skill__pdf__extract` instead of failing the turn that activates it.
 - Nova Micro, Lite and Pro resolve to their own capability rows (window, output, tools) instead of the 8,192-token fallback.
 - A release run from a branch says it built and pushed nothing, and tags its build with the version.
+- `POST /messages` takes `images`: a path inside the agent's directory (or inline base64), PNG, JPEG, GIF or WebP. The model sees them on that turn through Bedrock or an OpenAI-compatible endpoint; history keeps `[image: <path>]`. A model without vision refuses with `model_no_vision`, and `capabilities.vision` can say otherwise. The client's `send` takes `images` too.
 
 ### Since 0.2.0-pilot.3
 

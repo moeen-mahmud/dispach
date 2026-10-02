@@ -11,9 +11,10 @@
  * something that summarizes before it forgets.
  */
 
+import { IMAGE_TOKENS } from "../media/image-input.ts"
 import { isSessionSource, SESSION_SOURCE_PREFIX } from "../memory/conversation.ts"
 import { describeScope, scopeOfSource } from "../memory/scopes.ts"
-import type { ChatMessage } from "../model/provider.ts"
+import type { ChatMessage, ImageInput } from "../model/provider.ts"
 import { type ContextBlock, SLOT, skillHeader, VOLATILE_HEADER } from "./blocks.ts"
 import { isTurnStart } from "./compaction/stages.ts"
 import { estimateMessageTokens, estimateTokens } from "./tokens.ts"
@@ -123,6 +124,8 @@ export interface AssembleInput {
      */
     readonly protectedTail?: number
     readonly input: string
+    /** Images on the input message. Charged `IMAGE_TOKENS` each, since the estimate cannot see them. */
+    readonly inputImages?: readonly ImageInput[]
     /** Surfaced in the pinned error slot so a failure survives compaction. */
     readonly lastError?: string
     /** Total window, after capability resolution. */
@@ -255,7 +258,19 @@ export function assembleContext(input: AssembleInput): AssembledContext {
     if (input.reminder !== undefined && input.reminder.trim() !== "") {
         pinned.push(block(SLOT.reminder, "system", input.reminder, true, "workspace-reminder"))
     }
-    const inputBlock = block(SLOT.input, "user", input.input, true, "input")
+    const plainInput = block(SLOT.input, "user", input.input, true, "input")
+    const inputBlock =
+        input.inputImages === undefined || input.inputImages.length === 0
+            ? plainInput
+            : {
+                  ...plainInput,
+                  tokens: plainInput.tokens + IMAGE_TOKENS * input.inputImages.length,
+                  message: {
+                      role: "user" as const,
+                      content: input.input,
+                      images: input.inputImages,
+                  },
+              }
     pinned.push(inputBlock)
     if (input.lastError !== undefined && input.lastError !== "") {
         pinned.push(

@@ -191,7 +191,7 @@ export async function harness(
         /** Plugins a manifest may name by spec, the way the CLI supplies its first-party ones. */
         builtInPlugins?: BuiltInPlugins
         /** Workspace files beside the manifest, written before the runtime boots. */
-        files?: Record<string, string>
+        files?: Record<string, string | Uint8Array>
     } = {},
 ) {
     const dir = workspace(options.manifest)

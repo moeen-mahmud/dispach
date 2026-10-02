@@ -162,6 +162,15 @@ export interface SendOptions {
      * replay of a message you did not send. Remembered by the server for 24 hours.
      */
     readonly idempotencyKey?: string
+    /**
+     * Images sent with this message: PNG, JPEG, GIF or WebP, at most five, 3.75 MB each. A path
+     * relative to the agent's directory is preferred; inline base64 must fit the 1 MB body limit.
+     * A model without vision refuses with `model_no_vision`.
+     */
+    readonly images?: readonly (
+        | { readonly path: string }
+        | { readonly data: string; readonly mediaType?: string }
+    )[]
     readonly signal?: AbortSignal
 }
 
@@ -1182,6 +1191,7 @@ export function createClient(options: ClientOptions): DispachClient {
                         ...(opts?.sessionKey === undefined ? {} : { sessionKey: opts.sessionKey }),
                         ...(opts?.deliver === undefined ? {} : { deliver: opts.deliver }),
                         ...(opts?.from === undefined ? {} : { from: opts.from }),
+                        ...(opts?.images === undefined ? {} : { images: opts.images }),
                     },
                     ...(opts?.idempotencyKey === undefined
                         ? {}

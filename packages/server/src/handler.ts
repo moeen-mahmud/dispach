@@ -28,6 +28,7 @@ import {
     exportBundle,
     formatSessionKey,
     HarnessError,
+    type ImageInput,
     importBundle,
     isHarnessError,
     isPhased,
@@ -48,6 +49,7 @@ import {
     phasesFor,
     prepareScheduleWrite,
     type Runtime,
+    readImages,
     type ScheduleRecord,
     SENDER_KINDS,
     SETTINGS,
@@ -1584,6 +1586,20 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const idempotency = parseIdempotencyKey(context.request)
                 if (idempotency.kind === "error") return fail(idempotency.error, 400)
 
+                // Images are read and checked now, for the governor's reason below: once the turn
+                // detaches, a missing file or a model that cannot see would be refused to nobody.
+                let images: readonly ImageInput[] = []
+                if (input.images !== undefined && input.images.length > 0) {
+                    const blind = agent.refusesImages()
+                    if (blind !== undefined) return fail(blind.toDetail(), 400)
+                    try {
+                        images = await readImages(agent.dir, input.images)
+                    } catch (error) {
+                        if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                        throw error
+                    }
+                }
+
                 // The governor answers now, while there is still a response to put it in. After this
                 // the turn detaches and a refusal would reach nobody. Nothing is recorded for a
                 // refused message — not a turn row, not an idempotency claim — so a retry is clean.
@@ -1610,7 +1626,14 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         agentId: agent.id,
                         key: idempotency.key,
                         turnId,
-                        inputHash: await inputHash(sessionKey, text),
+                        // Images are part of what was sent, so a retry with different ones is a
+                        // different message rather than a replay of the first.
+                        inputHash: await inputHash(
+                            sessionKey,
+                            images.length === 0
+                                ? text
+                                : `${text}\n${images.map((image) => image.data).join("\n")}`,
+                        ),
                         now: new Date(),
                     })
                     if (claim.kind !== "claimed") admission.release()
@@ -1657,6 +1680,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         turnId,
                         source: "api",
                         ...(from.from === undefined ? {} : { from: from.from }),
+                        ...(images.length === 0 ? {} : { images }),
                         signal: controller.signal,
                     })
                     .then(async (result) => {

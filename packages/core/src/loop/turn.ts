@@ -29,7 +29,8 @@ import {
 } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import type { TurnEndReason } from "../events/types.ts"
-import type { ChatMessage, ToolDefinition } from "../model/provider.ts"
+import { imageReference } from "../media/image-input.ts"
+import type { ChatMessage, ImageInput, ToolDefinition } from "../model/provider.ts"
 import { type ResolvedRole, requestParamsFor } from "../model/roles.ts"
 import { compose, type Middleware } from "../plugins/middleware.ts"
 import type { ParsedOutput, StepOutput, ToolDialect } from "../tools/dialect/dialect.ts"
@@ -229,6 +230,8 @@ export interface TurnInput {
      * instructions. Runtime-authored, so it is not the sender's text and is not framed as theirs.
      */
     readonly runtimeNote?: string
+    /** Images sent with the input. Sent on every step of this turn, stored as references. */
+    readonly images?: readonly ImageInput[]
     /** Every mutating call is queued rather than run: a stand-in's turn. See `ExecuteInput.defer`. */
     readonly deferMutations?: ExecuteInput["defer"]
     /** Forwarded to `ToolContext.writeNote`: set when this agent is the space writer (Phase 29). */
@@ -504,8 +507,14 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
      * material, so it carries the fence, exactly as a rendered observation already does.
      */
     const framedInput = frameSenderInput(input.input, input.from)
-    const promptInput =
+    const noted =
         input.runtimeNote === undefined ? framedInput : `${input.runtimeNote}\n\n${framedInput}`
+    // The reference lines are in the text the prompt and the history both carry, so the model knows
+    // the image's path, and a later turn knows one was sent, after the bytes are gone.
+    const promptInput =
+        input.images === undefined || input.images.length === 0
+            ? noted
+            : `${noted}\n\n${input.images.map(imageReference).join("\n")}`
     const inputTrust = trustOfSender(input.from)
 
     const link = linkSignals(input.signal, input.limits.turnTimeoutMs)
@@ -738,6 +747,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     // replaced that array by the time this runs.
                     protectedTail: Math.max(0, messages.length - initialHistoryLength),
                     input: promptInput,
+                    ...(input.images === undefined || input.images.length === 0
+                        ? {}
+                        : { inputImages: input.images }),
                     // Reduced by whatever the dialect puts in the request body rather than in a block.
                     // Zero under NLT, so this is the same arithmetic it always was.
                     window: windowForTurn,

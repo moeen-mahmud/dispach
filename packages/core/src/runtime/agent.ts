@@ -25,7 +25,9 @@ import {
     type ErrorDetail,
     envOverridden,
     type GovernorError,
+    type HarnessError,
     memoryNotConfigured,
+    modelNoVision,
     modelWindowFamily,
     modelWindowUnknown,
     phaseAllowUnmatched,
@@ -79,7 +81,7 @@ import {
     syncSessions,
 } from "../memory/index.ts"
 import type { PromptStyle } from "../model/prompt-style.ts"
-import type { ChatMessage } from "../model/provider.ts"
+import type { ChatMessage, ImageInput } from "../model/provider.ts"
 import {
     type ResolvedRoles,
     type ResolveRolesOptions,
@@ -275,6 +277,8 @@ export interface AgentSendOptions {
     readonly deferMutations?: ExecuteInput["defer"]
     /** Runtime-authored text before the input, outside its fence. See `TurnInput.runtimeNote`. */
     readonly runtimeNote?: string
+    /** Images sent with this message, already read (`readImages`). See `ChatMessage.images`. */
+    readonly images?: readonly ImageInput[]
     /** A slot from `admit()`. Absent: `send` admits for itself, and throws the refusal. */
     readonly admission?: AdmittedTurn
 }
@@ -1195,10 +1199,26 @@ export class Agent {
 
     #inFlight = 0
 
+    /**
+     * Why a message with images would be refused for this role, or `undefined` when it would not.
+     * Public so a route can answer before it detaches the turn.
+     */
+    refusesImages(roleName?: string): HarnessError | undefined {
+        const role = roleName === undefined ? this.roles.main : this.roles.byName(roleName)
+        return role.capabilities.vision === true ? undefined : modelNoVision(role.config.id)
+    }
+
     async #send(input: string, options: AgentSendOptions): Promise<TurnResult> {
         const sessionKey = options.sessionKey ?? Agent.DEFAULT_SESSION
         const turnId = options.turnId ?? newTurnId()
         const source = options.source ?? "library"
+        const role = options.role === undefined ? this.roles.main : this.roles.byName(options.role)
+        // Before the turn row, so a refused message leaves nothing behind. A route checks this too,
+        // with `refusesImages`, because a detached turn's refusal reaches nobody.
+        if ((options.images?.length ?? 0) > 0) {
+            const refusal = this.refusesImages(options.role)
+            if (refusal !== undefined) throw refusal
+        }
 
         await this.store.sessions.ensure(this.id, sessionKey)
         const history = await this.store.messages.history(this.id, sessionKey)
@@ -1264,7 +1284,7 @@ export class Agent {
                   }),
             ...(remembered.length === 0 ? {} : { memory: remembered }),
             ...(skills.length === 0 ? {} : { skills }),
-            role: options.role === undefined ? this.roles.main : this.roles.byName(options.role),
+            role,
             window: this.window,
             reserveOutput: this.manifest.context.reserveOutput,
             // Named field by field rather than spread, so the compiler names anything the manifest
@@ -1301,6 +1321,9 @@ export class Agent {
                 ? {}
                 : { deferMutations: options.deferMutations }),
             ...(options.runtimeNote === undefined ? {} : { runtimeNote: options.runtimeNote }),
+            ...(options.images === undefined || options.images.length === 0
+                ? {}
+                : { images: options.images }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             // A turn that may not read private memory may not write it either (QA 0.2.0): the

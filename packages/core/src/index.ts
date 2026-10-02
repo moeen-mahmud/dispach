@@ -210,6 +210,15 @@ export {
 } from "./manifest/validate.ts"
 export { setInSource, uncommentInSource } from "./manifest/yaml-edit.ts"
 export {
+    IMAGE_TOKENS,
+    type ImageSpec,
+    imageReference,
+    MAX_IMAGE_BYTES,
+    MAX_IMAGES_PER_MESSAGE,
+    readImages,
+    sniffImage,
+} from "./media/image-input.ts"
+export {
     IMAGE_GENERATE,
     imageGenerateTool,
     MEDIA_DIR,
@@ -279,6 +288,7 @@ export type {
     ChatMessage,
     ChatRequest,
     FetchLike,
+    ImageInput,
     ModelProvider,
     ToolCallRequest,
     ToolDefinition,

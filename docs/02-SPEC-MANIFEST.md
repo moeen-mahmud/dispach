@@ -190,6 +190,7 @@ capabilities:
   parallelToolCalls: false
   contextWindow: 32768
   maxOutput: 4096
+  vision: false           # reads images sent with a message; absent is false (since 0.2.0-pilot.5)
   promptStyle:            # workspace rendering. Every field optional and merged individually
     delimiters: plain     # xml | markdown | plain
     intensity: emphatic   # emphatic | neutral | soft

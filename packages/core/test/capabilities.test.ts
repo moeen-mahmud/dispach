@@ -244,6 +244,7 @@ describe("manifest override merge", () => {
             maxOutput: 2048,
         })
         expect(merged).toEqual({
+            vision: true,
             nativeTools: true,
             strictSchema: true,
             thinking: "none",

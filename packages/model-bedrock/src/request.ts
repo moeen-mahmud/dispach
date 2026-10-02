@@ -27,6 +27,14 @@ import type { ChatMessage, ChatRequest, ModelRoleConfig } from "@dispach/core"
 
 const CACHE_POINT = { cachePoint: { type: "default" as const } }
 
+/** `ImageBlock.format`, by the media type the loader sniffed. Raw bytes: the SDK encodes them. */
+const IMAGE_FORMAT = {
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+} as const
+
 /** The SDK's JSON document type. A parsed JSON value is one by construction. */
 type Document = NonNullable<ToolUseBlock["input"]>
 
@@ -118,7 +126,16 @@ function contentOf(message: ChatMessage): { role: "user" | "assistant"; content:
         }
     }
     // `user`, and a `system` message after the conversation started.
-    return { role: "user", content: message.content === "" ? [] : [{ text: message.content }] }
+    const content: ContentBlock[] = message.content === "" ? [] : [{ text: message.content }]
+    for (const image of message.images ?? []) {
+        content.push({
+            image: {
+                format: IMAGE_FORMAT[image.mediaType],
+                source: { bytes: Uint8Array.from(Buffer.from(image.data, "base64")) },
+            },
+        })
+    }
+    return { role: "user", content }
 }
 
 export function converseInput(

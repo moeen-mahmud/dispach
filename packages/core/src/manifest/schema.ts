@@ -48,6 +48,7 @@ export const ModelCapabilitiesSchema = z
         parallelToolCalls: z.boolean().optional(),
         contextWindow: z.number().int().positive().optional(),
         maxOutput: z.number().int().positive().optional(),
+        vision: z.boolean().optional(),
         /** Merged field by field over the shipped default — set one without restating the rest. */
         promptStyle: PromptStyleSchema.optional(),
     })

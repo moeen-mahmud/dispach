@@ -158,7 +158,20 @@ function wireMessage(message: ChatMessage): Record<string, unknown> {
         role: message.role,
         // `null` rather than `""` beside tool calls: the API documents null for a message that is
         // only a call, and some compat endpoints treat an empty string as a malformed turn.
-        content: message.content === "" && calls.length > 0 ? null : message.content,
+        // A message with images is the array form, the only one `image_url` exists in; every other
+        // message keeps the string, so a request without images is byte-identical to before.
+        content:
+            message.images !== undefined && message.images.length > 0
+                ? [
+                      { type: "text", text: message.content },
+                      ...message.images.map((image) => ({
+                          type: "image_url",
+                          image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+                      })),
+                  ]
+                : message.content === "" && calls.length > 0
+                  ? null
+                  : message.content,
         ...(message.toolCallId === undefined ? {} : { tool_call_id: message.toolCallId }),
         ...(calls.length === 0
             ? {}

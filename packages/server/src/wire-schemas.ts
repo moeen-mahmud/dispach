@@ -143,6 +143,25 @@ export const MessageBody = z.object({
         z.string().min(1).optional(),
         "Which conversation this belongs to. Defaults to `api:default`.",
     ),
+    images: refuse(
+        z
+            .array(
+                z
+                    .object({
+                        path: z.string().optional(),
+                        data: z.string().optional(),
+                        mediaType: z.string().optional(),
+                    })
+                    .strict(),
+            )
+            .optional(),
+        {
+            code: "message_images_invalid",
+            hint: 'Send images as [{ "path": "files/…/shot.png" }] (relative to the agent\'s directory), or [{ "data": "<base64>", "mediaType": "image/png" }].',
+            description:
+                "Images sent with this message: PNG, JPEG, GIF or WebP, at most five, 3.75 MB each. A path inside the agent's directory, or inline base64 (within the 1 MB body limit). The model receives them on this turn; history keeps an `[image: <path>]` line.",
+        },
+    ),
     deliver: DeliverSchema.optional(),
     from: SenderSchema.optional(),
     stream: annotate(

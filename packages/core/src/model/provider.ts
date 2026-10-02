@@ -101,6 +101,21 @@ export interface ChatMessage {
      * message rather than being recomputed by each transport.
      */
     readonly cacheBreakpoint?: true
+    /**
+     * Images sent with this message (pilot.5, #12). Set only on the current turn's input, never stored:
+     * history keeps a `[image: <ref>]` line in `content` instead, so a later turn neither pays for the
+     * image again nor loses the fact that one was sent. Each transport maps it to its own shape.
+     */
+    readonly images?: readonly ImageInput[]
+}
+
+/** One image, ready for a transport. */
+export interface ImageInput {
+    readonly mediaType: "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    /** Base64, no `data:` prefix. */
+    readonly data: string
+    /** What the stored message says was sent: the workspace path, or `upload` for inline data. */
+    readonly ref: string
 }
 
 export interface ChatRequest {

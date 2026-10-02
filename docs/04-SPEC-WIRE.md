@@ -47,6 +47,7 @@ and WebSocket surfaces can return:
 | `body_too_large` | 400 | Over the 1 MB cap, refused before a channel plugin sees it. |
 | `bad_request_url` | 400 | `request.url` could not be parsed — usually a relative URL from a host framework. |
 | `message_text_required` | 400 | `POST /messages` with no `text`. |
+| `message_images_invalid` | 400 | `POST /messages` with `images` that is not a list of `{path}` or `{data, mediaType?}`. The checks on each image have their own codes (`image_*`, `model_no_vision`); see `images` above. |
 | `deliver_invalid` | 400 | `deliver` named a channel with no recipient, or an unknown shape. |
 | `delivery_channel_required` | 400 | `POST /deliveries` with no `channel`. |
 | `delivery_recipient_required` | 400 | `POST /deliveries` with no `to`. |
@@ -601,6 +602,22 @@ POST /v1/agents/:id/messages
 
 Returns `202` with `{ turnId, sessionKey }` immediately, then streams SSE if `stream` is
 true. **The turn is not bound to this connection.** Disconnecting does not cancel it.
+
+#### `images` — what the model is shown with the text (since 0.2.0-pilot.5)
+
+```json
+{ "text": "what's in this?", "images": [{ "path": "files/c1/shot.png" }] }
+```
+
+Each entry is `{ "path" }`, relative to the agent's directory, or `{ "data", "mediaType"? }` with
+base64 (within the 1 MB body limit). PNG, JPEG, GIF or WebP by their bytes, at most five, 3.75 MB
+each. They are read and checked before the turn starts, so every refusal is a `400` with nothing
+recorded: `image_not_found`, `image_path_invalid` (absolute, or outside the directory after
+symlinks), `image_unsupported`, `image_too_large`, `image_count_exceeded`, `image_data_invalid`,
+`image_media_type_mismatch`, and `model_no_vision` when `capabilities.vision` is not true for the
+agent's model. The model receives the images on every step of this turn; history keeps an
+`[image: <path>]` line (`upload` for inline data), so a later turn pays for no image and still knows
+one was sent. The idempotency hash covers the images.
 
 #### `from` — who sent it, and what follows
 

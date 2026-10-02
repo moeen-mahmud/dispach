@@ -1283,3 +1283,23 @@ export function tokenBudgetExhausted(
         field: "limits.tokens",
     })
 }
+
+// ─── Images sent with a message (pilot.5, #12) ──────────────────────────────────────────────
+
+export function imageRefused(
+    code: string,
+    message: string,
+    hint: string,
+    field = "images",
+): HarnessError {
+    return new HarnessError({ code, message, hint, field })
+}
+
+export function modelNoVision(model: string): HarnessError {
+    return new HarnessError({
+        code: "model_no_vision",
+        message: `${model} does not read images, so a message with one was not sent.`,
+        hint: "Use a model that does (Claude, Nova Lite or Pro, GPT-4o), or describe the image in text. If this model does take images, set model.main.capabilities.vision: true.",
+        field: "images",
+    })
+}

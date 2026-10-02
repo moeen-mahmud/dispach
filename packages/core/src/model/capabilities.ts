@@ -58,6 +58,12 @@ export interface ModelCapabilities {
     /** Max completion tokens. Never derive this from the window — see the note above. */
     readonly maxOutput: number
     /**
+     * Whether the model reads images sent with a message. Optional, and absent means no: a turn with
+     * an image is refused with `model_no_vision` rather than sent to a model that would drop it or
+     * answer as if it saw nothing. Set only on families documented to take images.
+     */
+    readonly vision?: boolean
+    /**
      * How authored workspace files are rendered for this model.
      *
      * Derived from the model id rather than tabulated per row, and that is not a shortcut: the
@@ -145,6 +151,7 @@ const NOVA_BASE = {
 } as const
 
 const CLAUDE_BASE = {
+    vision: true,
     nativeTools: true,
     strictSchema: false,
     thinking: "anthropic",
@@ -160,6 +167,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     {
         pattern: "gpt-4o*",
         capabilities: {
+            vision: true,
             nativeTools: true,
             strictSchema: true,
             thinking: "none",
@@ -172,6 +180,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     {
         pattern: "gpt-4.1*",
         capabilities: {
+            vision: true,
             nativeTools: true,
             strictSchema: true,
             thinking: "none",
@@ -208,6 +217,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     {
         pattern: "gpt-5*",
         capabilities: {
+            vision: true,
             nativeTools: true,
             strictSchema: true,
             thinking: "openai",
@@ -317,11 +327,11 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
     },
     {
         pattern: "nova-lite*",
-        capabilities: { ...NOVA_BASE, contextWindow: 300_000 },
+        capabilities: { ...NOVA_BASE, contextWindow: 300_000, vision: true },
     },
     {
         pattern: "nova-pro*",
-        capabilities: { ...NOVA_BASE, contextWindow: 300_000 },
+        capabilities: { ...NOVA_BASE, contextWindow: 300_000, vision: true },
     },
 
     // ── Google, via its OpenAI-compatible endpoint ─────────────────────────────────────────
@@ -329,6 +339,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
         pattern: "gemini*",
         family: true,
         capabilities: {
+            vision: true,
             nativeTools: true,
             strictSchema: false,
             thinking: "none",
