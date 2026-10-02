@@ -30,6 +30,7 @@
  */
 
 import { posix } from "node:path"
+import { artifactId, type Displaced } from "../context/compaction/stages.ts"
 import { estimateTokens } from "../context/tokens.ts"
 import { type ErrorDetail, toolFailed, toolTimedOut } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
@@ -40,7 +41,7 @@ import { coerceArgs } from "./coerce.ts"
 import { authorize, type PolicyConfig } from "./policy.ts"
 import type { ToolRegistry } from "./registry.ts"
 import { stripControl } from "./sanitise.ts"
-import { gatedResult, type OnMutate, refusedResult } from "./trust.ts"
+import { gatedResult, type OnMutate, refusedResult, type Trust } from "./trust.ts"
 import type { FieldError, Tool, ToolContext, ToolIntent, ToolResult } from "./types.ts"
 
 export interface ExecuteInput {
@@ -54,6 +55,14 @@ export interface ExecuteInput {
     readonly maxParallel: number
     /** Above this, an observation is cut to head and tail with a visible marker. */
     readonly observationMaxTokens: number
+    /**
+     * Stores the whole of an observation that was cut, so its marker can name an id `artifact_read`
+     * follows. Without it the marker only says how much was cut, and a model that needs the middle
+     * re-runs the call until `no_progress` (VelaCrew's field report: a project plan's ids were in the
+     * cut middle). Used only when `artifact_read` is in the catalogue: a marker naming a tool the agent
+     * lacks is an instruction it can't follow.
+     */
+    readonly keepFull?: (artifacts: readonly Displaced[]) => Promise<void>
     /**
      * True when an earlier step in this turn produced untrusted output.
      *
@@ -238,6 +247,7 @@ export function hashArgs(args: Readonly<Record<string, unknown>>): string {
 function truncate(
     output: string,
     maxTokens: number,
+    artifact?: string,
 ): { readonly text: string; readonly truncated: boolean } {
     if (maxTokens <= 0 || estimateTokens(output) <= maxTokens) {
         return { text: output, truncated: false }
@@ -248,8 +258,12 @@ function truncate(
     const head = output.slice(0, Math.floor(budget * 0.6))
     const tail = output.slice(-Math.floor(budget * 0.4))
     const elided = output.length - head.length - tail.length
+    const marker =
+        artifact === undefined
+            ? `[… ${elided} characters cut from the middle of this observation to fit the context budget …]`
+            : `[… ${elided} characters cut from the middle of this observation to fit the context budget — the whole result is readable with artifact_read("${artifact}") …]`
     return {
-        text: `${head}\n\n[… ${elided} characters cut from the middle of this observation to fit the context budget …]\n\n${tail}`,
+        text: `${head}\n\n${marker}\n\n${tail}`,
         truncated: true,
     }
 }
@@ -559,8 +573,20 @@ async function runOne(entry: PlannedCall, input: ExecuteInput): Promise<ToolResu
         input.eventContext,
     )
 
-    const settle = (ok: boolean, output: string, error?: ErrorDetail): ToolResult => {
-        const capped = truncate(output, input.observationMaxTokens)
+    const settle = async (
+        ok: boolean,
+        output: string,
+        error?: ErrorDetail,
+    ): Promise<ToolResult> => {
+        // Unreachable for anything that came through a `ToolRegistry` — every tool there has been
+        // normalised — but `ToolSpec.trust` is optional in the type, so the fallback has to exist. It
+        // is `trusted` because the only specs that bypass the registry are ones core itself constructed.
+        // `trustOf` can only lower it: a call can't vouch for itself past what its spec says.
+        const trust =
+            tool.spec.trust === "untrusted"
+                ? "untrusted"
+                : (tool.trustOf?.(args) ?? tool.spec.trust ?? "trusted")
+        const capped = await capObservation(output, trust, tool.spec.slug, input)
         const result: ToolResult = {
             callId: intent.callId,
             slug: tool.spec.slug,
@@ -570,11 +596,7 @@ async function runOne(entry: PlannedCall, input: ExecuteInput): Promise<ToolResu
             latencyMs: Math.round(performance.now() - started),
             bytes: output.length,
             truncated: capped.truncated,
-            // Unreachable for anything that came through a `ToolRegistry` — every tool there has
-            // been normalised — but `ToolSpec.trust` is optional in the type, so the fallback has to
-            // exist. It is `trusted` because the only specs that bypass the registry are ones core
-            // itself constructed.
-            trust: tool.spec.trust ?? "trusted",
+            trust,
         }
         input.bus.emit(
             "tool.result",
@@ -633,6 +655,40 @@ async function runOne(entry: PlannedCall, input: ExecuteInput): Promise<ToolResu
     } finally {
         clearTimeout(timer)
     }
+}
+
+/**
+ * Cut an observation to the budget, keeping the whole of it as an artifact when that is possible.
+ *
+ * A failed store falls back to the marker without an id rather than failing the call: the tool ran,
+ * and its result is still in front of the model, which is what the call was for.
+ */
+async function capObservation(
+    output: string,
+    trust: Trust,
+    slug: string,
+    input: ExecuteInput,
+): Promise<{ readonly text: string; readonly truncated: boolean }> {
+    const plain = truncate(output, input.observationMaxTokens)
+    if (!plain.truncated || input.keepFull === undefined || !input.registry.has("artifact_read")) {
+        return plain
+    }
+    const id = artifactId(output, trust)
+    try {
+        await input.keepFull([{ id, slug, content: output, tokens: estimateTokens(output) }])
+    } catch (error) {
+        input.bus.emit(
+            "agent.warning",
+            {
+                code: "observation_store_failed",
+                message: `Storing the whole of a cut ${slug} result failed: ${error instanceof Error ? error.message : String(error)}`,
+                hint: "The model still saw the cut result, but its marker names no id to read the rest with. A store that cannot be written is usually full or read-only.",
+            },
+            input.eventContext,
+        )
+        return plain
+    }
+    return truncate(output, input.observationMaxTokens, id)
 }
 
 function isAbortError(value: unknown): boolean {

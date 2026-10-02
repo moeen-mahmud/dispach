@@ -736,9 +736,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * make a listing depend on credentials being present — the defect `readManifestHeader` exists
      * to avoid. The id and the reason are what a client can act on.
      *
-     * `GET /v1/agents/:id` still answers **404** for one of these, and the asymmetry is the point:
-     * the listing answers "what exists", the resource answers "what is running". A 200 there would
-     * have to invent a body for an agent with no tools, no window and no sessions in memory.
+     * `GET /v1/agents/:id` answers the same thin row for one of these since pilot.5. It used to
+     * answer 404, so a client holding an id saw the listing call it `disabled` and the resource call
+     * it nonexistent (VelaCrew). Every route that *acts* on the agent still answers 404: the row says
+     * what exists, and nothing pretends it is running.
      */
     router.add(
         "GET",
@@ -748,13 +749,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
             const live = new Set(hosted.map((entry) => entry.id))
             const stopped = (await runtime.store.agentState.list())
                 .filter((state) => !state.enabled && !live.has(state.agentId))
-                .map((state) => ({
-                    id: state.agentId,
-                    name: state.agentId,
-                    status: "disabled" as const,
-                    ...(state.reason === undefined ? {} : { reason: state.reason }),
-                    ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
-                }))
+                .map(stoppedRow)
             /**
              * **Filtered by scope, and the stopped rows with it.**
              *
@@ -773,8 +768,16 @@ export function createHandler(options: HandlerOptions): ServerHandler {
     router.add(
         "GET",
         "/v1/agents/:id",
-        (context) =>
-            withAgent(runtime, context, async (agent) => {
+        async (context) => {
+            const id = context.params.id ?? ""
+            if (
+                !runtime.list().some((agent) => agent.id === id) &&
+                reachesAgent(context.principal, id)
+            ) {
+                const state = await runtime.store.agentState.get(id)
+                if (state !== undefined && !state.enabled) return json(stoppedRow(state))
+            }
+            return withAgent(runtime, context, async (agent) => {
                 // Both of these were the literal `0`, for every agent, whatever was configured — and
                 // the spec advertises them as "tool count, skills indexed, schedule count". A number
                 // that is always zero is worse than an absent field: it reads as a measurement.
@@ -835,7 +838,8 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                           }),
                     warnings: [...agent.warnings, ...agent.tools.warnings],
                 })
-            }),
+            })
+        },
         { capability: "read" },
     )
 
@@ -4337,6 +4341,17 @@ function usageQuery(
         range[name] = new Date(time).toISOString()
     }
     return { kind: "ok", value: { by: by as UsageGroup[], ...range } }
+}
+
+/** A stopped agent as the listing and its resource both show it: thin, because nothing is loaded. */
+function stoppedRow(state: AgentStateRecord) {
+    return {
+        id: state.agentId,
+        name: state.agentId,
+        status: "disabled" as const,
+        ...(state.reason === undefined ? {} : { reason: state.reason }),
+        ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+    }
 }
 
 function withAgent(

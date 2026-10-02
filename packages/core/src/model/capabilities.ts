@@ -135,6 +135,15 @@ const CONSERVATIVE: RegistryCapabilities = {
  * "Anthropic, via its OpenAI-compatible endpoint" — and directly beneath `strictSchema: false`,
  * whose comment had already made this exact argument for the field above it.
  */
+const NOVA_BASE = {
+    nativeTools: true,
+    strictSchema: false,
+    thinking: "none",
+    promptCache: "none",
+    parallelToolCalls: false,
+    maxOutput: 5000,
+} as const
+
 const CLAUDE_BASE = {
     nativeTools: true,
     strictSchema: false,
@@ -293,6 +302,26 @@ export const CAPABILITY_REGISTRY: readonly CapabilityEntry[] = [
         family: true,
         capabilities: { ...CLAUDE_BASE, contextWindow: 200_000, maxOutput: 8192 },
         note: CLAUDE_NOTE,
+    },
+
+    // ── Amazon Nova, on Bedrock only ───────────────────────────────────────────────────────
+    //
+    // From the Bedrock model cards (read 2026-10-02): Micro is text-only with a 128K window, Lite and
+    // Pro take images with 300K, and all three cap output at 5K and support client-side tool calling.
+    // `promptCache: none` for the same reason as the Claude rows: the bedrock-converse transport
+    // upgrades it to `bedrock` for an `amazon.nova` id. `parallelToolCalls: false` because nothing
+    // here has measured it. `eu.amazon.nova-lite-v1:0` reaches these patterns through `bedrockName`.
+    {
+        pattern: "nova-micro*",
+        capabilities: { ...NOVA_BASE, contextWindow: 128_000 },
+    },
+    {
+        pattern: "nova-lite*",
+        capabilities: { ...NOVA_BASE, contextWindow: 300_000 },
+    },
+    {
+        pattern: "nova-pro*",
+        capabilities: { ...NOVA_BASE, contextWindow: 300_000 },
     },
 
     // ── Google, via its OpenAI-compatible endpoint ─────────────────────────────────────────

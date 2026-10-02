@@ -4,6 +4,15 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.4
+
+- A tool result cut to fit `observationMaxTokens` is stored whole, and its marker names the id to read it with `artifact_read`. Reading an untrusted result back is untrusted too, so it no longer reopens the write gate.
+- `GET /v1/agents/:id` answers a stopped agent with the listing's `status: "disabled"` row instead of 404. Routes that act on it are still 404.
+- The `workspace_rule_budget` refusal names the lines it counted and their files. `context.rules.onExceed` is settable through `PATCH /config` (by a person), so a misread line no longer holds every reload.
+- Under `tools.dialect: native` a skill script (`skill.pdf.extract`) is sent as `skill__pdf__extract` instead of failing the turn that activates it.
+- Nova Micro, Lite and Pro resolve to their own capability rows (window, output, tools) instead of the 8,192-token fallback.
+- A release run from a branch says it built and pushed nothing, and tags its build with the version.
+
 ### Since 0.2.0-pilot.3
 
 - A path rule in `tools.policy` matches the normalised path: `workspace/../.env` no longer walks past `deny: ["file_read(.env)"]`.

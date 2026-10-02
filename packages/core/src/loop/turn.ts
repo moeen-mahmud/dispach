@@ -1215,6 +1215,12 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                           timeoutMs: input.limits.toolTimeoutMs,
                           maxParallel: input.limits.maxParallelTools,
                           observationMaxTokens: tools.observationMaxTokens,
+                          // Both halves or neither, for the reason `readArtifact` above gives: a stored
+                          // artifact nothing can read is a pointer to nowhere.
+                          ...(input.compaction?.persist === undefined ||
+                          input.compaction.read === undefined
+                              ? {}
+                              : { keepFull: input.compaction.persist }),
                           untrustedInTurn: untrustedSeen,
                           onMutate: tools.untrustedOnMutate,
                           policy: tools.policy,

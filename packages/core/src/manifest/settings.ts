@@ -157,6 +157,14 @@ export const SETTINGS: readonly Setting[] = [
         means: "how much of a tool's output reaches the model",
         agentListed: true,
     },
+    // Person-only: the agent can't relax a guard on its own instructions. An embedder needs it because
+    // the rule count is a heuristic, and a misread line otherwise refuses every reload and every
+    // PATCH (VelaCrew, pilot.4).
+    {
+        path: "context.rules.onExceed",
+        means: "fail | warn — whether too many counted rules in the workspace refuses the load",
+        agentListed: false,
+    },
     {
         path: "channels",
         means: "how people reach this agent, as a list — [{type: telegram, id: tg, tokenEnv: TELEGRAM_BOT_TOKEN, mode: longpoll}]. The token goes in the .env",

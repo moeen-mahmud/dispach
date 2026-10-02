@@ -190,9 +190,14 @@ export async function harness(
         secrets?: SecretAdmin
         /** Plugins a manifest may name by spec, the way the CLI supplies its first-party ones. */
         builtInPlugins?: BuiltInPlugins
+        /** Workspace files beside the manifest, written before the runtime boots. */
+        files?: Record<string, string>
     } = {},
 ) {
     const dir = workspace(options.manifest)
+    for (const [name, content] of Object.entries(options.files ?? {})) {
+        writeFileSync(join(dir, name), content)
+    }
     const runtime = await Runtime.create({
         agents: [join(dir, "agent.yaml")],
         env: ENV,

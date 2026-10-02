@@ -438,10 +438,19 @@ export function toolBudgetExceeded(requested: number, max: number): ConfigError 
  * — so the loop would have to guess which tool was meant. Under NLT the same slug is fine, which is
  * why this is a dialect error and not a registry one.
  */
+export function nativeToolNameCollision(mapped: string, other: string): ConfigError {
+    return new ConfigError({
+        code: "native_tool_name_collision",
+        message: `The tool "${mapped}" is sent to a native endpoint as "${mapped.replaceAll(".", "__")}", which can't be told apart from "${other}" when the model calls it.`,
+        hint: "Rename one of the two (a skill or script name, usually), or use tools.dialect: nlt, which sends slugs as written.",
+        field: "tools.dialect",
+    })
+}
+
 export function nativeToolNameInvalid(slug: string, provider: string): ConfigError {
     return new ConfigError({
         code: "native_tool_name_invalid",
-        message: `The tool "${slug}" (from ${provider}) cannot be used with tools.dialect: native — a native function name may only contain letters, digits, underscores and hyphens, and must be 1-64 characters.`,
+        message: `The tool "${slug}" (from ${provider}) cannot be used with tools.dialect: native — a native function name may only contain letters, digits, underscores and hyphens (a dot is sent as \`__\`), and must be 1-64 characters.`,
         hint: `Either switch to the nlt dialect, which accepts this slug as written and is the default, or ask ${provider} for a slug within that grammar. It is refused rather than rewritten because a rewritten name is ambiguous on the way back — two different slugs can map onto one legal name.`,
         field: "tools.dialect",
     })
@@ -702,20 +711,29 @@ export function workspaceNotWritableTier(
     })
 }
 
+/** How many counted lines the message names. The rest are in `details`, for a terminal. */
+const RULE_LINES_IN_MESSAGE = 6
+
 export function workspaceRuleBudget(init: {
     counted: number
     allowed: number
     perRuleSuccess: number
     reliabilityTarget: number
+    /** `<file>: <line>`, in order. */
     lines: readonly string[]
 }): ConfigError {
+    // The lines go in the message too, because the wire carries `toDetail()` and that has no
+    // `details`: an embedder whose reload this refused saw a count and no way to find the lines.
+    const shown = init.lines.slice(0, RULE_LINES_IN_MESSAGE).map((line) => `"${line}"`)
+    const more = init.lines.length - shown.length
     return new ConfigError({
         code: "workspace_rule_budget",
         message:
             `The workspace states ${init.counted} rules; at perRuleSuccess ${init.perRuleSuccess} a ` +
             `reliabilityTarget of ${init.reliabilityTarget} permits ${init.allowed}. ` +
-            `Expected compliance with all ${init.counted}: ${(init.perRuleSuccess ** init.counted).toFixed(2)}.`,
-        hint: "Delete rules, or move the ones with real consequences into tool-boundary code where they are enforced rather than requested. Do not raise reliabilityTarget — that changes the number without changing the behaviour. Counted lines are listed below; the count is a heuristic, so context.rules.onExceed: warn is the escape if it has misread a line.",
+            `Expected compliance with all ${init.counted}: ${(init.perRuleSuccess ** init.counted).toFixed(2)}. ` +
+            `Counted: ${shown.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`,
+        hint: "Delete rules, or move the ones with real consequences into tool-boundary code where they are enforced rather than requested. Do not raise reliabilityTarget — that changes the number without changing the behaviour. The message names the counted lines; the count is a heuristic, so context.rules.onExceed: warn is the escape if it has misread a line.",
         field: "context.rules",
         details: init.lines.map((line) => ({
             code: "workspace_rule_counted",

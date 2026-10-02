@@ -252,6 +252,20 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ needs.npm.outputs.prerelease != 'true' }}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && needs.npm.outputs.prerelease != 'true' }}
+            type=raw,value=${{ needs.npm.outputs.version }},enable=${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+      # A run from a branch proves the image builds and pushes nothing: login and push are tag-only.
+      # `type=semver` reads the tag ref, so a branch run had no tag at all, and its "No Docker tag has
+      # been generated" read as a release that went wrong (VelaCrew, pilot.4). The raw tag above names
+      # the build, and this line says what the run did.
+      - name: what this run publishes
+        run: |
+          if [ "${GITHUB_REF#refs/tags/v}" != "${GITHUB_REF}" ]; then
+            echo "pushing: ${{ steps.meta.outputs.tags }}" | tr '\n' ' '
+          else
+            echo "build only, nothing pushed: run this workflow from the v${{ needs.npm.outputs.version }} tag to publish the image" >> "$GITHUB_STEP_SUMMARY"
+            echo "build only, nothing pushed (${GITHUB_REF})"
+          fi
 
       - uses: docker/build-push-action@v6
         with:

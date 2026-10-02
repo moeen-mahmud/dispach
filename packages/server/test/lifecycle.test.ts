@@ -45,14 +45,30 @@ describe("stopping an agent over the wire", () => {
         await runtime.stop()
     })
 
-    test("the resource is 404 and the listing still carries it", async () => {
+    test("the resource answers the listing's row, and routes that act on it are still 404", async () => {
         const { runtime, call } = await harness({ token: TOKEN })
-        await call("POST", "/v1/agents/assistant/stop", { body: {} })
+        await call("POST", "/v1/agents/assistant/stop", { body: { reason: "quiet" } })
 
-        // The asymmetry is deliberate: the listing answers "what exists" and the resource answers
-        // "what is running". A 200 on the resource would have to invent a body for an agent with no
-        // tools, no window and no sessions in memory.
-        expect((await call("GET", "/v1/agents/assistant")).status).toBe(404)
+        // pilot.5: the resource used to answer 404 here, so a client holding the id saw the listing
+        // call it `disabled` and the resource call it nonexistent (VelaCrew).
+        const resource = await call("GET", "/v1/agents/assistant")
+        expect(resource.status).toBe(200)
+        expect(await resource.json()).toEqual({
+            id: "assistant",
+            name: "assistant",
+            status: "disabled",
+            disabledAt: expect.any(String),
+            reason: "quiet",
+        })
+        // Nothing pretends it is running.
+        expect((await call("GET", "/v1/agents/assistant/tools")).status).toBe(404)
+        expect(
+            (
+                await call("POST", "/v1/agents/assistant/messages", {
+                    body: { text: "hello", sessionKey: "api:x" },
+                })
+            ).status,
+        ).toBe(404)
         // Annotated with every field asserted below, not just the two being read for the shape:
         // `toEqual` checks the object literal against this type, so a narrower annotation makes the
         // assertion itself a type error — which is how this file failed `tsc` while passing
@@ -62,6 +78,7 @@ describe("stopping an agent over the wire", () => {
             name: string
             status: string
             disabledAt?: string
+            reason?: string
         }[]
         expect(listing).toEqual([
             {
@@ -69,6 +86,7 @@ describe("stopping an agent over the wire", () => {
                 name: "assistant",
                 status: "disabled",
                 disabledAt: expect.any(String),
+                reason: "quiet",
             },
         ])
 
@@ -273,6 +291,17 @@ describe("a scoped key", () => {
                 "agent_not_found",
             )
         }
+        // A stopped agent outside the key's reach reads exactly like one that doesn't exist.
+        await runtime.store.agentState.disable("hidden", new Date().toISOString(), "test")
+        const reader = await call("POST", "/v1/keys", {
+            body: { label: "reader", scope: { agents: ["other"], can: ["read"] } },
+        })
+        const readOnly = ((await reader.json()) as { secret: string }).secret
+        const hidden = await call("GET", "/v1/agents/hidden", { token: readOnly })
+        expect(hidden.status).toBe(404)
+        expect(((await hidden.json()) as { error: { code: string } }).error.code).toBe(
+            "agent_not_found",
+        )
         // Still hosted, and no row written.
         expect(runtime.list().map((agent) => agent.id)).toEqual(["assistant"])
         expect(await runtime.store.agentState.get("assistant")).toBeUndefined()

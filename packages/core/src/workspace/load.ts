@@ -237,25 +237,36 @@ export function ruleBudgetFailure(
     workspace: Workspace,
     rules: RulesConfig,
 ): ConfigError | undefined {
-    const counted = workspace.files
+    const parts = workspace.files
         .filter((file) => file.tier === "static" || file.tier === "reminder")
         // The full soul document is exempt from the prose heuristic: it ships only to a model its
         // author declared capable of deriving rules from explanation, and counting a constitution's
         // sentences as rules would fail every soul-bearing manifest. Its <rules> blocks still count
         // — they survive distillation and hold everywhere. The distilled file counts in full, like
         // any static file: it ships to small models, where the budget is the point.
-        .map((file) =>
-            file.field === "context.soul.file" ? rulesBlocksOnly(file.authored) : file.authored,
-        )
-        .join("\n")
-    const check = checkRules(counted, rules)
+        .map((file) => ({
+            name: file.name,
+            text:
+                file.field === "context.soul.file" ? rulesBlocksOnly(file.authored) : file.authored,
+        }))
+    const check = checkRules(parts.map((part) => part.text).join("\n"), rules)
     if (check.withinBudget) return undefined
+    // Counted over the joined text, as it always was, so no agent's verdict changes; each line is
+    // then attributed to the file it sits in. Without the file, "I never…" names a line somebody
+    // has to grep five files for (VelaCrew, pilot.4).
+    const starts: { readonly name: string; readonly from: number }[] = []
+    let from = 1
+    for (const part of parts) {
+        starts.push({ name: part.name, from })
+        from += part.text.split("\n").length
+    }
+    const fileOf = (line: number) => starts.findLast((start) => start.from <= line)?.name ?? "?"
     return workspaceRuleBudget({
         counted: check.counted.length,
         allowed: check.allowed,
         perRuleSuccess: rules.perRuleSuccess,
         reliabilityTarget: rules.reliabilityTarget,
-        lines: check.counted.map((rule) => rule.text),
+        lines: check.counted.map((rule) => `${fileOf(rule.line)}: ${rule.text.trim()}`),
     })
 }
 

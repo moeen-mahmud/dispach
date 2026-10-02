@@ -252,6 +252,12 @@ export type ToolHandler = (
 export interface Tool {
     readonly spec: ToolSpec
     readonly handler: ToolHandler
+    /**
+     * The trust of one call's result, where the spec's single value can't answer for every call.
+     * `artifact_read` is the case: it returns whatever it stored, and the trust of that is a fact
+     * about the artifact, not about the tool. It can only lower trust; `untrusted` on the spec wins.
+     */
+    readonly trustOf?: (args: Readonly<Record<string, unknown>>) => Trust
 }
 
 /**

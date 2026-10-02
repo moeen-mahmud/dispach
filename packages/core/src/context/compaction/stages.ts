@@ -46,6 +46,7 @@
 
 import { derivedId } from "../../ids.ts"
 import type { ChatMessage } from "../../model/provider.ts"
+import { artifactPrefix, holdsUntrusted, type Trust } from "../../tools/trust.ts"
 import { estimateMessageTokens, estimateTokens } from "../tokens.ts"
 
 /**
@@ -121,9 +122,17 @@ export interface StageInput {
 
 const NO_DISPLACEMENTS: ReadonlyMap<number, Displaced> = new Map()
 
-/** `obs_<len>_<hash>`. Length is in the id so two hash collisions still have to agree on size. */
+/**
+ * `obs_<len>_<hash>`, or `obu_` when the content is fenced untrusted output. Length is in the id so two
+ * hash collisions still have to agree on size, and the prefix is what `artifact_read` reads its trust
+ * from.
+ */
 export function displacedId(content: string): string {
-    return derivedId("obs", content)
+    return artifactId(content, holdsUntrusted(content) ? "untrusted" : "trusted")
+}
+
+export function artifactId(content: string, trust: Trust): string {
+    return derivedId(artifactPrefix(trust), content)
 }
 
 /** What a message costs, matching `assembleContext`'s accounting including tool-call arguments. */

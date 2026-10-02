@@ -21,6 +21,7 @@ import {
 } from "../errors.ts"
 import { PHASE_SET } from "../loop/phases.ts"
 import { appendNote, injectedTokens } from "../memory/writer.ts"
+import { artifactTrust } from "./trust.ts"
 import type { Tool, ToolContext, ToolProvider } from "./types.ts"
 
 export const LOCAL_PROVIDER_ID = "local"
@@ -293,6 +294,9 @@ const artifactRead: Tool = {
         // an offset gets it wrong and then reads the same page twice.
         return `${header}\n${slice}\n\n[cut here — ${artifact.content.length - end} characters remain; continue with artifact_read(id, from: ${end})]`
     },
+    // An untrusted observation read back is still untrusted. Without this the read cleared the turn's
+    // taint, and a write after it ran past the gate the original call had closed.
+    trustOf: (args) => artifactTrust(typeof args.id === "string" ? args.id.trim() : ""),
 }
 
 /**

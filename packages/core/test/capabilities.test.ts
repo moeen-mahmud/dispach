@@ -417,3 +417,18 @@ describe("a family row is its own provenance", () => {
         expect(windowProvenance("kimi-k2").source).toBe("fallback")
     })
 })
+
+describe("Amazon Nova on Bedrock (pilot.5)", () => {
+    test("geography-prefixed and versioned ids reach the Nova rows, not the 8,192-token fallback", () => {
+        // From the Bedrock model cards: Micro 128K, Lite and Pro 300K, all 5K out.
+        const micro = matchCapabilities("eu.amazon.nova-micro-v1:0")
+        expect(micro.pattern).toBe("nova-micro*")
+        expect(micro.capabilities.contextWindow).toBe(128_000)
+        expect(micro.capabilities.maxOutput).toBe(5000)
+        expect(matchCapabilities("amazon.nova-lite-v1:0").capabilities.contextWindow).toBe(300_000)
+        expect(matchCapabilities("apac.amazon.nova-pro-v1:0").capabilities.contextWindow).toBe(
+            300_000,
+        )
+        expect(micro.capabilities.nativeTools).toBe(true)
+    })
+})

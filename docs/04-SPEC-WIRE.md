@@ -273,6 +273,8 @@ GET /v1/agents           → [{ id, name, status, model, channels[], entryPhase,
 GET /v1/agents/:id       → the above plus dialect, window, tool count, skills indexed,
                            schedule count, warnings[], team? [{ id, task, artifact[] }],
                            assignedTo? { participantId, assignedBy?, assignedAt }
+                           a stopped agent answers its listing row instead (since 0.2.0-pilot.5);
+                           every route that acts on it still answers 404
 POST /v1/agents/:id/stop   { reason? } → 200 { id, status: "disabled", disabledAt, reason? }
 DELETE /v1/agents/:id?confirm=<id> → 200 { id, removed: true, dir, sessions, messages, … }   (admin; deletes for good)
 POST /v1/agents/:id/start           → 200 { id, status: "loaded", adopted[] }

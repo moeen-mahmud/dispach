@@ -772,6 +772,17 @@ async function runAttached(
     })
 
     const described = await client.agent(agentId).describe()
+    // A stopped agent's resource answers with `status: "disabled"` since pilot.5 rather than 404. Only
+    // reachable in a race (the lease was read, then the agent was stopped), since a stop releases the
+    // lease and `run` attaches only to a holder. Refused here rather than attaching to an agent that
+    // will 404 every send.
+    if (described.status === "disabled") {
+        throw new HarnessError({
+            code: "agent_disabled",
+            message: `${agentId} was stopped while this run was attaching.`,
+            hint: `Start it with \`${BRAND.slug} start ${agentId}\`, then run again.`,
+        })
+    }
     const source = remoteSource({
         client,
         agentId,

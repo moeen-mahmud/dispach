@@ -494,4 +494,24 @@ describe("soul rule counting", () => {
         const failure = ruleBudgetFailure(workspace, RULES)
         expect(failure !== undefined).toBe(true)
     })
+
+    test("the refusal names each counted line and its file in the message the wire carries", () => {
+        // pilot.5: the lines were only in `details`, which `toDetail()` drops, so an embedder whose
+        // reload was refused saw a count and nothing to act on (VelaCrew).
+        const dir = workspaceDir({
+            "IDENTITY.md": "You are a helper.",
+            "AGENTS.md":
+                "Intro.\nYou must reply in English.\nNever share keys.\nAlways cite sources.",
+        })
+        const { workspace } = load(dir, { static: ["IDENTITY.md", "AGENTS.md"] })
+        const failure = ruleBudgetFailure(workspace, {
+            ...RULES,
+            perRuleSuccess: 0.9,
+            reliabilityTarget: 0.85,
+        })
+        const message = failure?.toDetail().message ?? ""
+        expect(message).toContain('"AGENTS.md: You must reply in English."')
+        expect(message).toContain('"AGENTS.md: Always cite sources."')
+        expect(message).not.toContain("IDENTITY.md:")
+    })
 })
