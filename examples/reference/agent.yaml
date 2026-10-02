@@ -558,6 +558,25 @@ schedules:
     # very different amounts of money, and this is how that is said without a second endpoint.
     role: cheap
 
+# ── subagents (0.2.0-pilot.6) ─────────────────────────────────────────────────────────────
+#
+# A call to a routed slug runs in a throwaway child of this agent, with its own context, and the
+# parent reads the child's artifact instead of the raw output. The harness routes, never the model,
+# and only after the policy and the write gate have allowed the call. `tools` must be slugs this
+# agent pins (or lists under tools.local): a child only ever narrows its parent. It inherits the
+# parent's taint, stand-in deferral, acting participant and cancellation, and spawns no children.
+# Add `subagent:` under model: for a cheaper child model; absent, children run on main.
+#
+# subagents:
+#   - name: inbox
+#     task: Read the mailbox and report what needs attention.
+#     tools: [GMAIL_FETCH_EMAILS, GMAIL_GET_THREAD]
+#     route:
+#       tools: [GMAIL_FETCH_EMAILS]
+#     maxSteps: 8                  # lowers limits.maxSteps for the child, never raises it
+#     # model: fast                # a role under model:; default model.subagent, else main
+#     # artifact: { type: object, properties: { summary: { type: string } }, required: [summary] }
+
 # ── plugins ───────────────────────────────────────────────────────────────────────────────
 # Trusted in-process code, documented as such — `permissions` is advisory vocabulary in v1,
 # recorded and surfaced by `dispach plugins`, and enforced by nothing. Install plugins you trust,

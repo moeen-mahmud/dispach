@@ -251,6 +251,11 @@ export interface TurnInput {
     readonly deferMutations?: ExecuteInput["defer"]
     /** Forwarded to `ToolContext.writeNote`: set when this agent is the space writer (Phase 29). */
     readonly writeNote?: (text: string) => Promise<string>
+    /**
+     * The turn starts tainted, by this source: a subagent of a parent turn that had read untrusted
+     * content. Its task was written by a model that read it, so the write gate applies from step one.
+     */
+    readonly taintedBy?: string
     /** Caller's cancellation. A disconnect must never be wired to this. */
     readonly signal?: AbortSignal
     readonly turnId?: string
@@ -339,6 +344,8 @@ export interface TurnResult {
     readonly phase?: string
     /** Files tools produced for the reply, absolute paths. Absent when there are none. */
     readonly attachments?: readonly TurnAttachmentFile[]
+    /** Untrusted content reached this turn: its input, or a tool result. */
+    readonly tainted?: true
 }
 
 /** A file a tool handed to `ToolContext.attach`. */
@@ -653,11 +660,12 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
      * re-derives it from *that* message's sender, so a conversation with a peer stays gated for as
      * long as the peer is the one talking.
      */
-    let untrustedSeen = inputTrust === "untrusted"
+    let untrustedSeen = inputTrust === "untrusted" || input.taintedBy !== undefined
     // Files a tool produced for the reply (`image_generate`). Collected across every step, carried
     // out on the result, and sent by whichever surface delivers the text.
     const attachments: TurnAttachmentFile[] = []
-    let untrustedSource = input.from === undefined ? undefined : senderLabel(input.from)
+    let untrustedSource =
+        input.taintedBy ?? (input.from === undefined ? undefined : senderLabel(input.from))
 
     try {
         const history: ChatMessage[] = [...input.history]
@@ -1461,5 +1469,6 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
         // without making the caller subscribe to an event to learn where its own session got to.
         ...(input.phases === undefined ? {} : { phase }),
         ...(attachments.length === 0 ? {} : { attachments }),
+        ...(untrustedSeen ? { tainted: true as const } : {}),
     }
 }

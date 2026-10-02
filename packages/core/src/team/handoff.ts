@@ -129,10 +129,13 @@ export async function runHandoff(init: {
     readonly signal?: AbortSignal
     /** Who the member's turn acts for: the delegating person, for a cross-member delegation. */
     readonly participant?: import("../loop/sender.ts").ActingParticipant
+    /** The child session's prefix and the turn's source. `handoff` for both unless a subagent runs. */
+    readonly sessionPrefix?: string
+    readonly source?: string
 }): Promise<HandoffOutcome> {
     const now = init.now ?? (() => new Date())
     const handoffId = newHandoffId()
-    const sessionKey = `handoff:${newRunId()}`
+    const sessionKey = `${init.sessionPrefix ?? "handoff"}:${newRunId()}`
     const sink: ArtifactSink = { artifact: undefined }
 
     init.bus.emit(
@@ -199,7 +202,7 @@ export async function runHandoff(init: {
             // Its own source, not `"api"` or the supervisor's. A member's turns are a different kind
             // of thing from a person's and every surface reading `turns.source` should be able to
             // tell them apart without joining against the handoffs table.
-            source: "handoff",
+            source: init.source ?? "handoff",
             ...(init.signal === undefined ? {} : { signal: init.signal }),
             ...(init.participant === undefined ? {} : { participant: init.participant }),
             turnTools: [

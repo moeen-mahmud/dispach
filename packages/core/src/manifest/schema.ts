@@ -595,6 +595,33 @@ export const TeamSchema = z
     .strict()
 
 /**
+ * A throwaway child of this agent that runs a routed tool call in a context of its own (pilot.6).
+ *
+ * Routing is the harness's decision, never the model's: when the parent calls a slug under
+ * `route.tools`, the policy and the write gate decide as they always do, and only then does the child
+ * run instead of the tool. The parent's observation is the child's artifact, not the raw output.
+ *
+ * `tools` names slugs exactly, and each must be one the parent pins or lists under `tools.local`: a
+ * child only ever narrows the parent's authority (decision 10.5). Checked in `validateManifest`, so
+ * `validate` refuses what `run` would.
+ */
+export const SubagentSchema = z
+    .object({
+        name: slug,
+        /** What the child is for. Rendered into its task ahead of the call it was handed. */
+        task: z.string().min(1),
+        tools: z.array(z.string().min(1)).min(1),
+        route: z.object({ tools: z.array(z.string().min(1)).min(1) }).strict(),
+        /** The artifact's schema. Absent: `{summary, findings[]}`. */
+        artifact: TeamMemberSchema.shape.artifact.optional(),
+        /** A model role for this child. Absent: `model.subagent` when declared, else `main`. */
+        model: z.string().min(1).optional(),
+        /** Lowers the parent's `limits.maxSteps` for the child, never raises it. */
+        maxSteps: z.number().int().positive().optional(),
+    })
+    .strict()
+
+/**
  * One media capability: which provider does it, with what model, bounded by a hard timeout.
  *
  * `provider` names a media provider the way `api` names a model transport — `openai` is built in (any
@@ -867,6 +894,7 @@ export const AgentManifestSchema = z
         delivery: DeliverySchema.optional(),
         schedules: z.array(ScheduleSchema).default([]),
         team: TeamSchema.optional(),
+        subagents: z.array(SubagentSchema).optional(),
         media: MediaSchema.optional(),
         standIn: StandInSchema.optional(),
         delegation: DelegationSchema.optional(),
@@ -894,6 +922,7 @@ export type DeliveryConfig = z.infer<typeof DeliverySchema>
 export type ScheduleConfig = z.infer<typeof ScheduleSchema>
 export type TeamMemberConfig = z.infer<typeof TeamMemberSchema>
 export type TeamConfig = z.infer<typeof TeamSchema>
+export type SubagentConfig = z.infer<typeof SubagentSchema>
 export type MediaConfig = z.infer<typeof MediaSchema>
 export type StandInConfig = z.infer<typeof StandInSchema>
 export type DelegationConfig = z.infer<typeof DelegationSchema>

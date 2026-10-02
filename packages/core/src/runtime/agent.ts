@@ -53,7 +53,7 @@ import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from 
 import type { EnvSource } from "../manifest/env.ts"
 import type { LoadedManifest } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
-import type { AgentManifest, TranscriptionConfig } from "../manifest/schema.ts"
+import type { AgentManifest, ModelRole, TranscriptionConfig } from "../manifest/schema.ts"
 import { fallbackWarnings, scheduleDeliveryWarnings } from "../manifest/validate.ts"
 import { imageGenerateTool, type MediaUsage } from "../media/image-tool.ts"
 import {
@@ -96,6 +96,7 @@ import { loadSkills, type SkillCatalogue } from "../skills/index.ts"
 import { activateSkills } from "../skills/load.ts"
 import { renderScripts, skillScriptTools } from "../skills/tools.ts"
 import type { SessionSummary, Store, TurnRecord } from "../store/store.ts"
+import { routedTool, type SubagentRunner } from "../team/subagents.ts"
 import { type DialectId, passThroughFilter, type StreamFilter } from "../tools/dialect/dialect.ts"
 import { nativeDialect, nativeWireTokens } from "../tools/dialect/native.ts"
 import { nltDialect } from "../tools/dialect/nlt.ts"
@@ -294,6 +295,18 @@ export interface AgentSendOptions {
     readonly admission?: AdmittedTurn
 }
 
+/** A routed call's child is ended this long before the executor would abandon the call. */
+const SUBAGENT_DEADLINE_MARGIN_MS = 1000
+
+/** What only a subagent's turn carries. Private to this module: `send` never accepts it. */
+interface ChildTurn {
+    readonly child?: {
+        /** The usage rows' role, whichever model the child ran on. */
+        readonly usageRole: string
+        readonly taintedBy?: string
+    }
+}
+
 export interface AdmittedTurn {
     readonly ok: true
     /** Give the slot back without running a turn. Idempotent. */
@@ -403,6 +416,10 @@ export class Agent {
 
     #bus: EventBus
     #toolRuntime: ToolRuntime | undefined
+    /** `#toolRuntime` with routed slugs running their subagent. Built on first use; see `#routed`. */
+    #routedToolRuntime: ToolRuntime | undefined
+    /** A stand-in turn's deferral by turn id, so a subagent of that turn defers its writes too. */
+    readonly #defers = new Map<string, NonNullable<ExecuteInput["defer"]>>()
     /** For a tool-less agent, the runtime a turn's own tools layer onto. See the constructor. */
     #bareToolRuntime: ToolRuntime | undefined
     /**
@@ -962,10 +979,80 @@ export class Agent {
         return { ok: result.ok, output: result.output }
     }
 
-    /** The runtime a turn runs its tools on: the agent's own, or the bare one for a turn's tools. */
-    #toolsFor(turnTools: readonly Tool[] | undefined): ToolRuntime | undefined {
-        if (this.#toolRuntime !== undefined) return this.#toolRuntime
+    /**
+     * The runtime a turn runs its tools on: the agent's own, or the bare one for a turn's tools. A
+     * subagent gets the unrouted one, which is what makes depth 1 structural: its calls run the tool.
+     */
+    #toolsFor(turnTools: readonly Tool[] | undefined, child = false): ToolRuntime | undefined {
+        if (this.#toolRuntime !== undefined) return child ? this.#toolRuntime : this.#routed()
         return turnTools !== undefined && turnTools.length > 0 ? this.#bareToolRuntime : undefined
+    }
+
+    /**
+     * The agent's runtime with each routed slug's handler swapped for its subagent. Same specs, so
+     * slot 1 and the policy see exactly what they see without subagents. No block: the same object.
+     */
+    #routed(): ToolRuntime | undefined {
+        const base = this.#toolRuntime
+        const children = this.manifest.subagents ?? []
+        if (base === undefined || children.length === 0) return base
+        if (this.#routedToolRuntime !== undefined) return this.#routedToolRuntime
+        const byRoute = new Map(
+            children.flatMap((child) => child.route.tools.map((slug) => [slug, child] as const)),
+        )
+        this.#routedToolRuntime = {
+            ...base,
+            registry: base.registry.withSwapped((tool) => {
+                const child = byRoute.get(tool.spec.slug)
+                return child === undefined
+                    ? undefined
+                    : routedTool({
+                          tool,
+                          child,
+                          runner: this.#subagent,
+                          bus: this.#bus,
+                          store: this.store.handoffs,
+                      })
+            }),
+        }
+        return this.#routedToolRuntime
+    }
+
+    /**
+     * One child turn, inheriting everything that bounds the parent and nothing that widens it: the
+     * parent's taint, its stand-in deferral and its acting participant (`runHandoff` forwards that
+     * one), on the child's tools only, under the routed call's own deadline.
+     */
+    readonly #subagent: SubagentRunner = (child, context) => {
+        let tainted = false
+        const defer = this.#defers.get(context.turnId)
+        const role =
+            child.model ?? (this.manifest.model.subagent === undefined ? undefined : "subagent")
+        // Inside the executor's deadline for the routed call, so the child ends as a timeout it can
+        // report instead of being abandoned mid-turn by the call's own timer.
+        const timeoutMs = Math.max(1, context.deadlineMs - SUBAGENT_DEADLINE_MARGIN_MS)
+        return {
+            id: this.id,
+            tainted: () => tainted,
+            send: async (input, options) => {
+                const result = await this.#send(input, {
+                    ...options,
+                    toolsAllow: child.tools,
+                    timeoutMs,
+                    ...(child.maxSteps === undefined ? {} : { maxSteps: child.maxSteps }),
+                    ...(role === undefined ? {} : { role }),
+                    ...(defer === undefined ? {} : { deferMutations: defer }),
+                    child: {
+                        usageRole: "subagent",
+                        ...(context.tainted === true
+                            ? { taintedBy: "the turn that delegated this task" }
+                            : {}),
+                    },
+                })
+                tainted = result.tainted === true
+                return result
+            },
+        }
     }
 
     /** Whether `transcribe` can do anything. A channel asks before it bothers the sender. */
@@ -1250,11 +1337,17 @@ export class Agent {
         return role.capabilities.vision === true ? undefined : modelNoVision(role.config.id)
     }
 
-    async #send(input: string, options: AgentSendOptions): Promise<TurnResult> {
+    async #send(input: string, options: AgentSendOptions & ChildTurn): Promise<TurnResult> {
         const sessionKey = options.sessionKey ?? Agent.DEFAULT_SESSION
         const turnId = options.turnId ?? newTurnId()
         const source = options.source ?? "library"
-        const role = options.role === undefined ? this.roles.main : this.roles.byName(options.role)
+        const named = options.role === undefined ? this.roles.main : this.roles.byName(options.role)
+        // A subagent's calls are reported as `subagent` whichever model ran them, so usage rows and
+        // `model.result` agree about what the spend was for; `model` still names the endpoint.
+        const role =
+            options.child === undefined
+                ? named
+                : { ...named, role: options.child.usageRole as ModelRole }
         // Before the turn row, so a refused message leaves nothing behind. A route checks this too,
         // with `refusesImages`, because a detached turn's refusal reaches nobody.
         if ((options.images?.length ?? 0) > 0) {
@@ -1277,19 +1370,29 @@ export class Agent {
             ...(options.turnNote === undefined ? {} : { note: options.turnNote }),
         })
 
-        const active = this.knowledge === undefined ? [] : activateKnowledge(input, this.knowledge)
-        const skills = this.#activateSkills(input, history)
+        // A subagent gets its task and its tools, and none of what an ordinary turn adds on: no
+        // knowledge, skills or memory. Its context is meant to be small, and its parent has those.
+        const child = options.child
+        const active =
+            this.knowledge === undefined || child !== undefined
+                ? []
+                : activateKnowledge(input, this.knowledge)
+        const skills = child !== undefined ? [] : this.#activateSkills(input, history)
         const participant = options.participant ?? participantOf(options.from)
         const plan = await this.#readPlan(options.from, participant)
-        const remembered = await this.#recall(input, sessionKey, history, plan, {
-            turnId,
-            participant,
-            owner: plan.owner,
-        })
+        const remembered =
+            child !== undefined
+                ? []
+                : await this.#recall(input, sessionKey, history, plan, {
+                      turnId,
+                      participant,
+                      owner: plan.owner,
+                  })
 
         const meter = this.#meter(sessionKey, turnId, options.from?.id)
-        const turnRuntime = this.#toolsFor(options.turnTools)
+        const turnRuntime = this.#toolsFor(options.turnTools, child !== undefined)
         if (options.from?.id !== undefined) this.#senders.set(turnId, options.from.id)
+        if (options.deferMutations !== undefined) this.#defers.set(turnId, options.deferMutations)
         const result = await runTurn({
             agentId: this.id,
             meter,
@@ -1310,7 +1413,7 @@ export class Agent {
             // The volatile tier *is* private memory — `USER.md` and the notes `memory_write` appends —
             // so a turn that may not read private memory does not get it in its prompt either.
             // Skipping retrieval alone would still hand a stand-in every note in `MEMORY.md`.
-            ...(this.workspace.volatile === "" || !plan.private
+            ...(this.workspace.volatile === "" || !plan.private || child !== undefined
                 ? {}
                 : { volatile: this.workspace.volatile }),
             ...(this.workspace.reminder === "" ? {} : { reminder: this.workspace.reminder }),
@@ -1388,7 +1491,11 @@ export class Agent {
                             throw privateMemoryRefused()
                         },
                     }),
-        }).finally(() => this.#senders.delete(turnId))
+            ...(child?.taintedBy === undefined ? {} : { taintedBy: child.taintedBy }),
+        }).finally(() => {
+            this.#senders.delete(turnId)
+            this.#defers.delete(turnId)
+        })
 
         // Carried per session, not per turn. One turn's observations are a sample of the estimator's
         // bias; the bias itself belongs to the conversation, and a fresh calibration every turn would

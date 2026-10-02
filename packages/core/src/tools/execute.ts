@@ -469,7 +469,7 @@ async function decideAndRun(
             : { effect: "deny", reason: reasonFor(spec.slug, outcome.by) }
     }
 
-    if (decision.effect === "allow") return runOne(entry, input)
+    if (decision.effect === "allow") return runOne(entry, input, tainted)
 
     // Both refusal shapes emit `tool.gated` and nothing else. No `tool.call` and no `tool.result`:
     // nothing ran, and a consumer pairing the two would otherwise hold an orphan forever. A policy
@@ -561,7 +561,11 @@ export function batch(
     return groups
 }
 
-async function runOne(entry: PlannedCall, input: ExecuteInput): Promise<ToolResult> {
+async function runOne(
+    entry: PlannedCall,
+    input: ExecuteInput,
+    tainted: boolean,
+): Promise<ToolResult> {
     const { intent, tool, args } = entry
     const started = performance.now()
 
@@ -629,7 +633,13 @@ async function runOne(entry: PlannedCall, input: ExecuteInput): Promise<ToolResu
     try {
         const output = await Promise.race([
             Promise.resolve(
-                tool.handler(args, { ...input.context, signal, deadlineMs: input.timeoutMs }),
+                tool.handler(args, {
+                    ...input.context,
+                    signal,
+                    deadlineMs: input.timeoutMs,
+                    callId: intent.callId,
+                    tainted,
+                }),
             ),
             new Promise<never>((_, reject) => {
                 signal.addEventListener(

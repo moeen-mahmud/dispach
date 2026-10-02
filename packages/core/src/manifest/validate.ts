@@ -724,6 +724,9 @@ export function validateSchedules(
         }
     }
 
+    // A child's role is a reference too, and `subagent` is the one its children use by default.
+    for (const child of manifest.subagents ?? []) referencedRoles.add(child.model ?? "subagent")
+
     for (const name of customRoleNames(manifest.model)) {
         if (referencedRoles.has(name)) continue
         // Refused only where it looks like a typo of a built-in role, which is the failure this exists
@@ -739,6 +742,75 @@ export function validateSchedules(
         })
     }
 
+    return found
+}
+
+/**
+ * A child narrows the parent and never widens it, and every routed slug has exactly one child.
+ *
+ * Checked against `tools.pinned` and `tools.local` as written rather than against the resolved
+ * catalogue, so `validate` can answer without reaching a provider. A pinned slug nothing resolves is
+ * refused at load by `resolve()` anyway, child or no child.
+ */
+export function validateSubagents(manifest: AgentManifest): ErrorDetail[] {
+    const found: ErrorDetail[] = []
+    const parent = new Set([...manifest.tools.pinned, ...manifest.tools.local])
+    const declaredRoles = new Set<string>([...MODEL_ROLES, ...customRoleNames(manifest.model)])
+    const names = new Set<string>()
+    const routedBy = new Map<string, string>()
+
+    for (const [index, child] of (manifest.subagents ?? []).entries()) {
+        const field = `subagents[${index}]`
+        if (names.has(child.name)) {
+            found.push({
+                code: "subagent_name_duplicate",
+                message: `Two subagents are called "${child.name}".`,
+                hint: "Give each subagent its own name: it is how events, sessions and usage rows say which child ran.",
+                field: `${field}.name`,
+            })
+        }
+        names.add(child.name)
+
+        const outside = child.tools.filter((slug) => !parent.has(slug))
+        if (outside.length > 0) {
+            found.push({
+                code: "subagent_tool_not_pinned",
+                message: `Subagent "${child.name}" lists ${outside.join(", ")}, which this agent does not pin.`,
+                hint: "A subagent may only use tools its parent has, so it can never act with more authority than the parent. Add the slug to tools.pinned (or tools.local), or remove it from the subagent.",
+                field: `${field}.tools`,
+            })
+        }
+
+        for (const slug of child.route.tools) {
+            if (!child.tools.includes(slug)) {
+                found.push({
+                    code: "subagent_route_outside_tools",
+                    message: `Subagent "${child.name}" routes ${slug} but does not list it under tools, so it could not make the call it is handed.`,
+                    hint: `Add ${slug} to subagents[${index}].tools.`,
+                    field: `${field}.route.tools`,
+                })
+            }
+            const other = routedBy.get(slug)
+            if (other !== undefined && other !== child.name) {
+                found.push({
+                    code: "subagent_route_duplicate",
+                    message: `${slug} is routed to both "${other}" and "${child.name}".`,
+                    hint: "A routed call runs exactly one child. Route the slug from one subagent only.",
+                    field: `${field}.route.tools`,
+                })
+            }
+            routedBy.set(slug, child.name)
+        }
+
+        if (child.model !== undefined && !declaredRoles.has(child.model)) {
+            found.push({
+                code: "subagent_role_unknown",
+                message: `Subagent "${child.name}" names the model role "${child.model}", which is not declared under model:. Declared: ${[...declaredRoles].join(", ")}.`,
+                hint: "Add the role under model:, or remove model: from the subagent to use model.subagent (or main).",
+                field: `${field}.model`,
+            })
+        }
+    }
     return found
 }
 
@@ -879,6 +951,7 @@ export function validateManifest(manifest: AgentManifest, options: ValidateOptio
         ...validateApiKeyEnv(manifest, options.env),
         ...validateDialectSupport(manifest, options.capabilities),
         ...validateSchedules(options.raw, manifest, options.now ?? Date.now()),
+        ...validateSubagents(manifest),
         ...validateSupportedSections(options.raw),
     ]
 }

@@ -48,9 +48,11 @@
 # ─── builder ──────────────────────────────────────────────────────────────────────────────
 #
 # Bun is the dev toolchain — install, bundle, pack — and appears in this stage only. The tarball it
-# writes is architecture-independent, so buildx runs this stage once per platform and produces the
-# same bytes on both.
-FROM oven/bun:1 AS builder
+# writes is architecture-independent, so this stage runs once, on the builder's own platform, and both
+# runtime stages copy the same tarball. Without `--platform` buildx ran it once per platform, and the
+# arm64 copy under QEMU on an amd64 runner: `bun run build` measured 795 s there against 115 s native,
+# thirteen of the release job's seventeen minutes spent producing bytes it already had.
+FROM --platform=$BUILDPLATFORM oven/bun:1 AS builder
 WORKDIR /build
 
 # The lockfile and every workspace manifest first, so a source-only change reuses this layer.

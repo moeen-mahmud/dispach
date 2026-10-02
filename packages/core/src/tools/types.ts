@@ -149,6 +149,14 @@ export interface ToolContext {
      * a field set in one layer and dropped by the next has cost this repo six debugging rounds.
      */
     readonly actingParticipant?: ActingParticipant | null
+    /** The call this handler is answering, as the model announced it. Set by the executor. */
+    readonly callId?: string
+    /**
+     * The turn had read untrusted content before this call: the value the write gate just decided
+     * with. Set by the executor. A tool that starts work of its own carries it on, so a subagent of a
+     * tainted turn starts tainted too.
+     */
+    readonly tainted?: boolean
     /**
      * Where a durable note goes, when a workspace declares somewhere for it.
      *

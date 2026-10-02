@@ -4,6 +4,13 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.5
+
+- `subagents:` runs a routed tool call in a throwaway child of the same agent. The parent reads the child's artifact (`{summary, findings[]}` by default) instead of the raw output. Routing happens after the policy and the write gate, so a refused call starts no child.
+- A child inherits its parent's taint, stand-in deferral, acting participant and cancellation, and never spawns one of its own. Its tools must be ones the parent pins.
+- `model.subagent` (or `subagents[].model`) runs children on a cheaper model. Their usage rows and `model.result` events say `role: subagent`.
+- The release image builds its tarball once, natively, instead of once per platform under emulation.
+
 ### Since 0.2.0-pilot.4
 
 - A tool result cut to fit `observationMaxTokens` is stored whole, and its marker names the id to read it with `artifact_read`. Reading an untrusted result back is untrusted too, so it no longer reopens the write gate.

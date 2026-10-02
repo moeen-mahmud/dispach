@@ -1020,6 +1020,57 @@ turn acts for the person who asked the coordinator, so they stay accountable. A 
 (`A` offers to `B`, `B` to `A`) is refused at load. Targets are fixed when the coordinator loads; an
 agent adopted later is reachable after the coordinator reloads.
 
+### `subagents` (since 0.2.0-pilot.6)
+
+Throwaway children of this agent that run a routed tool call in a context of their own. **The harness
+routes, never the model:** a call to a slug under `route.tools` goes through the policy, the write
+gate and a stand-in's deferral exactly as it would without a child, and only then does the child run
+in place of the tool. The parent's observation is the child's artifact; the raw output stays in the
+child's `subagent:<runId>` session.
+
+```yaml
+model:
+  main: { id: deepseek-v4-pro, baseUrl: https://api.deepseek.com/v1, apiKeyEnv: MODEL_API_KEY }
+  subagent: { id: deepseek-v4-flash, baseUrl: https://api.deepseek.com/v1, apiKeyEnv: MODEL_API_KEY }
+
+subagents:
+  - name: inbox
+    task: Read the mailbox and report what needs attention.
+    tools: [GMAIL_FETCH_EMAILS, GMAIL_GET_THREAD]   # a subset of tools.pinned / tools.local
+    route:
+      tools: [GMAIL_FETCH_EMAILS]                    # calls to these run the child
+    # artifact:   a JSON Schema object, as for team.members; default {summary, findings[]}
+    # model:      a role under model:; default model.subagent when declared, else main
+    # maxSteps:   lowers limits.maxSteps for the child
+```
+
+| Field | |
+| --- | --- |
+| `name` | Required, unique. Names the child in events, sessions and usage. |
+| `task` | Required. What the child is for, written ahead of the call it is handed. |
+| `tools` | Required. Exact slugs, each in `tools.pinned` or `tools.local` (`subagent_tool_not_pinned`). A child only narrows its parent. Its catalogue is these plus `submit_artifact`. |
+| `route.tools` | Required. Each slug must be in this child's `tools` (`subagent_route_outside_tools`), and a slug is routed by one child only (`subagent_route_duplicate`). |
+| `artifact` | Optional JSON Schema object. Absent: `{summary: string, findings?: string[]}`. |
+| `model` | Optional role name (`subagent_role_unknown` when undeclared). Absent: `model.subagent`, else `main`. Usage rows and `model.result` say `role: subagent` either way, with `model` naming the endpoint. |
+| `maxSteps` | Optional. Lowers `limits.maxSteps` for the child, never raises it. |
+
+**What a child inherits, and nothing more.** The parent's taint (a child of a turn that read
+untrusted content starts tainted, so `untrusted.onMutate` applies from its first step), its
+stand-in deferral (a child of a stand-in turn queues its writes for the owner), its acting
+participant, its policy, and its cancellation. It gets no history, no volatile tier, no knowledge,
+skills or recalled memory. **Depth is 1**: a child's calls run the tool, never another child.
+
+**Trust of the artifact.** Untrusted when the routed tool is declared untrusted, or when the child read
+untrusted output; trusted otherwise.
+
+**Limits.** A routed call is one tool call, so it is bounded by `limits.toolTimeoutMs`: the child is
+ended a second before the call would be abandoned and reports `subagent_budget`. Children run one at
+a time. The child's spend is the parent agent's, under `limits.tokens` like any other turn.
+
+Slot 1 is unchanged by routing — a routed tool keeps its spec, so the cached prefix and the policy
+identity are the same as without a child. The child's narrowed catalogue is its own slot 1, which
+gets no cache hit on the parent's prefix; its session is fresh, so there is none to protect.
+
 ### `team`
 
 Sub-agents this agent may delegate to. **Declaring the block is what registers the `handoff`

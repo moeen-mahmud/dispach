@@ -321,6 +321,24 @@ export class ToolRegistry {
     }
 
     /**
+     * The same registry, order and specs unchanged, with some tools replaced by `swap`.
+     *
+     * For a routed subagent: the spec is what slot 1 renders and what the policy matches, so keeping
+     * it is what keeps the cached prefix and the call's policy identity; only the handler differs.
+     */
+    withSwapped(swap: (tool: Tool) => Tool | undefined): ToolRegistry {
+        const tools = this.#order
+            .map((spec) => this.#bySlug.get(spec.slug))
+            .filter((tool): tool is Tool => tool !== undefined)
+        return new ToolRegistry({
+            tools: tools.map((tool) => swap(tool) ?? tool),
+            dropped: this.dropped,
+            warnings: this.warnings,
+            notEnabled: this.notEnabled,
+        })
+    }
+
+    /**
      * The same registry with only the tools a phase allows.
      *
      * `dropped`, `warnings` and `notEnabled` are carried unchanged, and that is deliberate: they describe
