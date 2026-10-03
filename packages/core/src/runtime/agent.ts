@@ -421,6 +421,8 @@ export class Agent {
     #routedToolRuntime: ToolRuntime | undefined
     /** A stand-in turn's deferral by turn id, so a subagent of that turn defers its writes too. */
     readonly #defers = new Map<string, NonNullable<ExecuteInput["defer"]>>()
+    /** Each running turn's input, for a subagent of that turn to be told what its call is for. */
+    readonly #inputs = new Map<string, string>()
     /** For a tool-less agent, the runtime a turn's own tools layer onto. See the constructor. */
     #bareToolRuntime: ToolRuntime | undefined
     /**
@@ -1027,6 +1029,7 @@ export class Agent {
     readonly #subagent: SubagentRunner = (child, context) => {
         let tainted = false
         const defer = this.#defers.get(context.turnId)
+        const asked = this.#inputs.get(context.turnId)
         const role =
             child.model ?? (this.manifest.model.subagent === undefined ? undefined : "subagent")
         // Inside the executor's deadline for the routed call, so the child ends as a timeout it can
@@ -1035,6 +1038,7 @@ export class Agent {
         return {
             id: this.id,
             tainted: () => tainted,
+            ...(asked === undefined ? {} : { asked }),
             send: async (input, options) => {
                 const result = await this.#send(input, {
                     ...options,
@@ -1395,6 +1399,7 @@ export class Agent {
         const turnRuntime = this.#toolsFor(options.turnTools, child !== undefined)
         if (options.from?.id !== undefined) this.#senders.set(turnId, options.from.id)
         if (options.deferMutations !== undefined) this.#defers.set(turnId, options.deferMutations)
+        this.#inputs.set(turnId, input)
         const result = await runTurn({
             agentId: this.id,
             meter,
@@ -1498,6 +1503,7 @@ export class Agent {
         }).finally(() => {
             this.#senders.delete(turnId)
             this.#defers.delete(turnId)
+            this.#inputs.delete(turnId)
         })
 
         // Carried per session, not per turn. One turn's observations are a sample of the estimator's

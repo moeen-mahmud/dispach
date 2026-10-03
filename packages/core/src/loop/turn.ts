@@ -923,8 +923,13 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     if (result.displaced.length > 0 && input.compaction.persist !== undefined) {
                         await input.compaction.persist(result.displaced)
                     }
+                    // Copied before the clear: a ladder whose stages changed nothing returns the
+                    // array it was given, which is this one, so clearing first and pushing from it
+                    // emptied the turn's whole history (since d1deecb). The model then lost its own
+                    // call and result, repeated the call, and the turn ended in `no_progress`.
+                    const compacted = [...result.history]
                     history.length = 0
-                    history.push(...result.history)
+                    history.push(...compacted)
                     assembled = assembleWith(history)
                 }
             }

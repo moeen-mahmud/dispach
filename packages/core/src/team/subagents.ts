@@ -41,10 +41,14 @@ export function subagentTask(
     child: SubagentConfig,
     slug: string,
     args: Readonly<Record<string, unknown>>,
+    asked?: string,
 ): string {
     return [
         child.task,
         "",
+        // What the call is for. Without it the child summarises blind, and a summary that drops the
+        // one fact the person wanted is a smaller observation that answers nothing.
+        ...(asked === undefined || asked === "" ? [] : ["## What the person asked", "", asked, ""]),
         "## The call to make",
         "",
         `Call \`${slug}\` with these arguments, then work from what it returns:`,
@@ -57,7 +61,11 @@ export function subagentTask(
 export type SubagentRunner = (
     child: SubagentConfig,
     context: ToolContext,
-) => HandoffTarget & { readonly tainted: () => boolean }
+) => HandoffTarget & {
+    readonly tainted: () => boolean
+    /** The parent turn's input, so the child knows what the call is for. */
+    readonly asked?: string
+}
 
 /**
  * The routed version of `tool`: same spec, a handler that runs `child` instead.
@@ -83,7 +91,7 @@ export function routedTool(init: {
             const target = init.runner(child, context)
             const outcome = await runHandoff({
                 member: target,
-                task: subagentTask(child, tool.spec.slug, args),
+                task: subagentTask(child, tool.spec.slug, args, target.asked),
                 artifact:
                     (child.artifact as ToolParameters | undefined) ?? DEFAULT_SUBAGENT_ARTIFACT,
                 bus: init.bus,

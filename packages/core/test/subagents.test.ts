@@ -151,6 +151,8 @@ describe("a routed call", () => {
 
         // The child made the real call, so the raw output reached it and only it.
         expect(children.some((body) => body.includes("MAILBOX-RAW"))).toBe(true)
+        // And it was told what the call was for: the person's own question.
+        expect(children[0]).toContain("anything new?")
         const after = parent[1] ?? ""
         expect(after).toContain("Two unread, one from Ada about the numbers.")
         expect(after).toContain("ran in subagent inbox")
