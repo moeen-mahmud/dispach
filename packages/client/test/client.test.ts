@@ -227,6 +227,22 @@ describe("a turn, end to end", () => {
         await runtime.stop()
     })
 
+    test("send({ chunks }) keeps a reply that streamed before the reader attached", async () => {
+        // The web page lost every quick reply this way: the turn finished its tokens in the gap
+        // between the POST and the attach, the replay had none, and the reply was never drawn.
+        const { client, runtime } = await harness({ reply: "Quick answer." })
+        const turn = await client.agent("assistant").send("hi", { chunks: true })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        let text = ""
+        for await (const item of turn.stream({ chunks: true })) {
+            if (item.kind === "event" && item.event.type === "model.chunk") {
+                if (item.event.data.kind === "text") text += item.event.data.delta
+            }
+        }
+        expect(text).toBe("Quick answer.")
+        await runtime.stop()
+    })
+
     test("children is asked for on the stream's query, and only when set", async () => {
         const urls: string[] = []
         const recording = (async (url: string | URL | Request) => {

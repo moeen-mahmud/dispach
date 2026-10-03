@@ -32,6 +32,7 @@ import {
     endNote,
     passThroughFilter,
     type StreamFilter,
+    SUBMIT_ARTIFACT,
 } from "@dispach/core/wire"
 
 export type Row =
@@ -214,6 +215,8 @@ function withBlock(
 function onChild(state: Transcript, event: AnyEvent): Transcript {
     const mine = (row: Extract<Row, { kind: "tool" }>) =>
         row.subagent?.sessionKey === event.sessionKey
+    // The child's return channel is how it hands back its answer, not work it did for the person.
+    if ((event.data as { readonly slug?: string }).slug === SUBMIT_ARTIFACT) return state
     if (event.type === "tool.call") {
         const data = event.data as EventDataMap["tool.call"]
         return withBlock(state, mine, (block) =>

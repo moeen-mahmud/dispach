@@ -168,6 +168,12 @@ export interface SendOptions {
      */
     readonly idempotencyKey?: string
     /**
+     * Record this turn's tokens from its first one, for a `stream({ chunks: true })` or `tokens()`
+     * that follows. Without it the server records tokens only once a reader asks, so a reply
+     * streamed before you attach is missing from the replay and its text is lost to the stream.
+     */
+    readonly chunks?: boolean
+    /**
      * Images sent with this message: PNG, JPEG, GIF or WebP, at most five, 3.75 MB each. A path
      * relative to the agent's directory is preferred; inline base64 must fit the 1 MB body limit.
      * A model without vision refuses with `model_no_vision`.
@@ -1213,6 +1219,7 @@ export function createClient(options: ClientOptions): DispachClient {
                         ...(opts?.runtimeNote === undefined
                             ? {}
                             : { runtimeNote: opts.runtimeNote }),
+                        ...(opts?.chunks === true ? { chunks: true } : {}),
                     },
                     ...(opts?.idempotencyKey === undefined
                         ? {}
@@ -1223,7 +1230,8 @@ export function createClient(options: ClientOptions): DispachClient {
                 // would then be two code paths producing the same union, and the difference only
                 // shows up under load — a class of bug this project has paid for twice. One extra
                 // request buys one implementation, and the buffer is opened at acceptance, so
-                // attaching immediately afterwards is a guarantee rather than a race.
+                // attaching immediately afterwards misses no event. It can miss tokens, which are
+                // recorded only once asked for: `chunks` asks at acceptance.
                 return turnHandle(id, accepted.turnId, accepted.sessionKey, {
                     replayed: accepted.replayed === true,
                 })

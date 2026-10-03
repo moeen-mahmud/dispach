@@ -516,7 +516,9 @@ function Workspace(props: {
             sessionKey ??
             newConversationKey((count) => crypto.getRandomValues(new Uint8Array(count)))
         try {
-            const handle = await agent.send(text, { sessionKey: key })
+            // `chunks` at the send, not only at the attach: a reply streamed before the stream
+            // attached was otherwise missing from the replay, and the page showed no reply at all.
+            const handle = await agent.send(text, { sessionKey: key, chunks: true })
             if (sessionKey === undefined) {
                 setSessionKey(handle.sessionKey)
                 remember(handle.sessionKey)

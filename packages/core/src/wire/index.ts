@@ -65,6 +65,7 @@ export { EVENT_TYPES } from "../events/types.ts"
  */
 export { type EndContext, endedBadly, endNote } from "../loop/turn-end.ts"
 export { parseSSE } from "../model/sse.ts"
+export { SUBMIT_ARTIFACT } from "../team/artifact.ts"
 export { isChildSession } from "../team/child-session.ts"
 /**
  * The stream filter, because **the wire carries unfiltered chunks and every client must filter.**

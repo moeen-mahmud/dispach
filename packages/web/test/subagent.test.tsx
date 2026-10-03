@@ -58,6 +58,11 @@ const ITEMS: readonly TurnStreamItem[] = [
         { reason: "final", steps: 2, tokens: { prompt: 800, output: 200 }, durationMs: 4 },
         true,
     ),
+    event(
+        "tool.call",
+        { slug: "submit_artifact", callId: "k9", argsHash: "h", mutating: false },
+        true,
+    ),
     event("handoff.result", {
         member: "test",
         sessionKey: CHILD,
