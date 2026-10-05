@@ -1099,7 +1099,7 @@ export function unknownModelRole(name: string, known: readonly string[]): Config
         message: `No model role named "${name}" is declared. Declared: ${known.join(", ")}.`,
         hint:
             suggestion === undefined
-                ? `Add a "${name}" entry under model: in the manifest, or point the schedule at one of the declared roles.`
+                ? `Add a "${name}" entry under model: in the manifest (a person can add one with PATCH /config path model.${name}), or name one of the declared roles.`
                 : `Did you mean ${suggestion}?`,
         field: "schedules.role",
     })
