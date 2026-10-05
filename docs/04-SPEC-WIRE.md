@@ -1183,6 +1183,12 @@ agent. `dispose` refuses while a turn is in flight — the file is written by th
 `"applied": false` with the reason under `pending`, and the edit takes effect at the next start.
 Reporting 409 as though nothing had happened would leave a written manifest described as unwritten.
 
+`delegation.offer` also reloads every hosted agent whose `delegation.to` names this one (or is
+`"*"`), because a roster renders at load. Each is reported under `peers`, as
+`{ "id", "applied", "pending"? }`. When this agent's own reload is pending, its peers are listed
+with `applied: false`, since their roster would read the old offer. Reload them once this agent's
+`agent.reloaded` event arrives.
+
 `/context` exists because "why did it do that?" is almost always a context question, and
 guessing at it is how days get lost.
 

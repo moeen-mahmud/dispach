@@ -217,6 +217,7 @@ export function handoffTool(init: {
                 ...(member.crossMember === true && context.actingParticipant
                     ? { participant: context.actingParticipant }
                     : {}),
+                ...(member.crossMember === true ? { peerAsk: true as const } : {}),
             })
 
             if (outcome.kind === "ok") {

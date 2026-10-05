@@ -3505,6 +3505,14 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     applied = error.toDetail()
                 }
 
+                // A roster is rendered at load, so an offer that changed is invisible to every agent
+                // that may ask this one until each reloads. Done here, after this agent's own reload,
+                // because theirs reads this agent's new manifest; reported per peer, never swallowed.
+                const peers =
+                    parsed.value.path === "delegation.offer"
+                        ? await reloadAskers(runtime, agent.id, applied === undefined)
+                        : undefined
+
                 return json({
                     path: setting.path,
                     before: result.before,
@@ -3515,6 +3523,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     ...(applied === undefined
                         ? { applied: true }
                         : { applied: false, pending: applied }),
+                    ...(peers === undefined ? {} : { peers }),
                 })
             }),
         { capability: "admin" },
@@ -5004,6 +5013,49 @@ function streamTurn(
             return () => attachment.unsubscribe()
         },
     })
+}
+
+/**
+ * Reload every other hosted agent whose `delegation.to` can name `id`, so its roster shows the new
+ * offer. `now` false (this agent's own reload is still pending) names them unreloaded instead: their
+ * roster is read from the running manifest, so reloading them first would render the old offer.
+ */
+async function reloadAskers(
+    runtime: Runtime,
+    id: string,
+    now: boolean,
+): Promise<{ readonly id: string; readonly applied: boolean; readonly pending?: ErrorDetail }[]> {
+    const askers = runtime.list().filter((other) => {
+        const to = other.manifest.delegation?.to
+        return other.id !== id && (to === "*" || (to?.includes(id) ?? false))
+    })
+    const results = []
+    for (const other of askers) {
+        if (!now) {
+            results.push({
+                id: other.id,
+                applied: false,
+                pending: {
+                    code: "reload_pending",
+                    message: `${id}'s own reload is waiting for running turns, so ${other.id} still lists its old offer.`,
+                    hint: `POST /v1/agents/${other.id}/reload once ${id}'s agent.reloaded event arrives.`,
+                },
+            })
+            continue
+        }
+        try {
+            const pending = pendingDetail(await runtime.reload(other.id))
+            results.push(
+                pending === undefined
+                    ? { id: other.id, applied: true }
+                    : { id: other.id, applied: false, pending },
+            )
+        } catch (error) {
+            if (!isHarnessError(error)) throw error
+            results.push({ id: other.id, applied: false, pending: error.toDetail() })
+        }
+    }
+    return results
 }
 
 /**

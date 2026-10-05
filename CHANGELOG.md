@@ -10,6 +10,9 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - A person adds or replaces a named role with `PATCH /config path model.<name>` (a map: `{id, api or baseUrl, apiKeyEnv, …}`).
 - A turn on any role other than main, a schedule's or a message's, is budgeted against that role's own context window instead of main's.
 - Photos sent on Telegram, WhatsApp, Slack and Teams reach the model with the turn, as `POST /messages` `images` do (at most five, each up to 3.75 MB). On a model that reads no images, the sender is told so. Channel plugins put them on `RawInbound.images`.
+- Two members' agents may delegate to each other (`delegation.to` both ways). This was refused at load as `team_cycle`. A delegation is one hop: the asked agent cannot hand the work on.
+- An agent asked by another member's agent reads its owner's shared notes and the space, not its private memory, unless it is working for its own owner. Before, a delegated turn read everything and returned the result to the person who asked.
+- `PATCH /config` sets `delegation.offer` and `delegation.to`. An offer change reloads the agents that may ask, and each one is reported under `peers`.
 - Under NLT, a tool field that takes a list of objects works: a JSON list kept its objects as `"[object Object]"` and was refused, and `{…}, {…}` or a pretty-printed object was split into fragments. The catalogue now names an object field's own keys instead of `list of object` alone.
 
 ### Since 0.2.0-pilot.5

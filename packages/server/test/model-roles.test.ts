@@ -4,8 +4,9 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { AGENT_SETTABLE_PATHS, personSetting } from "@dispach/core"
 import { cleanupWorkspaces, harness, MANIFEST } from "./harness.ts"
 
 afterAll(cleanupWorkspaces)
@@ -91,5 +92,41 @@ describe("a named role", () => {
         await settle()
         expect(models).toEqual([])
         await runtime.stop()
+    })
+})
+
+describe("delegation over PATCH /config", () => {
+    test("a person sets an offer, and the agents that may ask it are reloaded so their roster shows it", async () => {
+        const { call, dir, runtime } = await harness({ manifest: MANIFEST })
+        const asker = join(dir, "asker.yaml")
+        writeFileSync(
+            asker,
+            `${MANIFEST.replace("id: assistant", "id: asker").replace("name: Assistant", "name: Asker")}delegation:\n  to: [assistant]\n`,
+        )
+        await runtime.adopt(asker)
+        const roster = () =>
+            runtime
+                .agent("asker")
+                ?.tools.specs()
+                .some((spec) => spec.slug === "handoff")
+        expect(roster()).toBe(false)
+
+        const response = await call("PATCH", "/v1/agents/assistant/config", {
+            body: {
+                path: "delegation.offer",
+                value: "{task: Answers questions about the roadmap., artifact: {type: object, properties: {answer: {type: string}}}}",
+            },
+        })
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as { peers: { id: string; applied: boolean }[] }
+        expect(body.peers).toEqual([{ id: "asker", applied: true }])
+        expect(roster()).toBe(true)
+        await runtime.stop()
+    })
+
+    test("delegation.to is a person's setting, never the agent's", () => {
+        expect(personSetting("delegation.to")?.path).toBe("delegation.to")
+        expect(AGENT_SETTABLE_PATHS).not.toContain("delegation.to")
+        expect(AGENT_SETTABLE_PATHS).not.toContain("delegation.offer")
     })
 })

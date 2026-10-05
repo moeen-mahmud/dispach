@@ -97,6 +97,7 @@ import { activateSkills } from "../skills/load.ts"
 import { renderScripts, skillScriptTools } from "../skills/tools.ts"
 import type { SessionSummary, Store, TurnRecord } from "../store/store.ts"
 import { routedTool, type SubagentRunner } from "../team/subagents.ts"
+import { HANDOFF } from "../team/supervisor.ts"
 import { type DialectId, passThroughFilter, type StreamFilter } from "../tools/dialect/dialect.ts"
 import { nativeDialect, nativeWireTokens } from "../tools/dialect/native.ts"
 import { nltDialect } from "../tools/dialect/nlt.ts"
@@ -293,6 +294,13 @@ export interface AgentSendOptions {
     readonly timeoutMs?: number
     /** A slot from `admit()`. Absent: `send` admits for itself, and throws the refusal. */
     readonly admission?: AdmittedTurn
+    /**
+     * This turn answers another member's agent (`delegation`, decision 14.80). It reads like a
+     * stand-in — this agent's owner's shared notes and the space, never private memory — unless the
+     * person it acts for is this agent's own owner. And it cannot delegate onward: `handoff` is left
+     * out of its catalogue, so a peer ask is one hop and `A ↔ B` cannot loop.
+     */
+    readonly peerAsk?: true
 }
 
 /** How much of a child's prompt budget its routed call's output may take; the rest is its task. */
@@ -1399,7 +1407,14 @@ export class Agent {
                 : activateKnowledge(input, this.knowledge)
         const skills = child !== undefined ? [] : this.#activateSkills(input, history)
         const participant = options.participant ?? participantOf(options.from)
-        const plan = await this.#readPlan(options.from, participant)
+        const plan = await this.#readPlan(options.from, participant, options.peerAsk === true)
+        // A peer ask is one hop: the asked agent answers and cannot hand the work on, to a peer or to
+        // its own team, so `A ↔ B` delegation cannot loop however the two are configured.
+        const slugs = this.tools.specs().map((spec) => spec.slug)
+        const toolsAllow =
+            options.peerAsk === true && slugs.includes(HANDOFF)
+                ? (options.toolsAllow ?? slugs).filter((slug) => slug !== HANDOFF)
+                : options.toolsAllow
         const remembered =
             child !== undefined
                 ? []
@@ -1517,7 +1532,7 @@ export class Agent {
             ...(options.images === undefined || options.images.length === 0
                 ? {}
                 : { images: options.images }),
-            ...(options.toolsAllow === undefined ? {} : { toolsAllow: options.toolsAllow }),
+            ...(toolsAllow === undefined ? {} : { toolsAllow }),
             ...(options.turnNote === undefined ? {} : { turnNote: options.turnNote }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -2009,6 +2024,7 @@ export class Agent {
     async #readPlan(
         from: TurnSender | undefined,
         participant: ActingParticipant | null,
+        peerAsk = false,
     ): Promise<ReadPlan> {
         const conversations = this.store.conversations
         const room = from?.room
@@ -2022,6 +2038,7 @@ export class Agent {
             ...(participant?.onBehalfOf === undefined
                 ? {}
                 : { standingInFor: participant.onBehalfOf }),
+            ...(peerAsk ? { askedFor: participant?.id ?? "" } : {}),
             ...(conversation === undefined ? {} : { conversation }),
             ...(owner === undefined ? {} : { owner }),
             projects: await conversations.projectsOf(this.id),

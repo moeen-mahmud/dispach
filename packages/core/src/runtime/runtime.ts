@@ -47,7 +47,7 @@ import { SqliteStore } from "../store/sqlite/store.ts"
 import type { DeliveryBacklog, LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
 import { expandTeams } from "../team/expand.ts"
 import type { HandoffTarget } from "../team/handoff.ts"
-import { checkTeamGraph, handoffTool } from "../team/supervisor.ts"
+import { handoffTool } from "../team/supervisor.ts"
 import type { ApprovalRequest } from "../tools/execute.ts"
 import { ToolRegistry } from "../tools/registry.ts"
 import type { ScriptRunner, Tool, ToolProvider, ToolProviderFactory } from "../tools/types.ts"
@@ -2262,32 +2262,9 @@ function instantiateAgent(input: {
                       task: peer.offer?.task ?? "",
                       artifact: peer.offer?.artifact ?? { type: "object", properties: {} },
                   }))
-    // The delegation edges join the team graph for the one walk that refuses a cycle or an
-    // over-deep chain, so `A → B → A` across members is caught at load exactly as within a team.
-    if (offered.length > 0) {
-        const edges = new Map(
-            input.peers.map((peer) => [
-                peer.id,
-                [
-                    ...(peer.team ?? []),
-                    ...input.peers
-                        .filter(
-                            (other) =>
-                                other.id !== peer.id &&
-                                other.offer !== undefined &&
-                                peer.to !== undefined &&
-                                (peer.to === "*" || peer.to.includes(other.id)),
-                        )
-                        .map((other) => other.id),
-                ],
-            ]),
-        )
-        edges.set(entry.manifest.id, [
-            ...(team ?? []).map((member) => member.id),
-            ...offered.map((member) => member.id),
-        ])
-        checkTeamGraph(entry.manifest.id, (id) => edges.get(id) ?? [])
-    }
+    // No cycle walk over these edges, unlike the team's (`expand.ts`): a peer-asked turn has no
+    // `handoff` at all (`AgentSendOptions.peerAsk`), so a delegation is one hop and `A ↔ B` is two
+    // agents asking each other, not a loop (decision 14.80).
     const teamTools: readonly Tool[] =
         team === undefined && offered.length === 0
             ? []

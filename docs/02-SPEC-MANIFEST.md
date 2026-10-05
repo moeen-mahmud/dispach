@@ -1016,9 +1016,13 @@ when they approve it with `POST /v1/actions/:actionId`, its outcome posted in th
 **`delegation`** lets a coordinator hand work to another member's agent in the silo. The handoff is
 the team one — `handoff(member, task)`, a fresh session, a typed artifact through `submit_artifact`,
 the same depth limit — resolved among agents that declare an `offer` and match `to`. The delegate's
-turn acts for the person who asked the coordinator, so they stay accountable. A cycle across members
-(`A` offers to `B`, `B` to `A`) is refused at load. Targets are fixed when the coordinator loads; an
-agent adopted later is reachable after the coordinator reloads.
+turn acts for the person who asked the coordinator, so they stay accountable. Since pilot.7 a
+delegation is a **peer ask, one hop**: the asked agent's turn has no `handoff` (no peers, no team of
+its own), so `A` and `B` may each list the other and nothing can loop. The asked turn reads like a
+stand-in: its owner's shared notes and the space, never private memory, unless the person it acts
+for is its own owner. Targets are fixed when the coordinator loads; an agent adopted later is
+reachable after the coordinator reloads. A person sets both fields with `PATCH /config`
+(`delegation.offer`, `delegation.to`); an agent's `config_set` cannot.
 
 ### `subagents` (since 0.2.0-pilot.6)
 

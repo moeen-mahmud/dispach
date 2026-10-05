@@ -256,6 +256,16 @@ export const SETTINGS: readonly Setting[] = [
         agentListed: false,
     },
     {
+        path: "delegation.offer",
+        means: 'what this agent takes on when another member\'s agent asks it, as a map: {task: "<one line>", artifact: {type: object, properties: {...}, required: [...]}}. The agents whose delegation.to names this one are reloaded so their roster shows it',
+        agentListed: false,
+    },
+    {
+        path: "delegation.to",
+        means: 'the other members\' agents this one may ask, by id, or "*" for every agent that offers. A peer ask is one hop: the asked agent answers, and cannot ask onward',
+        agentListed: false,
+    },
+    {
         path: "tools.providers.<id>.writeRoots",
         means: "the directories a file tool may write to, for that provider. Nothing outside them is writable — and this binds file tools only, never exec, which carries its target inside a shell string",
         agentListed: false,

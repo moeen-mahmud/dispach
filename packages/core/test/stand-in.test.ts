@@ -354,17 +354,42 @@ describe("delegation to another member's agent", () => {
         await runtime.stop()
     })
 
-    test("a cycle across members is refused at load, as within a team", async () => {
+    test("two members' agents can ask each other, and an asked agent cannot ask onward (pilot.7)", async () => {
+        // `to: "*"` plus an offer on both used to be refused at load as `team_cycle`. A peer ask is
+        // one hop instead: the asked agent's catalogue has no handoff, so A ↔ B cannot loop.
         const both = `delegation:\n  to: "*"\n${offer.replace("delegation:\n", "")}`
-        let code: string | undefined
-        try {
-            await boot(
-                { left: scripted(() => []), right: scripted(() => []) },
-                { left: both, right: both },
+        const asks = (other: string) =>
+            scripted((input) =>
+                input.startsWith("ask")
+                    ? [
+                          { tool: "handoff", args: { member: other, task: "One fact about WAL." } },
+                          { text: "done" },
+                      ]
+                    : [
+                          // Tries to hand the work on; the tool is not in its catalogue.
+                          { tool: "handoff", args: { member: other, task: "You do it." } },
+                          {
+                              tool: "submit_artifact",
+                              args: { finding: `from ${other === "left" ? "right" : "left"}` },
+                          },
+                          { text: "submitted" },
+                      ],
             )
-        } catch (error) {
-            code = isHarnessError(error) ? error.code : "other"
+        const { runtime, events } = await boot(
+            { left: asks("right"), right: asks("left") },
+            { left: both, right: both },
+        )
+        for (const [from, to] of [
+            ["left", "right"],
+            ["right", "left"],
+        ] as const) {
+            const result = await runtime.agent(from).send("ask the other")
+            const [handoff] = await runtime.store.handoffs.forTurn(from, result.turnId)
+            expect(handoff?.outcome).toBe("ok")
+            expect(handoff?.memberId).toBe(to)
         }
-        expect(code).toBe("team_cycle")
+        // Exactly the two asks: neither asked agent started a handoff of its own.
+        expect(events.filter((event) => event.type === "handoff.start").length).toBe(2)
+        await runtime.stop()
     })
 })

@@ -85,12 +85,32 @@ export interface ReadPlan {
 export function readPlan(input: {
     /** The absent owner, when this turn is a stand-in. */
     readonly standingInFor?: string
+    /**
+     * Whom the turn works for when another member's agent asked this one (a peer ask): set, even
+     * empty, only for such a turn. Anyone but this agent's own owner gets the stand-in's reading.
+     */
+    readonly askedFor?: string
     /** Set when the turn came from a conversation. */
     readonly conversation?: { readonly kind: "room" | "dm"; readonly authorId: string }
     /** Who the agent is assigned to. */
     readonly owner?: string
     readonly projects: readonly string[]
 }): ReadPlan {
+    // Another member's agent asked, for somebody who is not this agent's owner: the answer goes back
+    // to them, so it is written from what the owner shares and never from what they keep private.
+    if (
+        input.askedFor !== undefined &&
+        (input.owner === undefined || input.askedFor !== input.owner)
+    ) {
+        return {
+            private: false,
+            scopes: [
+                ...(input.owner === undefined ? [] : [`owner:${input.owner}` as const]),
+                "space",
+            ],
+            ...(input.owner === undefined ? {} : { owner: input.owner }),
+        }
+    }
     if (input.standingInFor !== undefined) {
         return {
             private: false,

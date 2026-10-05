@@ -49,6 +49,7 @@ export interface HandoffTarget {
             readonly signal?: AbortSignal
             readonly turnTools?: readonly import("../tools/types.ts").Tool[]
             readonly participant?: import("../loop/sender.ts").ActingParticipant
+            readonly peerAsk?: true
         },
     ): Promise<{
         readonly text: string
@@ -129,6 +130,8 @@ export async function runHandoff(init: {
     readonly signal?: AbortSignal
     /** Who the member's turn acts for: the delegating person, for a cross-member delegation. */
     readonly participant?: import("../loop/sender.ts").ActingParticipant
+    /** Another member's agent is being asked (`delegation`), not a team member. See `peerAsk`. */
+    readonly peerAsk?: true
     /** The child session's prefix and the turn's source. `handoff` for both unless a subagent runs. */
     readonly sessionPrefix?: string
     readonly source?: string
@@ -215,6 +218,7 @@ export async function runHandoff(init: {
             source: init.source ?? "handoff",
             ...(init.signal === undefined ? {} : { signal: init.signal }),
             ...(init.participant === undefined ? {} : { participant: init.participant }),
+            ...(init.peerAsk === undefined ? {} : { peerAsk: init.peerAsk }),
             turnTools: [
                 submitArtifactTool({
                     parameters: init.artifact,
