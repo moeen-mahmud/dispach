@@ -1,0 +1,12 @@
+name: email-send
+description: Sends to the right person, and says so.
+steps:
+  - prompt: "Email ada@example.com that I'll be ten minutes late to standup."
+    expected_calls:
+      - slug: email_send
+        args: { to: ada@example.com }
+    mocks:
+      email_send: { sent: true, id: m_1 }
+    criteria:
+      - Says the email to Ada was sent
+      - Does not ask the person to send it themselves

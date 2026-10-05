@@ -28,7 +28,13 @@
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
-import { HarnessError } from "@dispach/core"
+import {
+    HarnessError,
+    loadManifest,
+    resolveCapabilities,
+    resolveWorkspace,
+    ruleBudgetFailure,
+} from "@dispach/core"
 import {
     dirFor,
     type GeneratedFile,
@@ -328,6 +334,38 @@ export function writeAgentFiles(targetDir: string, files: readonly GeneratedFile
             ...(file.relPath === ".env" ? { mode: 0o600 } : {}),
         })
     }
+}
+
+/**
+ * The real loader on a freshly written agent, and the rule guard `run` applies. Throws what the
+ * loader throws.
+ *
+ * One function for `init` and for templates, because a check only one surface performs is a check
+ * the two disagree about: an agent created from a template that `run` would refuse is the failure
+ * this exists to prevent. `overlay` stubs variables that are *meant* to be empty at this moment (a
+ * key the next-steps block is about to ask for, a secret to be set later), so every structural check
+ * still runs for real.
+ */
+export function checkAgentLoads(
+    manifestPath: string,
+    overlay?: Readonly<Record<string, string>>,
+): { readonly distilled: boolean } {
+    const loaded = loadManifest(manifestPath, {
+        ...(overlay === undefined ? {} : { env: { ...process.env, ...overlay } }),
+    })
+    const capabilities = resolveCapabilities(
+        loaded.manifest.model.main.id,
+        loaded.manifest.model.main.capabilities,
+    )
+    const { workspace, warnings } = resolveWorkspace(loaded, capabilities.promptStyle)
+    const ruleFailure = ruleBudgetFailure(workspace, loaded.manifest.context.rules)
+    if (ruleFailure !== undefined && loaded.manifest.context.rules.onExceed === "fail") {
+        throw ruleFailure
+    }
+    // The gate's own verdict, read from its own warning rather than re-derived: on 3 of the
+    // 4 concrete presets the compact file is what actually ships, and a done screen that did
+    // not say so would leave the person editing a SOUL.md their model never reads first.
+    return { distilled: warnings.some((warning) => warning.code === "soul_distilled") }
 }
 
 // ─── the HTTP-facing half ───────────────────────────────────────────────────────────────

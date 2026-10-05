@@ -16,15 +16,7 @@
  */
 
 import { basename, dirname, join, resolve } from "node:path"
-import {
-    BRAND,
-    HarnessError,
-    loadManifest,
-    resolveCapabilities,
-    resolveWorkspace,
-    ruleBudgetFailure,
-    VERSION,
-} from "@dispach/core"
+import { BRAND, HarnessError, VERSION } from "@dispach/core"
 import { installRefs } from "#browse"
 import { announce } from "#lib/bootstrap"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
@@ -47,7 +39,7 @@ import { findAndInstallSkill } from "#lib/init-skills"
 import { type PairOutcome, pairLater, pairWhatsApp } from "#lib/init-whatsapp"
 import { negotiateKeyboard } from "#lib/keyboard"
 import { resolveModeFromProcess } from "#lib/output"
-import { complete, FLAG_FOR, fillDefaults, writeAgentFiles } from "#lib/provision"
+import { checkAgentLoads, complete, FLAG_FOR, fillDefaults, writeAgentFiles } from "#lib/provision"
 import { agentsDir, outsideSandboxNote } from "#lib/sandbox"
 import type { InitOptions } from "#lib/schema"
 import { webUrl } from "#lib/web-url"
@@ -150,22 +142,7 @@ async function runInit(options: InitOptions): Promise<InitResult> {
 
     let distilled = false
     try {
-        const loaded = loadManifest(join(targetDir, "agent.yaml"), {
-            ...(needsStub ? { env: { ...process.env, [keyVar]: "(pending)" } } : {}),
-        })
-        const capabilities = resolveCapabilities(
-            loaded.manifest.model.main.id,
-            loaded.manifest.model.main.capabilities,
-        )
-        const { workspace, warnings } = resolveWorkspace(loaded, capabilities.promptStyle)
-        const ruleFailure = ruleBudgetFailure(workspace, loaded.manifest.context.rules)
-        if (ruleFailure !== undefined && loaded.manifest.context.rules.onExceed === "fail") {
-            throw ruleFailure
-        }
-        // The gate's own verdict, read from its own warning rather than re-derived: on 3 of the
-        // 4 concrete presets the compact file is what actually ships, and a done screen that did
-        // not say so would leave the person editing a SOUL.md their model never reads first.
-        distilled = warnings.some((warning) => warning.code === "soul_distilled")
+        distilled = checkAgentLoads(join(targetDir, "agent.yaml"), envOverlay).distilled
     } catch (error) {
         // The files stay on disk — they are inspectable evidence — but the exit is a failure and
         // the loader's own report is printed verbatim. A generated agent that cannot load is this

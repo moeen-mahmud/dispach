@@ -1,0 +1,19 @@
+{
+    "name": "@dispach/control",
+    "version": "0.0.1",
+    "description": "The control plane for Dispach silos: place, route, key, suspend and wake one runtime per user.",
+    "license": "FSL-1.1-ALv2",
+    "type": "module",
+    "private": true,
+    "bin": {
+        "dispach-control": "./src/main.ts"
+    },
+    "engines": {
+        "node": ">=24"
+    },
+    "scripts": {
+        "start": "node src/main.ts",
+        "test:e2e": "CONTROL_E2E=1 bun test ./test/e2e.test.ts --timeout 300000",
+        "typecheck": "tsc -p tsconfig.json"
+    }
+}

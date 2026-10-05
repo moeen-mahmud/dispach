@@ -19,8 +19,8 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { existsSync } from "node:fs"
-import { resolve } from "node:path"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { dirname, join, resolve } from "node:path"
 import { VERSION } from "@dispach/core"
 import { spawnCaptureAsync } from "#lib/spawn"
 
@@ -57,5 +57,52 @@ describe("the built bundle", () => {
         expect(result.stderr.trim()).toBe("")
         expect(result.code).toBe(0)
         expect(result.stdout).toContain("terminal-setup")
+    })
+
+    /**
+     * WhatsApp's transport library is ~23 MiB of every process that loads it, and loading it was
+     * unconditional: `@dispach/channel-whatsapp` imports it dynamically in source, but its own build did
+     * not split, so the library was inlined into its `dist` and reached this bundle as a static import.
+     * Every `serve` paid for it whether or not any agent named a WhatsApp channel.
+     *
+     * Read off the bundle, because the defect lives only there: the static graph from the entry must
+     * not contain it, and a chunk reached by `import()` must — so the channel still works with no
+     * install step — and that chunk must load.
+     */
+    test("the WhatsApp library is behind a dynamic import, and still loads", async () => {
+        if (!existsSync(ENTRY)) return
+        const dist = dirname(ENTRY)
+        const read = (file: string) => readFileSync(join(dist, file), "utf8")
+        const statics = (source: string) =>
+            [...source.matchAll(/from\s*"\.\/([^"]+\.js)"/g)].map((match) => match[1] ?? "")
+        const reached = new Set<string>()
+        const queue = ["index.js"]
+        while (queue.length > 0) {
+            const file = queue.pop() ?? ""
+            if (reached.has(file)) continue
+            reached.add(file)
+            queue.push(...statics(read(file)))
+        }
+        // A protocol constant only the library itself carries; the transport that calls it names other symbols.
+        const MARKER = "Noise_XX_25519_AESGCM_SHA256"
+        expect([...reached].filter((file) => read(file).includes(MARKER))).toEqual([])
+
+        const lazy = readdirSync(dist).filter(
+            (file) => file.endsWith(".js") && !reached.has(file) && read(file).includes(MARKER),
+        )
+        expect(lazy.length).toBeGreaterThan(0)
+        for (const file of lazy) {
+            const result = await spawnCaptureAsync({
+                command: "node",
+                args: [
+                    "--input-type=module",
+                    "-e",
+                    `await import(${JSON.stringify(join(dist, file))})`,
+                ],
+                timeoutMs: 30_000,
+            })
+            expect(result.stderr.trim()).toBe("")
+            expect(result.code).toBe(0)
+        }
     })
 })

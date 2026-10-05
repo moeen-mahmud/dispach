@@ -1222,3 +1222,36 @@ export function pluginSetupFailed(name: string, cause: unknown): ConfigError {
         cause,
     })
 }
+
+/**
+ * A new turn refused by a governor limit (`limits.maxConcurrentTurns`, `limits.tokens`).
+ *
+ * One class for both, told apart by `code`, because every caller treats them the same way: nothing
+ * ran, nothing was recorded, and the refusal is the answer. The server maps it to `429`.
+ */
+export class GovernorError extends HarnessError {
+    static override readonly ERROR_NAME = "GovernorError"
+}
+
+export function turnsAtCapacity(agentId: string, cap: number): GovernorError {
+    return new GovernorError({
+        code: "agent_at_capacity",
+        message: `Agent "${agentId}" is already running ${cap} turn(s), its limits.maxConcurrentTurns.`,
+        hint: "Nothing was run. Retry when a turn finishes, or raise limits.maxConcurrentTurns in the manifest. Turns in the same session already queue behind each other; this limit is across sessions.",
+        field: "limits.maxConcurrentTurns",
+    })
+}
+
+export function tokenBudgetExhausted(
+    agentId: string,
+    used: number,
+    max: number,
+    windowMs: number,
+): GovernorError {
+    return new GovernorError({
+        code: "agent_token_budget_exhausted",
+        message: `Agent "${agentId}" has spent ${used} of its ${max} tokens in the last ${Math.round(windowMs / 1000)} s (limits.tokens).`,
+        hint: `Nothing was run. The budget is rolling, so it frees up as older calls leave the window. Raise limits.tokens.max or shorten windowMs in the manifest to change it; GET /v1/agents/:id/usage shows what was spent.`,
+        field: "limits.tokens",
+    })
+}

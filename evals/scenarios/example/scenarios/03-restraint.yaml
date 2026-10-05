@@ -1,0 +1,8 @@
+name: no-tool-needed
+description: Answers directly when no tool applies — the case phase scoping measured as the cost.
+steps:
+  - prompt: What's 17 times 3?
+    order: exact
+    expected_calls: []
+    criteria:
+      - States that the answer is 51

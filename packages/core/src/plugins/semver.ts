@@ -76,7 +76,7 @@ function tildeUpper(version: Version, specified: 1 | 2 | 3): Version {
 function satisfiesTerm(version: Version, term: string): boolean | undefined {
     if (term === "*" || term === "x" || term === "X") return true
 
-    const operator = /^(>=|<=|>|<|=|\^|~)?\s*(.+)$/.exec(term)
+    const operator = /^(>=|<=|>|<|=|\^|~)?\s*(\S.*)$/.exec(term)
     if (operator === null) return undefined
     const parsed = parsePartial(operator[2] ?? "")
     if (parsed === undefined) return undefined

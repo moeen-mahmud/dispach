@@ -51,6 +51,9 @@ jobs:
       id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
+      # `true` for a version carrying a pre-release (`0.2.0-pilot.1`). Decides the dist-tag, whether the
+      # tap is touched, and which image tags move — a pilot must never become anybody's `latest`.
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
@@ -81,6 +84,7 @@ jobs:
           fi
           if [ "${GITHUB_REF}" = "refs/tags/v${pkg}" ] || [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             echo "version=$pkg" >> "$GITHUB_OUTPUT"
+            case "$pkg" in *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
             echo "v$pkg"
           else
             echo "tag ${GITHUB_REF_NAME} does not match package version $pkg" >&2
@@ -102,10 +106,12 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # A pre-release goes to `next`: `npm i dispach` must keep installing the last release, and an
+      # npm publish without `--tag` would move `latest` to the pilot.
       - name: publish
         if: startsWith(github.ref, 'refs/tags/v')
         working-directory: packages/cli
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance ${{ steps.version.outputs.prerelease == 'true' && '--tag next' || '' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -128,6 +134,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           body_path: /tmp/notes.md
+          prerelease: ${{ needs.npm.outputs.prerelease == 'true' }}
           fail_on_unmatched_files: true
 
   # ─────────────────────────────────────────────────────────────────────────────────────────
@@ -139,9 +146,11 @@ jobs:
   # this job commits to it with `TAP_TOKEN`: a fine-grained PAT with contents:write on that one
   # repository. **Absent, the job fails and names the secret** — the previous arrangement attached
   # the formula and printed the manual step, and the tap served 0.1.0 through the whole of 0.1.1.
+  # Never for a pre-release: `brew install dispach` is a person's machine, and a pilot build is not
+  # something to hand them because a tag happened to be pushed.
   formula:
     needs: npm
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && needs.npm.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -233,15 +242,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `latest` only on a tag; the version tags are what a compose file pins.
+      # `latest` only on a release tag; the version tags are what a compose file pins. A pre-release
+      # moves only its own exact tag (`0.2.0-pilot.1`): never `latest`, never `0.2`.
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.npm.outputs.prerelease != 'true' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && needs.npm.outputs.prerelease != 'true' }}
 
       - uses: docker/build-push-action@v6
         with:

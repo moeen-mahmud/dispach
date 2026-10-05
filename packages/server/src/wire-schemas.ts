@@ -282,24 +282,105 @@ export const ChannelPatchBody = z.object({
     }),
 })
 
-/** `POST /v1/agents` — see the module comment for why the answers are not enumerated here. */
+/**
+ * `POST /v1/agents` — two bodies, one route: the wizard's `answers`, or a `template` with its `vars`.
+ *
+ * One object with every field optional rather than a union, because `parseBody` reads a refusal off
+ * the failing field's own metadata and a union's issues point at the union, which has none. The
+ * route decides which of the two was sent. See the module comment for why the answers are not
+ * enumerated here, and `GET /v1/templates` for the variables, which are the template's to declare.
+ */
 export const ProvisionBody = z.object({
     answers: refuse(
-        z.record(
-            z.string(),
-            // The **value's** own refusal, so a wrong-typed answer reports "invalid" rather than
-            // the record's "required". `metaAt` descends into a record's value type for this.
-            refuse(z.string(), {
-                code: "provision_answer_invalid",
-                hint: "Answers arrive as strings from the terminal and from here, and are validated per step. Send the value as a string — including a boolean-looking choice, whose values are named in GET /v1/provision.",
-                description: "One answer. Always text, whatever the step's type looks like.",
-            }),
-        ),
+        z
+            .record(
+                z.string(),
+                // The **value's** own refusal, so a wrong-typed answer reports "invalid" rather than
+                // the record's "required". `metaAt` descends into a record's value type for this.
+                refuse(z.string(), {
+                    code: "provision_answer_invalid",
+                    hint: "Answers arrive as strings from the terminal and from here, and are validated per step. Send the value as a string — including a boolean-looking choice, whose values are named in GET /v1/provision.",
+                    description: "One answer. Always text, whatever the step's type looks like.",
+                }),
+            )
+            .optional(),
         {
             code: "provision_answers_required",
             hint: 'Send { "answers": { "name": "milo", … } }. Every step you leave out takes its default, exactly as `init --yes` does with flags; GET /v1/provision lists them.',
             description:
-                "A subset of the wizard's steps, as strings. `GET /v1/provision` lists every step with its prompt, default and choices.",
+                "A subset of the wizard's steps, as strings. `GET /v1/provision` lists every step with its prompt, default and choices. Send this or `template`, not both.",
+        },
+    ),
+    template: refuse(z.string().min(1).optional(), {
+        code: "provision_template_invalid",
+        hint: "Send the template's name as a string. GET /v1/templates lists what this server has.",
+        description:
+            "Create the agent from a template in this server's sandbox instead of from answers. Needs `name`; takes `vars`.",
+    }),
+    name: refuse(z.string().optional(), {
+        code: "provision_name_required",
+        hint: 'Send { "template": "…", "name": "Acme store" }. The id every route keys on is derived from it.',
+        description:
+            "The new agent's name, with `template`. Its slug becomes the id; the template sees both as {{agent.name}} and {{agent.id}}.",
+    }),
+    vars: refuse(
+        z
+            .record(
+                z.string(),
+                refuse(z.string(), {
+                    code: "template_value_invalid",
+                    hint: "Template values are one line of text, sent as strings.",
+                    description: "One variable's value.",
+                }),
+            )
+            .optional(),
+        {
+            code: "template_value_invalid",
+            hint: 'Send { "vars": { "store": "Acme" } }, every value a string. GET /v1/templates lists each template\'s variables.',
+            description:
+                "Values for the template's declared variables. A secret variable's value goes to the agent's .env and is never returned.",
+        },
+    ),
+})
+
+/** `POST /v1/webhooks`. Which types exist is `EVENT_TYPES`'s answer, checked by the route. */
+export const WebhookBody = z.object({
+    url: refuse(z.string().min(1), {
+        code: "webhook_url_invalid",
+        hint: "Send an absolute https:// URL. A receiver on a private network needs the operator to allow it in WEBHOOK_ALLOW.",
+        description:
+            "Where deliveries are POSTed. Checked against every address it resolves to, at subscribe and at every send.",
+    }),
+    types: refuse(z.array(z.string()).min(1), {
+        code: "webhook_types_required",
+        hint: 'Send { "types": ["turn.end", "approval.requested"] }. Any event type except model.chunk; the wire spec lists them.',
+        description: "The event types to deliver. `model.chunk` is not deliverable.",
+    }),
+    agents: refuse(z.array(z.string()).min(1).optional(), {
+        code: "webhook_scope_invalid",
+        hint: "Send agent ids this credential can reach, or leave agents out to hear every agent it can reach.",
+        description:
+            "Narrow the subscription to these agents. It can never hear more than the creating credential reaches.",
+    }),
+})
+
+/** `PUT /v1/agents/:id/secrets`. Which names are allowed is the manifest's answer, not this schema's. */
+export const SecretsBody = z.object({
+    values: refuse(
+        z.record(
+            z.string(),
+            refuse(z.string(), {
+                code: "secret_value_invalid",
+                hint: "Send each value as a non-empty string.",
+                description:
+                    "One variable's value. Written to the agent's .env at 0600; never returned.",
+            }),
+        ),
+        {
+            code: "secrets_values_required",
+            hint: 'Send { "values": { "MODEL_API_KEY": "…" } }. GET /v1/agents/:id/secrets lists the variables this agent reads.',
+            description:
+                "Variables to write into the agent's .env, keyed by name. Only names the agent's manifest reads are accepted.",
         },
     ),
 })

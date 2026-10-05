@@ -22,18 +22,21 @@ import { estimateMessageTokens } from "../context/tokens.ts"
 import {
     type ErrorDetail,
     envOverridden,
+    type GovernorError,
     memoryNotConfigured,
     modelWindowFamily,
     modelWindowUnknown,
     phaseAllowUnmatched,
+    tokenBudgetExhausted,
     toolGatedAfterFirstUse,
+    turnsAtCapacity,
     unknownRetriever,
 } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import { newTurnId } from "../loop/ids.ts"
 import { entryPhase, isPhased, unmatchedAllows } from "../loop/phases.ts"
 import type { TurnSender } from "../loop/sender.ts"
-import { runStep } from "../loop/step.ts"
+import { runStep, type StepUsage } from "../loop/step.ts"
 import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from "../loop/turn.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { LoadedManifest } from "../manifest/load.ts"
@@ -229,7 +232,19 @@ export interface AgentSendOptions {
      * travels with the delegation rather than being baked into the member.
      */
     readonly turnTools?: readonly Tool[]
+    /** A slot from `admit()`. Absent: `send` admits for itself, and throws the refusal. */
+    readonly admission?: AdmittedTurn
 }
+
+export interface AdmittedTurn {
+    readonly ok: true
+    /** Give the slot back without running a turn. Idempotent. */
+    release(): void
+    /** Called by `send`; a second use throws. */
+    consume(): void
+}
+
+export type TurnAdmission = AdmittedTurn | { readonly ok: false; readonly error: GovernorError }
 
 export interface AgentDescription {
     readonly id: string
@@ -685,11 +700,87 @@ export class Agent {
      * crash be told apart from a turn that never began.
      */
     async send(input: string, options: AgentSendOptions = {}): Promise<TurnResult> {
-        this.#inFlight += 1
+        if (options.admission === undefined) {
+            const admission = await this.admit()
+            if (!admission.ok) throw admission.error
+            return this.send(input, { ...options, admission })
+        }
+        options.admission.consume()
         try {
             return await this.#send(input, options)
         } finally {
             this.#inFlight -= 1
+        }
+    }
+
+    /**
+     * Ask the governor for a turn slot, before anything about the turn is recorded.
+     *
+     * A caller that has to answer *before* the turn runs — the HTTP route, which returns `429` and
+     * otherwise detaches — admits first and passes the admission to `send`. The slot is held from the
+     * moment the concurrency check passes, synchronously, so two requests racing through the budget
+     * query cannot both take the last slot; a caller that admits and then does not send (an
+     * idempotency replay) must `release()`. Every other caller lets `send` admit for it.
+     *
+     * The budget is read from the meter's rows, which are written fire-and-forget, so a call that
+     * finished a moment ago may not be counted yet. That is inside the one-turn overshoot already
+     * accepted by checking at turn start.
+     */
+    async admit(): Promise<TurnAdmission> {
+        const quick = this.admitNow()
+        if (quick !== undefined) return quick
+        // A budget is configured: take the slot first, synchronously, then read the meter.
+        const slot = this.#takeSlot()
+        if (!slot.ok) return slot
+        const tokens = this.manifest.limits.tokens
+        if (tokens !== undefined) {
+            const from = new Date(Date.now() - tokens.windowMs).toISOString()
+            const [total] = (await this.store.usage.report({ by: [], agentIds: [this.id], from }))
+                .buckets
+            const used = (total?.promptTokens ?? 0) + (total?.outputTokens ?? 0)
+            if (used >= tokens.max) {
+                slot.release()
+                return {
+                    ok: false,
+                    error: tokenBudgetExhausted(this.id, used, tokens.max, tokens.windowMs),
+                }
+            }
+        }
+        return slot
+    }
+
+    /**
+     * `admit`, answered synchronously — or `undefined` when a token budget has to be read first.
+     *
+     * Exists so a caller that answered synchronously before governor limits existed still does for
+     * every agent without `limits.tokens`: the WebSocket bridge sends `ws.accepted` in the same tick
+     * as the frame that asked, and a client that stops a turn on that frame relies on it.
+     */
+    admitNow(): TurnAdmission | undefined {
+        if (this.manifest.limits.tokens !== undefined) return undefined
+        return this.#takeSlot()
+    }
+
+    #takeSlot(): TurnAdmission {
+        const cap = this.manifest.limits.maxConcurrentTurns
+        if (cap !== undefined && this.#inFlight >= cap) {
+            return { ok: false, error: turnsAtCapacity(this.id, cap) }
+        }
+        this.#inFlight += 1
+        let settled = false
+        return {
+            ok: true,
+            release: () => {
+                if (settled) return
+                settled = true
+                this.#inFlight -= 1
+            },
+            // Consuming hands the slot to the running turn, whose `finally` gives it back.
+            consume: () => {
+                if (settled)
+                    throw new Error("A turn admission was used twice. hint: admit once per send.")
+                settled = true
+            },
         }
     }
 
@@ -735,8 +826,10 @@ export class Agent {
         const skills = this.#activateSkills(input, history)
         const remembered = await this.#recall(input, sessionKey, history)
 
+        const meter = this.#meter(sessionKey, turnId, options.from?.id)
         const result = await runTurn({
             agentId: this.id,
+            meter,
             ...(this.#middleware.length === 0 ? {} : { middleware: this.#middleware }),
             sessionKey,
             turnId,
@@ -778,7 +871,7 @@ export class Agent {
                 maxParallelTools: this.manifest.limits.maxParallelTools,
             },
             ...(this.#toolRuntime === undefined ? {} : { tools: this.#toolRuntime }),
-            compaction: this.#compaction(sessionKey),
+            compaction: this.#compaction(sessionKey, meter),
             ...(isPhased(this.manifest.phases)
                 ? {
                       phases: {
@@ -1393,7 +1486,52 @@ export class Agent {
         return resolved
     }
 
-    #compaction(sessionKey: string): TurnCompaction {
+    /**
+     * What one turn's model calls cost, written as they happen.
+     *
+     * One closure per turn, handed to the turn loop **and** to the compactor, so a digest written
+     * during a member's turn is billed to that member rather than lost: the compactor has no turn
+     * row of its own and was the spend nothing recorded. The write is fire-and-forget by
+     * `StepInput.meter`'s contract, and a failure is a warning, never silence.
+     */
+    #meter(
+        sessionKey: string,
+        turnId: string,
+        sender: string | undefined,
+    ): (usage: StepUsage) => void {
+        return (usage) => {
+            this.store.usage
+                .record({
+                    agentId: this.id,
+                    sessionKey,
+                    turnId,
+                    role: usage.role,
+                    model: usage.model,
+                    promptTokens: usage.promptTokens,
+                    promptReported: usage.promptReported,
+                    ...(usage.cachedPromptTokens === undefined
+                        ? {}
+                        : { cachedPromptTokens: usage.cachedPromptTokens }),
+                    outputTokens: usage.outputTokens,
+                    outputReported: usage.outputReported,
+                    ...(sender === undefined ? {} : { sender }),
+                    at: new Date().toISOString(),
+                })
+                .catch((error: unknown) => {
+                    this.#bus.emit(
+                        "agent.warning",
+                        {
+                            code: "usage_record_failed",
+                            message: `Recording a model call's usage failed: ${error instanceof Error ? error.message : String(error)}`,
+                            hint: "The reply was unaffected; this call is missing from GET /v1/usage. A store that cannot be written is usually full or read-only.",
+                        },
+                        { agentId: this.id, sessionKey },
+                    )
+                })
+        }
+    }
+
+    #compaction(sessionKey: string, meter: (usage: StepUsage) => void): TurnCompaction {
         // `resolveRoles` always returns a compactor — it falls back to `main`, deliberately, so an
         // unconfigured role costs nothing. `configuredAs` is what distinguishes "configured" from
         // "inherited", and only a configured one gets to write digests: asking the model that is
@@ -1453,6 +1591,7 @@ export class Agent {
                               bus: this.#bus,
                               context: { agentId: this.id, sessionKey },
                               signal,
+                              meter,
                           })
                           return result.text
                       },

@@ -237,7 +237,8 @@ function stripWrappers(command: string): string {
 /** Above this, the parse is meaningless and the call asks instead. */
 const MAX_MATCHABLE = 10_000
 
-const SEPARATORS = /\s*(?:&&|\|\||;|\||&|\n)\s*/
+// No `\s*` either side: `stripWrappers` trims each part, and the padding made the split quadratic.
+const SEPARATORS = /&&|\|\||;|\||&|\n/
 
 /**
  * Split a shell string into the commands it actually runs.

@@ -218,8 +218,9 @@ describe("status verdicts", () => {
             leaseMode: "terminal",
         })
         expect(report.verdict).toBe("running")
-        expect(report.rows[0]?.value).toContain("running in a terminal")
-        expect(report.rows[0]?.note).toContain("not installed")
+        expect(report.rows[0]?.value).toContain("running · pid")
+        expect(report.rows[0]?.value).not.toContain("terminal")
+        expect(report.rows[0]?.note).toContain("not an installed service")
     })
 
     test("nothing anywhere is absent, and absent is not healthy", () => {
