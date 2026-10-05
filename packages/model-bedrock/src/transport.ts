@@ -26,7 +26,7 @@ import {
     type RetryPolicy,
 } from "@dispach/core"
 import { classify } from "./errors.ts"
-import { cachesPrompts, converseInput } from "./request.ts"
+import { cachesPrompts, converseInput, roleWarnings } from "./request.ts"
 import { toChunks } from "./stream.ts"
 
 export interface BedrockOptions {
@@ -122,6 +122,7 @@ export function bedrockTransport(senderFactory: SenderFactory = sdkSender): Mode
             config.capabilities?.promptCache === undefined && cachesPrompts(config.id)
                 ? { ...resolved, promptCache: "bedrock" }
                 : resolved,
+        warnings: (config, field) => roleWarnings(config, field),
         create(context): ModelProvider {
             const options = context.options as BedrockOptions | undefined
             if (options === undefined) {

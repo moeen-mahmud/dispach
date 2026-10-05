@@ -18,7 +18,14 @@ import { type Plugin, VERSION } from "@dispach/core"
 import { bedrockTransport } from "./transport.ts"
 
 export { classify } from "./errors.ts"
-export { cachesPrompts, converseInput, thinksWithBudget } from "./request.ts"
+export {
+    cachesPrompts,
+    converseInput,
+    roleWarnings,
+    thinkingOff,
+    thinkingStyle,
+    thinksWithBudget,
+} from "./request.ts"
 export { toChunks } from "./stream.ts"
 export {
     type BedrockOptions,

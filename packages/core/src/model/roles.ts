@@ -7,6 +7,7 @@
  * cost win.
  */
 
+import type { ErrorDetail } from "../errors.ts"
 import { unknownModelRole } from "../errors.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import type { AgentManifest, ModelRole, ModelRoleConfig } from "../manifest/schema.ts"
@@ -19,7 +20,7 @@ import {
 } from "./capabilities.ts"
 import type { ChatCompletionsConfig } from "./chat-completions.ts"
 import { type FallbackInfo, withFallbacks } from "./fallback.ts"
-import type { FetchLike, ModelProvider } from "./provider.ts"
+import type { ChatRequest, FetchLike, ModelProvider } from "./provider.ts"
 import { BUILT_IN_TRANSPORTS, type ModelTransport, transportFor } from "./transport.ts"
 
 export interface ResolvedRole {
@@ -38,6 +39,8 @@ export interface ResolvedRole {
      */
     readonly window: WindowProvenance
     readonly provider: ModelProvider
+    /** What the role's transport cannot honour in its config (`ModelTransport.warnings`). */
+    readonly warnings?: readonly ErrorDetail[]
 }
 
 /**
@@ -120,6 +123,7 @@ function buildRole(
     const resolved = resolveCapabilities(config.id, config.capabilities)
     const { transport } = transportFor(config, field, options.transports ?? BUILT_IN_TRANSPORTS)
     const capabilities = transport.capabilities?.(resolved, config) ?? resolved
+    const warnings = transport.warnings?.(config, field) ?? []
     const primary = providerFor(
         config,
         field,
@@ -153,6 +157,7 @@ function buildRole(
         capabilities,
         window: windowProvenance(config.id, config.capabilities),
         provider,
+        ...(warnings.length === 0 ? {} : { warnings }),
     }
 }
 
@@ -205,7 +210,7 @@ export function requestParamsFor(
     topP?: number
     /** Absent unless `model.<role>.maxTokens` was configured. See below. */
     maxTokens?: number
-    reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high"
+    reasoningEffort?: ChatRequest["reasoningEffort"]
 } {
     // `max_tokens` is sent ONLY when someone asked for it.
     //

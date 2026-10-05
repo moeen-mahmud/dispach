@@ -18,6 +18,7 @@ import {
     type ConverseSend,
     classify,
     converseInput,
+    roleWarnings,
     toChunks,
 } from "../src/index.ts"
 
@@ -134,6 +135,105 @@ describe("request mapping", () => {
             thinking: { type: "enabled", budget_tokens: 8192 },
         })
         expect(input.inferenceConfig).toEqual({ maxTokens: 8192 + 16_384 })
+    })
+
+    describe("reasoning effort by model (VelaCrew tiers, pilot.6)", () => {
+        const fields = (
+            model: string,
+            effort: ChatRequest["reasoningEffort"],
+            temperature?: number,
+        ) =>
+            converseInput(
+                {
+                    model,
+                    messages: [{ role: "user", content: "hi" }],
+                    ...(effort === undefined ? {} : { reasoningEffort: effort }),
+                    ...(temperature === undefined ? {} : { temperature }),
+                },
+                CONFIG,
+            )
+
+        test("Claude 4.7 and later get adaptive thinking with an effort, never a budget or a temperature", () => {
+            for (const model of [
+                "eu.anthropic.claude-opus-4-7",
+                "global.anthropic.claude-sonnet-5-5",
+            ]) {
+                const input = fields(model, "xhigh", 0.3)
+                expect(input.additionalModelRequestFields).toEqual({
+                    thinking: { type: "adaptive" },
+                    output_config: { effort: "xhigh" },
+                })
+                expect(input.inferenceConfig).toEqual({ maxTokens: 32_768 })
+            }
+            expect(
+                fields("global.anthropic.claude-opus-5-5", "max").additionalModelRequestFields,
+            ).toEqual({
+                thinking: { type: "adaptive" },
+                output_config: { effort: "max" },
+            })
+        })
+
+        test("none is each model's own off switch, or low effort where there is none", () => {
+            expect(
+                fields("global.anthropic.claude-sonnet-5-5", "none").additionalModelRequestFields,
+            ).toEqual({
+                thinking: { type: "between_tools" },
+            })
+            expect(
+                fields("global.anthropic.claude-opus-5-5", "none").additionalModelRequestFields,
+            ).toEqual({
+                thinking: { type: "adaptive" },
+                output_config: { effort: "low" },
+            })
+            expect(
+                fields("us.anthropic.claude-opus-5", "none").additionalModelRequestFields,
+            ).toEqual({
+                thinking: { type: "disabled" },
+            })
+        })
+
+        test("an unset effort sends nothing, and 4.6 keeps its budget", () => {
+            expect(
+                fields("global.anthropic.claude-opus-5-5", undefined).additionalModelRequestFields,
+            ).toBeUndefined()
+            expect(
+                fields("eu.anthropic.claude-opus-4-6", "high").additionalModelRequestFields,
+            ).toEqual({
+                thinking: { type: "enabled", budget_tokens: 16_384 },
+            })
+        })
+
+        test("an openai model gets the effort as reasoning_effort; Nova gets none", () => {
+            expect(
+                fields("global.openai.gpt-6-luna", "xhigh").additionalModelRequestFields,
+            ).toEqual({
+                reasoning_effort: "xhigh",
+            })
+            expect(
+                fields("amazon.nova-micro-v1:0", "high").additionalModelRequestFields,
+            ).toBeUndefined()
+        })
+
+        test("what cannot be honoured is said at load", () => {
+            const codes = (id: string, extra: Record<string, unknown>) =>
+                roleWarnings({ id, api: "bedrock-converse", ...extra }, "model.main").map(
+                    (w) => w.code,
+                )
+            expect(codes("global.anthropic.claude-opus-5-5", { reasoningEffort: "none" })).toEqual([
+                "model_thinking_always_on",
+            ])
+            expect(codes("global.anthropic.claude-sonnet-5-5", { temperature: 0.2 })).toEqual([
+                "model_sampling_unsupported",
+            ])
+            expect(codes("eu.anthropic.claude-sonnet-4-6", { temperature: 0.2 })).toEqual([])
+        })
+
+        test("a refusal stop reason is a content_filter finish", async () => {
+            const chunks = await collect(
+                toChunks(events([{ messageStop: { stopReason: "refusal" as never } }])),
+            )
+            expect(chunks).toContainEqual({ type: "finish", reason: "content_filter" })
+        })
     })
 
     test("a model family without prompt caching is sent no cachePoint, nor is one opted out", () => {
@@ -451,6 +551,34 @@ limits:
         expect(JSON.stringify(second[2]?.content)).toContain("OBSERVATION now")
         expect(reply.text).toBe("It is noon.")
     })
+})
+
+test("a transport's load warnings reach the agent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bedrock-warn-"))
+    writeFileSync(
+        join(dir, "agent.yaml"),
+        `apiVersion: ${BRAND.apiVersion}
+id: warned
+model:
+  main:
+    id: global.anthropic.claude-opus-5-5
+    api: bedrock-converse
+    reasoningEffort: none
+    options:
+      region: eu-west-1
+`,
+    )
+    const runtime = await Runtime.create({
+        agents: [join(dir, "agent.yaml")],
+        env: {},
+        store: ":memory:",
+        modelTransports: {
+            "bedrock-converse": bedrockTransport(async () => async () => events([])),
+        },
+    })
+    const codes = runtime.agent("warned")?.warnings.map((warning) => warning.code) ?? []
+    await runtime.stop()
+    expect(codes).toContain("model_thinking_always_on")
 })
 
 describe("capabilities through the transport", () => {

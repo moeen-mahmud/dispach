@@ -418,6 +418,7 @@ for instead.
 interface ModelTransport {
   optionsSchema?: ConfigSchema            // validates model.<role>.options at load
   capabilities?(resolved, config): ModelCapabilities      // what this transport makes true
+  warnings?(config, field): ErrorDetail[]                 // what it adjusts, shown at load (pilot.6)
   create(context: ModelTransportContext): ModelProvider   // no network: runs before ready
 }
 

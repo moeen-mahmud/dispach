@@ -1138,6 +1138,22 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                 break
             }
 
+            // The model, or a guardrail in front of it, declined. Ended as an error rather than recorded
+            // as the answer: a refusal often arrives with no text, and a turn that ends `final` on an
+            // empty reply is the silent shape. `content_filter` is chat-completions' spelling and the
+            // Bedrock transport's for a refusal, a guardrail and a content filter alike.
+            if (step.finishReason === "content_filter" || step.finishReason === "refusal") {
+                reason = "error"
+                const detail: ErrorDetail = {
+                    code: "model_refused",
+                    message: `The model declined to answer (finish reason ${step.finishReason})${step.text.trim() === "" ? " and returned no text" : ""}.`,
+                    hint: "A safety classifier or a guardrail stopped this reply; retrying the same request will usually end the same way. Rephrase it, or give this kind of task to a different model. model.<role>.fallbacks does not apply: it moves on only when the endpoint fails, and a refusal is an answer.",
+                }
+                error = detail
+                input.bus.emit("agent.warning", detail, context)
+                break
+            }
+
             const output: StepOutput = { text: step.text, calls: step.calls }
             /** Calls the dialect could not read at all. Only `native` can produce these. */
             const unreadable = parsed.malformed ?? []

@@ -9,7 +9,7 @@
  * special case, so there is exactly one path from a role to its provider.
  */
 
-import { ConfigError } from "../errors.ts"
+import { ConfigError, type ErrorDetail } from "../errors.ts"
 import type { EnvSource } from "../manifest/env.ts"
 import { DEFAULT_MODEL_API, type ModelRoleConfig } from "../manifest/schema.ts"
 import type { ConfigSchema } from "../plugins/plugin.ts"
@@ -44,6 +44,12 @@ export interface ModelTransport {
      * manifest set alone.
      */
     capabilities?(resolved: ModelCapabilities, config: ModelRoleConfig): ModelCapabilities
+    /**
+     * What this transport cannot honour in a role's config, said at load. A setting the model refuses
+     * is adjusted by the transport rather than failing every call, and this is where the adjustment
+     * is named: `agent.warnings`, which every front end shows.
+     */
+    warnings?(config: ModelRoleConfig, field: string): readonly ErrorDetail[]
     /** Build the provider. Must not touch the network: this runs before `runtime.ready`. */
     create(context: ModelTransportContext): ModelProvider
 }

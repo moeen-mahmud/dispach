@@ -526,7 +526,18 @@ export class Agent {
         this.roles = init.roles
         this.workspace = init.workspace
         this.identity = init.workspace.static
-        this.warnings = init.warnings
+        // What a configured role's transport could not honour, once per role that was written down.
+        this.warnings = [
+            ...init.warnings,
+            ...[
+                init.roles.main,
+                init.roles.selector,
+                init.roles.compactor,
+                ...init.roles.custom.values(),
+            ]
+                .filter((role) => role.configuredAs === role.role || role.role === "main")
+                .flatMap((role) => role.warnings ?? []),
+        ]
         this.#bus = init.bus
         this.store = init.store
         this.tools = init.tools

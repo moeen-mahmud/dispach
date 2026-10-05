@@ -97,7 +97,9 @@ const ModelRoleFields = z
          * Not universally honoured, and an endpoint that ignores it says nothing. Verify per
          * endpoint rather than assuming.
          */
-        reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high"]).optional(),
+        reasoningEffort: z
+            .enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+            .optional(),
         headers: z.record(z.string(), z.string()).optional(),
         /**
          * Ask the endpoint to report token usage in a streamed response.

@@ -22,6 +22,9 @@ const FINISH: Record<string, string> = {
     model_context_window_exceeded: "length",
     content_filtered: "content_filter",
     guardrail_intervened: "content_filter",
+    // A model's own safety classifier declining (Claude 5.5 and later). One spelling for all three,
+    // which the loop ends as `model_refused` rather than as an empty answer.
+    refusal: "content_filter",
 }
 
 type Open =

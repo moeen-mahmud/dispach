@@ -145,7 +145,7 @@ export interface ChatRequest {
      * endpoint in the same test. So treat it as a request, verify it per endpoint, and never assume
      * a lower setting took effect.
      */
-    readonly reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high"
+    readonly reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
     /** Omitted entirely under a text dialect, so the request body is unchanged from Phase 1. */
     readonly tools?: readonly ToolDefinition[]
 }

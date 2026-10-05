@@ -23,7 +23,7 @@ import type {
     SystemContentBlock,
     ToolUseBlock,
 } from "@aws-sdk/client-bedrock-runtime"
-import type { ChatMessage, ChatRequest, ModelRoleConfig } from "@dispach/core"
+import type { ChatMessage, ChatRequest, ErrorDetail, ModelRoleConfig } from "@dispach/core"
 
 const CACHE_POINT = { cachePoint: { type: "default" as const } }
 
@@ -45,8 +45,87 @@ export function cachesPrompts(modelId: string): boolean {
 
 /** Anthropic models on Bedrock take extended thinking through `additionalModelRequestFields`. */
 export function thinksWithBudget(modelId: string): boolean {
-    return /(^|[./])anthropic\.claude/.test(modelId)
+    return thinkingStyle(modelId) === "budget"
 }
+
+/** A Claude model's family and version, from a Bedrock id: `eu.anthropic.claude-sonnet-4-6`. */
+function claudeVersion(
+    modelId: string,
+): { readonly family: string; readonly version: number } | undefined {
+    // Current ids put the family first (`claude-opus-5-5`, `claude-sonnet-4-20250514-v1:0`); older ones
+    // put it last (`claude-3-7-sonnet-20250219-v1:0`). A dated suffix is not a minor version.
+    const current = /anthropic\.claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?/.exec(
+        modelId,
+    )
+    if (current !== null) {
+        const minor = Number(current[3] ?? "0")
+        return {
+            family: current[1] ?? "",
+            version: Number(current[2]) + (minor < 100 ? minor / 10 : 0),
+        }
+    }
+    const older = /anthropic\.claude-(\d+)(?:-(\d+))?-(opus|sonnet|haiku)/.exec(modelId)
+    if (older !== null) {
+        return { family: older[3] ?? "", version: Number(older[1]) + Number(older[2] ?? "0") / 10 }
+    }
+    return /anthropic\.claude/.test(modelId) ? { family: "", version: 0 } : undefined
+}
+
+/**
+ * How a Bedrock model takes reasoning: a Claude token budget, Claude's adaptive thinking with an effort,
+ * or an `openai.*` effort. Adaptive from 4.7, the first version that refuses a budget with a 400; 4.6
+ * still accepts one (deprecated), so its requests stay exactly as they were.
+ */
+export function thinkingStyle(modelId: string): "budget" | "adaptive" | "openai" | undefined {
+    if (/(^|[./])openai\./.test(modelId)) return "openai"
+    const claude = claudeVersion(modelId)
+    if (claude === undefined) return undefined
+    if (claude.family === "fable" || claude.family === "mythos") return "adaptive"
+    return claude.family !== "haiku" && claude.version >= 4.7 ? "adaptive" : "budget"
+}
+
+/**
+ * How `reasoningEffort: none` is spelled for an adaptive Claude model, which differs by model: most
+ * accept `disabled`, Sonnet 5.5 refuses it and turns thinking off with `between_tools`, and Opus 5.5,
+ * Fable and Mythos cannot turn it off at all, so `none` runs at the lowest effort instead.
+ */
+export function thinkingOff(modelId: string): "disabled" | "between_tools" | "low" {
+    const claude = claudeVersion(modelId)
+    if (claude === undefined) return "disabled"
+    if (claude.family === "fable" || claude.family === "mythos") return "low"
+    if (claude.family === "opus" && claude.version >= 5.5) return "low"
+    if (claude.family === "sonnet" && claude.version >= 5.5) return "between_tools"
+    return "disabled"
+}
+
+/**
+ * What this transport adjusts in a role's config, said at load rather than discovered as a 400 or as
+ * a setting that quietly did nothing.
+ */
+export function roleWarnings(config: ModelRoleConfig, field: string): readonly ErrorDetail[] {
+    const warnings: ErrorDetail[] = []
+    if (thinkingStyle(config.id) !== "adaptive") return warnings
+    if (config.reasoningEffort === "none" && thinkingOff(config.id) === "low") {
+        warnings.push({
+            code: "model_thinking_always_on",
+            message: `${config.id} cannot turn thinking off, so ${field}.reasoningEffort: none runs at low effort.`,
+            hint: `Set ${field}.reasoningEffort: low to say so explicitly, which also silences this.`,
+            field: `${field}.reasoningEffort`,
+        })
+    }
+    if (config.temperature !== undefined || config.topP !== undefined) {
+        warnings.push({
+            code: "model_sampling_unsupported",
+            message: `${config.id} does not accept temperature or topP, so ${field} sends neither.`,
+            hint: `Remove temperature and topP from ${field}; steer this model with reasoningEffort instead.`,
+            field,
+        })
+    }
+    return warnings
+}
+
+/** Output a reply gets when adaptive thinking is on and no `maxTokens` was configured. */
+const ADAPTIVE_MAX_TOKENS = 32_768
 
 /** `reasoningEffort` as an Anthropic thinking budget. `none` and unset mean no thinking requested. */
 /** Output left for the answer after a thinking budget, when no `maxTokens` was configured. */
@@ -188,25 +267,42 @@ export function converseInput(
         else messages.push({ role, content })
     }
 
+    const style = thinkingStyle(request.model)
+    const effort = request.reasoningEffort
     const budget =
-        thinksWithBudget(request.model) && request.reasoningEffort !== undefined
-            ? THINKING_BUDGET[request.reasoningEffort]
+        style === "budget" && effort !== undefined
+            ? THINKING_BUDGET[effort === "xhigh" || effort === "max" ? "high" : effort]
             : undefined
+    const adaptive = style === "adaptive" ? adaptiveFields(request.model, effort) : undefined
+    // Claude 4.7 and later refuse a sampling setting (Sonnet 5.5 a non-default one), so it is never
+    // sent to them; `warnings` says so at load.
+    const sampling = budget === undefined && style !== "adaptive"
     // Anthropic requires the output cap to exceed the thinking budget, and refuses a sampling
     // temperature beside it. The headroom past the budget is what the answer gets once thinking has
     // spent it: 4,096 cut long tool calls off mid-argument (VelaCrew, pilot.4), so it is 16,384 —
     // under every thinking-capable Claude's output ceiling even at the `high` budget.
     const maxTokens =
-        budget === undefined
-            ? request.maxTokens
-            : Math.max(request.maxTokens ?? 0, budget + ANSWER_HEADROOM)
+        budget !== undefined
+            ? Math.max(request.maxTokens ?? 0, budget + ANSWER_HEADROOM)
+            : adaptive?.thinking === true
+              ? (request.maxTokens ?? ADAPTIVE_MAX_TOKENS)
+              : request.maxTokens
     const inference = {
         ...(maxTokens === undefined ? {} : { maxTokens }),
-        ...(budget !== undefined || request.temperature === undefined
+        ...(!sampling || request.temperature === undefined
             ? {}
             : { temperature: request.temperature }),
-        ...(budget !== undefined || request.topP === undefined ? {} : { topP: request.topP }),
+        ...(!sampling || request.topP === undefined ? {} : { topP: request.topP }),
     }
+    const extra =
+        budget !== undefined
+            ? { thinking: { type: "enabled", budget_tokens: budget } }
+            : adaptive !== undefined
+              ? adaptive.fields
+              : style === "openai" && effort !== undefined && effort !== "none"
+                ? // The field name is the OpenAI API's; confirmed by a probe on Bedrock, not assumed.
+                  { reasoning_effort: effort === "minimal" ? "low" : effort }
+                : undefined
 
     return {
         modelId: request.model,
@@ -226,12 +322,34 @@ export function converseInput(
                       })),
                   },
               }),
-        ...(budget === undefined
-            ? {}
-            : {
-                  additionalModelRequestFields: {
-                      thinking: { type: "enabled", budget_tokens: budget },
-                  },
-              }),
+        ...(extra === undefined ? {} : { additionalModelRequestFields: extra }),
+    }
+}
+
+/**
+ * Adaptive thinking's request fields for one effort. `thinking` is whether thinking stays on, which
+ * decides the output headroom. Unset effort sends nothing: the model's own default.
+ */
+function adaptiveFields(
+    modelId: string,
+    effort: ChatRequest["reasoningEffort"],
+): { readonly fields: Record<string, Document>; readonly thinking: boolean } | undefined {
+    if (effort === undefined) return undefined
+    if (effort === "none") {
+        const off = thinkingOff(modelId)
+        if (off === "low") {
+            return {
+                fields: { thinking: { type: "adaptive" }, output_config: { effort: "low" } },
+                thinking: true,
+            }
+        }
+        return { fields: { thinking: { type: off } }, thinking: false }
+    }
+    return {
+        fields: {
+            thinking: { type: "adaptive" },
+            output_config: { effort: effort === "minimal" ? "low" : effort },
+        },
+        thinking: true,
     }
 }
