@@ -18,7 +18,8 @@ import { isChildSession } from "../src/team/child-session.ts"
 import type { Tool, ToolProviderFactory } from "../src/tools/types.ts"
 import { describe, expect, test } from "./_harness.ts"
 
-const RAW = `MAILBOX-RAW ${"Subject: quarterly numbers. ".repeat(40)}`
+// Far past `observationMaxTokens` (2,000), with a fact in the middle, where a cut removes text.
+const RAW = `MAILBOX-RAW ${"Subject: quarterly numbers. ".repeat(350)}MIDDLE-FACT ${"Subject: weekly sync. ".repeat(350)}`
 
 const SUBAGENTS = `subagents:
   - name: inbox
@@ -153,6 +154,8 @@ describe("a routed call", () => {
         expect(children.some((body) => body.includes("MAILBOX-RAW"))).toBe(true)
         // And it was told what the call was for: the person's own question.
         expect(children[0]).toContain("anything new?")
+        // And read all of it: a child's own window is its limit, not the parent's observation cap.
+        expect(children[1]).toContain("MIDDLE-FACT")
         const after = parent[1] ?? ""
         expect(after).toContain("Two unread, one from Ada about the numbers.")
         expect(after).toContain("ran in subagent inbox")
@@ -420,4 +423,24 @@ test("a delegation's own session is not a conversation", () => {
     expect(isChildSession("handoff:r_1")).toBe(true)
     expect(isChildSession("local:3c2dc5")).toBe(false)
     expect(isChildSession("api:subagent:x")).toBe(false)
+})
+
+test("a submit in the same step as the call it reports on is refused, so nothing invented reaches the parent", async () => {
+    const { runtime, parent, events } = await boot([
+        "ACTION: mail_list\nfolder: inbox\nEND\nACTION: submit_artifact\nsummary: INVENTED before the result existed.\nEND",
+        "ACTION: submit_artifact\nsummary: Read it: Two unread, one from Ada.\nEND",
+    ])
+    await runtime.agent("test")?.send("anything new?", { sessionKey: "api:alone" })
+    const after = parent[1] ?? ""
+    expect(after).not.toContain("INVENTED")
+    expect(after).toContain("Read it: Two unread, one from Ada.")
+    const gated = events.find(
+        (event) =>
+            event.type === "tool.gated" &&
+            (event.data as { slug?: string }).slug === "submit_artifact",
+    )
+    expect((gated?.data as { reason?: string } | undefined)?.reason).toContain(
+        "same step as mail_list",
+    )
+    await runtime.stop()
 })

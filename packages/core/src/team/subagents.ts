@@ -17,20 +17,18 @@ import type { HandoffStore } from "../store/store.ts"
 import type { Tool, ToolContext, ToolParameters } from "../tools/types.ts"
 import { type HandoffOutcome, type HandoffTarget, runHandoff } from "./handoff.ts"
 
-/** What a child returns when its subagent declares no schema of its own. */
+/**
+ * What a child returns when its subagent declares no schema of its own: one string. A list is the field
+ * a model formats wrong; under NLT a child wrote `findings` as a YAML list, spent its one repair on it
+ * and could end with no artifact at all.
+ */
 export const DEFAULT_SUBAGENT_ARTIFACT: ToolParameters = {
     type: "object",
     properties: {
         summary: {
             type: "string",
             description:
-                "What the call returned, in a few sentences, with every figure that matters.",
-        },
-        findings: {
-            type: "array",
-            items: { type: "string" },
-            description:
-                "One entry per item worth acting on: ids, names, dates and links kept exact.",
+                "What answers the person's question, and what they are likely to ask next about it. Keep every id, name, date, amount and file name exactly as written.",
         },
     },
     required: ["summary"],

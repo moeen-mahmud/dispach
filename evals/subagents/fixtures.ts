@@ -279,7 +279,7 @@ export const TASKS: readonly FixtureTask[] = [
                 ask: "Check my inbox. Which messages need a reply from me?",
                 expect: ["Farah", "Goran"],
             },
-            { ask: "Which of those has a deadline, and when is it?", expect: ["Friday"] },
+            { ask: "Which of those has a deadline, and when is it?", expect: ["Farah", "Friday"] },
         ],
     },
     {
@@ -358,7 +358,7 @@ export const TASKS: readonly FixtureTask[] = [
         tool: tool("review_list", "Lists recent product reviews.", reviews),
         turns: [
             { ask: "Summarise the negative reviews.", expect: ["Monitor arm", "clamp"] },
-            { ask: "How many one-star reviews were there?", expect: [["two", " 2 "]] },
+            { ask: "How many one-star reviews were there?", expect: [["two", " 2 ", "**2**"]] },
         ],
     },
     {

@@ -1039,7 +1039,7 @@ subagents:
     tools: [GMAIL_FETCH_EMAILS, GMAIL_GET_THREAD]   # a subset of tools.pinned / tools.local
     route:
       tools: [GMAIL_FETCH_EMAILS]                    # calls to these run the child
-    # artifact:   a JSON Schema object, as for team.members; default {summary, findings[]}
+    # artifact:   a JSON Schema object, as for team.members; default {summary}
     # model:      a role under model:; default model.subagent when declared, else main
     # maxSteps:   lowers limits.maxSteps for the child
 ```
@@ -1050,7 +1050,7 @@ subagents:
 | `task` | Required. What the child is for, written ahead of the call it is handed. |
 | `tools` | Required. Exact slugs, each in `tools.pinned` or `tools.local` (`subagent_tool_not_pinned`). A child only narrows its parent. Its catalogue is these plus `submit_artifact`. |
 | `route.tools` | Required. Each slug must be in this child's `tools` (`subagent_route_outside_tools`), and a slug is routed by one child only (`subagent_route_duplicate`). |
-| `artifact` | Optional JSON Schema object. Absent: `{summary: string, findings?: string[]}`. |
+| `artifact` | Optional JSON Schema object. Absent: `{summary: string}`, told to keep every id, name, date and amount exactly. One string, because a list is the field a model formats wrong. |
 | `model` | Optional role name (`subagent_role_unknown` when undeclared). Absent: `model.subagent`, else `main`. Usage rows and `model.result` say `role: subagent` either way, with `model` naming the endpoint. |
 | `maxSteps` | Optional. Lowers `limits.maxSteps` for the child, never raises it. |
 
@@ -1062,6 +1062,11 @@ skills or recalled memory. **Depth is 1**: a child's calls run the tool, never a
 
 **Trust of the artifact.** Untrusted when the routed tool is declared untrusted, or when the child read
 untrusted output; trusted otherwise.
+
+**A child reads its call's whole output.** Its observation cap is the larger of
+`context.observationMaxTokens` and three quarters of its own prompt budget (its model's window less
+`reserveOutput`), because reading all of it is the child's job and it holds nothing else. Past that
+it is cut as any observation is.
 
 **Limits.** A routed call is one tool call, so it is bounded by `limits.toolTimeoutMs`: the child is
 ended a second before the call would be abandoned and reports `subagent_budget`. Children run one at

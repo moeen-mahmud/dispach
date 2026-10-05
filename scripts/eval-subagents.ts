@@ -52,6 +52,7 @@ const FLAGS = [
     "price-subagent",
     "tasks",
     "arms",
+    "repeats",
     "out",
     "help",
 ] as const
@@ -68,6 +69,7 @@ const HELP = `eval-subagents — is routing bulk tool work to a subagent worth i
   --price-subagent <in,out>     the same for --subagent-model
   --tasks <ids>                 a comma-separated subset of the ten tasks
   --arms <names>                inline,routed,routed-cheap (default: all that can run)
+  --repeats <n>                 runs of each task per arm (default 1); a hosted endpoint varies
   --out <path>                  results.json (default evals/subagents/results.json)
 
 Tokens are the endpoint's own usage figures. A turn passes when its reply holds every required fact.
@@ -194,6 +196,7 @@ interface Usage {
 
 interface RunResult {
     readonly task: string
+    readonly repeat: number
     readonly arm: Arm
     readonly passed: readonly boolean[]
     readonly replies: readonly string[]
@@ -259,7 +262,18 @@ async function runTask(
         await runtime.stop()
         rmSync(dir, { recursive: true, force: true })
     }
-    return { task: task.id, arm, passed, replies, reasons, parent, child, reported, handoffs }
+    return {
+        task: task.id,
+        repeat: 0,
+        arm,
+        passed,
+        replies,
+        reasons,
+        parent,
+        child,
+        reported,
+        handoffs,
+    }
 }
 
 function cost(
@@ -325,16 +339,18 @@ async function main(): Promise<number> {
     const only = arg("tasks")?.split(",")
     const tasks = TASKS.filter((task) => only === undefined || only.includes(task.id))
 
+    const repeats = Math.max(1, Number(arg("repeats") ?? "1"))
     const results: RunResult[] = []
-    for (const task of tasks) {
-        for (const arm of arms) {
-            const result = await runTask(task, arm, main, cheap, env)
-            results.push(result)
-            process.stdout.write(
-                `${task.id.padEnd(12)} ${arm.padEnd(13)} ${result.passed.map((ok) => (ok ? "pass" : "FAIL")).join(" ")}  parent ${result.parent.prompt} prompt  child ${result.child.prompt} prompt${result.handoffs.length > 0 ? `  [${result.handoffs.join(",")}]` : ""}\n`,
-            )
+    for (let repeat = 0; repeat < repeats; repeat += 1)
+        for (const task of tasks) {
+            for (const arm of arms) {
+                const result = { ...(await runTask(task, arm, main, cheap, env)), repeat }
+                results.push(result)
+                process.stdout.write(
+                    `${task.id.padEnd(12)} ${arm.padEnd(13)} ${result.passed.map((ok) => (ok ? "pass" : "FAIL")).join(" ")}  parent ${result.parent.prompt} prompt  child ${result.child.prompt} prompt${result.handoffs.length > 0 ? `  [${result.handoffs.join(",")}]` : ""}\n`,
+                )
+            }
         }
-    }
 
     const summary = arms.map((arm) => {
         const rows = results.filter((result) => result.arm === arm)
@@ -379,6 +395,7 @@ async function main(): Promise<number> {
             {
                 ranAt: new Date().toISOString(),
                 model: main.id,
+                repeats,
                 ...(cheap === undefined ? {} : { subagentModel: cheap.id }),
                 prices: { main: mainPrice, subagent: cheapPrice },
                 summary,

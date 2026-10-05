@@ -506,6 +506,8 @@ export async function executeIntents(input: ExecuteInput): Promise<ExecuteOutcom
     }
 
     const results: ToolResult[] = []
+    // A call that must stand alone is refused when it does not: see `ToolSpec.alone`.
+    const crowded = planned.length > 1
     let tainted = input.untrustedInTurn
     let source = input.untrustedSource ?? "an earlier tool call"
 
@@ -517,7 +519,11 @@ export async function executeIntents(input: ExecuteInput): Promise<ExecuteOutcom
             // and neither the gate nor the policy should quietly depend on that staying true.
             // Position is preserved either way, so `results` still answers every announced call in
             // order — which the native protocol requires.
-            group.map((entry) => wrapped(entry, input, tainted, source)),
+            group.map((entry) =>
+                crowded && entry.tool.spec.alone === true
+                    ? Promise.resolve(notAlone(entry, planned, input))
+                    : wrapped(entry, input, tainted, source),
+            ),
         )
         results.push(...settled)
 
@@ -534,6 +540,47 @@ export async function executeIntents(input: ExecuteInput): Promise<ExecuteOutcom
     }
 
     return { results, repair: [] }
+}
+
+/** `alone` refused beside other calls. Not an error the model caused on purpose: it says what to do. */
+function notAlone(
+    entry: PlannedCall,
+    planned: readonly PlannedCall[],
+    input: ExecuteInput,
+): ToolResult {
+    const { slug } = entry.tool.spec
+    const others = [
+        ...new Set(planned.filter((other) => other !== entry).map((other) => other.tool.spec.slug)),
+    ]
+    const reason = `${slug} was called in the same step as ${others.join(", ")}, so it could only report results that did not exist yet.`
+    input.bus.emit(
+        "tool.gated",
+        { slug, callId: entry.intent.callId, reason, policy: input.onMutate },
+        input.eventContext,
+    )
+    const output = [
+        `${slug} was not run.`,
+        "",
+        reason,
+        "",
+        `Read what ${others.join(", ")} returned, then call ${slug} again on its own, in a step of its own.`,
+    ].join("\n")
+    return {
+        callId: entry.intent.callId,
+        slug,
+        ok: false,
+        gated: true,
+        trust: "trusted",
+        output,
+        error: {
+            code: "tool_not_alone",
+            message: reason,
+            hint: `Call ${slug} by itself, after the other calls' results are in.`,
+        },
+        latencyMs: 0,
+        bytes: output.length,
+        truncated: false,
+    }
 }
 
 /**

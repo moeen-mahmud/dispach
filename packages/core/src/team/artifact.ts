@@ -73,6 +73,7 @@ export function submitArtifactTool(init: {
             whenNotToUse:
                 "you are still working, or you cannot fill in a required field — say what is missing in your reply instead, and do not call this with a guess",
             mutating: false,
+            alone: true,
             tags: ["write", "team"],
             parameters: init.parameters,
         },

@@ -132,6 +132,11 @@ const ATTEMPTED_CALL: readonly RegExp[] = [
     /tool[\u2581_]calls?[\u2581_]begin/i,
     // A bare JSON call, which several models fall back to when a text protocol confuses them.
     /^\s*\{\s*"(?:name|tool|tool_name|function)"\s*:/m,
+    // An opening call tag naming a tool, alone on its line, with nothing after it: deepseek-v4-pro wrote
+    // `<invoke name="incident_list">` and stopped (eval:subagents, pilot.6). Unclosed, so the closing-tag
+    // rule above missed it, and it was delivered as the reply. The `name=` attribute on a line of its
+    // own is what prose about markup does not write.
+    /^\s*<\s*(?:invoke|tool_call|tool_use|tool|function_call|function)\b[^>]*\bname\s*=\s*["'][^"']+["'][^>]*>\s*$/im,
 ]
 
 /**

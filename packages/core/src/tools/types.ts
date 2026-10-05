@@ -56,6 +56,14 @@ export interface ToolSpec {
     /** Mutating tools serialise, hold reserved budget slots, and are never retried. */
     readonly mutating: boolean
     /**
+     * This call must be the only one in its step. Asked for beside others, it is refused and they run.
+     *
+     * For a tool that reports on what the step's other calls return: `submit_artifact`. Several calls
+     * may share a step and run in order, so a model can write the call and the report in one breath
+     * and submit an answer invented before the result existed. Measured live in `eval:subagents`.
+     */
+    readonly alone?: true
+    /**
      * Whether this tool's output may contain text a stranger wrote.
      *
      * Optional here and **normalised by the registry**, which defaults anything a remote provider

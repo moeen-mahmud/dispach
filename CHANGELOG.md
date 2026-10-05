@@ -6,13 +6,15 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 
 ### Since 0.2.0-pilot.5
 
-- `subagents:` runs a routed tool call in a throwaway child of the same agent. The parent reads the child's artifact (`{summary, findings[]}` by default) instead of the raw output. Routing happens after the policy and the write gate, so a refused call starts no child.
+- `subagents:` runs a routed tool call in a throwaway child of the same agent. The parent reads the child's artifact (`{summary}` by default) instead of the raw output. Routing happens after the policy and the write gate, so a refused call starts no child.
 - A child inherits its parent's taint, stand-in deferral, acting participant and cancellation, and never spawns one of its own. Its tools must be ones the parent pins.
 - `model.subagent` (or `subagents[].model`) runs children on a cheaper model. Their usage rows and `model.result` events say `role: subagent`.
 - A subagent's events carry `parentTurnId` and `parentSessionKey`, and `handoff.start`/`handoff.result` gain `kind`, `name` and the parent's `callId`. A turn's stream includes its subagents' events with `children: true` (also on the client's `stream()`), and still ends on its own `turn.end`. A key scoped to a session reaches the subagents that session ran.
 - The chat shows a routed call's subagent under its tool row: one line (`↳ subagent inbox · 3 steps · 1.2k tokens · ok`) that ⌥r opens to the child's calls, in the TUI and as a folded block in the web UI. ⌥r works on a model that streams no reasoning when there is a subagent block to open.
 - A turn whose own tool result pushed the prompt past compaction's first threshold could lose its whole history mid-turn, repeat the call and end in `no_progress` (since 0.1.0). It happened whenever the compaction stages that ran could change nothing, which is the usual case for one large result in the current turn.
-- A subagent is told what the person asked, ahead of the call it was handed.
+- A subagent is told what the person asked, ahead of the call it was handed, and reads its call's whole output up to its own window rather than the parent's `observationMaxTokens`.
+- `submit_artifact` must be the only call in its step (`ToolSpec.alone`). A subagent or team member that submitted in the same step as its tool call was reporting a result that did not exist yet.
+- Under the NLT dialect, an unclosed `<invoke name="…">` line is treated as an attempted call and asked for again, instead of being shown as the reply.
 - `bun run eval:subagents` measures routed calls against keeping the work in the parent's context (`evals/subagents/`).
 - The web chat shows a quick reply as it arrives. A reply whose tokens finished before the page attached to the turn was missing from the replay, so the page drew no reply until a reload. The client's `send` takes `chunks: true` to record a turn's tokens from its first one, and the web sends with it.
 - Conversation lists (the web sidebar, the TUI's session picker, `run --continue`) leave out the sessions a subagent or a team handoff ran in. The API still lists them.

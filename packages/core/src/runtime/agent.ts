@@ -295,6 +295,9 @@ export interface AgentSendOptions {
     readonly admission?: AdmittedTurn
 }
 
+/** How much of a child's prompt budget its routed call's output may take; the rest is its task. */
+const CHILD_OBSERVATION_SHARE = 0.75
+
 /** A routed call's child is ended this long before the executor would abandon the call. */
 const SUBAGENT_DEADLINE_MARGIN_MS = 1000
 
@@ -1396,7 +1399,29 @@ export class Agent {
                   })
 
         const meter = this.#meter(sessionKey, turnId, options.from?.id)
-        const turnRuntime = this.#toolsFor(options.turnTools, child !== undefined)
+        // A child on its own model role has that model's window, not main's.
+        const window =
+            child !== undefined && named !== this.roles.main
+                ? named.capabilities.contextWindow
+                : this.window
+        const tools = this.#toolsFor(options.turnTools, child !== undefined)
+        // A child reads its routed call's output up to what its window holds, not the parent's
+        // `observationMaxTokens`: reading all of it is the child's job, and it holds nothing else. Cut
+        // at the parent's figure, mail triage lost the two messages that mattered and the child
+        // reported that nothing needed a reply. A budget optimises; it must not decide the answer.
+        const turnRuntime =
+            child === undefined || tools === undefined
+                ? tools
+                : {
+                      ...tools,
+                      observationMaxTokens: Math.max(
+                          tools.observationMaxTokens,
+                          Math.floor(
+                              (window - this.manifest.context.reserveOutput) *
+                                  CHILD_OBSERVATION_SHARE,
+                          ),
+                      ),
+                  }
         if (options.from?.id !== undefined) this.#senders.set(turnId, options.from.id)
         if (options.deferMutations !== undefined) this.#defers.set(turnId, options.deferMutations)
         this.#inputs.set(turnId, input)
@@ -1438,7 +1463,7 @@ export class Agent {
             ...(remembered.length === 0 ? {} : { memory: remembered }),
             ...(skills.length === 0 ? {} : { skills }),
             role,
-            window: this.window,
+            window,
             reserveOutput: this.manifest.context.reserveOutput,
             // Named field by field rather than spread, so the compiler names anything the manifest
             // grows and this forgets — which is what it did for `noProgress`.

@@ -381,8 +381,15 @@ interface ToolSpec {
   schema: JSONSchema
   tags: string[]                // "read" | "write" | custom; drives phases and write quota
   mutating: boolean             // counts against reserveWrite; never parallelised
+  alone?: true                  // must be the only call in its step (since 0.2.0-pilot.6)
 }
 ```
+
+**`alone` is for a tool that reports on what other calls return.** Several calls may share a step
+and run in order, so a model can write a call and its report in one message and submit an answer
+invented before the result existed: a subagent did exactly that in `eval:subagents`. Asked for beside
+other calls, an `alone` call is refused (`tool_not_alone`, a `tool.gated` event) and the others run;
+the observation says to call it again on its own. `submit_artifact` sets it.
 
 **An unknown slug must fail the load, naming it — but `resolve()` is not where that happens.**
 Silently dropping dead slugs is the exact failure that starves write tools and produces "tool not

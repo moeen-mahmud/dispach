@@ -684,6 +684,21 @@ describe("a tool call in some other protocol's format", () => {
         expect(parsed.malformed?.[0]?.hint).toContain("ACTION:")
     })
 
+    test("an unclosed call tag naming a tool counts, and prose about markup does not", () => {
+        // deepseek-v4-pro wrote this and stopped, in eval:subagents; it was delivered as the reply.
+        for (const text of [
+            '<invoke name="incident_list">',
+            'Let me pull up the incident list.\n\n<invoke name="incident_list">',
+        ]) {
+            const parsed = parseNlt(text)
+            expect(parsed.intents).toEqual([])
+            expect(parsed.malformed?.length).toBe(1)
+        }
+        expect(
+            parseNlt('An `<invoke name="x">` element is how some APIs spell a call.').malformed,
+        ).toBeUndefined()
+    })
+
     test("a vendor's own tool tokens count too", () => {
         // Matched on the bare `DSML` marker rather than its delimiters: those are full-width pipes,
         // and a pattern written with the ASCII one looks right and matches nothing — which it did.

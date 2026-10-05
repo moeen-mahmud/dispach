@@ -612,7 +612,7 @@ export const SubagentSchema = z
         task: z.string().min(1),
         tools: z.array(z.string().min(1)).min(1),
         route: z.object({ tools: z.array(z.string().min(1)).min(1) }).strict(),
-        /** The artifact's schema. Absent: `{summary, findings[]}`. */
+        /** The artifact's schema. Absent: `{summary}`. */
         artifact: TeamMemberSchema.shape.artifact.optional(),
         /** A model role for this child. Absent: `model.subagent` when declared, else `main`. */
         model: z.string().min(1).optional(),
