@@ -49,6 +49,32 @@ describe("the parser finds blocks", () => {
         expect(parsed.text).toBe("Nothing to do here — the answer is 4.")
     })
 
+    test("a field holding objects names their fields, so a model is not left to guess the keys", () => {
+        const entry = renderNltEntry({
+            ...SPEC,
+            slug: "plan_day",
+            parameters: {
+                type: "object",
+                properties: {
+                    tasks: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                title: { type: "string" },
+                                minutes: { type: "integer" },
+                            },
+                            required: ["title"],
+                        },
+                    },
+                },
+            },
+        })
+        expect(entry).toContain(
+            'write it as a JSON list of objects, each with "title" (required), "minutes" (optional, integer)',
+        )
+    })
+
     test("one block, one field", () => {
         const parsed = parseNlt("ACTION: now\ntimezone: UTC\nEND")
         expect(parsed.intents).toEqual([{ callId: "c1", slug: "now", args: { timezone: "UTC" } }])

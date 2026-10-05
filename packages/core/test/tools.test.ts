@@ -15,7 +15,7 @@ import { EventBus } from "../src/events/bus.ts"
 import type { AnyEvent } from "../src/events/types.ts"
 import { coerceArgs } from "../src/tools/coerce.ts"
 import { nativeDialect } from "../src/tools/dialect/native.ts"
-import { nltDialect } from "../src/tools/dialect/nlt.ts"
+import { nltDialect, parseNlt } from "../src/tools/dialect/nlt.ts"
 import {
     type ApprovalRequest,
     batch,
@@ -372,6 +372,49 @@ describe("coercion", () => {
         // A string list still takes native numbers and booleans as text.
         const mixed = coerce({ to: "a@b.com", labels: [1, true, "x"] })
         expect(mixed.ok && mixed.args.labels).toEqual(["1", "true", "x"])
+    })
+
+    test("a list of objects written under NLT keeps its objects, in each shape a model writes it (pilot.7)", () => {
+        // pilot.3 fixed the native path; the NLT path read a JSON list through `String(item)`, so
+        // every object became "[object Object]", and the bare forms were split on their commas.
+        const BOARD = spec({
+            slug: "update_board",
+            mutating: true,
+            parameters: {
+                type: "object",
+                properties: {
+                    ops: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: { id: { type: "string" }, status: { type: "string" } },
+                        },
+                    },
+                },
+                required: ["ops"],
+            },
+        })
+        const ops = [
+            { id: "T-1", status: "done" },
+            { id: "T-2", status: "doing" },
+        ]
+        const written = [
+            '[{"id": "T-1", "status": "done"}, {"id": "T-2", "status": "doing"}]',
+            '{"id": "T-1", "status": "done"}, {"id": "T-2", "status": "doing"}',
+            '{"id": "T-1", "status": "done"}\n{"id": "T-2", "status": "doing"}',
+            '[\n  {\n    "id": "T-1",\n    "status": "done"\n  },\n  {\n    "id": "T-2",\n    "status": "doing"\n  }\n]',
+        ]
+        for (const text of written) {
+            const parsed = parseNlt(`ACTION: update_board\nops: <<<\n${text}\n>>>\nEND`)
+            const result = coerceArgs(BOARD, parsed.intents[0]?.args ?? {})
+            expect(result.ok && result.args.ops).toEqual(ops)
+        }
+        // Not JSON is still refused with the hint to write JSON, never coerced into a partial object.
+        const bad = coerceArgs(BOARD, { ops: "T-1 done, T-2 doing" })
+        expect(bad.ok).toBe(false)
+        // A JSON list of strings is unchanged.
+        const labels = coerce({ to: "a@b.com", labels: '["a", "b"]' })
+        expect(labels.ok && labels.args.labels).toEqual(["a", "b"])
     })
 
     test("matches a field name written in another case or separator", () => {

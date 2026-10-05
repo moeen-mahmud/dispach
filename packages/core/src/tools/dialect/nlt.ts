@@ -856,8 +856,30 @@ function fieldLine(name: string, node: JsonSchemaNode, required: boolean, pad: n
         notes.push(`one of: ${node.enum.map((value) => String(value)).join(" | ")}`)
     }
     if (node.default !== undefined) notes.push(`defaults to ${JSON.stringify(node.default)}`)
+    const shape = objectShape(node.type === "array" ? node.items : node)
+    if (shape !== undefined) {
+        notes.push(
+            node.type === "array"
+                ? `write it as a JSON list of objects, each with ${shape}`
+                : `write it as a JSON object with ${shape}`,
+        )
+    }
 
     return notes.length === 0 ? head : `${head} ${notes.join("; ")}`
+}
+
+/**
+ * An object's own fields, for a field whose value is one: `list of object` alone left a model to
+ * guess every key, and a guessed key is a call the tool refuses.
+ */
+function objectShape(node: JsonSchemaNode | undefined): string | undefined {
+    if (node?.type !== "object" || node.properties === undefined) return undefined
+    const required = new Set(node.required ?? [])
+    const fields = Object.entries(node.properties).map(([name, child]) => {
+        const kind = child.type === "string" ? "" : `, ${typeLabel(child)}`
+        return `"${name}" (${required.has(name) ? "required" : "optional"}${kind})`
+    })
+    return fields.length === 0 ? undefined : fields.join(", ")
 }
 
 const NO_NEGATIVE_GUIDANCE =

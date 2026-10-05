@@ -134,13 +134,26 @@ function convertScalar(node: JsonSchemaNode, value: unknown): Converted {
     }
 }
 
-function splitList(value: string): string[] {
+function splitList(value: string, itemType: JsonSchemaNode["type"]): unknown[] {
     const text = value.trim()
     if (text === "") return []
+    // A list of objects is JSON or nothing: splitting `{"a": 1, "b": 2}` on its commas, or a
+    // pretty-printed object on its newlines, yields fragments no item can be coerced from. So the
+    // bare form — `{…}, {…}` or one object over several lines — is read as the list it means.
+    if (itemType === "object" && !text.startsWith("[")) {
+        try {
+            const parsed: unknown = JSON.parse(`[${text}]`)
+            if (Array.isArray(parsed)) return parsed
+        } catch {
+            // Not JSON; the item conversion below reports it with the hint to write JSON.
+        }
+    }
     if (text.startsWith("[")) {
         try {
             const parsed: unknown = JSON.parse(text)
-            if (Array.isArray(parsed)) return parsed.map((item) => String(item))
+            // Items as parsed: stringifying them turned every object in a JSON list into
+            // "[object Object]", the same defect pilot.3 fixed for native calls.
+            if (Array.isArray(parsed)) return parsed
         } catch {
             // Not JSON after all — fall through to the separator rules, which is what a model
             // writing `[a, b` meant anyway.
@@ -160,7 +173,7 @@ function convert(node: JsonSchemaNode, value: unknown, field: string): Converted
         const items: readonly unknown[] | undefined = Array.isArray(value)
             ? value
             : typeof value === "string"
-              ? splitList(value)
+              ? splitList(value, node.items?.type ?? "string")
               : undefined
         if (items === undefined) {
             return fail(
