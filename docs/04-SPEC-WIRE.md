@@ -132,7 +132,8 @@ and WebSocket surfaces can return:
 | `provision_skills_search_refused` | 400 | `skills: "find"`, which needs an interactive picker. Points at `skills install`. |
 | `schedule_manifest_owned` | 409 | `PATCH` or `DELETE` on a schedule the manifest declares. Reconciliation restores every field from the file at the next boot, so the write would be undone and reported as success. Change the manifest entry instead. |
 | `config_path_unknown` | 400 | `PATCH /config` named a field this surface does not set. Carries the nearest real path — or, for `channels[].allowFrom`, the action that does set it. |
-| `config_value_unreadable` | 400 | `value` is not a string, or is text no parser can read. It is read exactly as a terminal reads it. |
+| `config_value_unreadable` | 400 | `value` is not a string, is text no parser can read, or is absent without `remove: true`. It is read exactly as a terminal reads it. |
+| `config_remove_invalid` | 400 | `remove` is anything but `true`, or was sent together with a `value`. |
 | `config_confirm_required` | 409 | One of the two edits whose only purpose is to stop a check running, without `confirm: true`. The message is the reason. Nothing was written. |
 | `config_not_editable` | 409 | The agent was loaded from an object rather than a file, so there is no manifest to change. |
 | `channel_patch_empty` | 400 | Neither `enabled` nor `credential` was sent. "Send something" is a sentence rather than a schema: a union expressing it names neither field in its error. |
@@ -1170,6 +1171,11 @@ because two would eventually disagree about whether `["a", "b"]` is a list of tw
 
 Two fields carry a `confirm` sentence — `tools.policy.deny` and `tools.untrusted.onMutate` — and
 each is refused with `config_confirm_required` until `{ "confirm": true }` accompanies the value.
+
+`{ "path", "remove": true }`, in place of a value, takes the field out of the manifest so it returns to
+its default; `before` is what was there and `after` is absent. The result is checked like any edit, so
+removing a required field is refused (`manifest_edit_invalid`). A field that is not there is left as
+it is, so a removal is safe to repeat. The client's `removeConfig(path)` sends it.
 They are the two edits whose only purpose is to stop a check running.
 
 The reply reports the write and the *application* separately:

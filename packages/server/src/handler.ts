@@ -1331,11 +1331,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         adopted: [],
                         error: isHarnessError(error)
                             ? error.toDetail()
-                            : {
-                                  code: "provision_adopt_failed",
-                                  message: error instanceof Error ? error.message : String(error),
-                                  hint: "The agent was written and is not running. Fix what the message names and `start` it, or restart the host.",
-                              },
+                            : unexpected(
+                                  "provision_adopt_failed",
+                                  "The agent was written and is not running. Fix what the server's log names and `start` it, or restart the host.",
+                                  error,
+                              ),
                     },
                     201,
                 )
@@ -1438,11 +1438,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     adopted: [],
                     error: isHarnessError(error)
                         ? error.toDetail()
-                        : {
-                              code: "secrets_apply_failed",
-                              message: error instanceof Error ? error.message : String(error),
-                              hint: "The values were written and the agent is not running on them yet. Fix what the message names and reload or start it.",
-                          },
+                        : unexpected(
+                              "secrets_apply_failed",
+                              "The values were written and the agent is not running on them yet. Fix what the server's log names and reload or start it.",
+                              error,
+                          ),
                 })
             }
         },
@@ -3449,6 +3449,22 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     )
                 }
 
+                // Exactly one of the two: a value with `remove` is a request that means two things.
+                const removing = parsed.value.remove === true
+                if (removing === (parsed.value.value !== undefined)) {
+                    return fail(
+                        {
+                            code: removing ? "config_remove_invalid" : "config_value_unreadable",
+                            message: removing
+                                ? "A request named both a value and remove: true."
+                                : "A request named neither a value nor remove: true.",
+                            hint: 'Send { "path", "value" } to set a field, or { "path", "remove": true } to take it out.',
+                            field: removing ? "remove" : "value",
+                        },
+                        400,
+                    )
+                }
+
                 // The two edits whose only purpose is to stop a check running. Refused rather than
                 // logged: `confirm` absent is not consent, and the sentence is the row's own, so the
                 // terminal and the browser ask the same question in the same words.
@@ -3473,7 +3489,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         // One parser for the person's two editors — see `ConfigBody`. Throws by name
                         // rather than guessing, because guessing is how `tools.pinned: "exec"`
                         // becomes a one-character tool list.
-                        value: parseSettingValue(parsed.value.value),
+                        value:
+                            parsed.value.value === undefined
+                                ? undefined
+                                : parseSettingValue(parsed.value.value),
+                        ...(removing ? { remove: true as const } : {}),
                         // Refuses a provider config the provider would refuse (an MCP server with a
                         // credential in its URL), rather than writing it and dropping the provider.
                         providers: runtime.toolProviderFactories,
@@ -4254,11 +4274,11 @@ async function writeSchedule(
     } catch (error) {
         const detail = isHarnessError(error)
             ? error.toDetail()
-            : {
-                  code: "schedule_invalid",
-                  message: error instanceof Error ? error.message : String(error),
-                  hint: "See docs/02-SPEC-MANIFEST.md for the schedule fields.",
-              }
+            : unexpected(
+                  "schedule_invalid",
+                  "See docs/02-SPEC-MANIFEST.md for the schedule fields; the server's log has the cause.",
+                  error,
+              )
         return fail(detail, 400)
     }
 }
@@ -4280,6 +4300,17 @@ function web(path: string, context: RequestContext): Response {
             hint: "The routes in handler.ts and the table in web.ts have diverged, which spec.test.ts asserts cannot happen — so this build is inconsistent. Rebuild with `bun run build`.",
         })
     return response
+}
+
+/**
+ * An unexpected throw as a caller sees it: a code and a hint, and the cause in the server's log. Its
+ * message can carry paths and internals, and the caller may be a scoped key's holder (code scanning).
+ */
+function unexpected(code: string, hint: string, error: unknown): ErrorDetail {
+    process.stderr.write(
+        `${code}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+    )
+    return { code, message: "An unexpected failure; the server's log has the cause.", hint }
 }
 
 function json(body: unknown, status = 200): Response {
@@ -4356,11 +4387,11 @@ async function runHandler(handler: Handler, context: RequestContext): Promise<Re
     } catch (error) {
         if (isHarnessError(error)) return fail(error.toDetail(), 400)
         return fail(
-            {
-                code: "internal_error",
-                message: error instanceof Error ? error.message : String(error),
-                hint: "An unexpected failure in the server. The runtime's event stream carries what happened around it.",
-            },
+            unexpected(
+                "internal_error",
+                "Not caused by the request. The server's log has the cause, and the runtime's event stream carries what happened around it.",
+                error,
+            ),
             500,
         )
     }
@@ -4729,9 +4760,7 @@ async function readJson(
             kind: "error",
             error: {
                 code: "body_not_json",
-                message: `The request body is not valid JSON: ${
-                    cause instanceof Error ? cause.message : String(cause)
-                }`,
+                message: "The request body is not valid JSON.",
                 hint: "Send application/json. A shell quoting mistake is the usual cause — check for unescaped quotes inside the payload.",
             },
         }

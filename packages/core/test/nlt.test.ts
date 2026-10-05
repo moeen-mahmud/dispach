@@ -42,6 +42,18 @@ const SPEC: ToolSpec = {
     },
 }
 
+describe("adversarial lines finish (code scanning, 2026-10)", () => {
+    // The ACTION line's lazy capture against `\s*>?\s*$` was cubic: this exact line took minutes,
+    // which is a model-written line freezing a turn. Rewritten so every whitespace run has one place
+    // to go; the slug comes out the same.
+    test("ACTION with twenty thousand spaces inside its name parses at once", () => {
+        // Something after the spaces is what made the old lazy capture retry every split.
+        const parsed = parseNlt(`ACTION: a${" ".repeat(20_000)}b>\nEND`)
+        expect(parsed.intents[0]?.slug.startsWith("a ")).toBe(true)
+        expect(parsed.intents[0]?.slug.endsWith(" b")).toBe(true)
+    })
+})
+
 describe("the parser finds blocks", () => {
     test("a reply with no block is all text", () => {
         const parsed = parseNlt("Nothing to do here — the answer is 4.")

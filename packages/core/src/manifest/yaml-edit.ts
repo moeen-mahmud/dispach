@@ -194,18 +194,17 @@ function renderSequenceEntry(entry: unknown, indent: number): string[] {
  * `undefined` is not a failure — it is the honest answer that this editor is too simple for the file
  * in front of it, and the caller has a correct-but-reflowing fallback.
  */
-export function setInSource(
-    source: string,
+/**
+ * Walk as far down the chain as the file actually goes, tracking where each level's block starts and
+ * how deep its children sit. Stopping early is normal rather than a failure: `providerConfig` is
+ * commented out in every generated manifest, so `tools.providerConfig.writeRoots` has a missing
+ * *intermediate* on the very first call anyone makes. `undefined` when a level has no children to
+ * take an indent from.
+ */
+function walk(
+    lines: readonly string[],
     path: readonly string[],
-    value: unknown,
-): string | undefined {
-    if (path.length === 0) return undefined
-    const lines = source.split("\n")
-
-    // Walk as far down the chain as the file actually goes, tracking where each level's block starts
-    // and how deep its children sit. Stopping early is normal rather than a failure: `providerConfig`
-    // is commented out in every generated manifest, so `tools.providerConfig.writeRoots` has a
-    // missing *intermediate* on the very first call anyone makes.
+): { searchFrom: number; indent: number; parent: number | undefined; depth: number } | undefined {
     let searchFrom = 0
     let indent = 0
     let parent: number | undefined
@@ -223,6 +222,36 @@ export function setInSource(
         if (firstChild === undefined) return undefined
         indent = indentOf(firstChild)
     }
+    return { searchFrom, indent, parent, depth }
+}
+
+/**
+ * The source with the key at `path` and its whole block taken out, every other line byte-identical.
+ * The source unchanged when the key is not there, so a removal is safe to repeat; `undefined` when the
+ * file's shape cannot be walked, which sends the caller to the round-trip.
+ */
+export function removeInSource(source: string, path: readonly string[]): string | undefined {
+    if (path.length === 0) return undefined
+    const lines = source.split("\n")
+    const walked = walk(lines, path)
+    if (walked === undefined) return undefined
+    if (walked.depth < path.length - 1) return source
+    const at = findKey(lines, path[path.length - 1] ?? "", walked.indent, walked.searchFrom)
+    if (at === undefined) return source
+    const end = endOfBlock(lines, at, walked.indent)
+    return [...lines.slice(0, at), ...lines.slice(end + 1)].join("\n")
+}
+
+export function setInSource(
+    source: string,
+    path: readonly string[],
+    value: unknown,
+): string | undefined {
+    if (path.length === 0) return undefined
+    const lines = source.split("\n")
+    const walked = walk(lines, path)
+    if (walked === undefined) return undefined
+    const { searchFrom, indent, parent, depth } = walked
 
     // A missing intermediate: everything from here down is written as one nested block, inserted at
     // the end of the deepest parent that does exist.

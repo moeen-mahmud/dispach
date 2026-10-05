@@ -300,6 +300,11 @@ export interface AgentClient {
         options?: { readonly confirm?: boolean },
     ): Promise<ConfigWriteResult>
     /**
+     * Take a field out of the manifest so it returns to its default, through the same checks as
+     * `setConfig`: a required field is refused, and a field that is not there is left as it is.
+     */
+    removeConfig(path: string, options?: { readonly confirm?: boolean }): Promise<ConfigWriteResult>
+    /**
      * Connect or disconnect a channel, and set its credential.
      *
      * One call for three things, because they are one decision — is this channel working — and a
@@ -1052,7 +1057,10 @@ export function isEvent<K extends EventType>(
 }
 
 export function createClient(options: ClientOptions): DispachClient {
-    const base = options.baseUrl.replace(/\/+$/, "")
+    // A loop, not a trailing-slash regex, which rescans on a run of slashes (code scanning).
+    let end = options.baseUrl.length
+    while (end > 0 && options.baseUrl[end - 1] === "/") end -= 1
+    const base = options.baseUrl.slice(0, end)
     const doFetch = options.fetch ?? fetch
 
     const headers = (extra: Record<string, string> = {}): Record<string, string> => ({
@@ -1357,6 +1365,15 @@ export function createClient(options: ClientOptions): DispachClient {
                     body: {
                         path,
                         value,
+                        ...(options?.confirm === undefined ? {} : { confirm: options.confirm }),
+                    },
+                }),
+
+            removeConfig: (path, options) =>
+                json<ConfigWriteResult>("PATCH", at("/config"), {
+                    body: {
+                        path,
+                        remove: true,
                         ...(options?.confirm === undefined ? {} : { confirm: options.confirm }),
                     },
                 }),

@@ -16,8 +16,13 @@ const ROOT = resolve(import.meta.dirname, "..")
 
 export function changelogSection(changelog: string, version: string): string | undefined {
     const lines = changelog.split("\n")
-    const start = lines.findIndex((line) =>
-        new RegExp(`^## ${version.replace(/\./g, "\\.")}(\\s|$)`).test(line),
+    // A string comparison, not a regex built from the version: escaping only `.` left every other
+    // metacharacter live.
+    const heading = `## ${version}`
+    const start = lines.findIndex(
+        (line) =>
+            line.startsWith(heading) &&
+            (line.length === heading.length || /\s/.test(line[heading.length] ?? "")),
     )
     if (start === -1) return undefined
     let end = lines.length

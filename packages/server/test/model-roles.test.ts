@@ -130,3 +130,33 @@ describe("delegation over PATCH /config", () => {
         expect(AGENT_SETTABLE_PATHS).not.toContain("delegation.offer")
     })
 })
+
+describe("removing a field over PATCH /config (pilot.8)", () => {
+    test("a field set once returns to its default; a required one is refused; value and remove are exclusive", async () => {
+        const { call, dir, runtime } = await harness({
+            manifest: MANIFEST.replace(
+                "apiKeyEnv: MODEL_API_KEY",
+                "apiKeyEnv: MODEL_API_KEY\n    temperature: 0.3",
+            ),
+        })
+        const patch = (body: Record<string, unknown>) =>
+            call("PATCH", "/v1/agents/assistant/config", { body })
+        expect(runtime.agent("assistant")?.manifest.model.main.temperature).toBe(0.3)
+
+        const removed = await patch({ path: "model.main.temperature", remove: true })
+        expect(removed.status).toBe(200)
+        expect(await removed.json()).toMatchObject({ before: 0.3, applied: true })
+        expect(readFileSync(join(dir, "agent.yaml"), "utf8")).not.toContain("temperature")
+        expect(runtime.agent("assistant")?.manifest.model.main.temperature).toBeUndefined()
+
+        const required = await patch({ path: "model.main.id", remove: true })
+        expect(required.status).toBe(400)
+        expect(await errorCode(required)).toBe("manifest_edit_invalid")
+
+        const both = await patch({ path: "model.main.temperature", value: "0.2", remove: true })
+        expect(await errorCode(both)).toBe("config_remove_invalid")
+        const neither = await patch({ path: "model.main.temperature" })
+        expect(await errorCode(neither)).toBe("config_value_unreadable")
+        await runtime.stop()
+    })
+})

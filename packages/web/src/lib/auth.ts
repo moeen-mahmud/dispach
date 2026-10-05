@@ -19,7 +19,7 @@
  *    and the difference has to be probed rather than assumed: a live key makes an otherwise-open
  *    server demand one (11.193), so "no token configured" does not imply "open".
  *
- * ## `localStorage`, and what that does and does not risk
+ * ## `sessionStorage`, and what that does and does not risk
  *
  * The key is readable by script on this origin. That is the same exposure the page already has —
  * it is holding a live session, so script on this origin can act as the operator whether or not a
@@ -27,6 +27,10 @@
  * is the property that actually matters and is enforced by the bundle having no network origins in
  * it. What storage buys is not having to re-exchange a claim on every reload, which is impossible
  * anyway: a claim is good once.
+ *
+ * `sessionStorage` rather than `localStorage` (code scanning, 2026-10): the key survives a reload and
+ * goes when the tab does, instead of sitting on disk for every later visit. A key an earlier version
+ * left in `localStorage` is moved into this tab once and deleted there.
  */
 
 import { createClient, type DispachClient, DispachError } from "@dispach/client"
@@ -55,7 +59,12 @@ function takeClaimFromUrl(): string | undefined {
 
 export function storedKey(): string | undefined {
     try {
-        return window.localStorage.getItem(STORAGE_KEY) ?? undefined
+        const legacy = window.localStorage.getItem(STORAGE_KEY)
+        if (legacy !== null) {
+            window.localStorage.removeItem(STORAGE_KEY)
+            window.sessionStorage.setItem(STORAGE_KEY, legacy)
+        }
+        return window.sessionStorage.getItem(STORAGE_KEY) ?? undefined
     } catch {
         // Private windows and blocked site data throw on access rather than returning null. A page
         // that cannot remember a key still works; it just asks again.
@@ -65,7 +74,7 @@ export function storedKey(): string | undefined {
 
 export function rememberKey(secret: string): void {
     try {
-        window.localStorage.setItem(STORAGE_KEY, secret)
+        window.sessionStorage.setItem(STORAGE_KEY, secret)
     } catch {
         // Nothing to do and nothing to report: the session in hand is unaffected.
     }
@@ -73,6 +82,7 @@ export function rememberKey(secret: string): void {
 
 export function forgetKey(): void {
     try {
+        window.sessionStorage.removeItem(STORAGE_KEY)
         window.localStorage.removeItem(STORAGE_KEY)
     } catch {
         /* as above */

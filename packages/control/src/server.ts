@@ -62,8 +62,8 @@ function fail(res: ServerResponse, error: unknown): void {
     send(res, 500, {
         error: {
             code: "internal_error",
-            message: error instanceof Error ? error.message : String(error),
-            hint: "A defect in the control plane, not in the request. The stack is on its stderr.",
+            message: "An unexpected failure in the control plane.",
+            hint: "A defect in the control plane, not in the request. The cause and stack are on its stderr.",
         },
     })
 }
@@ -342,7 +342,12 @@ export function createControlServer(options: ServerOptions): Server {
         const release = control.hold(subject)
         res.on("close", release)
         const awake = await control.ensureAwake(silo)
-        const target = new URL(rest, awake.baseUrl)
+        // The silo's own origin, with only the caller's path and query copied onto it: the host can
+        // never come from the request (`new URL(rest, base)` takes another host from `//elsewhere`).
+        const asked = new URL(rest, "http://path.invalid")
+        const target = new URL(awake.baseUrl)
+        target.pathname = asked.pathname
+        target.search = asked.search
         const headers: Record<string, string | string[]> = {}
         for (const [key, value] of Object.entries(req.headers)) {
             if (value !== undefined && !HOP_BY_HOP.has(key)) headers[key] = value

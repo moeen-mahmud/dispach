@@ -268,7 +268,7 @@ describe("web_fetch", () => {
             lookup,
             fetch: async (input) => {
                 attempted.push(input)
-                if (input.startsWith("https://redirector.example.com")) {
+                if (new URL(input).host === "redirector.example.com") {
                     return new Response(null, {
                         status: 302,
                         headers: { location: "http://127.0.0.1:9000/secrets" },

@@ -57,6 +57,39 @@ limits:
 `
 
 describe("prepareManifestEdit", () => {
+    test("removes a key and its block, every other byte kept; an absent key is a no-op (pilot.8)", () => {
+        const scalar = prepareManifestEdit(MANIFEST, {
+            path: ["model", "main", "temperature"],
+            value: undefined,
+            remove: true,
+        })
+        expect(scalar.before).toBe(0.3)
+        expect(scalar.reflowed).toBe(false)
+        expect(scalar.next).toBe(MANIFEST.replace("    temperature: 0.3\n", ""))
+        const block = prepareManifestEdit(MANIFEST, {
+            path: ["tools", "policy"],
+            value: undefined,
+            remove: true,
+        })
+        expect(block.next).not.toContain("policy:")
+        expect(block.next).not.toContain("allow: []")
+        expect(block.next).toContain("    - now\n\nlimits:")
+        const absent = prepareManifestEdit(MANIFEST, {
+            path: ["model", "main", "topP"],
+            value: undefined,
+            remove: true,
+        })
+        expect(absent.next).toBe(MANIFEST)
+        // Required: the schema refuses the result, as it refuses any edit.
+        expect(() =>
+            prepareManifestEdit(MANIFEST, {
+                path: ["model", "main", "id"],
+                value: undefined,
+                remove: true,
+            }),
+        ).toThrow()
+    })
+
     test("places a scalar and keeps every other byte", () => {
         const result = prepareManifestEdit(MANIFEST, { path: ["limits", "maxSteps"], value: 9 })
         expect(result.before).toBe(6)

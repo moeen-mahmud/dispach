@@ -10,6 +10,7 @@
  * that a live key would make awkward to reach on purpose.
  */
 
+import { trimTrailingSlashes } from "@dispach/core"
 import { composioRequestFailed } from "./errors.ts"
 import type { ComposioTool } from "./map.ts"
 
@@ -100,7 +101,7 @@ export class ComposioClient {
 
     constructor(options: ClientOptions) {
         this.#apiKey = options.apiKey
-        this.#baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "")
+        this.#baseUrl = trimTrailingSlashes(options.baseUrl ?? DEFAULT_BASE_URL)
         this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init))
     }
 

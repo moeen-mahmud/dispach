@@ -19,6 +19,7 @@
 
 import { apiKeyMissing, modelHttpError, modelStreamMalformed, modelUnreachable } from "../errors.ts"
 import type { EnvSource } from "../manifest/env.ts"
+import { trimTrailingSlashes } from "../text.ts"
 import type {
     ChatChunk,
     ChatMessage,
@@ -239,12 +240,12 @@ class ToolCallBuffer {
 export function endpointUrl(baseUrl: string): string {
     try {
         const url = new URL(baseUrl)
-        url.pathname = `${url.pathname.replace(/\/+$/, "")}/chat/completions`
+        url.pathname = `${trimTrailingSlashes(url.pathname)}/chat/completions`
         return url.toString()
     } catch {
         // Not absolute. `validateManifest` rejects this at load; if a caller constructs a
         // provider directly, fall back rather than throwing from a URL parse.
-        return `${baseUrl.replace(/\/+$/, "")}/chat/completions`
+        return `${trimTrailingSlashes(baseUrl)}/chat/completions`
     }
 }
 

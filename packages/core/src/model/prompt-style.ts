@@ -57,7 +57,7 @@ export const DEFAULT_PROMPT_STYLE: PromptStyle = {
  */
 export function parameterBillions(modelId: string): number | undefined {
     const id = modelId.toLowerCase()
-    const mixture = /(\d+)x(\d+(?:\.\d+)?)b\b/.exec(id)
+    const mixture = /(?<!\d)(\d+)x(\d+(?:\.\d+)?)b\b/.exec(id)
     if (mixture !== null) return Number(mixture[2])
     const plain = /(?:^|[^a-z0-9])(\d+(?:\.\d+)?)b\b/.exec(id)
     if (plain === null) return undefined
@@ -126,7 +126,7 @@ const EXAMPLE_OPEN = /^[ \t]*<example(?:\s[^>]*)?>[ \t]*$/
 const EXAMPLE_CLOSE = /^[ \t]*<\/example>[ \t]*$/
 const RULES_OPEN = /^[ \t]*<rules(?:\s[^>]*)?>[ \t]*$/
 const RULES_CLOSE = /^[ \t]*<\/rules>[ \t]*$/
-const HEADING = /^(#{1,6})\s+(.*)$/
+const HEADING = /^(#{1,6})\s+(\S.*)?$/
 
 /**
  * What `intensity` actually varies: one generated line in front of the author's rules.

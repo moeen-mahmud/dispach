@@ -79,8 +79,10 @@ const PLACEHOLDER = /\{\{\s*(vars|agent)\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g
 /** Non-global, so `.test` carries no `lastIndex` from one line to the next. */
 const HAS_PLACEHOLDER = /\{\{\s*(?:vars|agent)\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}/
 /** `key: {{vars.x}}`, `- {{vars.x}}` or `- key: {{vars.x}}`, with an optional trailing comment. */
+// The tail after `}}` is captured whole and checked by `wholeValue`: `(\s+#.*)?\s*$` let two
+// whitespace runs claim the same spaces, which backtracks (code scanning).
 const YAML_WHOLE_VALUE =
-    /^(\s*(?:-\s+)?(?:[A-Za-z0-9_.-]+:\s+)?)\{\{\s*((?:vars|agent)\.[A-Za-z_][A-Za-z0-9_]*)\s*\}\}(\s+#.*)?\s*$/
+    /^(\s*(?:-\s+)?(?:[A-Za-z0-9_.-]+:\s+)?)\{\{\s*((?:vars|agent)\.[A-Za-z_][A-Za-z0-9_]*)\s*\}\}(.*)$/
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point.
 const CONTROL = /[\u0000-\u001f\u007f]/
 
@@ -342,8 +344,8 @@ function renderFile(
                     (_all, space: string, name: string) => values.get(`${space}.${name}`) ?? "",
                 )
             }
-            const whole = YAML_WHOLE_VALUE.exec(line)
-            if (whole === null) {
+            const whole = wholeValue(line)
+            if (whole === undefined) {
                 throw new ConfigError({
                     code: "template_placeholder_placement",
                     message: `${where} puts a placeholder inside a YAML value.`,
@@ -352,8 +354,8 @@ function renderFile(
                 })
             }
             // An optional variable left empty still renders, as an empty string.
-            const value = values.get(whole[2] ?? "") ?? ""
-            return `${whole[1] ?? ""}${JSON.stringify(value)}${whole[3] ?? ""}`
+            const value = values.get(whole.name) ?? ""
+            return `${whole.lead}${JSON.stringify(value)}${whole.comment}`
         })
         .join("\n")
 }
@@ -395,4 +397,16 @@ export function manifestEnvReferences(
     }
     walk(parseYaml(text), "", "")
     return out
+}
+
+/** A YAML line whose value is exactly one placeholder, with an optional ` # comment` after it. */
+function wholeValue(
+    line: string,
+): { readonly lead: string; readonly name: string; readonly comment: string } | undefined {
+    const match = YAML_WHOLE_VALUE.exec(line)
+    if (match === null) return undefined
+    const tail = match[3] ?? ""
+    // Nothing, or whitespace and then a comment. The comment keeps its own spacing.
+    if (tail.trim() !== "" && !/^\s+#/.test(tail)) return undefined
+    return { lead: match[1] ?? "", name: match[2] ?? "", comment: tail.trim() === "" ? "" : tail }
 }

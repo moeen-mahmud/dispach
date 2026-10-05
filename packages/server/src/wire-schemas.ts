@@ -350,10 +350,17 @@ export const ConfigBody = z.object({
         description:
             "A dotted path, exactly as it appears in the manifest — `tools.pinned`, `model.main.id`.",
     }),
-    value: refuse(z.string(), {
+    value: refuse(z.string().optional(), {
         code: "config_value_unreadable",
-        hint: 'Text, the way it is typed at a terminal: a bare word, a number, true or false, a list as ["a", "b"], or a map as {k: v}. Quote anything containing a colon or a "#".',
-        description: "The new value, as text. Read by the same parser the `config` command uses.",
+        hint: 'Text, the way it is typed at a terminal: a bare word, a number, true or false, a list as ["a", "b"], or a map as {k: v}. Quote anything containing a colon or a "#". To take a field out, send { "remove": true } instead.',
+        description:
+            "The new value, as text. Read by the same parser the `config` command uses. Required unless `remove` is true.",
+    }),
+    remove: refuse(z.literal(true).optional(), {
+        code: "config_remove_invalid",
+        hint: 'Send { "path": "…", "remove": true } with no value to take a field out of the manifest, or a value to set it.',
+        description:
+            "Take the field out of the manifest instead of setting it, so it returns to its default. Checked like any edit: a required field is refused. A field that is not there is left as it is. Not sent together with `value`.",
     }),
     confirm: annotate(
         z.boolean().optional(),

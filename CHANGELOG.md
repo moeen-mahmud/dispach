@@ -6,6 +6,8 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 
 ### Since 0.2.0-pilot.7
 
+- `PATCH /config` takes `{path, remove: true}` to take a field out of the manifest, so it returns to its default, with the same checks as a set: a required field is refused, and a field that is not there is left alone. The client's `removeConfig(path)` sends it.
+- Security fixes from development: the code-scanning and Dependabot findings, the websocket's internal errors logging their cause, and a security policy with private reporting.
 - Bedrock: GPT-6 models (`openai.gpt-6*`, Luna among them) are no longer sent `temperature` or `topP`, which they refuse on every turn. A role that sets either gets a `model_sampling_unsupported` warning at load, as Claude 4.7 and later do. gpt-oss and Nova still get both.
 
 ### Since 0.2.0-pilot.6

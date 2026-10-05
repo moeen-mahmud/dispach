@@ -16,6 +16,8 @@
  * actually holds.
  */
 
+import { stripHtmlComments } from "@dispach/core"
+
 /** Elements whose content is code, styling or metadata rather than prose. Dropped whole. */
 const DROPPED = ["script", "style", "noscript", "template", "svg", "canvas", "iframe", "head"]
 
@@ -97,7 +99,7 @@ export function htmlToText(html: string): string {
         text = text.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*$`, "i"), " ")
     }
 
-    text = text.replace(/<!--[\s\S]*?-->/g, " ")
+    text = stripHtmlComments(text, " ")
     text = text.replace(BREAKING, "\n")
     text = text.replace(/<[^>]*>/g, " ")
     text = decodeEntities(text)

@@ -39,15 +39,22 @@ import type { ToolProviderFactory } from "../tools/types.ts"
 import { resolveProviders } from "./providers.ts"
 import { type AgentManifest, AgentManifestSchema } from "./schema.ts"
 import { validateSchedules } from "./validate.ts"
-import { setInSource, uncommentInSource } from "./yaml-edit.ts"
+import { removeInSource, setInSource, uncommentInSource } from "./yaml-edit.ts"
 
 export interface ManifestEdit {
     /** Absolute path to the manifest. */
     readonly file: string
     /** Dotted path, already split. */
     readonly path: readonly string[]
-    /** Already parsed from whatever the surface accepted. */
+    /** Already parsed from whatever the surface accepted. Ignored when `remove` is set. */
     readonly value: unknown
+    /**
+     * Take the key out instead of setting it, so a field set once can return to its default
+     * (VelaCrew: a `temperature` left over from a template, on a model that refuses one). Checked
+     * like any edit, so removing a required field is refused by the schema. A key that is not there
+     * is a no-op.
+     */
+    readonly remove?: true
     /**
      * Used instead of the reflowing round-trip when the source editor cannot place the path.
      *
@@ -106,7 +113,7 @@ export interface PreparedEdit extends Omit<ManifestEditResult, "after"> {
  */
 export function prepareManifestEdit(
     source: string,
-    edit: Pick<ManifestEdit, "path" | "value" | "fallback">,
+    edit: Pick<ManifestEdit, "path" | "value" | "fallback" | "remove">,
 ): PreparedEdit {
     const parts = [...edit.path]
     const dotted = parts.join(".")
@@ -118,13 +125,18 @@ export function prepareManifestEdit(
     // then uncomment the block the generated manifest ships commented, which is what keeps a first-time
     // `channels` write from reflowing 98 lines. The round-trip below is the last resort.
     const placed =
-        setInSource(source, parts, edit.value) ??
-        edit.fallback?.(source) ??
-        (parts.length === 1 ? uncommentInSource(source, parts[0] ?? "", edit.value) : undefined)
+        edit.remove === true
+            ? removeInSource(source, parts)
+            : (setInSource(source, parts, edit.value) ??
+              edit.fallback?.(source) ??
+              (parts.length === 1
+                  ? uncommentInSource(source, parts[0] ?? "", edit.value)
+                  : undefined))
     let next: string
     if (placed === undefined) {
         const round = parseDocument(source)
-        round.setIn(parts, edit.value)
+        if (edit.remove === true) round.deleteIn(parts)
+        else round.setIn(parts, edit.value)
         next = String(round)
     } else {
         next = placed
@@ -198,7 +210,7 @@ export async function editManifest(edit: ManifestEdit): Promise<ManifestEditResu
     checkProviders(edit, prepared.manifest)
     checkMedia(edit, prepared.manifest)
     await writeFile(edit.file, prepared.next, "utf8")
-    return { ...prepared, after: edit.value }
+    return { ...prepared, after: edit.remove === true ? undefined : edit.value }
 }
 
 /**
@@ -219,7 +231,7 @@ export function editManifestSync(edit: ManifestEdit): ManifestEditResult {
     checkProviders(edit, prepared.manifest)
     checkMedia(edit, prepared.manifest)
     writeFileSync(edit.file, prepared.next, "utf8")
-    return { ...prepared, after: edit.value }
+    return { ...prepared, after: edit.remove === true ? undefined : edit.value }
 }
 
 /**

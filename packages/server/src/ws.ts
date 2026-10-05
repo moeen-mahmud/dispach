@@ -408,11 +408,15 @@ export function attachWebSocket(
                 agent.admit().then(proceed, (error: unknown) => {
                     // The budget read failed: the store, not the caller. Said on the socket rather
                     // than left as an unhandled rejection with the client waiting for `ws.accepted`.
+                    // The cause goes to the log, not the socket.
+                    process.stderr.write(
+                        `internal: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+                    )
                     ws.send(
                         JSON.stringify({
                             type: "ws.error",
                             code: "internal_error",
-                            message: error instanceof Error ? error.message : String(error),
+                            message: "The turn budget could not be read.",
                         }),
                     )
                 })

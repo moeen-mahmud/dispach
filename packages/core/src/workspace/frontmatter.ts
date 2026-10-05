@@ -14,6 +14,7 @@
 
 import { parse as parseYaml } from "yaml"
 import { knowledgeFileInvalid, workspaceFrontmatterInvalid } from "../errors.ts"
+import { stripHtmlComments } from "../text.ts"
 
 export type Tier = "static" | "volatile" | "reminder"
 export type Editable = "none" | "append" | "replace"
@@ -47,7 +48,6 @@ const EVICTION: readonly string[] = ["oldest", "none"]
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
 
 /** `<!-- ... -->`, non-greedy so adjacent comments do not merge into one span. */
-const HTML_COMMENT = /<!--[\s\S]*?-->/g
 
 /** Three or more consecutive newlines, left behind wherever a comment block was removed. */
 const BLANK_RUN = /\n{3,}/g
@@ -87,7 +87,7 @@ export function parseWorkspaceFile(name: string, raw: string): ParsedFile {
  * every identity file has.
  */
 export function strip(text: string): string {
-    return text.replace(HTML_COMMENT, "").replace(BLANK_RUN, "\n\n").trim()
+    return stripHtmlComments(text).replace(BLANK_RUN, "\n\n").trim()
 }
 
 export interface ParsedKnowledgeFile {

@@ -11,7 +11,7 @@
  * getting it wrong toward permanent silently abandons a reply that would have gone through.
  */
 
-import type { ErrorDetail } from "@dispach/core"
+import { type ErrorDetail, trimTrailingSlashes } from "@dispach/core"
 
 /** Telegram's envelope. `ok: false` carries a human string and sometimes a `parameters` block. */
 export interface TelegramResponse<T> {
@@ -132,7 +132,7 @@ export class TelegramApi {
     constructor(options: TelegramApiOptions) {
         this.#token = options.token
         this.#fetch = options.fetch ?? ((input, init) => fetch(input, init))
-        this.#base = (options.baseUrl ?? DEFAULT_BASE).replace(/\/+$/, "")
+        this.#base = trimTrailingSlashes(options.baseUrl ?? DEFAULT_BASE)
     }
 
     /**
