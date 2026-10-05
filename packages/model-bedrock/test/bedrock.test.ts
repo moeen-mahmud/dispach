@@ -215,6 +215,19 @@ describe("request mapping", () => {
             ).toBeUndefined()
         })
 
+        test("GPT-6 is never sent a temperature; gpt-oss and Nova still are (VelaCrew, pilot.6)", () => {
+            // Bedrock: "This model doesn't support the temperature field" on every turn of Luna.
+            expect(
+                fields("global.openai.gpt-6-luna", undefined, 0.3).inferenceConfig,
+            ).toBeUndefined()
+            expect(fields("openai.gpt-oss-120b-1:0", undefined, 0.3).inferenceConfig).toEqual({
+                temperature: 0.3,
+            })
+            expect(fields("amazon.nova-micro-v1:0", undefined, 0.3).inferenceConfig).toEqual({
+                temperature: 0.3,
+            })
+        })
+
         test("what cannot be honoured is said at load", () => {
             const codes = (id: string, extra: Record<string, unknown>) =>
                 roleWarnings({ id, api: "bedrock-converse", ...extra }, "model.main").map(
@@ -227,6 +240,10 @@ describe("request mapping", () => {
                 "model_sampling_unsupported",
             ])
             expect(codes("eu.anthropic.claude-sonnet-4-6", { temperature: 0.2 })).toEqual([])
+            expect(codes("global.openai.gpt-6-luna", { temperature: 0.3 })).toEqual([
+                "model_sampling_unsupported",
+            ])
+            expect(codes("openai.gpt-oss-120b-1:0", { temperature: 0.3 })).toEqual([])
         })
 
         test("a refusal stop reason is a content_filter finish", async () => {

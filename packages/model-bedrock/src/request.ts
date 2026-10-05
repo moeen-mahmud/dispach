@@ -99,13 +99,25 @@ export function thinkingOff(modelId: string): "disabled" | "between_tools" | "lo
 }
 
 /**
+ * Whether the model refuses `temperature` and `topP`. Claude 4.7 and later (Sonnet 5.5 a non-default
+ * value), and GPT-6 (VelaCrew, pilot.6: "This model doesn't support the temperature field" on every
+ * turn of `global.openai.gpt-6-luna`). Other `openai.*` models, gpt-oss among them, still take both.
+ */
+export function refusesSampling(modelId: string): boolean {
+    return thinkingStyle(modelId) === "adaptive" || /(^|[./])openai\.gpt-6/.test(modelId)
+}
+
+/**
  * What this transport adjusts in a role's config, said at load rather than discovered as a 400 or as
  * a setting that quietly did nothing.
  */
 export function roleWarnings(config: ModelRoleConfig, field: string): readonly ErrorDetail[] {
     const warnings: ErrorDetail[] = []
-    if (thinkingStyle(config.id) !== "adaptive") return warnings
-    if (config.reasoningEffort === "none" && thinkingOff(config.id) === "low") {
+    if (
+        thinkingStyle(config.id) === "adaptive" &&
+        config.reasoningEffort === "none" &&
+        thinkingOff(config.id) === "low"
+    ) {
         warnings.push({
             code: "model_thinking_always_on",
             message: `${config.id} cannot turn thinking off, so ${field}.reasoningEffort: none runs at low effort.`,
@@ -113,7 +125,10 @@ export function roleWarnings(config: ModelRoleConfig, field: string): readonly E
             field: `${field}.reasoningEffort`,
         })
     }
-    if (config.temperature !== undefined || config.topP !== undefined) {
+    if (
+        refusesSampling(config.id) &&
+        (config.temperature !== undefined || config.topP !== undefined)
+    ) {
         warnings.push({
             code: "model_sampling_unsupported",
             message: `${config.id} does not accept temperature or topP, so ${field} sends neither.`,
@@ -274,9 +289,9 @@ export function converseInput(
             ? THINKING_BUDGET[effort === "xhigh" || effort === "max" ? "high" : effort]
             : undefined
     const adaptive = style === "adaptive" ? adaptiveFields(request.model, effort) : undefined
-    // Claude 4.7 and later refuse a sampling setting (Sonnet 5.5 a non-default one), so it is never
-    // sent to them; `warnings` says so at load.
-    const sampling = budget === undefined && style !== "adaptive"
+    // Claude 4.7 and later and GPT-6 refuse a sampling setting, so it is never sent to them;
+    // `warnings` says so at load.
+    const sampling = budget === undefined && !refusesSampling(request.model)
     // Anthropic requires the output cap to exceed the thinking budget, and refuses a sampling
     // temperature beside it. The headroom past the budget is what the answer gets once thinking has
     // spent it: 4,096 cut long tool calls off mid-argument (VelaCrew, pilot.4), so it is 16,384 —

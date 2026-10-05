@@ -4,6 +4,10 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.7
+
+- Bedrock: GPT-6 models (`openai.gpt-6*`, Luna among them) are no longer sent `temperature` or `topP`, which they refuse on every turn. A role that sets either gets a `model_sampling_unsupported` warning at load, as Claude 4.7 and later do. gpt-oss and Nova still get both.
+
 ### Since 0.2.0-pilot.6
 
 - `POST /messages` takes `role`: run that turn on a model role declared under `model:`, as a schedule does. An undeclared role is refused before the turn starts (`model_role_unknown`). The client's `send` takes it too.
