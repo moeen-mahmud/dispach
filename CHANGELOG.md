@@ -6,7 +6,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 
 ### Since 0.2.0-pilot.5
 
-- Bedrock: Claude 4.7 and later (Sonnet 5.5, Opus 5.5) take `reasoningEffort` as adaptive thinking with an effort instead of the thinking budget they refuse. `reasoningEffort` gains `xhigh` and `max`. `none` is each model's own off switch, or low effort where thinking cannot be turned off, said at load. `temperature` and `topP` are not sent to models that refuse them. `openai.*` models get the effort as `reasoning_effort`.
+- Bedrock: Claude 4.7 and later (Sonnet 5.5, Opus 5.5) take `reasoningEffort` as adaptive thinking with an effort instead of the thinking budget they refuse. `reasoningEffort` gains `xhigh` and `max`. `none` is each model's own off switch, or low effort where thinking cannot be turned off, said at load. `temperature` and `topP` are not sent to models that refuse them. `openai.*` models get the effort as `reasoning: {effort}`.
 - `gpt-6*` resolves to its own capability row (1,050,000 window, 128,000 output, native tools, vision; VelaCrew's figures).
 - A refused reply (a model's safety classifier, a guardrail, or a chat-completions `content_filter` finish) ends the turn as an error, `model_refused`, instead of an empty answer.
 - `subagents:` runs a routed tool call in a throwaway child of the same agent. The parent reads the child's artifact (`{summary}` by default) instead of the raw output. Routing happens after the policy and the write gate, so a refused call starts no child.

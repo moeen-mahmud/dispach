@@ -203,11 +203,12 @@ describe("request mapping", () => {
             })
         })
 
-        test("an openai model gets the effort as reasoning_effort; Nova gets none", () => {
+        test("an openai model gets the effort as reasoning.effort; Nova gets none", () => {
+            // Top-level `reasoning_effort` is a 400 `unknown_parameter` on Bedrock (probed).
             expect(
                 fields("global.openai.gpt-6-luna", "xhigh").additionalModelRequestFields,
             ).toEqual({
-                reasoning_effort: "xhigh",
+                reasoning: { effort: "xhigh" },
             })
             expect(
                 fields("amazon.nova-micro-v1:0", "high").additionalModelRequestFields,

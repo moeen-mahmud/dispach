@@ -300,8 +300,10 @@ export function converseInput(
             : adaptive !== undefined
               ? adaptive.fields
               : style === "openai" && effort !== undefined && effort !== "none"
-                ? // The field name is the OpenAI API's; confirmed by a probe on Bedrock, not assumed.
-                  { reasoning_effort: effort === "minimal" ? "low" : effort }
+                ? // Nested, as OpenAI's Responses API spells it. Probed on Bedrock (gpt-6-luna, 2026-10-05):
+                  // a top-level `reasoning_effort` is a 400 `unknown_parameter`, and `reasoning.effort`
+                  // is accepted. Whether it is honoured a one-word probe could not show.
+                  { reasoning: { effort: effort === "minimal" ? "low" : effort } }
                 : undefined
 
     return {
