@@ -46,6 +46,7 @@ import {
     PERSON_SETTABLE_PATHS,
     type PluginCaller,
     parseSettingValue,
+    personSetting,
     phasesFor,
     prepareScheduleWrite,
     type Runtime,
@@ -1733,9 +1734,21 @@ export function createHandler(options: HandlerOptions): ServerHandler {
 
                 // Images are read and checked now, for the governor's reason below: once the turn
                 // detaches, a missing file or a model that cannot see would be refused to nobody.
+                // The role is resolved now for the same reason: after the turn detaches, an unknown
+                // name would throw into a turn nobody is waiting on.
+                if (input.role !== undefined) {
+                    try {
+                        agent.roles.byName(input.role)
+                    } catch (error) {
+                        if (isHarnessError(error)) {
+                            return fail({ ...error.toDetail(), field: "role" }, 400)
+                        }
+                        throw error
+                    }
+                }
                 let images: readonly ImageInput[] = []
                 if (input.images !== undefined && input.images.length > 0) {
-                    const blind = agent.refusesImages()
+                    const blind = agent.refusesImages(input.role)
                     if (blind !== undefined) return fail(blind.toDetail(), 400)
                     try {
                         images = await readImages(agent.dir, input.images)
@@ -1827,6 +1840,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         ...(from.from === undefined ? {} : { from: from.from }),
                         ...(images.length === 0 ? {} : { images }),
                         ...(input.runtimeNote === undefined ? {} : { turnNote: input.runtimeNote }),
+                        ...(input.role === undefined ? {} : { role: input.role }),
                         signal: controller.signal,
                     })
                     .then(async (result) => {
@@ -3372,8 +3386,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     // Named rather than implied: an object-form manifest has no file to edit, and a
                     // client that cannot tell will offer a form whose save can only fail.
                     ...(file === undefined ? { editable: false } : { editable: true, file }),
-                    settings: SETTINGS.filter((setting) =>
-                        PERSON_SETTABLE_PATHS.includes(setting.path),
+                    // `model.<role>` is the one placeholder a person fills in: `model.fast`.
+                    settings: SETTINGS.filter(
+                        (setting) =>
+                            PERSON_SETTABLE_PATHS.includes(setting.path) ||
+                            setting.path === "model.<role>",
                     ).map((setting) => ({
                         path: setting.path,
                         means: setting.means,
@@ -3409,12 +3426,12 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     )
                 }
 
-                const setting = settingByPath(parsed.value.path)
+                const setting = personSetting(parsed.value.path) ?? settingByPath(parsed.value.path)
                 // `via` and the placeholder paths are in `SETTINGS` and not in
                 // `PERSON_SETTABLE_PATHS`, so the membership test is the one that decides — and the
                 // refusal reads the row anyway, because `channels[].allowFrom` can name the command
                 // that does set it instead of answering "no such setting" about a real field.
-                if (setting === undefined || !PERSON_SETTABLE_PATHS.includes(setting.path)) {
+                if (setting === undefined || personSetting(parsed.value.path) === undefined) {
                     return fail(
                         {
                             code: "config_path_unknown",
@@ -3451,7 +3468,8 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 try {
                     result = await editManifest({
                         file: source,
-                        path: setting.path.split("."),
+                        // The concrete path: `model.fast`, not the row's `model.<role>`.
+                        path: parsed.value.path.split("."),
                         // One parser for the person's two editors — see `ConfigBody`. Throws by name
                         // rather than guessing, because guessing is how `tools.pinned: "exec"`
                         // becomes a one-character tool list.

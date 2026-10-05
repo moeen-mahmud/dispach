@@ -52,6 +52,7 @@ and WebSocket surfaces can return:
 | `agent_not_from_template` | 409 | `PATCH …/vars` on an agent with no record of its template: one made before 0.2.0-pilot.5, or not from a template. |
 | `template_var_secret` | 400 | `PATCH …/vars` naming a secret var; set it with `PUT …/secrets`. |
 | `tools_refresh_providers_invalid` | 400 | `POST …/tools/refresh` with `providers` that is not a non-empty list of ids. |
+| `model_role_unknown` | 400 | `POST /messages` with a `role` not declared under `model:`. Nothing is recorded. |
 | `message_note_invalid` | 400 | `POST /messages` with a `runtimeNote` that is empty or over 8,000 characters. |
 | `message_note_untrusted` | 400 | `POST /messages` with a `runtimeNote` from a peer agent (`from.kind: "agent"`). |
 | `message_images_invalid` | 400 | `POST /messages` with `images` that is not a list of `{path}` or `{data, mediaType?}`. The checks on each image have their own codes (`image_*`, `model_no_vision`); see `images` above. |
@@ -616,6 +617,18 @@ POST /v1/agents/:id/messages
 Returns `202` with `{ turnId, sessionKey }` immediately, then streams SSE if `stream` is
 true. **The turn is not bound to this connection.** Disconnecting does not cancel it.
 
+#### `role` — run this turn on another model role (since 0.2.0-pilot.7)
+
+```json
+{ "text": "summarise this thread", "role": "fast" }
+```
+
+A role declared under `model:`, the one a schedule names with `role:`. This turn only: the
+conversation's other turns run on `main`. The turn is budgeted against that role's own context
+window, and its usage rows carry the role. An undeclared name is refused before the turn starts
+(`model_role_unknown`, `field: "role"`), with nothing recorded. A person adds a role with
+`PATCH /config {path: "model.<name>", value: "{id: …, api or baseUrl, apiKeyEnv, …}"}`.
+
 #### `runtimeNote` — your application's note about this message (since 0.2.0-pilot.5)
 
 ```json
@@ -1097,6 +1110,12 @@ GET /v1/agents/:id/context   → the assembled context for the next turn, with t
 GET   /v1/agents/:id/config     → every field this surface may set, what it does, and its current value
 PATCH /v1/agents/:id/config     → set one field, then replace the agent so it takes effect
 ```
+
+`model.<role>` (since 0.2.0-pilot.7) is the one path a person fills in: `{path: "model.fast", value:
+"{id: …, api: bedrock-converse, options: {region: eu-west-2}}"}` adds or replaces a whole named role,
+which a schedule (`role:`) or a message (`role`) then runs on. `model.main` is not replaced whole; its
+fields keep their own rows. Person-only, like every model setting: an agent choosing its own model is
+its owner's money.
 
 ### Channels (connect, disconnect, re-credential, unpair)
 

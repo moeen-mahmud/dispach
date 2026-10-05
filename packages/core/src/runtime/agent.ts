@@ -1410,11 +1410,10 @@ export class Agent {
                   })
 
         const meter = this.#meter(sessionKey, turnId, options.from?.id)
-        // A child on its own model role has that model's window, not main's.
-        const window =
-            child !== undefined && named !== this.roles.main
-                ? named.capabilities.contextWindow
-                : this.window
+        // A turn on another model role (a subagent's, a schedule's, a message's) is budgeted against
+        // that model's window, not main's: a schedule on a 32k model sized against a 1M main overflows,
+        // and one on a 1M model sized against a 32k main compacts for nothing (VelaCrew, pilot.7).
+        const window = named === this.roles.main ? this.window : named.capabilities.contextWindow
         const tools = this.#toolsFor(options.turnTools, child !== undefined)
         // A child reads its routed call's output up to what its window holds, not the parent's
         // `observationMaxTokens`: reading all of it is the child's job, and it holds nothing else. Cut

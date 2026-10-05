@@ -4,6 +4,12 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.6
+
+- `POST /messages` takes `role`: run that turn on a model role declared under `model:`, as a schedule does. An undeclared role is refused before the turn starts (`model_role_unknown`). The client's `send` takes it too.
+- A person adds or replaces a named role with `PATCH /config path model.<name>` (a map: `{id, api or baseUrl, apiKeyEnv, …}`).
+- A turn on any role other than main, a schedule's or a message's, is budgeted against that role's own context window instead of main's.
+
 ### Since 0.2.0-pilot.5
 
 - Bedrock: Claude 4.7 and later (Sonnet 5.5, Opus 5.5) take `reasoningEffort` as adaptive thinking with an effort instead of the thinking budget they refuse. `reasoningEffort` gains `xhigh` and `max`. `none` is each model's own off switch, or low effort where thinking cannot be turned off, said at load. `temperature` and `topP` are not sent to models that refuse them. `openai.*` models get the effort as `reasoning: {effort}`.

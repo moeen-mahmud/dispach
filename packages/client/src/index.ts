@@ -173,6 +173,8 @@ export interface SendOptions {
      * streamed before you attach is missing from the replay and its text is lost to the stream.
      */
     readonly chunks?: boolean
+    /** A model role declared under `model:` to run this turn on instead of main. This turn only. */
+    readonly role?: string
     /**
      * Images sent with this message: PNG, JPEG, GIF or WebP, at most five, 3.75 MB each. A path
      * relative to the agent's directory is preferred; inline base64 must fit the 1 MB body limit.
@@ -1220,6 +1222,7 @@ export function createClient(options: ClientOptions): DispachClient {
                             ? {}
                             : { runtimeNote: opts.runtimeNote }),
                         ...(opts?.chunks === true ? { chunks: true } : {}),
+                        ...(opts?.role === undefined ? {} : { role: opts.role }),
                     },
                     ...(opts?.idempotencyKey === undefined
                         ? {}

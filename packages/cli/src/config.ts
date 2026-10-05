@@ -35,6 +35,7 @@ import {
     manifestValueAt,
     nearest,
     parseSettingValue,
+    personSetting,
     processAlive,
     readManifestHeader,
     type Setting,
@@ -190,7 +191,8 @@ function get(
 }
 
 function requireSetting(path: string): Setting {
-    const found = settingByPath(path)
+    // `model.fast` is the `model.<role>` row, the one placeholder a person fills in themselves.
+    const found = settingByPath(path) ?? personSetting(path)
     if (found !== undefined) return found
     const suggestion = nearest(path, [...settablePaths()])
     throw new HarnessError({

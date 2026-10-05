@@ -186,6 +186,7 @@ export {
 export {
     AGENT_SETTABLE_PATHS,
     PERSON_SETTABLE_PATHS,
+    personSetting,
     SETTINGS,
     type Setting,
     settingByPath,

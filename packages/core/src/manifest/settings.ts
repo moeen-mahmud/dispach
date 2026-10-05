@@ -143,7 +143,14 @@ export const SETTINGS: readonly Setting[] = [
     },
     {
         path: "model.main.reasoningEffort",
-        means: "none | minimal | low | medium | high — how hard a reasoning model thinks",
+        means: "none | minimal | low | medium | high | xhigh | max — how hard a reasoning model thinks",
+        agentListed: false,
+    },
+    // A whole named role, which a schedule (`role:`) or a message (`role`) runs on (pilot.7). A
+    // person's, like every other cost decision: an agent choosing its own model is its owner's money.
+    {
+        path: "model.<role>",
+        means: "a named model role, {id, api or baseUrl, apiKeyEnv, ...}; a schedule or message runs on it with role: <name>",
         agentListed: false,
     },
     { path: "limits.maxSteps", means: "tool calls allowed in one turn", agentListed: true },
@@ -258,6 +265,21 @@ export const SETTINGS: readonly Setting[] = [
 /** Exact-path lookup. `undefined` for anything no surface may set. */
 export function settingByPath(path: string): Setting | undefined {
     return SETTINGS.find((entry) => entry.path === path)
+}
+
+/** `model.fast` is the `model.<role>` row; `main` keeps its own field-by-field rows. */
+const ROLE_PATH = /^model\.([A-Za-z][\w-]*)$/
+
+/**
+ * The row a person may set at this concrete path, or `undefined`. Exact paths first, then the one
+ * placeholder a person fills in themselves: `model.<role>`. The server and the CLI both ask this, so
+ * they cannot disagree about what is settable.
+ */
+export function personSetting(path: string): Setting | undefined {
+    const exact = settingByPath(path)
+    if (exact !== undefined) return PERSON_SETTABLE_PATHS.includes(exact.path) ? exact : undefined
+    const role = ROLE_PATH.exec(path)?.[1]
+    return role === undefined || role === "main" ? undefined : settingByPath("model.<role>")
 }
 
 /**

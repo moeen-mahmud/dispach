@@ -149,6 +149,12 @@ export const MessageBody = z.object({
         z.string().min(1).optional(),
         "Which conversation this belongs to. Defaults to `api:default`.",
     ),
+    role: refuse(z.string().trim().min(1).optional(), {
+        code: "model_role_unknown",
+        hint: "Name a role declared under model: in the manifest (GET /v1/agents/:id/config lists them), or omit role to run on main. A person adds one with PATCH /config path model.<name>.",
+        description:
+            "A model role to run this turn on instead of main: one declared under `model:`, as a schedule names one with `role:`. This turn only; the conversation's other turns are unaffected. Refused before the turn starts when no such role is declared.",
+    }),
     runtimeNote: refuse(z.string().trim().min(1).max(MAX_NOTE_CHARS).optional(), {
         code: "message_note_invalid",
         hint: `Send runtimeNote as non-empty text of at most ${MAX_NOTE_CHARS} characters: the active project, today's date in the person's zone, an attachment's extracted text.`,
