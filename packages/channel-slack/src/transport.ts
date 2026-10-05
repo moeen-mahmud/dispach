@@ -26,7 +26,7 @@ import type {
     OutboundMessage,
     SendResult,
 } from "@dispach/core"
-import { audioFileOf, type SlackEvent, toInbound } from "./events.ts"
+import { audioFileOf, imageFilesOf, type SlackEvent, toInbound } from "./events.ts"
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>
 
@@ -213,21 +213,28 @@ export class SlackTransport implements ChannelTransport {
                     const clip = audioFileOf(event)
                     const url = clip?.url_private_download
                     if (inbound === undefined) return
-                    host.receive(
-                        clip === undefined || url === undefined
-                            ? inbound
+                    const images = imageFilesOf(event).map((file) => ({
+                        ...(file.size === undefined ? {} : { sizeBytes: file.size }),
+                        fetch: (fetchSignal: AbortSignal) =>
+                            this.#download(file.url_private_download ?? "", fetchSignal),
+                    }))
+                    host.receive({
+                        ...inbound,
+                        ...(images.length === 0 ? {} : { images }),
+                        ...(clip === undefined || url === undefined
+                            ? {}
                             : {
-                                  ...inbound,
                                   audio: {
                                       mimeType: clip.mimetype ?? "audio/webm",
                                       ...(clip.duration_ms === undefined
                                           ? {}
                                           : { durationS: clip.duration_ms / 1000 }),
                                       ...(clip.size === undefined ? {} : { sizeBytes: clip.size }),
-                                      fetch: (fetchSignal) => this.#download(url, fetchSignal),
+                                      fetch: (fetchSignal: AbortSignal) =>
+                                          this.#download(url, fetchSignal),
                                   },
-                              },
-                    )
+                              }),
+                    })
                 }
             })
             // An error event is always followed by close, which is where the outcome is decided.
@@ -351,7 +358,7 @@ export class SlackTransport implements ChannelTransport {
             response.headers.get("content-type")?.startsWith("text/html") === true
         ) {
             throw new Error(
-                `Slack would not serve the voice clip (${response.status}); the bot token needs the files:read scope`,
+                `Slack would not serve the file (${response.status}); the bot token needs the files:read scope`,
             )
         }
         return new Uint8Array(await response.arrayBuffer())

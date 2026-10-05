@@ -914,6 +914,38 @@ describe("media", () => {
         await channel.stop()
     })
 
+    test("a photo arrives as an image, with or without a caption, and its bytes come from Baileys on demand", async () => {
+        const fake = fakeBaileys()
+        const { host, received } = recorder()
+        const channel = transport(fake.api)
+        await channel.start(host)
+        await settle()
+        fake.deliver({
+            type: "notify",
+            messages: [
+                { ...base, message: { imageMessage: { caption: "look", fileLength: 5000 } } },
+                { ...base, key: { ...base.key, id: "V2" }, message: { imageMessage: {} } },
+                {
+                    ...base,
+                    key: { ...base.key, id: "V3" },
+                    message: { documentMessage: { mimetype: "application/pdf" } },
+                },
+            ],
+        })
+        const raws = received as {
+            text: string
+            images?: { sizeBytes?: number; fetch(signal: AbortSignal): Promise<Uint8Array> }[]
+        }[]
+        expect(raws.map((raw) => [raw.text, raw.images?.length])).toEqual([
+            ["look", 1],
+            ["", 1],
+        ])
+        expect(raws[0]?.images?.[0]?.sizeBytes).toBe(5000)
+        const bytes = await raws[1]?.images?.[0]?.fetch(new AbortController().signal)
+        expect([...(bytes ?? [])]).toEqual([7, 7])
+        await channel.stop()
+    })
+
     test("an attachment is sent as an image, captioned by the chunk's text", async () => {
         const fake = fakeBaileys()
         const { host } = recorder()

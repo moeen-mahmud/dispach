@@ -51,6 +51,14 @@ export interface TelegramMessage {
     readonly voice?: TelegramAudio
     /** An audio file sent as music. */
     readonly audio?: TelegramAudio
+    /** A photo, in every size Telegram made of it, smallest first. */
+    readonly photo?: readonly TelegramPhotoSize[]
+    /** A file sent as a file. An image sent this way is read like a photo. */
+    readonly document?: {
+        readonly file_id: string
+        readonly mime_type?: string
+        readonly file_size?: number
+    }
     /** Forum topic id. Present only in a supergroup with topics enabled. */
     readonly message_thread_id?: number
 }
@@ -59,6 +67,13 @@ export interface TelegramAudio {
     readonly file_id: string
     readonly duration?: number
     readonly mime_type?: string
+    readonly file_size?: number
+}
+
+export interface TelegramPhotoSize {
+    readonly file_id: string
+    readonly width: number
+    readonly height: number
     readonly file_size?: number
 }
 

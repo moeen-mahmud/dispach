@@ -145,10 +145,11 @@ function fromData(data: string, declared: string | undefined, field: string): Im
             field,
         )
     }
-    const bytes = new Uint8Array(Buffer.from(clean, "base64"))
-    if (bytes.length > MAX_IMAGE_BYTES) throw tooLarge("upload", bytes.length, field)
-    const mediaType = sniffImage(bytes)
-    if (mediaType === undefined) throw unsupported("upload", field)
+    const { mediaType } = imageFromBytes(
+        new Uint8Array(Buffer.from(clean, "base64")),
+        "upload",
+        field,
+    )
     if (declared !== undefined && declared !== mediaType) {
         throw imageRefused(
             "image_media_type_mismatch",
@@ -158,6 +159,17 @@ function fromData(data: string, declared: string | undefined, field: string): Im
         )
     }
     return { mediaType, data: clean, ref: "upload" }
+}
+
+/**
+ * Bytes a transport already fetched — a channel's photo — checked the way an upload is: size, then
+ * the magic bytes decide the type. `ref` is what history keeps in place of the image.
+ */
+export function imageFromBytes(bytes: Uint8Array, ref: string, field = "image"): ImageInput {
+    if (bytes.length > MAX_IMAGE_BYTES) throw tooLarge(ref, bytes.length, field)
+    const mediaType = sniffImage(bytes)
+    if (mediaType === undefined) throw unsupported(ref, field)
+    return { mediaType, data: Buffer.from(bytes).toString("base64"), ref }
 }
 
 function outside(path: string, field: string) {

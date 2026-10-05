@@ -14,6 +14,7 @@ import {
     type ErrorDetail,
     editManifest,
     type InboundAudio,
+    type InboundImage,
     isHarnessError,
     type MediaProviderFactory,
     type ModelTransport,
@@ -50,9 +51,9 @@ function scripted(inputs: string[]): ModelTransport {
         create: (context) => ({
             id: context.id,
             async *chat(request): AsyncIterable<ChatChunk> {
-                const input = String(
-                    request.messages.findLast((message) => message.role === "user")?.content,
-                )
+                const last = request.messages.findLast((message) => message.role === "user")
+                const seen = last?.images?.map((image) => image.mediaType).join(",")
+                const input = `${String(last?.content)}${seen === undefined ? "" : ` <${seen}>`}`
                 if (!drew.has(input)) inputs.push(input)
                 if (input.includes("draw") && !drew.has(input)) {
                     drew.add(input)
@@ -93,6 +94,7 @@ async function boot(options: {
     transcribe?: Transcribe
     attachments?: boolean
     allowFrom?: string
+    vision?: boolean
 }) {
     const dir = mkdtempSync(join(tmpdir(), "media-"))
     writeFileSync(
@@ -104,7 +106,7 @@ model:
     id: scripted
     api: scripted
     capabilities:
-      nativeTools: true
+      nativeTools: true${options.vision === true ? "\n      vision: true" : ""}
 tools:
   dialect: native
 channels:
@@ -150,7 +152,12 @@ ${options.media ?? ""}`,
     runtime.bus.on("agent.channel.error", (event) => {
         if (event.type === "agent.channel.error") errors.push(event.data)
     })
-    const deliver = (text: string, audio?: InboundAudio, senderId = "42") =>
+    const deliver = (
+        text: string,
+        audio?: InboundAudio,
+        senderId = "42",
+        images?: readonly InboundImage[],
+    ) =>
         host?.receive({
             providerMessageId: `m${Math.random()}`,
             peerId: "900",
@@ -158,6 +165,7 @@ ${options.media ?? ""}`,
             senderHandle: senderId,
             text,
             ...(audio === undefined ? {} : { audio }),
+            ...(images === undefined ? {} : { images }),
             receivedAt: new Date().toISOString(),
         })
     return { runtime, dir, sent, errors, inputs, deliver }
@@ -311,6 +319,70 @@ describe("voice notes on a channel", () => {
         deliver("", voice(fetched), "42")
         await new Promise((resolve) => setTimeout(resolve, 50))
         expect(fetched).toEqual([])
+        await runtime.stop()
+    })
+})
+
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10])
+
+const photo = (fetched: string[], bytes: Uint8Array = JPEG, sizeBytes?: number): InboundImage => ({
+    ...(sizeBytes === undefined ? {} : { sizeBytes }),
+    fetch: async () => {
+        fetched.push("fetched")
+        return bytes
+    },
+})
+
+describe("photos on a channel", () => {
+    test("reach the model with the turn, typed by their bytes, with the caption as the text", async () => {
+        const { runtime, inputs, sent, deliver } = await boot({ vision: true })
+        deliver("what is this?", undefined, "42", [photo([]), photo([], PNG)])
+        await until(() => sent.length === 1, "the reply")
+        expect(inputs).toEqual([
+            "what is this?\n\n[image: photo 1]\n[image: photo 2] <image/jpeg,image/png>",
+        ])
+        await runtime.stop()
+    })
+
+    test("on a model that cannot read images, the sender is told and nothing is downloaded", async () => {
+        const { runtime, inputs, sent, errors, deliver } = await boot({})
+        const fetched: string[] = []
+        deliver("", undefined, "42", [photo(fetched)])
+        await until(() => sent.length === 1, "the refusal")
+        expect(sent[0]?.text).toContain("can't see photos")
+        expect(inputs).toEqual([])
+        expect(fetched).toEqual([])
+        expect(errors.map((error) => error.code)).toEqual(["model_no_vision"])
+        await runtime.stop()
+    })
+
+    test("too large by the provider's figure is refused before the download; not an image after it", async () => {
+        const { runtime, inputs, sent, errors, deliver } = await boot({ vision: true })
+        const fetched: string[] = []
+        deliver("", undefined, "42", [photo(fetched, JPEG, 50_000_000)])
+        await until(() => sent.length === 1, "the size refusal")
+        expect(fetched).toEqual([])
+        deliver("", undefined, "42", [photo(fetched, new Uint8Array([1, 2, 3]))])
+        await until(() => sent.length === 2, "the type refusal")
+        expect(sent[0]?.text).toContain("too large")
+        expect(sent[1]?.text).toContain("PNG, JPEG")
+        expect(errors.map((error) => error.code)).toEqual(["image_too_large", "image_unsupported"])
+        expect(inputs).toEqual([])
+        await runtime.stop()
+    })
+
+    test("past five, the rest are not fetched and the turn still runs", async () => {
+        const { runtime, inputs, sent, deliver } = await boot({ vision: true })
+        const fetched: string[] = []
+        deliver(
+            "album",
+            undefined,
+            "42",
+            Array.from({ length: 7 }, () => photo(fetched)),
+        )
+        await until(() => sent.length === 1, "the reply")
+        expect(fetched.length).toBe(5)
+        expect(inputs[0]).toContain("[image: photo 5]")
         await runtime.stop()
     })
 })

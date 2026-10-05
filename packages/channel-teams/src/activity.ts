@@ -85,6 +85,34 @@ export function audioOf(
     return undefined
 }
 
+const IMAGE_FILE_TYPES = new Set(["png", "jpg", "jpeg", "gif", "webp"])
+
+/**
+ * The images an activity carried, fetched like audio: a shared image file by its pre-signed
+ * `downloadUrl`, a pasted one (`image/*` with a `contentUrl`) with the bot's token.
+ */
+export function imagesOf(activity: TeamsActivity): readonly { url: string; signed: boolean }[] {
+    const images: { url: string; signed: boolean }[] = []
+    for (const attachment of activity.attachments ?? []) {
+        const fileType = attachment.content?.fileType?.toLowerCase()
+        const downloadUrl = attachment.content?.downloadUrl
+        if (
+            attachment.contentType === "application/vnd.microsoft.teams.file.download.info" &&
+            downloadUrl !== undefined &&
+            fileType !== undefined &&
+            IMAGE_FILE_TYPES.has(fileType)
+        ) {
+            images.push({ url: downloadUrl, signed: true })
+        } else if (
+            attachment.contentType.startsWith("image/") &&
+            attachment.contentUrl !== undefined
+        ) {
+            images.push({ url: attachment.contentUrl, signed: false })
+        }
+    }
+    return images
+}
+
 const ENTITIES: Record<string, string> = {
     "&nbsp;": " ",
     "&amp;": "&",
@@ -130,8 +158,11 @@ export function toInbound(activity: TeamsActivity): RawInbound | undefined {
     const personal = (activity.conversation.conversationType ?? "personal") === "personal"
     if (!personal && !mentionsBot(activity)) return undefined
     const text = plainText(activity)
-    // A voice message with no words is still a message; the runtime transcribes it into some.
-    if (text === "" && audioOf(activity) === undefined) return undefined
+    // A voice message with no words is still a message; the runtime transcribes it into some. A
+    // photo is shown.
+    if (text === "" && audioOf(activity) === undefined && imagesOf(activity).length === 0) {
+        return undefined
+    }
     const person = activity.from.aadObjectId ?? activity.from.id
     return {
         ...(activity.id === undefined

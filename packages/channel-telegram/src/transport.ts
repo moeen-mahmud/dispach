@@ -18,12 +18,14 @@ import type {
     ChannelHost,
     ChannelLimits,
     ChannelTransport,
+    InboundImage,
     OutboundMessage,
     RawInbound,
     SendResult,
     WebhookDelivery,
     WebhookOutcome,
 } from "@dispach/core"
+import { MAX_IMAGE_BYTES } from "@dispach/core"
 import { TelegramApi, TelegramApiError, type TelegramMessage, type TelegramUpdate } from "./api.ts"
 
 /** Telegram's own cap, in UTF-16 code units — the unit `String.length` counts in. */
@@ -322,34 +324,63 @@ export class TelegramTransport implements ChannelTransport {
 
         // `caption` covers a photo or document sent with text. A media message with no caption
         // produces nothing — answering "" would be a turn with no input — unless it is a voice note,
-        // which the runtime transcribes into one.
+        // which the runtime transcribes into one, or a photo, which the model is shown.
         const text = message.text ?? message.caption ?? ""
         const heard = message.voice ?? message.audio
-        if (text.trim() === "" && heard === undefined) return
+        const seen = photoOf(message)
+        if (text.trim() === "" && heard === undefined && seen === undefined) return
         if (message.from?.is_bot === true) return
 
         const raw = toInbound(message, text)
-        if (heard === undefined) {
-            host.receive(raw)
-            return
-        }
+        const images: InboundImage[] =
+            seen === undefined
+                ? []
+                : [
+                      {
+                          ...(seen.file_size === undefined ? {} : { sizeBytes: seen.file_size }),
+                          fetch: (signal) => this.#download(seen.file_id, "photo", signal),
+                      },
+                  ]
         host.receive({
             ...raw,
-            audio: {
-                // A voice note is OGG/Opus whether or not Telegram says so.
-                mimeType: heard.mime_type ?? "audio/ogg",
-                ...(heard.duration === undefined ? {} : { durationS: heard.duration }),
-                ...(heard.file_size === undefined ? {} : { sizeBytes: heard.file_size }),
-                fetch: async (signal) => {
-                    const file = await this.#api.getFile(heard.file_id, signal)
-                    if (file.file_path === undefined) {
-                        throw new Error("Telegram returned no file path for the voice note")
-                    }
-                    return this.#api.download(file.file_path, signal)
-                },
-            },
+            ...(images.length === 0 ? {} : { images }),
+            ...(heard === undefined
+                ? {}
+                : {
+                      audio: {
+                          // A voice note is OGG/Opus whether or not Telegram says so.
+                          mimeType: heard.mime_type ?? "audio/ogg",
+                          ...(heard.duration === undefined ? {} : { durationS: heard.duration }),
+                          ...(heard.file_size === undefined ? {} : { sizeBytes: heard.file_size }),
+                          fetch: (signal: AbortSignal) =>
+                              this.#download(heard.file_id, "voice note", signal),
+                      },
+                  }),
         })
     }
+
+    async #download(fileId: string, what: string, signal: AbortSignal): Promise<Uint8Array> {
+        const file = await this.#api.getFile(fileId, signal)
+        if (file.file_path === undefined) {
+            throw new Error(`Telegram returned no file path for the ${what}`)
+        }
+        return this.#api.download(file.file_path, signal)
+    }
+}
+
+/**
+ * The one image a message carried: the largest size of a photo that fits the runtime's cap — the
+ * sizes come smallest first, and the biggest is what a person saw — or an image sent as a file.
+ */
+export function photoOf(
+    message: TelegramMessage,
+): { readonly file_id: string; readonly file_size?: number } | undefined {
+    const sizes = message.photo ?? []
+    if (sizes.length > 0) {
+        return sizes.findLast((size) => (size.file_size ?? 0) <= MAX_IMAGE_BYTES) ?? sizes[0]
+    }
+    const document = message.document
+    return document?.mime_type?.startsWith("image/") === true ? document : undefined
 }
 
 /** Exported for the transport test, which asserts on the mapping rather than on a live bot. */

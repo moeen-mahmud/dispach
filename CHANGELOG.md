@@ -9,6 +9,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - `POST /messages` takes `role`: run that turn on a model role declared under `model:`, as a schedule does. An undeclared role is refused before the turn starts (`model_role_unknown`). The client's `send` takes it too.
 - A person adds or replaces a named role with `PATCH /config path model.<name>` (a map: `{id, api or baseUrl, apiKeyEnv, …}`).
 - A turn on any role other than main, a schedule's or a message's, is budgeted against that role's own context window instead of main's.
+- Photos sent on Telegram, WhatsApp, Slack and Teams reach the model with the turn, as `POST /messages` `images` do (at most five, each up to 3.75 MB). On a model that reads no images, the sender is told so. Channel plugins put them on `RawInbound.images`.
 
 ### Since 0.2.0-pilot.5
 

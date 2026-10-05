@@ -477,7 +477,11 @@ the metering, so a provider only answers.
 
 **On a channel.** A transport puts a voice note on `RawInbound.audio` as `{mimeType, durationS?,
 sizeBytes?, fetch(signal)}`: the bytes are fetched only if the note is transcribed, which happens
-after `allowFrom`, so a stranger's audio is never downloaded. A transport that can send a file
+after `allowFrom`, so a stranger's audio is never downloaded. Photos go on `RawInbound.images` as
+`[{sizeBytes?, fetch(signal)}]`, fetched on the same terms: the runtime asks first whether the model
+reads images, then reads at most five, each capped and typed by its bytes as `POST /messages`
+`images` are, and sends them with the turn. A refusal is a reply to the sender and an
+`agent.channel.error`, never silence. A transport that can send a file
 declares `limits.attachments` and reads `OutboundMessage.attachment` (`{path, mimeType}`, with `text`
 as its caption); for one that does not, the outbox names the file in the reply instead. A tool
 produces such a file by calling `ToolContext.attach({path, mimeType})`.

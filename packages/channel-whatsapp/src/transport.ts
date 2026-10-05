@@ -220,9 +220,16 @@ export interface WhatsAppMessage {
     message?: {
         conversation?: string | null
         extendedTextMessage?: { text?: string | null } | null
-        imageMessage?: { caption?: string | null } | null
+        imageMessage?: {
+            caption?: string | null
+            fileLength?: number | { toNumber(): number } | null
+        } | null
         videoMessage?: { caption?: string | null } | null
-        documentMessage?: { caption?: string | null } | null
+        documentMessage?: {
+            caption?: string | null
+            mimetype?: string | null
+            fileLength?: number | { toNumber(): number } | null
+        } | null
         /** A voice note (`ptt`) or an audio file. OGG/Opus for a voice note. */
         audioMessage?: {
             mimetype?: string | null
@@ -719,22 +726,18 @@ export class WhatsAppTransport implements ChannelTransport {
             const raw = toInbound(message, { ownJids: this.#ownJids, sentIds: this.#sentIds })
             if (raw === undefined) continue
             const heard = audioOf(message)
-            if (heard === undefined) {
-                host.receive(raw)
-                continue
-            }
+            const seen = imageOf(message)
             const baileys = this.#loaded
+            const fetch = async () => {
+                if (baileys?.download === undefined) {
+                    throw new Error("this Baileys build cannot download media")
+                }
+                return baileys.download(message)
+            }
             host.receive({
                 ...raw,
-                audio: {
-                    ...heard,
-                    fetch: async () => {
-                        if (baileys?.download === undefined) {
-                            throw new Error("this Baileys build cannot download media")
-                        }
-                        return baileys.download(message)
-                    },
-                },
+                ...(heard === undefined ? {} : { audio: { ...heard, fetch } }),
+                ...(seen === undefined ? {} : { images: [{ ...seen, fetch }] }),
             })
         }
     }
@@ -855,8 +858,14 @@ export function toInbound(
         body?.videoMessage?.caption ??
         body?.documentMessage?.caption ??
         ""
-    // A voice note has no words of its own; the runtime transcribes it into some.
-    if (text.trim() === "" && (body?.audioMessage ?? undefined) === undefined) return undefined
+    // A voice note has no words of its own; the runtime transcribes it into some. A photo is shown.
+    if (
+        text.trim() === "" &&
+        (body?.audioMessage ?? undefined) === undefined &&
+        imageOf(message) === undefined
+    ) {
+        return undefined
+    }
 
     const stamp = message.messageTimestamp
     const seconds =
@@ -890,18 +899,33 @@ export function audioOf(
 ): { mimeType: string; durationS?: number; sizeBytes?: number } | undefined {
     const audio = message.message?.audioMessage
     if (audio === null || audio === undefined) return undefined
-    const length = audio.fileLength
-    const size =
-        typeof length === "number"
-            ? length
-            : typeof length?.toNumber === "function"
-              ? length.toNumber()
-              : undefined
+    const size = lengthOf(audio.fileLength)
     return {
         mimeType: audio.mimetype ?? "audio/ogg",
         ...(typeof audio.seconds === "number" ? { durationS: audio.seconds } : {}),
         ...(size === undefined ? {} : { sizeBytes: size }),
     }
+}
+
+/** A photo's size, without its bytes: an image message, or an image sent as a document. */
+export function imageOf(message: WhatsAppMessage): { sizeBytes?: number } | undefined {
+    const body = message.message
+    const document = body?.documentMessage
+    const image =
+        body?.imageMessage ??
+        (document?.mimetype?.startsWith("image/") === true ? document : undefined)
+    if (image === null || image === undefined) return undefined
+    const size = lengthOf(image.fileLength)
+    return size === undefined ? {} : { sizeBytes: size }
+}
+
+/** Baileys carries a length as a number or a protobuf Long. */
+function lengthOf(length: number | { toNumber(): number } | null | undefined): number | undefined {
+    return typeof length === "number"
+        ? length
+        : typeof length?.toNumber === "function"
+          ? length.toNumber()
+          : undefined
 }
 
 /** Of a JID and its alternate spelling, the one that names a phone number; else the primary. */

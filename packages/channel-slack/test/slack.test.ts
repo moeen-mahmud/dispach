@@ -394,6 +394,46 @@ describe("media", () => {
         await transport.stop()
     })
 
+    test("a shared photo arrives as an image, fetched with the bot token only when asked", async () => {
+        const fake = slack()
+        const { host, received } = fakeHost()
+        const transport = transportFor(fake)
+        await transport.start(host)
+        await until(() => fake.sockets.length === 1, "socket")
+        fake.push({
+            type: "message",
+            subtype: "file_share",
+            channel_type: "im",
+            channel: "D1",
+            user: "U1",
+            text: "",
+            ts: "5.2",
+            files: [
+                {
+                    mimetype: "image/png",
+                    url_private_download: "https://files.slack.com/shot.png",
+                    size: 900,
+                },
+                {
+                    mimetype: "application/pdf",
+                    url_private_download: "https://files.slack.com/a.pdf",
+                },
+            ],
+        })
+        await until(() => received.length === 1, "delivery")
+        const images = received[0]?.images ?? []
+        expect(images.map((image) => image.sizeBytes)).toEqual([900])
+        expect(fake.sent).toHaveLength(0)
+        fake.state.post = () =>
+            new Response(new Uint8Array([5, 5]), { headers: { "content-type": "image/png" } })
+        expect([...((await images[0]?.fetch(new AbortController().signal)) ?? [])]).toEqual([5, 5])
+        expect(fake.sent[0]).toMatchObject({
+            url: "https://files.slack.com/shot.png",
+            authorization: "Bearer xoxb-1",
+        })
+        await transport.stop()
+    })
+
     test("an image is uploaded externally and shared into the thread", async () => {
         const fake = slack()
         fake.state.post = (url = "") =>

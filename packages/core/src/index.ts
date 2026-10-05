@@ -30,6 +30,7 @@ export type {
     ChannelStatus,
     ChannelTransport,
     InboundAudio,
+    InboundImage,
     InboundMessage,
     IssuedChannelInput,
     OutboundMessage,
@@ -213,6 +214,7 @@ export { setInSource, uncommentInSource } from "./manifest/yaml-edit.ts"
 export {
     IMAGE_TOKENS,
     type ImageSpec,
+    imageFromBytes,
     imageReference,
     MAX_IMAGE_BYTES,
     MAX_IMAGES_PER_MESSAGE,

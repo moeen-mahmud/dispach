@@ -46,6 +46,14 @@ export function audioFileOf(event: SlackEvent): SlackFile | undefined {
     )
 }
 
+/** The images a message carried: every shared file Slack says is an image and can be downloaded. */
+export function imageFilesOf(event: SlackEvent): readonly SlackFile[] {
+    return (event.files ?? []).filter(
+        (file) =>
+            file.url_private_download !== undefined && file.mimetype?.startsWith("image/") === true,
+    )
+}
+
 /** Slack escapes exactly these three in message text. */
 const ENTITIES: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">" }
 
@@ -71,8 +79,10 @@ export function toInbound(event: SlackEvent, botUserId?: string): RawInbound | u
     const direct = event.type === "message" && event.channel_type === "im"
     if (!direct && event.type !== "app_mention") return undefined
     const text = plainText(event.text ?? "", botUserId)
-    // A clip with no words is still a message; the runtime transcribes it into some.
-    if (text === "" && audioFileOf(event) === undefined) return undefined
+    // A clip with no words is still a message; the runtime transcribes it into some. A photo is shown.
+    if (text === "" && audioFileOf(event) === undefined && imageFilesOf(event).length === 0) {
+        return undefined
+    }
     const thread = direct ? event.thread_ts : (event.thread_ts ?? event.ts)
     return {
         // Channel plus ts is Slack's own message identity; a mention in a DM arriving as both

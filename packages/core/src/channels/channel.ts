@@ -61,6 +61,12 @@ export interface RawInbound {
      * declares `media.transcription`; otherwise the sender is told it cannot be listened to.
      */
     readonly audio?: InboundAudio
+    /**
+     * Photos the message carried. Read by the runtime and sent with the turn, as `POST /messages`
+     * sends `images`, when the model reads images; otherwise the sender is told it cannot see them.
+     * At most `MAX_IMAGES_PER_MESSAGE` are read.
+     */
+    readonly images?: readonly InboundImage[]
     /** RFC 3339 UTC. The provider's timestamp when it has one, ours otherwise. */
     readonly receivedAt: string
 }
@@ -76,6 +82,16 @@ export interface InboundAudio {
     readonly mimeType: string
     readonly durationS?: number
     /** When the provider says, so an oversized note is refused without downloading it. */
+    readonly sizeBytes?: number
+    fetch(signal: AbortSignal): Promise<Uint8Array>
+}
+
+/**
+ * A photo a message carried. Lazy for the same reasons `InboundAudio` is: the provider owns the
+ * authenticated download, and a refused sender's photo is never fetched. The bytes decide the type.
+ */
+export interface InboundImage {
+    /** When the provider says, so an oversized photo is refused without downloading it. */
     readonly sizeBytes?: number
     fetch(signal: AbortSignal): Promise<Uint8Array>
 }

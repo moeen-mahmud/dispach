@@ -28,7 +28,7 @@ import {
     type WebhookDelivery,
     type WebhookOutcome,
 } from "@dispach/core"
-import { audioOf, type TeamsActivity, tenantOf, toInbound } from "./activity.ts"
+import { audioOf, imagesOf, type TeamsActivity, tenantOf, toInbound } from "./activity.ts"
 import { AuthRefused, type BotFrameworkAuth, type FetchLike, TokenRefused } from "./auth.ts"
 
 export interface TeamsTransportOptions {
@@ -117,17 +117,22 @@ export class TeamsTransport implements ChannelTransport {
         const inbound = toInbound(activity)
         if (inbound === undefined) return { status: 200 }
         const audio = audioOf(activity)
-        host.receive(
-            audio === undefined
-                ? inbound
+        const images = imagesOf(activity).map((image) => ({
+            fetch: (signal: AbortSignal) => this.#download(image.url, image.signed, signal),
+        }))
+        host.receive({
+            ...inbound,
+            ...(images.length === 0 ? {} : { images }),
+            ...(audio === undefined
+                ? {}
                 : {
-                      ...inbound,
                       audio: {
                           mimeType: audio.mimeType,
-                          fetch: (signal) => this.#download(audio.url, audio.signed, signal),
+                          fetch: (signal: AbortSignal) =>
+                              this.#download(audio.url, audio.signed, signal),
                       },
-                  },
-        )
+                  }),
+        })
         return { status: 200 }
     }
 
@@ -225,7 +230,7 @@ export class TeamsTransport implements ChannelTransport {
             : { authorization: `Bearer ${await this.#auth.token(signal)}` }
         const response = await this.#fetch(url, { method: "GET", headers, signal })
         if (!response.ok) {
-            throw new Error(`Teams would not serve the voice message (${response.status})`)
+            throw new Error(`Teams would not serve the file (${response.status})`)
         }
         return new Uint8Array(await response.arrayBuffer())
     }

@@ -31,10 +31,12 @@ import type {
 } from "../channels/channel.ts"
 import { Inbox } from "../channels/inbox.ts"
 import { Outbox } from "../channels/outbox.ts"
-import { type ErrorDetail, GovernorError, isHarnessError } from "../errors.ts"
+import { type ErrorDetail, GovernorError, imageRefused, isHarnessError } from "../errors.ts"
 import type { EventBus } from "../events/bus.ts"
 import { endNote } from "../loop/turn-end.ts"
 import type { EnvSource } from "../manifest/env.ts"
+import { imageFromBytes, MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE } from "../media/image-input.ts"
+import type { ImageInput } from "../model/provider.ts"
 import type { DeliveryAttachment, OutboxStore } from "../store/store.ts"
 import type { Agent } from "./agent.ts"
 
@@ -59,6 +61,8 @@ export interface ChannelFactoryContext {
 
 /** Telegram's indicator lapses after ~5 s, so it is refreshed while a turn runs. */
 const TYPING_INTERVAL_MS = 4_000
+/** One photo's download, bounded so a stalled provider cannot hold the conversation's queue. */
+const PHOTO_FETCH_MS = 30_000
 
 export interface ChannelHubOptions {
     readonly bus: EventBus
@@ -548,12 +552,22 @@ export class ChannelHub {
             }
             input = heard
         }
+        let images: readonly ImageInput[] = []
+        if ((message.images?.length ?? 0) > 0) {
+            const seen = await this.#see(bound, transport, message)
+            if (seen === undefined) {
+                stopTyping()
+                return
+            }
+            images = seen
+        }
 
         try {
             const senderId = `${message.channelType}:${message.senderId ?? message.peerId}`
             const result = await bound.agent.send(input, {
                 sessionKey: message.sessionKey,
                 source: transport.id,
+                ...(images.length === 0 ? {} : { images }),
                 // A remote agent is an agent sender: untrusted text and no acting participant, which
                 // `participantOf` derives from `from` — so nothing it says can act for a person.
                 ...(message.senderKind === "agent"
@@ -678,33 +692,120 @@ export class ChannelHub {
                         : code === "media_transcript_empty"
                           ? "I couldn't hear anything in that voice note. Could you try again?"
                           : "I couldn't transcribe that voice note. Could you type it instead?"
-            await bound.outbox.enqueue({
-                agentId: bound.agent.id,
-                sessionKey: message.sessionKey,
-                channelId: transport.id,
-                recipient: message.peerId,
-                // No turn ran. The provider's id makes a redelivered note collide with this reply.
-                key: `unheard:${message.providerMessageId ?? Date.now()}`,
-                ...(message.thread === undefined ? {} : { thread: message.thread }),
-                text: reply,
+            await this.#unanswered(bound, transport, message, {
+                key: "unheard",
+                reply,
+                code,
+                what: "A voice note",
+                failed: "was not transcribed",
+                cause,
             })
-            await bound.outbox.drain(bound.agent.id)
-            this.#bus.emit(
-                "agent.channel.error",
-                {
-                    channelId: transport.id,
-                    code,
-                    message: `A voice note from ${transport.id} was not transcribed: ${
-                        cause instanceof Error ? cause.message : String(cause)
-                    }`,
-                    hint: isHarnessError(cause)
-                        ? cause.hint
-                        : "The sender was told. The provider's own error is above.",
-                },
-                { agentId: bound.agent.id, sessionKey: message.sessionKey },
+            return undefined
+        }
+    }
+
+    /**
+     * A message's photos, read for the turn, or `undefined` once the sender has been told why not.
+     *
+     * Read here rather than by the transport because the checks are the API's: the model must read
+     * images (`refusesImages`, asked before anything is downloaded), each photo is size-capped and
+     * typed by its bytes. Past `MAX_IMAGES_PER_MESSAGE` the rest are not fetched — an album of ten is
+     * still a message somebody wants answered.
+     */
+    async #see(
+        bound: Bound,
+        transport: ChannelTransport,
+        message: InboundMessage,
+    ): Promise<readonly ImageInput[] | undefined> {
+        const photos = (message.images ?? []).slice(0, MAX_IMAGES_PER_MESSAGE)
+        const tell = (reply: string, code: string, cause: unknown) =>
+            this.#unanswered(bound, transport, message, {
+                key: "unseen",
+                reply,
+                code,
+                what: "A photo",
+                failed: "was not read",
+                cause,
+            })
+        const blind = bound.agent.refusesImages()
+        if (blind !== undefined) {
+            await tell(
+                "I can't see photos here yet. Could you describe it in words instead?",
+                blind.code,
+                blind,
             )
             return undefined
         }
+        const images: ImageInput[] = []
+        try {
+            for (const [index, photo] of photos.entries()) {
+                const ref = photos.length === 1 ? "photo" : `photo ${index + 1}`
+                if (photo.sizeBytes !== undefined && photo.sizeBytes > MAX_IMAGE_BYTES) {
+                    // Refused from the provider's own figure, so the download never happens.
+                    throw imageRefused(
+                        "image_too_large",
+                        `"${ref}" is ${photo.sizeBytes} bytes; an image may be at most ${MAX_IMAGE_BYTES}.`,
+                        "The sender was asked for a smaller one.",
+                    )
+                }
+                const bytes = await photo.fetch(AbortSignal.timeout(PHOTO_FETCH_MS))
+                images.push(imageFromBytes(bytes, ref))
+            }
+        } catch (cause) {
+            const code = isHarnessError(cause) ? cause.code : "image_fetch_failed"
+            await tell(
+                code === "image_too_large"
+                    ? "That photo is too large for me to read. Could you send a smaller one?"
+                    : code === "image_unsupported"
+                      ? "I can only read PNG, JPEG, GIF and WebP photos. Could you send it as one of those?"
+                      : "I couldn't download that photo. Could you send it again?",
+                code,
+                cause,
+            )
+            return undefined
+        }
+        return images
+    }
+
+    /** No turn ran for this message: tell the sender in their words, the operator in the event. */
+    async #unanswered(
+        bound: Bound,
+        transport: ChannelTransport,
+        message: InboundMessage,
+        why: {
+            readonly key: string
+            readonly reply: string
+            readonly code: string
+            readonly what: string
+            readonly failed: string
+            readonly cause: unknown
+        },
+    ): Promise<void> {
+        await bound.outbox.enqueue({
+            agentId: bound.agent.id,
+            sessionKey: message.sessionKey,
+            channelId: transport.id,
+            recipient: message.peerId,
+            // No turn ran. The provider's id makes a redelivered message collide with this reply.
+            key: `${why.key}:${message.providerMessageId ?? Date.now()}`,
+            ...(message.thread === undefined ? {} : { thread: message.thread }),
+            text: why.reply,
+        })
+        await bound.outbox.drain(bound.agent.id)
+        this.#bus.emit(
+            "agent.channel.error",
+            {
+                channelId: transport.id,
+                code: why.code,
+                message: `${why.what} from ${transport.id} ${why.failed}: ${
+                    why.cause instanceof Error ? why.cause.message : String(why.cause)
+                }`,
+                hint: isHarnessError(why.cause)
+                    ? why.cause.hint
+                    : "The sender was told. The provider's own error is above.",
+            },
+            { agentId: bound.agent.id, sessionKey: message.sessionKey },
+        )
     }
 
     /** Returns a stop function. Never throws, never awaited by the turn. */

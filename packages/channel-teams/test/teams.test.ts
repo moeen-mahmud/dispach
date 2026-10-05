@@ -415,6 +415,33 @@ describe("voice messages", () => {
         expect(downloads.map((entry) => entry.auth)).toEqual([null, "Bearer bot-token"])
     })
 
+    test("a shared image file and a pasted image arrive as images, fetched like audio", async () => {
+        const { transport, host, received, bearer, deliver, ms } = setup()
+        await transport.start(host)
+        await deliver(
+            {
+                ...PERSONAL,
+                id: "p1",
+                text: "",
+                attachments: [
+                    {
+                        contentType: "application/vnd.microsoft.teams.file.download.info",
+                        name: "shot.PNG",
+                        content: { downloadUrl: "https://files.example/shot.png", fileType: "PNG" },
+                    },
+                    { contentType: "image/jpeg", contentUrl: "https://files.example/pasted.jpg" },
+                    { contentType: "text/html" },
+                ],
+            },
+            bearer(),
+        )
+        expect(received.map((message) => message.images?.length)).toEqual([2])
+        const signal = new AbortController().signal
+        for (const image of received[0]?.images ?? []) await image.fetch(signal)
+        const downloads = ms.sent.filter((entry) => entry.url.startsWith("https://files.example/"))
+        expect(downloads.map((entry) => entry.auth)).toEqual([null, "Bearer bot-token"])
+    })
+
     test("an image cannot be carried, so the outbox will name it instead", () => {
         expect(setup().transport.limits.attachments).toBeUndefined()
     })
