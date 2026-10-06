@@ -99,11 +99,14 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         query: [
             {
                 name: "include",
-                about: "env, git or env,git: add each agent's .env (its secrets) and .git directories.",
+                about: "Any of env, git, home, comma-separated: each agent's .env (its secrets), its .git directories, and the rest of the state directory under home/.",
             },
         ],
         statuses: [
-            { code: 400, when: "include names something other than env or git" },
+            {
+                code: 400,
+                when: "include names something other than env, git or home, or home on a server with no state directory",
+            },
             { code: 403, when: "the key is scoped to some agents" },
         ],
     },

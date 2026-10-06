@@ -110,6 +110,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ...(options.channels === undefined ? {} : { channels: options.channels }),
         ...(options.remover === undefined ? {} : { remover: options.remover }),
         ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
+        ...(options.home === undefined ? {} : { home: options.home }),
         // **Derived, not forwarded.** The bind host is already an argument here, so a caller cannot
         // hand over a policy that disagrees with what was actually bound — which is the whole input
         // to how strict the guard is. `origin` is `Omit`ted from `ServeOptions` for the same reason:

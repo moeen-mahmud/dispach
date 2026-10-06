@@ -16,8 +16,9 @@ export interface TarEntry {
     /** The path inside the archive, `/`-separated, no leading slash. */
     readonly name: string
     /**
-     * Bytes in hand, or a file on disk that nothing will change while it is read: its header carries
-     * the size `stat` reported, and a file that grew meanwhile would corrupt the archive.
+     * Bytes in hand, or a file on disk. A file's header carries the size `stat` reported and exactly
+     * that many bytes follow: one that grew while it was read is cut there, one that shrank is padded
+     * with zeros, so a file being written cannot corrupt the archive, only its own entry.
      */
     readonly source: { readonly path: string } | { readonly bytes: Uint8Array }
 }
@@ -83,7 +84,8 @@ async function* blocks(
     }
 }
 
-async function* entriesOf(entries: readonly TarEntry[]): AsyncGenerator<Uint8Array> {
+/** Exported for its test: the blocks, before gzip. */
+export async function* entriesOf(entries: readonly TarEntry[]): AsyncGenerator<Uint8Array> {
     for (const entry of entries) {
         if ("bytes" in entry.source) {
             yield* headers(entry.name, entry.source.bytes.length, Date.now())
@@ -93,12 +95,15 @@ async function* entriesOf(entries: readonly TarEntry[]): AsyncGenerator<Uint8Arr
         const info = await stat(entry.source.path)
         yield* headers(entry.name, info.size, info.mtimeMs)
         let written = 0
-        for await (const chunk of createReadStream(entry.source.path)) {
-            const bytes = chunk as Uint8Array
-            written += bytes.length
-            yield bytes
+        if (info.size > 0) {
+            for await (const chunk of createReadStream(entry.source.path, { end: info.size - 1 })) {
+                const bytes = chunk as Uint8Array
+                written += bytes.length
+                yield bytes
+            }
         }
-        if (written % BLOCK !== 0) yield new Uint8Array(BLOCK - (written % BLOCK))
+        if (written < info.size) yield new Uint8Array(info.size - written)
+        if (info.size % BLOCK !== 0) yield new Uint8Array(BLOCK - (info.size % BLOCK))
     }
     // Two empty blocks end an archive.
     yield new Uint8Array(BLOCK * 2)

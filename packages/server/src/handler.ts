@@ -14,7 +14,7 @@
 
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, relative, sep } from "node:path"
+import { join, relative, resolve as resolvePath, sep } from "node:path"
 import type { Capability as Cap, KeyScope, ReloadOutcome } from "@dispach/core"
 import {
     type Agent,
@@ -280,6 +280,11 @@ export interface HandlerOptions {
      * the caller, which is the rule `setCredential` states for one channel, applied to the whole agent.
      */
     readonly secrets?: SecretAdmin
+    /**
+     * The state directory `serve` runs from (`~/.dispach`), for `GET /v1/backup?include=home`
+     * (pilot.11). Absent, that include is refused: what lives beside the store is the CLI's layout.
+     */
+    readonly home?: string
 }
 
 /** What the CLI injects for the secrets routes. See `HandlerOptions.secrets`. */
@@ -921,20 +926,36 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 .split(",")
                 .map((part) => part.trim())
                 .filter((part) => part !== "")
-            const unknown = include.filter((part) => !Object.hasOwn(BACKUP_INCLUDE, part))
+            const unknown = include.filter(
+                (part) => part !== "home" && !Object.hasOwn(BACKUP_INCLUDE, part),
+            )
             if (unknown.length > 0) {
                 return fail(
                     {
                         code: "backup_include_invalid",
                         message: `include names ${unknown.join(", ")}, which a backup cannot add.`,
-                        hint: `Accepted: ${Object.keys(BACKUP_INCLUDE).join(", ")}, comma-separated. env adds each agent's .env (its secrets), git its .git directories.`,
+                        hint: `Accepted: ${[...Object.keys(BACKUP_INCLUDE), "home"].join(", ")}, comma-separated. env adds each agent's .env (its secrets), git its .git directories, home everything else in the state directory.`,
+                        field: "include",
+                    },
+                    400,
+                )
+            }
+            const home = options.home
+            if (include.includes("home") && home === undefined) {
+                return fail(
+                    {
+                        code: "backup_home_unavailable",
+                        message:
+                            "include=home asks for the state directory, and this server was not given one.",
+                        hint: "`serve` passes it; a handler embedded elsewhere sets HandlerOptions.home. The store and agent directories are backed up without it.",
                         field: "include",
                     },
                     400,
                 )
             }
             const skip = new Set(BACKUP_SKIP)
-            for (const part of include) skip.delete(BACKUP_INCLUDE[part] ?? "")
+            for (const part of include)
+                for (const name of BACKUP_INCLUDE[part] ?? []) skip.delete(name)
             const dir = await mkdtemp(join(tmpdir(), "backup-"))
             const snapshot = join(dir, "store.db")
             await runtime.store.snapshot(snapshot)
@@ -953,11 +974,31 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 // Where it lived, so a restore puts `agents/<id>/` back in the right directory.
                 agents.push({ id: agent.id, dir: agent.dir, files: files.length })
             }
+            // `include=home` (pilot.11): the rest of the state directory under `home/`, so a team
+            // drive, its git directory, templates and stopped agents are restorable too. Hosted agents
+            // are already under `agents/`; the store is the snapshot above, never its live files;
+            // logs and the skill-source clones are rebuilt rather than restored.
+            let homeFiles: number | undefined
+            if (include.includes("home") && home !== undefined) {
+                const hosted = new Set(runtime.list().map((agent) => resolvePath(agent.dir)))
+                const at = (...parts: string[]) => resolvePath(home, ...parts)
+                const prune = new Set([
+                    ...hosted,
+                    at("logs"),
+                    at("sources"),
+                    ...["", "-wal", "-shm", "-journal"].map((suffix) => at(`store.db${suffix}`)),
+                ])
+                const files = await agentFiles(home, skip, prune)
+                for (const file of files)
+                    entries.push({ name: `home/${file.name}`, source: { path: file.path } })
+                homeFiles = files.length
+            }
             const manifest = {
                 createdAt: new Date().toISOString(),
                 version: VERSION,
                 agents,
                 included: include,
+                ...(homeFiles === undefined ? {} : { home: { dir: home, files: homeFiles } }),
                 excluded: [...skip],
             }
             entries.unshift({
@@ -5236,21 +5277,33 @@ function pendingDetail(outcome: ReloadOutcome): ErrorDetail | undefined {
 }
 
 /** Left out of a backup: secrets the embedder owns, and what is rebuilt rather than restored. */
-const BACKUP_SKIP: ReadonlySet<string> = new Set([".env", ".venv", "node_modules", ".git"])
+const BACKUP_SKIP: ReadonlySet<string> = new Set([
+    ".env",
+    // The sandbox's host token, reached only by `include=home`: a secret, so it follows `env`.
+    ".api-token",
+    ".venv",
+    "node_modules",
+    ".git",
+])
 
 /** What `?include=` may put back, by the name it is asked for. */
-const BACKUP_INCLUDE: Readonly<Record<string, string>> = { env: ".env", git: ".git" }
+const BACKUP_INCLUDE: Readonly<Record<string, readonly string[]>> = {
+    env: [".env", ".api-token"],
+    git: [".git"],
+}
 
 /** Every regular file under an agent's directory, by its path relative to it, skips excluded. */
 async function agentFiles(
     root: string,
     skip: ReadonlySet<string>,
+    prune: ReadonlySet<string> = new Set(),
 ): Promise<{ name: string; path: string }[]> {
     const found: { name: string; path: string }[] = []
     const walk = async (dir: string) => {
         for (const entry of await readdir(dir, { withFileTypes: true })) {
             if (skip.has(entry.name)) continue
             const path = join(dir, entry.name)
+            if (prune.has(resolvePath(path))) continue
             if (entry.isDirectory()) await walk(path)
             else if (entry.isFile())
                 found.push({ name: relative(root, path).split(sep).join("/"), path })

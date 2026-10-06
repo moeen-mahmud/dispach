@@ -192,6 +192,8 @@ export async function harness(
         builtInPlugins?: BuiltInPlugins
         /** Workspace files beside the manifest, written before the runtime boots. */
         files?: Record<string, string | Uint8Array>
+        /** The state directory, for `GET /v1/backup?include=home`. */
+        home?: string
     } = {},
 ) {
     const dir = workspace(options.manifest)
@@ -216,6 +218,7 @@ export async function harness(
         ...(options.resolveAgent === undefined ? {} : { resolveAgent: options.resolveAgent }),
         ...(options.provision === undefined ? {} : { provision: options.provision }),
         ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
+        ...(options.home === undefined ? {} : { home: options.home }),
     })
 
     const call = (

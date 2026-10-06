@@ -95,4 +95,58 @@ describe("backup", () => {
         )
         await runtime.stop()
     })
+
+    test("?include=home adds the rest of the state directory, never the live store, logs or clone cache (pilot.11)", async () => {
+        const { mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs")
+        const { tmpdir } = await import("node:os")
+        const { dirname, join } = await import("node:path")
+        const home = mkdtempSync(join(tmpdir(), "backup-home-"))
+        const put = (path: string, text: string) => {
+            mkdirSync(dirname(join(home, path)), { recursive: true })
+            writeFileSync(join(home, path), text)
+        }
+        put("drive/notes/plan.md", "the plan")
+        put("drive.git/HEAD", "ref: refs/heads/main\n")
+        put("drive.git/info/exclude", "*.tmp\n")
+        put("templates/crew/template.yaml", "name: crew\n")
+        put("agents/stopped/agent.yaml", "id: stopped\n")
+        put("agents/stopped/.env", "K=v\n")
+        put("agents/.api-token", "dispach_secret\n")
+        put("store.db", "live")
+        put("store.db-wal", "live")
+        put("logs/server/out.log", "log")
+        put("sources/anthropic/SKILL.md", "clone")
+        const { call, runtime } = await harness({ home })
+        const read = async (path: string) =>
+            untar(gunzipSync(new Uint8Array(await (await call("GET", path)).arrayBuffer())))
+
+        const files = await read("/v1/backup?include=home,git")
+        expect(files.get("home/drive/notes/plan.md")).toBe("the plan")
+        expect(files.get("home/drive.git/HEAD")).toBe("ref: refs/heads/main\n")
+        expect(files.get("home/drive.git/info/exclude")).toBe("*.tmp\n")
+        expect(files.get("home/templates/crew/template.yaml")).toBe("name: crew\n")
+        expect(files.get("home/agents/stopped/agent.yaml")).toBe("id: stopped\n")
+        // Secrets follow `env`, here as in an agent directory.
+        expect(files.has("home/agents/stopped/.env")).toBe(false)
+        expect(files.has("home/agents/.api-token")).toBe(false)
+        // The store is the snapshot at the root, never the live file; logs and clones are rebuilt.
+        expect(
+            [...files.keys()].filter((name) => /^home\/(store\.db|logs|sources)/.test(name)),
+        ).toEqual([])
+        expect(files.get("store.db")?.startsWith("SQLite format 3")).toBe(true)
+        expect(JSON.parse(files.get("backup.json") ?? "{}").home).toEqual({ dir: home, files: 5 })
+
+        const withEnv = await read("/v1/backup?include=home,env")
+        expect(withEnv.get("home/agents/.api-token")).toBe("dispach_secret\n")
+        expect(withEnv.get("home/agents/stopped/.env")).toBe("K=v\n")
+        await runtime.stop()
+
+        const bare = await harness()
+        const refused = await bare.call("GET", "/v1/backup?include=home")
+        expect(refused.status).toBe(400)
+        expect(((await refused.json()) as { error: { code: string } }).error.code).toBe(
+            "backup_home_unavailable",
+        )
+        await bare.runtime.stop()
+    })
 })

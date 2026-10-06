@@ -58,6 +58,7 @@ import {
     listAgents,
     pluginRoot,
     readHostToken,
+    sandboxRoot,
     storePath,
     templatesDir,
     writeHostToken,
@@ -550,6 +551,8 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                 secrets: { status: secretStatus, write: writeSecrets },
                 /** `DELETE /v1/agents/:id`: sandbox agents only, and never an id two directories share. */
                 remover: sandboxRemover(env),
+                /** `GET /v1/backup?include=home`: everything else under the sandbox root. */
+                home: sandboxRoot(env),
                 /**
                  * The same functions the `channels` command calls, injected for the same reason the
                  * provisioner is: *how* a channel is switched off or re-credentialled is the CLI's —

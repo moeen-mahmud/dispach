@@ -4,6 +4,11 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.10
+
+- `GET /v1/backup?include=home` adds the rest of the state directory under `home/`: stopped agents, templates, and anything an embedder keeps beside the store, such as a team drive and its git directory. It never adds the live `store.db*`, `logs/` or the `sources/` clone cache. `.env` files and the host token are added only with `include=env`, and `.git` directories only with `include=git`. `backup.json` records the directory, and the wire spec's restore steps cover it.
+- A file that grows or shrinks while a backup is being read no longer corrupts the archive. Its entry holds exactly the size it had when the backup started.
+
 ### Since 0.2.0-pilot.9
 
 - `tools.providers.web.baseUrl` (the search backend) and `tools.providers.web.firecrawl.baseUrl` (scrape, crawl, map) point the web provider at a relay with the same paths and bodies, so a platform key need not be in the agent's environment. `tool.usage` is unchanged.

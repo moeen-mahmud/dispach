@@ -173,7 +173,8 @@ and WebSocket surfaces can return:
 | `assignment_requires_admin` | 403 | A participant-bound key assigning an agent when its participant is not an `admin`. |
 | `participant_timezone_invalid` | 400 | `POST /v1/participants` with a `timezone` that is not an IANA zone the runtime knows. |
 | `backup_requires_unscoped_key` | 403 | `GET /v1/backup` with a key scoped to some agents: a backup holds every agent's data. |
-| `backup_include_invalid` | 400 | `GET /v1/backup?include=` names something other than `env` or `git`. |
+| `backup_include_invalid` | 400 | `GET /v1/backup?include=` names something other than `env`, `git` or `home`. |
+| `backup_home_unavailable` | 400 | `include=home` on a server that was not given its state directory (a handler embedded outside `serve`). |
 | `memory_scope_invalid` | 400 | A scope other than `space`, `owner:<participantId>` or `project:<projectId>`. An agent's private memory has no route: the agent writes it. |
 | `memory_note_empty` | 400 | A note with no text. |
 | `memory_scope_forbidden` | 403 | This participant may not write — or, for an owner scope, read — that scope. `owner:<id>` is its owner's alone, admins included; the space takes an admin or the designated writer; a project, an admin. Also a non-admin participant defining a project or naming the space writer, and anyone but the person or an admin reading their audit. |
@@ -305,11 +306,16 @@ GET  /v1/agents/:id/export?paths=MEMORY.md,memory/,knowledge/
 POST /v1/agents/:id/import { bundle, mode?: "skip" | "overwrite" }   (25 MB cap)
                                   → { id, added[], merged: [{ path, notes }], skipped[], overwritten[],
                                       evicted, reload: "none" | "loaded" | "pending" }
-GET  /v1/backup?include=env,git    → application/gzip: a tar of backup.json, store.db (a consistent
+GET  /v1/backup?include=env,git,home
+                                 → application/gzip: a tar of backup.json, store.db (a consistent
                                     snapshot) and agents/<id>/… for every hosted agent, no .env,
                                     .venv, node_modules or .git   (admin, unscoped key; since pilot.9)
                                     `include` (pilot.10) adds .env, .git or both; .venv and
-                                    node_modules are always rebuilt rather than restored
+                                    node_modules are always rebuilt rather than restored.
+                                    `home` (pilot.11) adds the rest of the state directory under
+                                    home/…: stopped agents, templates, anything an embedder keeps
+                                    there. Never the live store.db*, logs/ or the sources/ clone
+                                    cache. The host token (agents/.api-token) follows `env`
 
 GET  /v1/openapi.json    → the generated OpenAPI 3.1 document
 GET  /docs               → a browser reference over it
@@ -375,7 +381,10 @@ directories it holds open.
 1. `store.db` goes to the path the server opens (`~/.dispach/store.db`, or `serve --store`). Leave
    no `store.db-wal` or `store.db-shm` beside it.
 2. Each `agents/<id>/` goes to the `dir` that `backup.json` records for that agent.
-3. Start the server. Migrations run forward at open, so a backup restores into the same version or a
+3. With `include=home`, the contents of `home/` go to the state directory (`home.dir` in
+   `backup.json`), beside the store. Copy them before step 2's directories, so a hosted agent's
+   files win wherever the two overlap.
+4. Start the server. Migrations run forward at open, so a backup restores into the same version or a
    newer one, never an older one.
 
 Without `include=env`, each agent's `.env` has to be written again before it starts; without
