@@ -105,6 +105,7 @@ const CONFIG = {
             url: "http://127.0.0.1:3000/mcp",
             headersEnv: { Authorization: "HULY_MCP_AUTH" },
             participantHeader: "X-Acting-Participant",
+            turnHeader: "X-Dispach-Turn",
             policyArgs: { invoke_tool: "toolName" },
         },
     },
@@ -307,6 +308,18 @@ describe("calls", () => {
         const calls = fake.seen.filter((call) => call.method === "tools/call")
         expect(calls[0]?.headers.get("x-acting-participant")).toBe("user:bob")
         expect(calls[1]?.headers.has("x-acting-participant")).toBe(false)
+    })
+
+    test("each call carries its turn and call ids, so a write traces to one answer (pilot.9)", async () => {
+        const fake = server()
+        const { tool } = await warmed(fake)
+        await tool("huly__get_version")?.handler(
+            {},
+            { ...context(null), turnId: "t_one", callId: "c_7" },
+        )
+        const [call] = fake.seen.filter((entry) => entry.method === "tools/call")
+        expect(call?.headers.get("x-dispach-turn")).toBe("t_one")
+        expect(call?.headers.get("x-dispach-turn-call")).toBe("c_7")
     })
 
     test("the server's refusal is a failed call carrying its words", async () => {

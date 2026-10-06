@@ -227,6 +227,12 @@ tools:
   #       - ~/code/thing  #   absolute, or relative to this file
   #     protect:          # extra paths they refuse. Widening only — nothing removes a protection
   #       - "*.pem"
+  #     env: inherit      # what exec and skill scripts see: inherit (default, everything), scrub
+  #                       #   (PATH, HOME, locale, TZ, TERM, TMPDIR only), or [NAMES] (scrub, plus
+  #                       #   these). Scrub keeps the runtime's tokens out of anything a command can
+  #                       #   print. Not the whole story: a command runs as this process's user and
+  #                       #   can read /proc/<pid>/environ — pass secrets as X_FILE, or mount /proc
+  #                       #   with hidepid=2. The agent's config_set can never change this.
   #
   #   # @dispach/tools-web — the public internet, read-only.
   #   #
@@ -239,9 +245,18 @@ tools:
   #   # reaching the cloud metadata endpoint. An operator who wants an internal HTTP call has `exec`
   #   # and `curl`, which is a grant made deliberately and narrowable by a policy rule.
   #   web:
-  #     backend: tavily              # tavily | brave | exa
+  #     backend: tavily              # tavily | brave | exa | firecrawl
   #     apiKeyEnv: TAVILY_API_KEY    # the variable's name, never the key
   #     maxBytes: 2000000            # stop reading a page here, mid-response, before extraction
+  #     # Firecrawl, first-class: with this block web_fetch reads through Firecrawl's scrape (pages
+  #     # that need JavaScript come back as markdown), and web_crawl (a site's pages) and web_map (a
+  #     # site's addresses) are offered. `backend: firecrawl` turns it on too. Every call is metered
+  #     # as a tool.usage event, in credits, with the participant it is billed to.
+  #     firecrawl:
+  #       apiKeyEnv: FIRECRAWL_API_KEY
+  #       onlyMainContent: true      # drop headers, navigation and footers
+  #       maxAge: 172800000          # accept Firecrawl's cached copy this recent, in ms
+  #       timeoutMs: 60000           # Firecrawl's own limit for one page
   #
   #   # @dispach/tools-composio — a remote catalogue, called over HTTP and never through MCP.
   #   #

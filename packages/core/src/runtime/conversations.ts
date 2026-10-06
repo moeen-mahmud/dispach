@@ -112,7 +112,17 @@ export class ConversationHub {
         readonly id: string
         readonly name?: string
         readonly role?: "admin" | "member"
+        readonly title?: string
+        readonly timezone?: string
     }): Promise<ParticipantRecord> {
+        if (input.timezone !== undefined && !isTimeZone(input.timezone)) {
+            throw refused(
+                "participant_timezone_invalid",
+                `"${input.timezone}" is not a timezone this runtime knows.`,
+                'An IANA zone name, such as "Europe/London" or "Asia/Dhaka".',
+                "timezone",
+            )
+        }
         if (agentOf(input.id) !== undefined) {
             throw refused(
                 "participant_id_reserved",
@@ -126,6 +136,8 @@ export class ConversationHub {
             kind: "human",
             ...(input.name === undefined ? {} : { name: input.name }),
             role: input.role ?? "member",
+            ...(input.title === undefined ? {} : { title: input.title }),
+            ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
             createdAt: this.#now().toISOString(),
         })
     }
@@ -909,5 +921,15 @@ export class ConversationHub {
             turnId,
         })
         this.#fanOut(conversation, reply)
+    }
+}
+
+/** Whether the runtime's own clock can render this zone: the same check that will use it. */
+function isTimeZone(zone: string): boolean {
+    try {
+        new Intl.DateTimeFormat("en-US", { timeZone: zone })
+        return true
+    } catch {
+        return false
     }
 }

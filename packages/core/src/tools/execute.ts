@@ -686,6 +686,24 @@ async function runOne(
                     deadlineMs: input.timeoutMs,
                     callId: intent.callId,
                     tainted,
+                    meter: (usage) => {
+                        const participant = input.context.actingParticipant?.id
+                        input.bus.emit(
+                            "tool.usage",
+                            {
+                                slug: tool.spec.slug,
+                                callId: intent.callId,
+                                provider: usage.provider,
+                                ...(usage.operation === undefined
+                                    ? {}
+                                    : { operation: usage.operation }),
+                                unit: usage.unit,
+                                units: usage.units,
+                                ...(participant === undefined ? {} : { participant }),
+                            },
+                            input.eventContext,
+                        )
+                    },
                 }),
             ),
             new Promise<never>((_, reject) => {

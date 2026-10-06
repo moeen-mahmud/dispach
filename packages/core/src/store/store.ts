@@ -636,6 +636,10 @@ export interface ParticipantRecord {
     readonly name?: string
     /** `admin` may assign agents to members. Nothing else differs. */
     readonly role: "admin" | "member"
+    /** A job title, as the team knows the person (pilot.9). Not a permission. */
+    readonly title?: string
+    /** An IANA zone, `Europe/London`: what "tomorrow at nine" means for this person (pilot.9). */
+    readonly timezone?: string
     readonly createdAt: string
     /** Pushed by the embedder (Phase 28). Absent until pushed, and absent reads as online. */
     readonly presence?: "online" | "offline"
@@ -1614,6 +1618,12 @@ export interface Store {
      * deletion come to disagree.
      */
     agentFootprint(agentId: string): Promise<AgentFootprint>
+    /**
+     * A consistent copy of the whole store at `path`, taken while it stays open (pilot.9,
+     * `GET /v1/backup`). `VACUUM INTO`, so the copy is one transaction's view and compacted; the
+     * file must not exist yet.
+     */
+    snapshot(path: string): Promise<void>
     /**
      * Delete everything belonging to one agent, in one transaction.
      *

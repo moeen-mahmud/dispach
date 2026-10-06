@@ -25,6 +25,7 @@ import {
     type ModelTransport,
     type RetryPolicy,
 } from "@dispach/core"
+import { containerCredentials } from "./credentials.ts"
 import { classify } from "./errors.ts"
 import { cachesPrompts, converseInput, roleWarnings } from "./request.ts"
 import { toChunks } from "./stream.ts"
@@ -45,10 +46,14 @@ export type SenderFactory = (options: BedrockOptions) => Promise<ConverseSend>
 
 export const sdkSender: SenderFactory = async (options) => {
     const sdk = await import("@aws-sdk/client-bedrock-runtime")
+    // A named profile is the person's explicit choice; otherwise a container-credentials endpoint is
+    // read by Dispach, so its refusal reason survives (`credentials.ts`).
+    const container = options.profile === undefined ? containerCredentials(process.env) : undefined
     const client = new sdk.BedrockRuntimeClient({
         region: options.region,
         maxAttempts: 1,
         ...(options.profile === undefined ? {} : { profile: options.profile }),
+        ...(container === undefined ? {} : { credentials: container }),
     })
     return async (input, signal) => {
         const response = await client.send(new sdk.ConverseStreamCommand(input), {

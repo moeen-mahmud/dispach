@@ -569,6 +569,12 @@ factory the runtime builds agents with, handed over so a provider whose tools ed
 written: the same check the TUI, the web app and `PATCH /config` make (decision 14.24). A factory must
 construct without network I/O, which is what makes building one to validate its config safe.
 
+**`ctx.meter?.({provider, operation?, unit, units})`** (since pilot.9) reports what one call spent at a
+third party, in that party's own unit (`credits`, `requests`). The runtime emits it as a `tool.usage`
+event with the acting participant, so an embedder bills a user's web spend the way it bills
+`model.result`. The executor supplies it on every call; the web provider meters each search, scrape,
+crawl and map.
+
 **`ctx.actingParticipant`** is who the turn acts for: `{ id, name?, via: "api" | "channel", onBehalfOf? }`, or
 `null` for a schedule, a peer agent, an in-process team handoff or the operator. A cross-member
 delegation (Phase 28) carries the person who asked the coordinator, who stays accountable; a

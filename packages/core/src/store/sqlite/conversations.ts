@@ -69,6 +69,8 @@ interface ParticipantRow {
     created_at: string
     presence: string | null
     presence_at: string | null
+    title: string | null
+    timezone: string | null
 }
 
 interface ActionRow {
@@ -118,6 +120,8 @@ const participantOf = (row: ParticipantRow): ParticipantRecord => ({
     kind: "human",
     ...(row.name === null ? {} : { name: row.name }),
     role: row.role === "admin" ? "admin" : "member",
+    ...(row.title === null ? {} : { title: row.title }),
+    ...(row.timezone === null ? {} : { timezone: row.timezone }),
     createdAt: row.created_at,
     ...(row.presence === "online" || row.presence === "offline" ? { presence: row.presence } : {}),
     ...(row.presence_at === null ? {} : { presenceAt: row.presence_at }),
@@ -164,8 +168,10 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
 } {
     const q = {
         participantUpsert: db.prepare(
-            `INSERT INTO participants (id, kind, name, role, created_at) VALUES (?, 'human', ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET name = excluded.name, role = excluded.role`,
+            `INSERT INTO participants (id, kind, name, role, title, timezone, created_at)
+             VALUES (?, 'human', ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET name = excluded.name, role = excluded.role,
+                 title = excluded.title, timezone = excluded.timezone`,
         ),
         participantGet: db.prepare("SELECT * FROM participants WHERE id = ?"),
         participantList: db.prepare("SELECT * FROM participants ORDER BY id"),
@@ -297,7 +303,14 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
 
     return {
         upsertParticipant: async (record) => {
-            q.participantUpsert.run(record.id, record.name ?? null, record.role, record.createdAt)
+            q.participantUpsert.run(
+                record.id,
+                record.name ?? null,
+                record.role,
+                record.title ?? null,
+                record.timezone ?? null,
+                record.createdAt,
+            )
             const row = q.participantGet.get<ParticipantRow>(record.id)
             if (row === undefined)
                 throw new Error(`participant "${record.id}" vanished after a write`)

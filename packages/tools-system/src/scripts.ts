@@ -22,6 +22,7 @@ import { statSync } from "node:fs"
 import { mkdir, rm } from "node:fs/promises"
 import { delimiter, join } from "node:path"
 import type { ScriptRunner, ScriptRunRequest, ScriptRunResult } from "@dispach/core"
+import { childEnv, type EnvPolicy } from "./env.ts"
 import { readOutput } from "./output.ts"
 import { spillDir } from "./paths.ts"
 import { runCommand } from "./run.ts"
@@ -29,6 +30,11 @@ import { runCommand } from "./run.ts"
 export interface SystemScriptRunnerOptions {
     /** The manifest's environment layered over the ambient one. Values, not names. */
     readonly env: Readonly<Record<string, string | undefined>>
+    /**
+     * The system provider's `env` policy, read at each run: the provider is built after this runner
+     * is registered, so the policy is not known yet when the constructor runs. Absent is `inherit`.
+     */
+    readonly policy?: () => EnvPolicy
 }
 
 /** POSIX single-quoting, so a path with a space or a quote in it survives the shell. */
@@ -38,9 +44,11 @@ function quote(value: string): string {
 
 export class SystemScriptRunner implements ScriptRunner {
     readonly #env: Readonly<Record<string, string | undefined>>
+    readonly #policy: () => EnvPolicy
 
     constructor(options: SystemScriptRunnerOptions) {
         this.#env = options.env
+        this.#policy = options.policy ?? (() => "inherit")
     }
 
     /**
@@ -77,7 +85,7 @@ export class SystemScriptRunner implements ScriptRunner {
         const run = await runCommand({
             command: line,
             cwd: request.cwd,
-            env: this.#env,
+            env: childEnv(this.#env, this.#policy()),
             timeoutMs: request.timeoutMs,
             pty: false,
             background: false,

@@ -636,6 +636,43 @@ async function runTools(
 }
 
 describe("execution", () => {
+    test("a tool's meter reaches the bus as tool.usage, with the participant it is billed to (pilot.9)", async () => {
+        const search = tool({ slug: "web_search", mutating: false }, async (_args, context) => {
+            context.meter?.({ provider: "tavily", operation: "search", unit: "credits", units: 1 })
+            return "results"
+        })
+        const registry = await ToolRegistry.create({
+            pinned: ["web_search"],
+            providers: [provider("fake", [search])],
+        })
+        const bus = new EventBus({ runtimeId: "rt_test" })
+        const events = capture(bus)
+        await executeIntents({
+            registry,
+            intents: [intent("web_search")],
+            context: toolContext({ actingParticipant: { id: "user:ada", via: "api" } }),
+            bus,
+            eventContext: { agentId: "a", sessionKey: "s", turnId: "t" },
+            timeoutMs: 1000,
+            maxParallel: 4,
+            observationMaxTokens: 2000,
+            untrustedInTurn: false,
+            onMutate: "refuse",
+            policy: { ...DEFAULT_POLICY, mode: "allow" },
+        })
+        const usage = events.find((event) => event.type === "tool.usage")
+        expect(usage?.data).toEqual({
+            slug: "web_search",
+            callId: "c1",
+            provider: "tavily",
+            operation: "search",
+            unit: "credits",
+            units: 1,
+            participant: "user:ada",
+        })
+        expect(usage?.turnId).toBe("t")
+    })
+
     test("a path rule sees the normalised path, so ../ cannot walk past it (pilot.4)", async () => {
         const read = tool(
             {

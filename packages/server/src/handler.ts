@@ -12,7 +12,9 @@
  * why `TurnStreams` exists — a client that comes back has to be able to find out what it missed.
  */
 
-import { readFile } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join, relative, sep } from "node:path"
 import type { Capability as Cap, KeyScope, ReloadOutcome } from "@dispach/core"
 import {
     type Agent,
@@ -91,6 +93,7 @@ import {
 import { claimSpent, fail, forbidden } from "./respond.ts"
 import { Router } from "./router.ts"
 import { sseResponse } from "./sse.ts"
+import { type TarEntry, tarGz } from "./tar.ts"
 import { serveAsset, WEB_PATHS } from "./web.ts"
 import {
     ApprovalBody,
@@ -886,6 +889,71 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * embedder brokers it — scans for secrets, decides who may — so both are `admin`, and a key bound
      * to a participant must be an admin participant's.
      */
+    /**
+     * The silo, backed up (pilot.9, VelaCrew; the #14 skipped in pilot.5): a consistent snapshot of
+     * the store and every hosted agent's directory, as one tar.gz.
+     *
+     * `admin`, and every agent's data is in it, so a key scoped to fewer agents is refused rather than
+     * handed a partial backup that looks whole. `.env` files are left out on purpose: secrets belong
+     * to the embedder that injects them, and a backup is a file that gets copied around. So are
+     * `.venv`, `node_modules` and `.git`, which are rebuilt rather than restored.
+     */
+    router.add(
+        "GET",
+        "/v1/backup",
+        async (context) => {
+            if (context.principal.kind === "key" && context.principal.scope?.agents !== undefined) {
+                return fail(
+                    {
+                        code: "backup_requires_unscoped_key",
+                        message:
+                            "This key reaches only some agents, and a backup holds every agent's data.",
+                        hint: "Take backups with a key that has admin and no agents scope.",
+                    },
+                    403,
+                )
+            }
+            const dir = await mkdtemp(join(tmpdir(), "backup-"))
+            const snapshot = join(dir, "store.db")
+            await runtime.store.snapshot(snapshot)
+            const entries: TarEntry[] = [{ name: "store.db", source: { path: snapshot } }]
+            const agents: { id: string; files: number }[] = []
+            for (const agent of runtime.list()) {
+                const files = await agentFiles(agent.dir)
+                for (const file of files) {
+                    entries.push({
+                        name: `agents/${agent.id}/${file.name}`,
+                        source: { bytes: await readFile(file.path) },
+                    })
+                }
+                agents.push({ id: agent.id, files: files.length })
+            }
+            const manifest = {
+                createdAt: new Date().toISOString(),
+                version: VERSION,
+                agents,
+                excluded: [...BACKUP_SKIP],
+            }
+            entries.unshift({
+                name: "backup.json",
+                source: {
+                    bytes: new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}\n`),
+                },
+            })
+            const stamp = manifest.createdAt.replace(/[:.]/g, "-")
+            return new Response(
+                tarGz(entries, () => rm(dir, { recursive: true, force: true })),
+                {
+                    headers: {
+                        "content-type": "application/gzip",
+                        "content-disposition": `attachment; filename="backup-${stamp}.tar.gz"`,
+                    },
+                },
+            )
+        },
+        { capability: "admin" },
+    )
+
     router.add(
         "GET",
         "/v1/agents/:id/export",
@@ -2468,6 +2536,8 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         id: input.id,
                         ...(input.name === undefined ? {} : { name: input.name }),
                         ...(input.role === undefined ? {} : { role: input.role }),
+                        ...(input.title === undefined ? {} : { title: input.title }),
+                        ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
                     }),
                     201,
                 )
@@ -2805,6 +2875,23 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 }
             }),
         { capability: "admin" },
+    )
+
+    /**
+     * Who the agent is assigned to, read back (pilot.9, VelaCrew). `assignment: null` when nobody:
+     * an unassigned agent is a normal state, and a 404 would read as the agent itself missing.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/assignee",
+        (context) =>
+            withAgent(runtime, context, async (agent) =>
+                json({
+                    id: agent.id,
+                    assignment: (await runtime.store.conversations.assignment(agent.id)) ?? null,
+                }),
+            ),
+        { capability: "read" },
     )
 
     router.add(
@@ -5098,4 +5185,23 @@ function pendingDetail(outcome: ReloadOutcome): ErrorDetail | undefined {
         message: `It applies when the ${outcome.running} running turn(s) finish; they complete on the settings they started with.`,
         hint: `New turns keep the old settings for ${outcome.holdAfterMs} ms, then wait and start on the new ones. The agent.reloaded event says when it is in force.`,
     }
+}
+
+/** Left out of a backup: secrets the embedder owns, and what is rebuilt rather than restored. */
+const BACKUP_SKIP = new Set([".env", ".venv", "node_modules", ".git"])
+
+/** Every regular file under an agent's directory, by its path relative to it, skips excluded. */
+async function agentFiles(root: string): Promise<{ name: string; path: string }[]> {
+    const found: { name: string; path: string }[] = []
+    const walk = async (dir: string) => {
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+            if (BACKUP_SKIP.has(entry.name)) continue
+            const path = join(dir, entry.name)
+            if (entry.isDirectory()) await walk(path)
+            else if (entry.isFile())
+                found.push({ name: relative(root, path).split(sep).join("/"), path })
+        }
+    }
+    await walk(root)
+    return found
 }

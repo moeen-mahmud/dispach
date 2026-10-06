@@ -4,6 +4,18 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.8
+
+- `tools.providers.system.env: scrub` (or a list of names to pass) keeps the runtime's secrets out of what `exec` and skill scripts see. It is off by default, so nothing changes until a manifest sets it, and the agent cannot change it.
+- `X_FILE` sets `X` from that file when the CLI starts, unless `X` is set already. The value never appears in the process's environment block. `AWS_*` is left to the SDK.
+- Bedrock: when `AWS_CONTAINER_CREDENTIALS_FULL_URI` is set, the endpoint's own refusal code (for example `credit_exhausted`) is the turn's error code, terminal, instead of `bedrock_credentials_missing`.
+- Firecrawl, first-class: `tools.providers.web.firecrawl: {}` routes `web_fetch` through Firecrawl's scrape (JavaScript pages come back as markdown) and adds `web_crawl` and `web_map`. `backend: firecrawl` is a search backend too.
+- Every web search, scrape, crawl and map emits `tool.usage` (`provider`, `unit`, `units`, `participant`). Any tool can report its spend this way through `ToolContext.meter`.
+- An agent asked by another member's agent is told whose agent it is and who is asking. Participants take `title` and `timezone` (`POST /v1/participants`), and both appear in that note.
+- An MCP server's `turnHeader` sends the turn id with every call, and the call id in `<turnHeader>-Call`.
+- `GET /v1/backup` (admin, unscoped key) streams the silo as a tar.gz: a consistent store snapshot plus every hosted agent's directory, without `.env` files.
+- `GET /v1/agents/:id/assignee` reads the assignment back.
+
 ### Since 0.2.0-pilot.7
 
 - `PATCH /config` takes `{path, remove: true}` to take a field out of the manifest, so it returns to its default, with the same checks as a set: a required field is refused, and a field that is not there is left alone. The client's `removeConfig(path)` sends it.

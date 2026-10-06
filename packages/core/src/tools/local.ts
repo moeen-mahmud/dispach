@@ -423,5 +423,6 @@ export function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
         ...(overrides.setPhase === undefined ? {} : { setPhase: overrides.setPhase }),
         ...(overrides.memoryDir === undefined ? {} : { memoryDir: overrides.memoryDir }),
         ...(overrides.writeNote === undefined ? {} : { writeNote: overrides.writeNote }),
+        ...(overrides.meter === undefined ? {} : { meter: overrides.meter }),
     }
 }

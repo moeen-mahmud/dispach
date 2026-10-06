@@ -104,6 +104,29 @@ describe("a key bound to a participant, in conversations", () => {
             participantId: "user:bob",
             assignedBy: "user:ada",
         })
+        // Read back on its own route too (pilot.9); unassigned is null, not a 404.
+        const read = (await (await call("GET", "/v1/agents/assistant/assignee")).json()) as {
+            assignment: { participantId: string } | null
+        }
+        expect(read.assignment?.participantId).toBe("user:bob")
+        await call("DELETE", "/v1/agents/assistant/assignee")
+        const cleared = await call("GET", "/v1/agents/assistant/assignee")
+        expect(cleared.status).toBe(200)
+        expect(((await cleared.json()) as { assignment: unknown }).assignment).toBeNull()
+    })
+
+    test("a participant carries a title and a timezone; an unknown zone is refused (pilot.9)", async () => {
+        const { call } = await setup()
+        const made = await call("POST", "/v1/participants", {
+            body: { id: "user:dee", name: "Dee", title: "Engineer", timezone: "Asia/Dhaka" },
+        })
+        expect(made.status).toBe(201)
+        expect(await made.json()).toMatchObject({ title: "Engineer", timezone: "Asia/Dhaka" })
+        const bad = await call("POST", "/v1/participants", {
+            body: { id: "user:eve", timezone: "Mars/Olympus" },
+        })
+        expect(bad.status).toBe(400)
+        expect(await codeOf(bad)).toBe("participant_timezone_invalid")
     })
 
     test("an agent is not a participant to register, and a message needs an author", async () => {

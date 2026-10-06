@@ -38,6 +38,7 @@ import {
     type ToolProviderFactory,
 } from "@dispach/core"
 import { configTools } from "./config.ts"
+import { childEnv, type EnvPolicy, envPolicy } from "./env.ts"
 import { execTool } from "./exec.ts"
 import { fileTools } from "./files.ts"
 import { SYSTEM_PROVIDER_ID } from "./paths.ts"
@@ -170,9 +171,12 @@ export const SYSTEM_TOOL_SLUGS: readonly string[] = [
  */
 export const SYSTEM_READONLY_SLUGS: readonly string[] = ["file_read", "glob", "grep"]
 
-const CONFIG_KEYS = ["protect", "writeRoots"] as const
+const CONFIG_KEYS = ["protect", "writeRoots", "env"] as const
 
-export function systemFromConfig(context: ToolProviderContext): SystemProvider {
+export function systemFromConfig(
+    context: ToolProviderContext,
+    onPolicy?: (policy: EnvPolicy) => void,
+): SystemProvider {
     const unknown = Object.keys(context.config).filter(
         (key) => !CONFIG_KEYS.includes(key as (typeof CONFIG_KEYS)[number]),
     )
@@ -187,8 +191,11 @@ export function systemFromConfig(context: ToolProviderContext): SystemProvider {
 
     const protect = context.config.protect
     const writeRoots = context.config.writeRoots
+    const policy = envPolicy(context.config.env)
+    // The same policy reaches the skill-script runner this agent's plugin setup registered.
+    onPolicy?.(policy)
     return new SystemProvider({
-        env: context.env,
+        env: childEnv(context.env, policy),
         dir: context.dir,
         ...(context.providers === undefined ? {} : { providers: context.providers }),
         ...(context.mediaProviders === undefined ? {} : { mediaProviders: context.mediaProviders }),

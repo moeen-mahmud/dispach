@@ -361,6 +361,15 @@ permission rules; `write` is files **without** a shell, which is the only config
 `tools.providers.system` accepts `writeRoots` (extra writable directories) and `protect` (extra
 refused paths). Both widen their respective set; nothing narrows either.
 
+`tools.providers.system.env` (since pilot.9) decides what `exec` and a skill's scripts see of the
+environment: `inherit` (the default, and every agent before it), `scrub` (`PATH`, `HOME`, `USER`,
+`LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `TERM`, `TMPDIR` and nothing else), or a list of
+names, which scrubs and passes those too. It is the agent's containment, so `config_set` refuses it by
+path and nested in a `tools.providers` value. It cannot stop a command reading the runtime's own
+`/proc/<pid>/environ`, since both run as one user: pass secrets as files (`X_FILE`, which the CLI
+reads into `X` at start without putting the value in the process's environment block) or mount `/proc`
+with `hidepid=2`.
+
 `exec` takes `command`, `workdir`, `timeoutMs`, `pty`, and `background`. It takes **no `env`
 argument**, deliberately: a per-call environment map is invisible to the policy engine, which matches
 the command string, so `{PATH: "/tmp/evil"}` beside `git status` would pass a rule that never saw the
@@ -443,6 +452,7 @@ put the security fields out of reach; and two edits are refused whatever the pol
 | refused edit | why |
 | --- | --- |
 | a `writeRoots` list anywhere — `tools.providers.<id>.writeRoots`, or nested inside a `tools.providers` value | where the agent may write is the person's decision. Asked to create a file, an agent granted itself the whole home directory and wrote there |
+| the system provider's `env`, by path or nested inside a `tools.providers` value | what a command can see of the environment is containment; an agent that could set `inherit` back could hand its shell every secret the scrub keeps out |
 | replacing `tools.policy.deny` | its only purpose is removing a restriction someone set deliberately |
 | `tools.untrusted.onMutate: allow` | it turns off the check on outside content driving a write |
 
@@ -476,6 +486,7 @@ tools:
 | `url` | `http` or `https`. A URL carrying a credential is refused; put it in `headersEnv`. stdio is not supported: give the server an HTTP front. |
 | `headersEnv` | Header name → the variable holding its value, from the environment the agent loaded with. A missing variable fails the call that needs it, naming the variable. |
 | `participantHeader` | Sent with every call as the turn's acting participant id, and absent for a schedule, a peer agent or the operator, which is how the server tells the two apart. |
+| `turnHeader` | Since pilot.9. Sent with every call as the turn id, with the call id in `<turnHeader>-Call`, so a server can trace a write to the answer that made it. |
 | `policyArgs` | Tool name → the argument a `tools.policy` rule matches. For a proxy tool (`invoke_tool(toolName, arguments)`) this is the inner tool's name, so a rule can reach the call the proxy would make. |
 
 Tools are **pinned by name** like every other provider's, never exposed wholesale, so a server adding

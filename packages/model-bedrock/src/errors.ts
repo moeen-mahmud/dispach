@@ -73,6 +73,30 @@ export function classify(
         }
     }
 
+    // The container endpoint, read by Dispach (`credentials.ts`), refused and said why. Its own code is
+    // the turn's error code when it is one (`credit_exhausted`), so an embedder that refused once a
+    // user's credit ran out can tell that user so; a 4xx stays terminal and never falls back.
+    if (name === "CredentialsRefusedError") {
+        const shape = error as { status?: unknown; code?: unknown; detail?: unknown }
+        const refusedStatus = typeof shape.status === "number" ? shape.status : 403
+        const own =
+            typeof shape.code === "string" && /^[a-z][a-z0-9_]{1,63}$/.test(shape.code)
+                ? shape.code
+                : undefined
+        return {
+            retryable: false,
+            status: refusedStatus,
+            error: new ModelError({
+                code: own ?? "bedrock_credentials_refused",
+                message: `The AWS credentials endpoint refused to issue credentials for Bedrock (${modelId} in ${region}): status ${refusedStatus}${own === undefined ? "" : `, ${own}`}${typeof shape.detail === "string" ? ` — ${shape.detail}` : ""}.`,
+                hint: "The container-credentials endpoint answered and declined: the decision of the service vending credentials (a budget or credit stop, a revoked user), not a missing configuration. Its own code is this error's code. Dispach does not retry it.",
+                field,
+                status: refusedStatus,
+                cause: error,
+            }),
+        }
+    }
+
     // The credentials endpoint answered, and said no — a refusal, not an absence. The SDK keeps only
     // the status (its retry wrapper re-throws `String(error)`, dropping the body), so that is what is
     // carried: an embedder vending credentials can make a 403 its budget stop and tell it apart from a

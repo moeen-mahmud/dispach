@@ -703,6 +703,7 @@ export type {
     ToolProviderRefresh,
     ToolResult,
     ToolSpec,
+    ToolUsage,
     WorkspaceWriteTarget,
 } from "./tools/types.ts"
 export { VERSION } from "./version.ts"

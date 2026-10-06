@@ -396,6 +396,20 @@ export interface EventDataMap {
         audioSeconds?: number
         sender?: string
     }
+    /**
+     * What one tool call spent at a third party (pilot.9), reported by the tool through
+     * `ToolContext.meter`: a web search's credit, a crawl's pages. Zero or more per call.
+     */
+    "tool.usage": {
+        slug: string
+        callId: string
+        provider: string
+        operation?: string
+        unit: string
+        units: number
+        /** The acting participant's id, when the turn acts for one: whom the spend is billed to. */
+        participant?: string
+    }
     "tool.call": {
         slug: string
         callId: string
@@ -721,6 +735,7 @@ export const EVENT_TYPES = [
     "model.fallback",
     "model.result",
     "media.result",
+    "tool.usage",
     "tool.call",
     "tool.result",
     "tool.gated",

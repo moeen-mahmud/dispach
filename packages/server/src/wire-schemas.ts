@@ -465,6 +465,14 @@ export const ParticipantBody = z.object({
         hint: 'Either "admin" (may assign agents to members) or "member". Omitted is "member".',
         description: 'What the participant may do: "admin" also assigns agents.',
     }),
+    title: annotate(
+        z.string().trim().min(1).max(120).optional(),
+        "A job title, as the team knows the person. Told to an agent answering another member's agent about whom it represents and who is asking. Not a permission.",
+    ),
+    timezone: annotate(
+        z.string().trim().min(1).optional(),
+        'An IANA timezone, such as "Europe/London". Told to an agent answering another member\'s agent, so "tomorrow at nine" means the right hour. Refused when the runtime does not know it.',
+    ),
 })
 
 export const ConversationBody = z.object({

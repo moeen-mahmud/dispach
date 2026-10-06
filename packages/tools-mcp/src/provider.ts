@@ -10,6 +10,7 @@
  *           url: http://127.0.0.1:3000/mcp
  *           headersEnv: { Authorization: HULY_MCP_AUTH }   # header → env var NAME
  *           participantHeader: X-Acting-Participant        # who the turn acts for (doc 16 R7)
+ *           turnHeader: X-Dispach-Turn                     # which turn made the call (pilot.9)
  *           policyArgs: { invoke_tool: toolName }          # a proxy tool's inner tool, for policy
  *   pinned: [huly__search_tools, huly__get_tool_schema, huly__invoke_tool]
  * ```
@@ -47,12 +48,25 @@ export interface McpServerConfig {
     /** Header name → the env var holding its value. Names only (hard rule 10). */
     readonly headersEnv: Readonly<Record<string, string>>
     readonly participantHeader?: string
+    /**
+     * A header carrying the turn id, and one carrying the call id beside it as `<header>-Call`
+     * (pilot.9, VelaCrew): so a server's writes can be traced to the answer that made them, where
+     * matching by agent and time window mixes two turns that ran at once.
+     */
+    readonly turnHeader?: string
     /** MCP tool name → the argument a policy rule matches. */
     readonly policyArgs: Readonly<Record<string, string>>
     readonly timeoutMs: number
 }
 
-const SERVER_KEYS = ["url", "headersEnv", "participantHeader", "policyArgs", "timeoutMs"] as const
+const SERVER_KEYS = [
+    "url",
+    "headersEnv",
+    "participantHeader",
+    "turnHeader",
+    "policyArgs",
+    "timeoutMs",
+] as const
 const DEFAULT_TIMEOUT_MS = 30_000
 /** `available()` is billed every turn; a server in native mode lists hundreds. */
 const AVAILABLE_LIMIT = 40
@@ -88,7 +102,7 @@ export function parseServers(config: Readonly<Record<string, unknown>>): McpServ
     if (extra.length > 0) {
         throw mcpConfigInvalid(
             `tools.providers.mcp has keys the MCP provider does not read: ${extra.join(", ")}.`,
-            "Everything goes under servers.<name>: url, headersEnv, participantHeader, policyArgs, timeoutMs. Refused rather than ignored, because a setting that looks applied and is not is worse than a rejected manifest.",
+            "Everything goes under servers.<name>: url, headersEnv, participantHeader, turnHeader, policyArgs, timeoutMs. Refused rather than ignored, because a setting that looks applied and is not is worse than a rejected manifest.",
         )
     }
     const servers = record(config.servers)
@@ -160,9 +174,21 @@ export function parseServers(config: Readonly<Record<string, unknown>>): McpServ
                 `${field}.participantHeader`,
             )
         }
+        const turnHeader = entry.turnHeader
+        if (
+            turnHeader !== undefined &&
+            (typeof turnHeader !== "string" || !/^[A-Za-z0-9-]+$/.test(turnHeader))
+        ) {
+            throw mcpConfigInvalid(
+                `${field}.turnHeader must be a header name.`,
+                "e.g. X-Dispach-Turn. Each call then carries the turn id there, and the call id in <name>-Call.",
+                `${field}.turnHeader`,
+            )
+        }
         return {
             name,
             url: url.toString(),
+            ...(turnHeader === undefined ? {} : { turnHeader }),
             headersEnv: stringMap(
                 entry.headersEnv,
                 `${field}.headersEnv`,
@@ -344,10 +370,19 @@ export class McpProvider implements ToolProvider {
                 // Only a person is forwarded. A schedule or a peer agent sends no header, which is
                 // how the server tells "nobody in particular" from somebody (decision 14.21).
                 const participant = context.actingParticipant
-                const extra =
-                    server.participantHeader === undefined || participant == null
+                const extra = {
+                    ...(server.participantHeader === undefined || participant == null
                         ? {}
-                        : { [server.participantHeader]: participant.id }
+                        : { [server.participantHeader]: participant.id }),
+                    ...(server.turnHeader === undefined
+                        ? {}
+                        : {
+                              [server.turnHeader]: context.turnId,
+                              ...(context.callId === undefined
+                                  ? {}
+                                  : { [`${server.turnHeader}-Call`]: context.callId }),
+                          }),
+                }
                 const result = await this.#client(server).callTool(
                     tool.name,
                     args,

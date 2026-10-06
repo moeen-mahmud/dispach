@@ -126,6 +126,12 @@ function floorRefusal(path: string, value?: unknown): string | undefined {
     // And not through the parent, either: `tools.providers` is settable so the agent can turn on the
     // web provider when asked, which means the *value* is a place a writeRoots list could hide.
     if (key.startsWith("tools.providers") && containsKey(value, "writeroots")) return WRITE_ROOTS
+    // What a command's environment holds is containment too (pilot.9): an agent that could set
+    // `env: inherit` back could hand its own shell every secret the scrub was there to keep out.
+    const CHILD_ENV =
+        "what your commands can see of the environment is not yours to widen. The scrub keeps the runtime's credentials out of anything you run; a person lists a variable your commands need"
+    if (key.startsWith("tools.providers") && key.split(".").includes("env")) return CHILD_ENV
+    if (key.startsWith("tools.providers") && containsKey(value, "env")) return CHILD_ENV
     // Same two shapes as `writeRoots`: the path itself, and the key hidden inside a value. `channels`
     // is settable so the agent can set up a bot when asked, which makes its value a place an
     // allowFrom could ride along in.
@@ -295,7 +301,7 @@ export function configReadHandler(options: ConfigOptions): ToolHandler {
             "",
             "Anything not on this list is not settable from a conversation. A change takes effect when the agent next starts, not in the current conversation.",
             "",
-            "Some edits are refused whatever the rules say. Removing a check: replacing tools.policy.deny, or setting tools.untrusted.onMutate to allow. Deciding reach: a writeRoots list anywhere, a channel's allowFrom, and server.host or server.tokenEnv. Enabling a capability is what a person asks you for; where you may write, who may talk to you, and what address you listen on are theirs — name what you need and why, and let them add it.",
+            "Some edits are refused whatever the rules say. Removing a check: replacing tools.policy.deny, or setting tools.untrusted.onMutate to allow. Deciding reach: a writeRoots list anywhere, the system provider's env, a channel's allowFrom, and server.host or server.tokenEnv. Enabling a capability is what a person asks you for; where you may write, who may talk to you, and what address you listen on are theirs — name what you need and why, and let them add it.",
             "",
             `The whole file, comments and all, is at ${file} — read it with file_read if that tool is enabled, or ask the person to open it.`,
         ].join("\n")

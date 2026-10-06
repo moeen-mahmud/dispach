@@ -190,6 +190,13 @@ export interface ToolContext {
      */
     readonly readArtifact?: (id: string) => Promise<DisplacedArtifact | undefined>
     /**
+     * Report what this call spent at a third party (pilot.9): a web search's credit, a crawl's pages.
+     * Emitted as `tool.usage` beside the call's own events, with the acting participant, so an
+     * embedder bills a user's web spend the way it bills `model.result`. Supplied by the executor on
+     * every call; absent only in a context built by hand.
+     */
+    readonly meter?: (usage: ToolUsage) => void
+    /**
      * Moves the session to another phase. Resolved by the turn, which owns the current one.
      *
      * A seam rather than state on the context, because the change has to reach three places the tool
@@ -424,6 +431,17 @@ export interface ScriptRunResult {
     readonly code?: number
     /** Set when the deadline ended it, so the observation can say so rather than showing empty output. */
     readonly timedOut: boolean
+}
+
+/** One call's spend at a third party, in that party's own unit. */
+export interface ToolUsage {
+    /** Who charged it: `tavily`, `firecrawl`. */
+    readonly provider: string
+    /** What was done, when a tool does several: `search`, `scrape`, `crawl`, `map`. */
+    readonly operation?: string
+    /** `credits` where the provider bills in them, `requests` where it bills per call. */
+    readonly unit: string
+    readonly units: number
 }
 
 export interface ToolProviderContext {

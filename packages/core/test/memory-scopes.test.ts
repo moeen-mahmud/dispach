@@ -202,8 +202,13 @@ async function peerAsk(participantId: string) {
         },
     })
     const hub = runtime.conversations
-    await hub.registerParticipant({ id: "user:ada", name: "Ada" })
-    await hub.registerParticipant({ id: "user:bob", name: "Bob" })
+    await hub.registerParticipant({
+        id: "user:ada",
+        name: "Ada",
+        title: "Head of Design",
+        timezone: "Europe/London",
+    })
+    await hub.registerParticipant({ id: "user:bob", name: "Bob", timezone: "Asia/Dhaka" })
     await hub.assign({ agentId: "adabot", participantId: "user:ada" })
     await hub.assign({ agentId: "bobbot", participantId: "user:bob" })
     await hub.addNote({
@@ -231,6 +236,26 @@ describe("memory scopes", () => {
         // For Ada herself, her own agent reads everything, as her DM does.
         const forAda = await peerAsk("user:ada")
         expect(forAda.adaSaw).toContain("Globex")
+    })
+
+    test("an asked agent is told whose agent it is and who is asking, with their titles and timezones (pilot.9)", async () => {
+        const forBob = await peerAsk("user:bob")
+        expect(forBob.adaSaw).toContain(
+            "You are the agent of Ada (Head of Design, timezone Europe/London), answering another member's agent.",
+        )
+        expect(forBob.adaSaw).toContain(
+            "The agent asking is bobbot, on behalf of Bob (timezone Asia/Dhaka).",
+        )
+    })
+
+    test("a timezone the runtime does not know is refused", async () => {
+        const { runtime, hub } = await team()
+        expect(
+            await refusal(() =>
+                hub.registerParticipant({ id: "user:x", timezone: "Mars/Olympus" }),
+            ),
+        ).toBe("participant_timezone_invalid")
+        await runtime.stop()
     })
 
     test("Ada's private memory reaches her own direct turns and nothing else: not Bob's agent, not the crew, not her stand-in", async () => {

@@ -8,6 +8,7 @@
  */
 
 import type { Plugin } from "@dispach/core"
+import type { EnvPolicy } from "./env.ts"
 import { systemFromConfig } from "./provider.ts"
 import { SystemScriptRunner } from "./scripts.ts"
 
@@ -21,6 +22,7 @@ export {
     parseValue,
     SETTABLE_PATHS,
 } from "./config.ts"
+export { childEnv, type EnvPolicy, envPolicy } from "./env.ts"
 export {
     execCommandEmpty,
     execPtyUnavailable,
@@ -106,7 +108,15 @@ export default {
         { kind: "fs", paths: ["<workspace>"], mode: "write" },
     ],
     setup(context) {
-        context.defineToolProvider("system", systemFromConfig)
-        context.defineScriptRunner(new SystemScriptRunner({ env: context.env }))
+        // One agent's provider and runner share its `env` policy; setup runs once per agent.
+        let policy: EnvPolicy = "inherit"
+        context.defineToolProvider("system", (providerContext) =>
+            systemFromConfig(providerContext, (chosen) => {
+                policy = chosen
+            }),
+        )
+        context.defineScriptRunner(
+            new SystemScriptRunner({ env: context.env, policy: () => policy }),
+        )
     },
 } satisfies Plugin

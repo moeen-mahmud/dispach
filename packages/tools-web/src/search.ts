@@ -100,6 +100,12 @@ function searchHandler(options: SearchOptions): ToolHandler {
             if (!response.ok) await readError(chosen.id, response)
 
             const payload: unknown = await response.json()
+            context.meter?.({
+                provider: chosen.id,
+                operation: "search",
+                unit: chosen.unit,
+                units: chosen.units?.(payload) ?? 1,
+            })
             return render(query, chosen.read(payload).slice(0, maxResults))
         } finally {
             clearTimeout(timer)

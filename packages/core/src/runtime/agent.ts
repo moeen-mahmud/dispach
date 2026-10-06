@@ -300,7 +300,7 @@ export interface AgentSendOptions {
      * person it acts for is this agent's own owner. And it cannot delegate onward: `handoff` is left
      * out of its catalogue, so a peer ask is one hop and `A ↔ B` cannot loop.
      */
-    readonly peerAsk?: true
+    readonly peerAsk?: { readonly askedBy: string }
 }
 
 /** How much of a child's prompt budget its routed call's output may take; the rest is its task. */
@@ -1407,12 +1407,21 @@ export class Agent {
                 : activateKnowledge(input, this.knowledge)
         const skills = child !== undefined ? [] : this.#activateSkills(input, history)
         const participant = options.participant ?? participantOf(options.from)
-        const plan = await this.#readPlan(options.from, participant, options.peerAsk === true)
+        const plan = await this.#readPlan(options.from, participant, options.peerAsk !== undefined)
         // A peer ask is one hop: the asked agent answers and cannot hand the work on, to a peer or to
         // its own team, so `A ↔ B` delegation cannot loop however the two are configured.
         const slugs = this.tools.specs().map((spec) => spec.slug)
+        // Whose agent this is and who is asking, said by the runtime on a peer ask rather than left to
+        // a note retrieval may miss: the volatile tier that names the owner is withheld here.
+        const peerNote =
+            options.peerAsk === undefined
+                ? undefined
+                : await this.#peerAskNote(options.peerAsk.askedBy, participant?.id)
+        const runtimeNote =
+            [peerNote, options.runtimeNote].filter((note) => note !== undefined).join("\n\n") ||
+            undefined
         const toolsAllow =
-            options.peerAsk === true && slugs.includes(HANDOFF)
+            options.peerAsk !== undefined && slugs.includes(HANDOFF)
                 ? (options.toolsAllow ?? slugs).filter((slug) => slug !== HANDOFF)
                 : options.toolsAllow
         const remembered =
@@ -1528,7 +1537,7 @@ export class Agent {
             ...(options.deferMutations === undefined
                 ? {}
                 : { deferMutations: options.deferMutations }),
-            ...(options.runtimeNote === undefined ? {} : { runtimeNote: options.runtimeNote }),
+            ...(runtimeNote === undefined ? {} : { runtimeNote }),
             ...(options.images === undefined || options.images.length === 0
                 ? {}
                 : { images: options.images }),
@@ -2021,6 +2030,39 @@ export class Agent {
      * Only a conversation turn or a stand-in narrows anything, and only those pay for the lookups that
      * decide it — every other turn reads what it always read, plus any shared scope it belongs to.
      */
+    /**
+     * The asked turn's framing (pilot.9, VelaCrew): this agent's owner, the asking agent and the
+     * person it acts for, each with the title and timezone their participant record carries. Facts the
+     * embedder registered, so nothing here is the model's to doubt; absent fields are left out.
+     */
+    async #peerAskNote(askedBy: string, actingFor: string | undefined): Promise<string> {
+        const conversations = this.store.conversations
+        const describe = async (id: string | undefined) => {
+            if (id === undefined) return undefined
+            const person = await conversations.participant(id)
+            const name = person?.name ?? id
+            const detail = [
+                person?.title,
+                person?.timezone === undefined ? undefined : `timezone ${person.timezone}`,
+            ]
+                .filter((part) => part !== undefined)
+                .join(", ")
+            return detail === "" ? name : `${name} (${detail})`
+        }
+        const ownerId = (await conversations.assignment(this.id))?.participantId
+        const owner = await describe(ownerId)
+        const asker = await describe(actingFor)
+        return [
+            owner === undefined
+                ? "You are answering another member's agent."
+                : `You are the agent of ${owner}, answering another member's agent.`,
+            asker === undefined
+                ? `The agent asking is ${askedBy}.`
+                : `The agent asking is ${askedBy}, on behalf of ${asker}.`,
+            "Your answer goes back to them, so it is written from what your owner shares, not from what they keep private.",
+        ].join(" ")
+    }
+
     async #readPlan(
         from: TurnSender | undefined,
         participant: ActingParticipant | null,

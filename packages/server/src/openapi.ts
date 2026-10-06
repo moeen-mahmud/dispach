@@ -92,6 +92,11 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         summary: "Every agent this server knows about, hosted or switched off.",
     },
     "GET /v1/agents/:id": { summary: "One agent, with its dialect, window, counts and warnings." },
+    "GET /v1/backup": {
+        summary:
+            "The silo as a tar.gz: a consistent store snapshot and every hosted agent's directory, with a backup.json manifest. Never a .env file. An admin key with no agents scope.",
+        statuses: [{ code: 403, when: "the key is scoped to some agents" }],
+    },
     "GET /v1/agents/:id/export": {
         summary:
             "A slice of the agent as a JSON bundle: its carried memory file, memory archive and knowledge. Never the manifest, secrets or skills.",
@@ -260,6 +265,10 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     "PUT /v1/agents/:id/assignee": {
         summary: "Record which member an agent works for. An admin participant's act.",
         body: AssigneeBody,
+    },
+    "GET /v1/agents/:id/assignee": {
+        summary:
+            "Who the agent is assigned to, as `{id, assignment}`; `assignment` is null when nobody.",
     },
     "DELETE /v1/agents/:id/assignee": { summary: "Clear an agent's assignment." },
     "GET /v1/webhooks": {

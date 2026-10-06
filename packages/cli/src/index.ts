@@ -37,6 +37,7 @@ import { helpText } from "#lib/help"
 import { installServerUnit } from "#lib/host-actions"
 import { missingInterface } from "#lib/interface-missing"
 import { resolveAgentRef } from "#lib/sandbox"
+import { loadSecretFiles } from "#lib/secret-files"
 import { quietAcceptedWarnings } from "#lib/warnings"
 import { memoryCommand } from "#memory"
 import { modelCommand } from "#model"
@@ -579,6 +580,8 @@ async function dispatch(argv: readonly string[]): Promise<number> {
 // the list is specific rather than "every ExperimentalWarning".
 quietAcceptedWarnings()
 installGuards()
+// Before anything reads the environment: `X_FILE` fills `X` for every reader (pilot.9).
+loadSecretFiles()
 
 // One way out for every route, so the terminal is restored and buffered output drains before the
 // process ends — and then the process actually ends.

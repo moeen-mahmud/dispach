@@ -242,7 +242,7 @@ export async function readCapped(response: Response, maxBytes: number): Promise<
     return { text: parts.join(""), read: Math.min(read, maxBytes), capped }
 }
 
-interface Rendered {
+export interface Rendered {
     readonly url: string
     readonly requested: string
     readonly title?: string
@@ -263,7 +263,7 @@ interface Rendered {
  * as though it had read all of it, which is the same failure as a search returning the first fifty of
  * four hundred matches with nothing saying so.
  */
-function render(result: Rendered): string {
+export function render(result: Rendered): string {
     const lines: string[] = []
     lines.push(result.url)
     if (result.hops > 0 && result.url !== result.requested) {

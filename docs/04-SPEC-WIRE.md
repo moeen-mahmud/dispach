@@ -170,6 +170,8 @@ and WebSocket surfaces can return:
 | `action_not_found` | 404 | No such action, or one this key may not decide — a member-bound key decides only its own. The same answer either way. |
 | `action_already_decided` | 409 | The action was approved or declined already. Nothing ran twice. |
 | `assignment_requires_admin` | 403 | A participant-bound key assigning an agent when its participant is not an `admin`. |
+| `participant_timezone_invalid` | 400 | `POST /v1/participants` with a `timezone` that is not an IANA zone the runtime knows. |
+| `backup_requires_unscoped_key` | 403 | `GET /v1/backup` with a key scoped to some agents: a backup holds every agent's data. |
 | `memory_scope_invalid` | 400 | A scope other than `space`, `owner:<participantId>` or `project:<projectId>`. An agent's private memory has no route: the agent writes it. |
 | `memory_note_empty` | 400 | A note with no text. |
 | `memory_scope_forbidden` | 403 | This participant may not write — or, for an owner scope, read — that scope. `owner:<id>` is its owner's alone, admins included; the space takes an admin or the designated writer; a project, an admin. Also a non-admin participant defining a project or naming the space writer, and anyone but the person or an admin reading their audit. |
@@ -301,6 +303,9 @@ GET  /v1/agents/:id/export?paths=MEMORY.md,memory/,knowledge/
 POST /v1/agents/:id/import { bundle, mode?: "skip" | "overwrite" }   (25 MB cap)
                                   → { id, added[], merged: [{ path, notes }], skipped[], overwritten[],
                                       evicted, reload: "none" | "loaded" | "pending" }
+GET  /v1/backup                    → application/gzip: a tar of backup.json, store.db (a consistent
+                                    snapshot) and agents/<id>/… for every hosted agent, no .env,
+                                    .venv, node_modules or .git   (admin, unscoped key; since pilot.9)
 
 GET  /v1/openapi.json    → the generated OpenAPI 3.1 document
 GET  /docs               → a browser reference over it
@@ -319,7 +324,8 @@ GET    /v1/webhooks            → { webhooks: [{ subscriptionId, url, types, sc
                                                 consecutiveFailures, lastError?, pending, … }] }
 DELETE /v1/webhooks/:webhookId → { id, deleted: true }
 
-POST   /v1/participants { id, name?, role? }        → 201 { id, kind: "human", name?, role, createdAt }
+POST   /v1/participants { id, name?, role?, title?, timezone? }
+                                                     → 201 { id, kind: "human", name?, role, title?, timezone?, createdAt }
 GET    /v1/participants                              → { participants: [...] }
 DELETE /v1/participants/:participantId               → { id, deleted: true }
 POST   /v1/conversations { kind, members[], title? } → 201 { id, kind, title?, members, createdAt }
@@ -333,6 +339,7 @@ PUT    /v1/participants/:participantId/presence { presence: "online" | "offline"
 GET    /v1/actions?status                            → { actions: [{ id, agentId, conversationId, ownerId,
                                                                    requestedBy, slug, args, status, result?, … }] }
 POST   /v1/actions/:actionId { approve }             → the action, decided (`done`, `failed` or `denied`)
+GET    /v1/agents/:id/assignee                       → { id, assignment: { agentId, participantId, … } | null }
 PUT    /v1/agents/:id/assignee { participantId }     → { agentId, participantId, assignedBy?, assignedAt }
 DELETE /v1/agents/:id/assignee                       → { id, unassigned }
 POST   /v1/memory/notes { scope, text }              → 201 { id, scope, text, writtenBy, createdAt }
@@ -942,6 +949,7 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/tools/refresh` | `admin` |
 | `PATCH /v1/agents/:id/vars` | `admin` |
+| `GET /v1/backup` | `admin` |
 | `GET /v1/agents/:id/export` | `admin` |
 | `POST /v1/agents/:id/import` | `admin` |
 | `POST /v1/agents/:id/start` | `admin` |
@@ -972,6 +980,7 @@ here that the server does not register, or a registered route missing from here,
 | `PUT /v1/participants/:participantId/presence` | `chat` |
 | `GET /v1/actions` | `read` |
 | `POST /v1/actions/:actionId` | `chat` |
+| `GET /v1/agents/:id/assignee` | `read` |
 | `PUT /v1/agents/:id/assignee` | `admin` |
 | `DELETE /v1/agents/:id/assignee` | `admin` |
 | `POST /v1/memory/notes` | `chat` |
@@ -1338,6 +1347,7 @@ stream still ends on its own turn's `turn.end`, so read `turnId` before treating
 | `schedule.deferred` | a fire arrived mid-run | `scheduleId`, `kind` |
 | `schedule.error` | unreadable schedule, or the turn it started failed | `scheduleId`, `code`, `message`, `hint` |
 | `media.result` | a media call finished | `callId` (a ledger key, like `model.result`'s, and on its usage row), `kind` (`transcription` \| `image`), `provider`, `model`, `latencyMs`, `images?`, `audioSeconds?` (when the provider or the channel reported a duration), `sender?` (Phase 26j) |
+| `tool.usage` | a tool reported what one call spent at a third party | `slug`, `callId`, `provider` (`tavily`, `firecrawl`, …), `operation?` (`search`, `scrape`, `crawl`, `map`), `unit` (`credits` \| `requests`), `units`, `participant?` (the acting participant, whom it is billed to). Zero or more per call (pilot.9) |
 | `conversation.message` | a message in a room or DM | `conversationId`, `messageId`, `authorId`, `origin` (`human` \| `agent`, stamped by the runtime), `text`, `mentions`, `hop`, `turnId?` (an agent's reply). A stand-in's messages carry `onBehalfOf` in the log. An agent's carries its `agentId` in the envelope; a human's carries none (Phase 27) |
 | `conversation.skipped` | a message addressed an agent that did not answer | `conversationId`, `messageId`, `reason` (`hop_limit` \| `refused` \| `failed`), `detail`, `hop`, `ceiling` (the agent's `limits.maxHops`) |
 | `agent.assigned` | an admin recorded who an agent works for | `participantId`, `assignedBy?` |

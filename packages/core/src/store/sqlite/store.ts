@@ -2368,6 +2368,12 @@ export class SqliteStore implements Store {
         }
     }
 
+    async snapshot(path: string): Promise<void> {
+        // A literal rather than a bound parameter: `VACUUM INTO` takes an expression, and binding it
+        // is not something every SQLite build this runs on agrees about.
+        this.#db.exec(`VACUUM INTO '${path.replaceAll("'", "''")}'`)
+    }
+
     async close(): Promise<void> {
         if (this.#closed) return
         this.#closed = true

@@ -1140,6 +1140,18 @@ ALTER TABLE schedules ADD COLUMN max_steps INTEGER;
 ALTER TABLE turns ADD COLUMN note TEXT;
 `,
     },
+    {
+        version: 27,
+        name: "participant_profile",
+        /**
+         * A person's job title and IANA timezone (pilot.9, VelaCrew): what an agent answering another
+         * member's agent is told about whom it represents and who is asking. Both optional.
+         */
+        sql: `
+ALTER TABLE participants ADD COLUMN title TEXT;
+ALTER TABLE participants ADD COLUMN timezone TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

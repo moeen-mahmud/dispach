@@ -141,3 +141,27 @@ export function webConfigInvalid(key: string, why: string): ConfigError {
         field: `tools.providers.web.${key}`,
     })
 }
+
+export function webFirecrawlKeyMissing(variable: string): ConfigError {
+    return new ConfigError({
+        code: "web_firecrawl_key_missing",
+        message: `Firecrawl needs ${variable} and it is not set.`,
+        hint: `Set ${variable} in the .env beside agent.yaml, or in the environment (or ${variable}_FILE naming a file that holds it). tools.providers.web.firecrawl.apiKeyEnv names a different variable if you need one.`,
+        field: "tools.providers.web.firecrawl.apiKeyEnv",
+    })
+}
+
+export function webFirecrawlFailed(operation: string, status: number, detail: string): ToolError {
+    return new ToolError({
+        code: status === 402 ? "web_firecrawl_credits" : "web_firecrawl_failed",
+        message: `Firecrawl ${operation} answered ${status}: ${detail}`,
+        hint:
+            status === 402
+                ? "The Firecrawl account is out of credits. Nothing here can fix that; say so rather than trying another page."
+                : status === 401 || status === 403
+                  ? "The Firecrawl key was rejected. Check the value of the variable named in tools.providers.web.firecrawl.apiKeyEnv."
+                  : status === 429
+                    ? "Rate limited by Firecrawl. Wait before the next call; nothing in the manifest raises it."
+                    : "A failure at Firecrawl rather than in the request. The page may block its crawler; try another source.",
+    })
+}

@@ -39,6 +39,18 @@ export {
     readCapped,
 } from "./fetch.ts"
 export {
+    CRAWL_SPEC,
+    crawlTool,
+    DEFAULT_CRAWL_PAGES,
+    DEFAULT_MAP_LINKS,
+    type FirecrawlConfig,
+    firecrawlFetchTool,
+    MAP_SPEC,
+    MAX_CRAWL_PAGES,
+    MAX_MAP_LINKS,
+    mapTool,
+} from "./firecrawl.ts"
+export {
     assertFetchable,
     checkUrlShape,
     type LookupLike,
@@ -47,6 +59,7 @@ export {
 } from "./guard.ts"
 export { WEB_PROVIDER_ID } from "./paths.ts"
 export {
+    FIRECRAWL_TOOL_SLUGS,
     WEB_TOOL_SLUGS,
     WebProvider,
     type WebProviderOptions,
