@@ -177,8 +177,11 @@ export function execHandler(options: ExecOptions): ToolHandler {
         }
 
         const timeoutMs = effectiveTimeout(numberArg(args.timeoutMs), context.deadlineMs)
+        // Not when the request is the spec's own default: coercion fills that in for a model that
+        // asked for nothing, and reporting it as a clamp put a misleading line on every such call.
+        const requested = numberArg(args.timeoutMs)
         const clamped =
-            numberArg(args.timeoutMs) !== undefined && timeoutMs < Number(args.timeoutMs)
+            requested !== undefined && requested !== DEFAULT_TIMEOUT_MS && timeoutMs < requested
         const background = args.background === true
         const dir = spillDir()
         await mkdir(dir, { recursive: true })

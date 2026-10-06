@@ -232,6 +232,22 @@ test("a timeout longer than the ceiling is clamped", () => {
     expect(effectiveTimeout(3_600_000, 3_600_000)).toBe(MAX_TIMEOUT_MS)
 })
 
+test("the default timeout coercion fills in is not reported as a clamp; a real request is (pilot.9)", async () => {
+    // Coercion writes the spec's default into a call that named no timeout, and the 120 s harness
+    // deadline then clamps it — which used to print "longer than allowed" on every default call.
+    const dir = tempDir()
+    const quiet = await handler(dir)(
+        { command: "echo hi", timeoutMs: DEFAULT_TIMEOUT_MS },
+        toolContext({ dir, deadlineMs: 120_000 }),
+    )
+    expect(quiet).not.toContain("longer than allowed")
+    const asked = await handler(dir)(
+        { command: "echo hi", timeoutMs: 3_600_000 },
+        toolContext({ dir, deadlineMs: 120_000 }),
+    )
+    expect(asked).toContain("longer than allowed")
+})
+
 test("a deadline too short for the margin still yields a positive timeout", () => {
     expect(effectiveTimeout(undefined, 3_000)).toBe(2_400)
     expect(effectiveTimeout(undefined, 1)).toBeGreaterThan(0)

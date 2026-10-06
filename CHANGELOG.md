@@ -15,6 +15,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - An MCP server's `turnHeader` sends the turn id with every call, and the call id in `<turnHeader>-Call`.
 - `GET /v1/backup` (admin, unscoped key) streams the silo as a tar.gz: a consistent store snapshot plus every hosted agent's directory, without `.env` files.
 - `GET /v1/agents/:id/assignee` reads the assignment back.
+- `exec` no longer says "the requested timeout was longer than allowed" on a call that asked for no timeout. It said so on every such call, because the declared default was clamped.
 
 ### Since 0.2.0-pilot.7
 
