@@ -130,6 +130,13 @@ function floorRefusal(path: string, value?: unknown): string | undefined {
     // `env: inherit` back could hand its own shell every secret the scrub was there to keep out.
     const CHILD_ENV =
         "what your commands can see of the environment is not yours to widen. The scrub keeps the runtime's credentials out of anything you run; a person lists a variable your commands need"
+    // Where a provider sends its requests (pilot.10): an agent that could set a baseUrl could point
+    // Composio or the web backends at a server of its choosing and hand it the token and every query.
+    // Composio's was settable this way before web had one.
+    const API_ADDRESS =
+        "where a provider sends its requests, and so its credentials, is not yours to decide. A person sets a provider's baseUrl"
+    if (key.startsWith("tools.providers") && key.split(".").includes("baseurl")) return API_ADDRESS
+    if (key.startsWith("tools.providers") && containsKey(value, "baseurl")) return API_ADDRESS
     if (key.startsWith("tools.providers") && key.split(".").includes("env")) return CHILD_ENV
     if (key.startsWith("tools.providers") && containsKey(value, "env")) return CHILD_ENV
     // Same two shapes as `writeRoots`: the path itself, and the key hidden inside a value. `channels`
@@ -301,7 +308,7 @@ export function configReadHandler(options: ConfigOptions): ToolHandler {
             "",
             "Anything not on this list is not settable from a conversation. A change takes effect when the agent next starts, not in the current conversation.",
             "",
-            "Some edits are refused whatever the rules say. Removing a check: replacing tools.policy.deny, or setting tools.untrusted.onMutate to allow. Deciding reach: a writeRoots list anywhere, the system provider's env, a channel's allowFrom, and server.host or server.tokenEnv. Enabling a capability is what a person asks you for; where you may write, who may talk to you, and what address you listen on are theirs — name what you need and why, and let them add it.",
+            "Some edits are refused whatever the rules say. Removing a check: replacing tools.policy.deny, or setting tools.untrusted.onMutate to allow. Deciding reach: a writeRoots list anywhere, the system provider's env, any provider's baseUrl, a channel's allowFrom, and server.host or server.tokenEnv. Enabling a capability is what a person asks you for; where you may write, who may talk to you, and what address you listen on are theirs — name what you need and why, and let them add it.",
             "",
             `The whole file, comments and all, is at ${file} — read it with file_read if that tool is enabled, or ask the person to open it.`,
         ].join("\n")

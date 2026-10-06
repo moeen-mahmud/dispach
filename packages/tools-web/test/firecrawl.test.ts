@@ -204,3 +204,61 @@ describe("Firecrawl", () => {
         ).toThrow(/firecrawl.scrape/)
     })
 })
+
+describe("a relay in front of the web APIs (pilot.10)", () => {
+    test("baseUrl moves search and every Firecrawl call to the relay, same path and body, any host", async () => {
+        const seen: string[] = []
+        const fetchLike = async (input: string): Promise<Response> => {
+            seen.push(input)
+            return Response.json(
+                input.endsWith("/scrape")
+                    ? { data: { markdown: "ok", metadata: { statusCode: 200 } } }
+                    : { results: [], data: { web: [] } },
+            )
+        }
+        const { WebProvider } = await import("../src/provider.ts")
+        const provider = webFromConfig({
+            dir: "/tmp",
+            env: {},
+            config: {
+                backend: "tavily",
+                baseUrl: "http://velaops-engine:4000/internal/web-relay/tavily/",
+                firecrawl: {
+                    baseUrl: "http://velaops-engine:4000/internal/web-relay/firecrawl/v2",
+                },
+            },
+            agentId: "a",
+        })
+        expect(await provider.list()).toContain("web_crawl")
+        const built = new WebProvider({
+            env: { TAVILY_API_KEY: "silo-token", FIRECRAWL_API_KEY: "silo-token" },
+            backend: "tavily",
+            baseUrl: "http://velaops-engine:4000/internal/web-relay/tavily",
+            firecrawl: {
+                apiKeyEnv: "FIRECRAWL_API_KEY",
+                onlyMainContent: true,
+                baseUrl: "http://velaops-engine:4000/internal/web-relay/firecrawl/v2",
+            },
+            fetch: fetchLike,
+            lookup: async () => [{ address: "93.184.216.34" }],
+        })
+        const tools = await built.resolve(["web_search", "web_fetch"])
+        for (const tool of tools) {
+            await tool.handler(
+                tool.spec.slug === "web_search" ? { query: "q" } : { url: "https://example.com/" },
+                toolContext({}),
+            )
+        }
+        expect(seen).toEqual([
+            "http://velaops-engine:4000/internal/web-relay/tavily/search",
+            "http://velaops-engine:4000/internal/web-relay/firecrawl/v2/scrape",
+        ])
+    })
+
+    test("a baseUrl carrying credentials, or not http, is refused at load", () => {
+        const load = (baseUrl: string) =>
+            webFromConfig({ dir: "/tmp", env: {}, config: { baseUrl }, agentId: "a" })
+        expect(() => load("http://user:pass@relay/x")).toThrow(/credentials/)
+        expect(() => load("ftp://relay/x")).toThrow(/http or https/)
+    })
+})

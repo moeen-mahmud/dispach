@@ -45,6 +45,8 @@ export interface FirecrawlConfig {
     /** Env var *name*. Never a key. */
     readonly apiKeyEnv: string
     readonly onlyMainContent: boolean
+    /** Its API's address before the path, for a relay that adds the real key (pilot.10). */
+    readonly baseUrl?: string
     /** Accept Firecrawl's cached copy this recent, in milliseconds. Its own default when absent. */
     readonly maxAgeMs?: number
     readonly timeoutMs?: number
@@ -87,7 +89,7 @@ async function call(
     // At call time, like search's key: a manifest naming Firecrawl on a machine without the key
     // must still boot, and say so only when a tool that needs it runs.
     if (key === "") throw webFirecrawlKeyMissing(options.config.apiKeyEnv)
-    const response = await options.fetch(`${BASE}${path}`, {
+    const response = await options.fetch(`${options.config.baseUrl ?? BASE}${path}`, {
         method: init.method,
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),

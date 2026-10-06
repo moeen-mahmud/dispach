@@ -53,6 +53,8 @@ export interface WebProviderOptions {
     readonly backend?: BackendId
     /** Env var *name*. Never a key. Defaults to the chosen backend's conventional variable. */
     readonly apiKeyEnv?: string
+    /** The search backend's address before its path: a relay that adds the real key (pilot.10). */
+    readonly baseUrl?: string
     readonly maxBytes?: number
     /**
      * Firecrawl, when configured: `web_fetch` reads through its scrape, and `web_crawl` and `web_map`
@@ -86,6 +88,7 @@ export class WebProvider implements ToolProvider {
             searchTool({
                 backend: id,
                 apiKeyEnv: options.apiKeyEnv ?? chosen.defaultKeyEnv,
+                ...(options.baseUrl === undefined ? {} : { baseUrl: options.baseUrl }),
                 env: options.env,
                 fetch: fetchImpl,
             }),
@@ -131,8 +134,8 @@ export class WebProvider implements ToolProvider {
     }
 }
 
-const CONFIG_KEYS = ["backend", "apiKeyEnv", "maxBytes", "firecrawl"] as const
-const FIRECRAWL_KEYS = ["apiKeyEnv", "onlyMainContent", "maxAge", "timeoutMs"] as const
+const CONFIG_KEYS = ["backend", "apiKeyEnv", "baseUrl", "maxBytes", "firecrawl"] as const
+const FIRECRAWL_KEYS = ["apiKeyEnv", "baseUrl", "onlyMainContent", "maxAge", "timeoutMs"] as const
 
 export function webFromConfig(context: ToolProviderContext): WebProvider {
     const unknown = Object.keys(context.config).filter(
@@ -171,13 +174,16 @@ export function webFromConfig(context: ToolProviderContext): WebProvider {
         throw webConfigInvalid("maxBytes", "must be a number of at least 1000.")
     }
 
+    const baseUrl = baseUrlOf(context.config.baseUrl, "baseUrl")
     const firecrawl = firecrawlConfig(
         context.config.firecrawl,
         backendId === "firecrawl",
         typeof apiKeyEnv === "string" ? apiKeyEnv : undefined,
+        baseUrl,
     )
     return new WebProvider({
         env: context.env,
+        ...(baseUrl === undefined ? {} : { baseUrl }),
         ...(firecrawl === undefined ? {} : { firecrawl }),
         ...(backendId === undefined ? {} : { backend: String(backendId) as BackendId }),
         ...(typeof apiKeyEnv === "string" ? { apiKeyEnv } : {}),
@@ -194,6 +200,7 @@ function firecrawlConfig(
     raw: unknown,
     isSearchBackend: boolean,
     searchKeyEnv: string | undefined,
+    searchBaseUrl: string | undefined,
 ): FirecrawlConfig | undefined {
     if (raw === undefined && !isSearchBackend) return undefined
     const block = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>
@@ -231,6 +238,8 @@ function firecrawlConfig(
         }
         return value
     }
+    const ownBase = baseUrlOf(block.baseUrl, "firecrawl.baseUrl")
+    const baseUrl = ownBase ?? (isSearchBackend ? searchBaseUrl : undefined)
     const maxAgeMs = number("maxAge", 0, 30 * 24 * 60 * 60_000)
     const timeoutMs = number("timeoutMs", 1_000, 300_000)
     return {
@@ -241,7 +250,34 @@ function firecrawlConfig(
                   ? searchKeyEnv
                   : "FIRECRAWL_API_KEY",
         onlyMainContent: only ?? true,
+        ...(baseUrl === undefined ? {} : { baseUrl }),
         ...(maxAgeMs === undefined ? {} : { maxAgeMs }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
     }
+}
+
+/**
+ * A provider API's address, for a relay (pilot.10): http or https, no credentials in it, trailing slash
+ * dropped so the path appends cleanly. It is the embedder's own endpoint, so the address guard that
+ * checks what the agent asks to fetch does not apply to it — and `config_set` can never write it,
+ * since an agent that could would send its token and every query wherever it liked.
+ */
+function baseUrlOf(raw: unknown, key: string): string | undefined {
+    if (raw === undefined) return undefined
+    let url: URL
+    try {
+        url = new URL(String(raw))
+    } catch {
+        throw webConfigInvalid(key, `is not a URL: ${JSON.stringify(raw)}.`)
+    }
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+        throw webConfigInvalid(key, "must be an http or https address.")
+    }
+    if (url.username !== "" || url.password !== "") {
+        throw webConfigInvalid(
+            key,
+            "must not carry credentials. The key travels in the request's own header, from apiKeyEnv.",
+        )
+    }
+    return url.href.replace(/\/+$/, "")
 }

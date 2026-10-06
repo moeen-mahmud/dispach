@@ -247,6 +247,8 @@ tools:
   #   web:
   #     backend: tavily              # tavily | brave | exa | firecrawl
   #     apiKeyEnv: TAVILY_API_KEY    # the variable's name, never the key
+  #     # baseUrl: http://relay:4000/web/tavily   # a relay that adds the real key, so no platform
+  #     #                                         # secret sits in this agent's environment. Same paths.
   #     maxBytes: 2000000            # stop reading a page here, mid-response, before extraction
   #     # Firecrawl, first-class: with this block web_fetch reads through Firecrawl's scrape (pages
   #     # that need JavaScript come back as markdown), and web_crawl (a site's pages) and web_map (a
@@ -254,6 +256,7 @@ tools:
   #     # as a tool.usage event, in credits, with the participant it is billed to.
   #     firecrawl:
   #       apiKeyEnv: FIRECRAWL_API_KEY
+  #       # baseUrl: http://relay:4000/web/firecrawl/v2   # as above, for scrape, crawl and map
   #       onlyMainContent: true      # drop headers, navigation and footers
   #       maxAge: 172800000          # accept Firecrawl's cached copy this recent, in ms
   #       timeoutMs: 60000           # Firecrawl's own limit for one page

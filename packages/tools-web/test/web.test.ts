@@ -461,15 +461,16 @@ describe("web_search", () => {
     }
 
     test("each backend is asked in its own dialect", () => {
-        const tavily = backend("tavily").request("bun test", 5, "k")
+        const ask = (id: "tavily" | "brave" | "exa", query: string, max: number) =>
+            backend(id).request(query, max, "k", backend(id).defaultBase)
+        const tavily = ask("tavily", "bun test", 5)
         expect(tavily.url).toBe("https://api.tavily.com/search")
         expect(String(tavily.init.body)).toContain('"max_results":5')
 
-        const brave = backend("brave").request("bun test", 3, "k")
-        expect(brave.url).toContain("q=bun+test")
-        expect(brave.url).toContain("count=3")
+        const brave = ask("brave", "bun test", 3)
+        expect(brave.url).toBe("https://api.search.brave.com/res/v1/web/search?q=bun+test&count=3")
 
-        const exa = backend("exa").request("bun test", 2, "k")
+        const exa = ask("exa", "bun test", 2)
         expect(String(exa.init.body)).toContain('"numResults":2')
     })
 

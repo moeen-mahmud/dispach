@@ -4,6 +4,11 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.9
+
+- `tools.providers.web.baseUrl` (the search backend) and `tools.providers.web.firecrawl.baseUrl` (scrape, crawl, map) point the web provider at a relay with the same paths and bodies, so a platform key need not be in the agent's environment. `tool.usage` is unchanged.
+- `config_set` can no longer set any provider's `baseUrl`, by path or inside a `tools.providers` value. Composio's was settable before, which let an agent send its token to an address of its choosing.
+
 ### Since 0.2.0-pilot.8
 
 - `tools.providers.system.env: scrub` (or a list of names to pass) keeps the runtime's secrets out of what `exec` and skill scripts see. It is off by default, so nothing changes until a manifest sets it, and the agent cannot change it.

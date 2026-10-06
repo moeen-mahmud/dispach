@@ -34,7 +34,13 @@ export interface Backend {
     readonly id: BackendId
     /** The env var a manifest defaults to for this backend. Named, never a value. */
     readonly defaultKeyEnv: string
-    request(query: string, maxResults: number, apiKey: string): BackendRequest
+    /**
+     * Where its API lives, before the path. `tools.providers.web.baseUrl` replaces it: a relay that
+     * adds the real key keeps the platform secret out of the silo (pilot.10), and gets the same path
+     * and body under its own address.
+     */
+    readonly defaultBase: string
+    request(query: string, maxResults: number, apiKey: string, base: string): BackendRequest
     read(payload: unknown): readonly SearchHit[]
     /** How the backend bills one search, for `ToolContext.meter`. */
     readonly unit: "credits" | "requests"
@@ -60,11 +66,12 @@ function rows(value: unknown): readonly unknown[] {
 const TAVILY: Backend = {
     id: "tavily",
     defaultKeyEnv: "TAVILY_API_KEY",
+    defaultBase: "https://api.tavily.com",
     // A basic-depth search is one credit.
     unit: "credits",
-    request(query, maxResults, apiKey) {
+    request(query, maxResults, apiKey, base) {
         return {
-            url: "https://api.tavily.com/search",
+            url: `${base}/search`,
             init: {
                 method: "POST",
                 headers: {
@@ -95,9 +102,10 @@ const TAVILY: Backend = {
 const BRAVE: Backend = {
     id: "brave",
     defaultKeyEnv: "BRAVE_API_KEY",
+    defaultBase: "https://api.search.brave.com/res/v1",
     unit: "requests",
-    request(query, maxResults, apiKey) {
-        const url = new URL("https://api.search.brave.com/res/v1/web/search")
+    request(query, maxResults, apiKey, base) {
+        const url = new URL(`${base}/web/search`)
         url.searchParams.set("q", query)
         url.searchParams.set("count", String(maxResults))
         return {
@@ -123,10 +131,11 @@ const BRAVE: Backend = {
 const EXA: Backend = {
     id: "exa",
     defaultKeyEnv: "EXA_API_KEY",
+    defaultBase: "https://api.exa.ai",
     unit: "requests",
-    request(query, maxResults, apiKey) {
+    request(query, maxResults, apiKey, base) {
         return {
-            url: "https://api.exa.ai/search",
+            url: `${base}/search`,
             init: {
                 method: "POST",
                 headers: {
@@ -156,10 +165,11 @@ const EXA: Backend = {
 const FIRECRAWL: Backend = {
     id: "firecrawl",
     defaultKeyEnv: "FIRECRAWL_API_KEY",
+    defaultBase: "https://api.firecrawl.dev/v2",
     unit: "credits",
-    request(query, maxResults, apiKey) {
+    request(query, maxResults, apiKey, base) {
         return {
-            url: "https://api.firecrawl.dev/v2/search",
+            url: `${base}/search`,
             init: {
                 method: "POST",
                 headers: {

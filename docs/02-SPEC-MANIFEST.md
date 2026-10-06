@@ -452,6 +452,7 @@ put the security fields out of reach; and two edits are refused whatever the pol
 | refused edit | why |
 | --- | --- |
 | a `writeRoots` list anywhere — `tools.providers.<id>.writeRoots`, or nested inside a `tools.providers` value | where the agent may write is the person's decision. Asked to create a file, an agent granted itself the whole home directory and wrote there |
+| any provider's `baseUrl` (Composio's, the web search backend's, Firecrawl's), by path or nested inside a `tools.providers` value | where a provider sends its requests is where its credential goes; an agent that could set it could send its token and every query anywhere |
 | the system provider's `env`, by path or nested inside a `tools.providers` value | what a command can see of the environment is containment; an agent that could set `inherit` back could hand its shell every secret the scrub keeps out |
 | replacing `tools.policy.deny` | its only purpose is removing a restriction someone set deliberately |
 | `tools.untrusted.onMutate: allow` | it turns off the check on outside content driving a write |

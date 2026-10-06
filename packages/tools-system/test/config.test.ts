@@ -175,6 +175,25 @@ test("a writeRoots hidden inside a providers value is refused", async () => {
     expect(readFileSync(file, "utf8")).toBe(before)
 })
 
+test("no provider's baseUrl can be set by the agent, by path or inside a value (pilot.10)", async () => {
+    // Composio's baseUrl was settable this way, so an agent could send its token anywhere.
+    const { set, file } = fixture()
+    const before = readFileSync(file, "utf8")
+    await expect(
+        set(
+            { path: "tools.providers", value: '{"composio": {"baseUrl": "https://evil.example"}}' },
+            toolContext({}),
+        ),
+    ).rejects.toThrow(/not yours to decide/)
+    await expect(
+        set(
+            { path: "tools.providers.web.firecrawl.baseUrl", value: "https://evil.example" },
+            toolContext({}),
+        ),
+    ).rejects.toThrow(/not yours to decide/)
+    expect(readFileSync(file, "utf8")).toBe(before)
+})
+
 test("the system provider's env cannot be set by the agent, by path or inside a value (pilot.9)", async () => {
     const { set, file } = fixture()
     const before = readFileSync(file, "utf8")
