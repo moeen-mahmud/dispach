@@ -70,6 +70,7 @@ and WebSocket surfaces can return:
 | `idempotency_key_invalid` | 400 | `Idempotency-Key` is empty, over 255 characters, or not printable ASCII. |
 | `idempotency_key_reused` | 409 | The key belongs to a turn whose text or session differed. Nothing ran. |
 | `phase_invalid` | 400 | The phase is not declared in the manifest. |
+| `recall_invalid` | 400 | `recall` on a session is not a boolean. |
 | `approval_decision_required` | 400 | `POST /approvals/:id` with no boolean `granted`. No default in either direction. |
 | `key_label_required` | 400 | `POST /v1/keys` with no string `label`. Required rather than defaulted — it is the only thing distinguishing two credentials. |
 | `key_label_invalid` | 400 | The label is empty, over 64 characters, or carries a control character. |
@@ -172,6 +173,7 @@ and WebSocket surfaces can return:
 | `assignment_requires_admin` | 403 | A participant-bound key assigning an agent when its participant is not an `admin`. |
 | `participant_timezone_invalid` | 400 | `POST /v1/participants` with a `timezone` that is not an IANA zone the runtime knows. |
 | `backup_requires_unscoped_key` | 403 | `GET /v1/backup` with a key scoped to some agents: a backup holds every agent's data. |
+| `backup_include_invalid` | 400 | `GET /v1/backup?include=` names something other than `env` or `git`. |
 | `memory_scope_invalid` | 400 | A scope other than `space`, `owner:<participantId>` or `project:<projectId>`. An agent's private memory has no route: the agent writes it. |
 | `memory_note_empty` | 400 | A note with no text. |
 | `memory_scope_forbidden` | 403 | This participant may not write — or, for an owner scope, read — that scope. `owner:<id>` is its owner's alone, admins included; the space takes an admin or the designated writer; a project, an admin. Also a non-admin participant defining a project or naming the space writer, and anyone but the person or an admin reading their audit. |
@@ -303,9 +305,11 @@ GET  /v1/agents/:id/export?paths=MEMORY.md,memory/,knowledge/
 POST /v1/agents/:id/import { bundle, mode?: "skip" | "overwrite" }   (25 MB cap)
                                   → { id, added[], merged: [{ path, notes }], skipped[], overwritten[],
                                       evicted, reload: "none" | "loaded" | "pending" }
-GET  /v1/backup                    → application/gzip: a tar of backup.json, store.db (a consistent
+GET  /v1/backup?include=env,git    → application/gzip: a tar of backup.json, store.db (a consistent
                                     snapshot) and agents/<id>/… for every hosted agent, no .env,
                                     .venv, node_modules or .git   (admin, unscoped key; since pilot.9)
+                                    `include` (pilot.10) adds .env, .git or both; .venv and
+                                    node_modules are always rebuilt rather than restored
 
 GET  /v1/openapi.json    → the generated OpenAPI 3.1 document
 GET  /docs               → a browser reference over it
@@ -363,6 +367,19 @@ GET /v1/agents/:id/secrets → { id, secrets: [{ name, set, usedBy[] }] }
 PUT /v1/agents/:id/secrets   { values: {NAME: value, …} }
                          → 200 { id, written[], shadowed[], applied, adopted[], stopped?, error? }
 ```
+
+**Restoring a backup** (pilot.10) is a file operation with the server stopped, into a home with no
+store yet. There is no restore route: a running runtime would be restoring over the store and
+directories it holds open.
+
+1. `store.db` goes to the path the server opens (`~/.dispach/store.db`, or `serve --store`). Leave
+   no `store.db-wal` or `store.db-shm` beside it.
+2. Each `agents/<id>/` goes to the `dir` that `backup.json` records for that agent.
+3. Start the server. Migrations run forward at open, so a backup restores into the same version or a
+   newer one, never an older one.
+
+Without `include=env`, each agent's `.env` has to be written again before it starts; without
+`include=git`, `.git` directories are absent. `.venv` and `node_modules` are rebuilt on first use.
 
 **Provisioning is one POST, and it ends in an adopt rather than a restart.** The directory is
 written and the agent is **live before the response returns** — served, channels started, schedules
@@ -945,6 +962,7 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/schedules/:sid/run` | `write` |
 | `DELETE /v1/agents/:id/sessions/:key` | `write` |
 | `POST /v1/agents/:id/sessions/:key/phase` | `write` |
+| `POST /v1/agents/:id/sessions/:key/recall` | `write` |
 | `POST /v1/agents` | `admin` |
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/tools/refresh` | `admin` |
@@ -1036,10 +1054,16 @@ GET    /v1/agents/:id/sessions/:key
 GET    /v1/agents/:id/sessions/:key/messages?before=&limit=
 DELETE /v1/agents/:id/sessions/:key          → clears history; keeps memory files
 POST   /v1/agents/:id/sessions/:key/phase    → { phase }
+POST   /v1/agents/:id/sessions/:key/recall   { recall } → { sessionKey, recall }
 ```
 
 `DELETE` clears conversation state only. Memory markdown is a file artifact and is never
 deleted by an API call.
+
+`recall` (pilot.10) keeps a conversation's history and takes it out of `memory.includeHistory`
+recall: `false` drops its passages at once and keeps them out of later index passes; `true` puts it
+back at the agent's next turn. A session switched out carries `recall: false`; absent means recalled.
+An unknown session is `404`.
 
 **The `messages` page is newest-first, and `nextBefore` walks backwards.** `ORDER BY id DESC`,
 with `nextBefore` carrying the page's *oldest* id — so paging with `before=` goes back through the
@@ -1356,6 +1380,22 @@ stream still ends on its own turn's `turn.end`, so read `turnId` before treating
 | `memory.read` | a turn recalled someone's owner scope for somebody other than that person — a stand-in, a room, another caller (Phase 29). The owner's own requests, and unattributed work on their own agent, are not recorded | `scope`, `reader` (the agent), `sources`, `requestedBy?`, `onBehalfOf?` (set for a stand-in). The same record is kept for `GET /v1/participants/:id/memory/reads` |
 | `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs`, `attachments?` (`[{path, mimeType}]`, files a tool produced for the reply, relative to the agent's directory; a channel sends them after the text) |
 | `error` | anything uncaught | `code`, `message`, `hint`, `stack?` |
+
+**What `units` counts, per first-party provider** (pilot.10). Where a provider reports its own
+charge on the response, `units` is that figure; otherwise it is the fallback below. Multiply by your
+own price: Dispach carries no prices.
+
+| `provider` | `operation` | `unit` | `units` |
+| --- | --- | --- | --- |
+| `tavily` | `search` | `credits` | 1. Dispach always asks for `search_depth: basic`; it never sends `advanced` (2 credits) |
+| `brave`, `exa` | `search` | `requests` | 1 |
+| `firecrawl` | `search` | `credits` | the response's `creditsUsed`, else 1. No `scrapeOptions` are sent, so no per-hit scrape |
+| `firecrawl` | `scrape` (`web_fetch`) | `credits` | `creditsUsed`, else 1. No proxy option is sent, so never a stealth charge |
+| `firecrawl` | `map` | `credits` | `creditsUsed`, else 1 |
+| `firecrawl` | `crawl` | `credits` | the crawl status's `creditsUsed`, else the pages returned. A stopped or timed-out crawl is cancelled and reports what it spent |
+
+The turn and conversation a charge belongs to are on the event envelope, as on every event:
+`turnId`, `sessionKey` and `agentId`, beside `data`.
 
 ### Planned
 

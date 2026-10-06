@@ -58,4 +58,41 @@ describe("backup", () => {
         })
         await runtime.stop()
     })
+
+    test("?include=env,git adds what a restore needs, and says where each agent lived (pilot.10)", async () => {
+        const { call, runtime } = await harness({
+            files: { ".env": "TELEGRAM_TOKEN=t\n", "MEMORY.md": "- m\n" },
+        })
+        const { mkdirSync, writeFileSync } = await import("node:fs")
+        const { join } = await import("node:path")
+        const dir = runtime.agent("assistant")?.dir ?? ""
+        mkdirSync(join(dir, "drive", ".git"), { recursive: true })
+        writeFileSync(join(dir, "drive", ".git", "HEAD"), "ref: refs/heads/main\n")
+        mkdirSync(join(dir, "node_modules"), { recursive: true })
+        writeFileSync(join(dir, "node_modules", "x.js"), "x")
+
+        const read = async (path: string) =>
+            untar(gunzipSync(new Uint8Array(await (await call("GET", path)).arrayBuffer())))
+        const plain = await read("/v1/backup")
+        expect(plain.has("agents/assistant/.env")).toBe(false)
+        expect(plain.has("agents/assistant/drive/.git/HEAD")).toBe(false)
+
+        const full = await read("/v1/backup?include=env,git")
+        expect(full.get("agents/assistant/.env")).toBe("TELEGRAM_TOKEN=t\n")
+        expect(full.get("agents/assistant/drive/.git/HEAD")).toBe("ref: refs/heads/main\n")
+        expect(full.has("agents/assistant/node_modules/x.js")).toBe(false)
+        const manifest = JSON.parse(full.get("backup.json") ?? "{}") as {
+            agents: { id: string; dir: string }[]
+            included: string[]
+        }
+        expect(manifest.agents[0]?.dir).toBe(dir)
+        expect(manifest.included).toEqual(["env", "git"])
+
+        const refused = await call("GET", "/v1/backup?include=env,toString")
+        expect(refused.status).toBe(400)
+        expect(((await refused.json()) as { error: { code: string } }).error.code).toBe(
+            "backup_include_invalid",
+        )
+        await runtime.stop()
+    })
 })

@@ -321,6 +321,15 @@ export const PhaseBody = z.object({
     }),
 })
 
+/** `POST /v1/agents/:id/sessions/:key/recall` (pilot.10) */
+export const RecallBody = z.object({
+    recall: refuse(z.boolean(), {
+        code: "recall_invalid",
+        hint: 'Send { "recall": false } to keep this conversation out of history recall, or true to put it back. Its messages are kept either way.',
+        description: "Whether this conversation is indexed for history recall.",
+    }),
+})
+
 /** `POST /v1/agents/:id/stop` — the reason is optional and free text. */
 export const StopBody = z.object({
     reason: refuse(z.string().optional(), {

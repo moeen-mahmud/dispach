@@ -325,6 +325,11 @@ export interface AgentClient {
         sessionKey: string,
         phase: string,
     ): Promise<{ readonly sessionKey: string; readonly phase: string }>
+    /** Keep a conversation out of history recall (`false`), or put it back. Its messages stay. */
+    setRecall(
+        sessionKey: string,
+        recall: boolean,
+    ): Promise<{ readonly sessionKey: string; readonly recall: boolean }>
     context(options?: { readonly sessionKey?: string; readonly input?: string }): Promise<unknown>
     /**
      * What is waiting on a person right now, oldest first.
@@ -1399,6 +1404,13 @@ export function createClient(options: ClientOptions): DispachClient {
                     "POST",
                     at(`/sessions/${encodeURIComponent(sessionKey)}/phase`),
                     { body: { phase } },
+                ),
+
+            setRecall: (sessionKey, recall) =>
+                json<{ sessionKey: string; recall: boolean }>(
+                    "POST",
+                    at(`/sessions/${encodeURIComponent(sessionKey)}/recall`),
+                    { body: { recall } },
                 ),
 
             approve: async (approvalId, granted) => {

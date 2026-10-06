@@ -671,6 +671,7 @@ describe("execution", () => {
             participant: "user:ada",
         })
         expect(usage?.turnId).toBe("t")
+        expect(usage?.sessionKey).toBe("s")
     })
 
     test("a path rule sees the normalised path, so ../ cannot walk past it (pilot.4)", async () => {

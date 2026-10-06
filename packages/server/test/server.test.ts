@@ -637,6 +637,34 @@ describe("sessions", () => {
         await runtime.stop()
     })
 
+    test("a session switched out of recall says so and keeps its messages (pilot.10)", async () => {
+        const { call, runtime } = await withSession()
+        const response = await call("POST", "/v1/agents/assistant/sessions/api%3As/recall", {
+            body: { recall: false },
+        })
+        expect(response.status).toBe(200)
+        const record = (await (
+            await call("GET", "/v1/agents/assistant/sessions/api%3As")
+        ).json()) as { recall?: boolean }
+        expect(record.recall).toBe(false)
+        const page = (await (
+            await call("GET", "/v1/agents/assistant/sessions/api%3As/messages")
+        ).json()) as { messages: unknown[] }
+        expect(page.messages.length).toBeGreaterThan(0)
+        const refused = await call("POST", "/v1/agents/assistant/sessions/api%3As/recall", {
+            body: { recall: "no" },
+        })
+        expect(refused.status).toBe(400)
+        expect(((await refused.json()) as { error: { code: string } }).error.code).toBe(
+            "recall_invalid",
+        )
+        const missing = await call("POST", "/v1/agents/assistant/sessions/api%3Anope/recall", {
+            body: { recall: false },
+        })
+        expect(missing.status).toBe(404)
+        await runtime.stop()
+    })
+
     test("a non-string phase is refused", async () => {
         const { call, runtime } = await withSession()
         const response = await call("POST", "/v1/agents/assistant/sessions/api%3As/phase", {

@@ -8,6 +8,11 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 
 - `tools.providers.web.baseUrl` (the search backend) and `tools.providers.web.firecrawl.baseUrl` (scrape, crawl, map) point the web provider at a relay with the same paths and bodies, so a platform key need not be in the agent's environment. `tool.usage` is unchanged.
 - `config_set` can no longer set any provider's `baseUrl`, by path or inside a `tools.providers` value. Composio's was settable before, which let an agent send its token to an address of its choosing.
+- An agent asked by another member's agent is now also told that its owner's private notes and memory are not in the turn, and to say it cannot confirm something it cannot check (availability, a preference) rather than guess. Not said when the owner is the one asking.
+- Bedrock: a 5xx from the container-credentials endpoint carries the body's own `code` (or `bedrock_credentials_unavailable`) and is retried, instead of reaching the turn as `model_http_error`.
+- `POST /v1/agents/:id/sessions/:key/recall {recall: false}` takes a conversation out of history recall without deleting it: its passages go at once and stay out. `true` puts it back. The session then reads `recall: false`; the client's `setRecall` sends it.
+- `GET /v1/backup?include=env,git` adds each agent's `.env` and `.git`, and `backup.json` records each agent's directory. Restoring is documented in the wire spec: with the server stopped, `store.db` to the store path and each `agents/<id>/` to its recorded directory.
+- The wire spec lists what `tool.usage`'s `units` counts for each web provider and operation.
 
 ### Since 0.2.0-pilot.8
 

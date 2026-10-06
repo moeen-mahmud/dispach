@@ -42,6 +42,31 @@ describe("container credentials", () => {
         expect(classified.error.message).toContain("No credit left.")
     })
 
+    test("a 5xx is unavailable rather than refused: its own code, or a distinct one, and retryable (pilot.10)", async () => {
+        const classifiedFor = async (body: unknown) => {
+            const { fetchLike } = endpoint(503, body)
+            const read = containerCredentials(
+                {
+                    AWS_CONTAINER_CREDENTIALS_FULL_URI: URI,
+                    AWS_CONTAINER_AUTHORIZATION_TOKEN: "tok",
+                },
+                fetchLike,
+            )
+            let thrown: unknown
+            try {
+                await read?.()
+            } catch (error) {
+                thrown = error
+            }
+            return classify(thrown, "amazon.nova-micro-v1:0", "eu-west-2", "model.main")
+        }
+        const own = await classifiedFor({ code: "credentials_unavailable" })
+        expect(own.retryable).toBe(true)
+        expect(own.status).toBe(503)
+        expect(own.error.code).toBe("credentials_unavailable")
+        expect((await classifiedFor({})).error.code).toBe("bedrock_credentials_unavailable")
+    })
+
     test("credentials are read once and reused until near their expiry", async () => {
         const later = new Date(Date.now() + 60 * 60_000).toISOString()
         const { fetchLike, calls } = endpoint(200, {

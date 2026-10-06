@@ -467,19 +467,22 @@ export async function enumerateSessions(input: {
     readonly agentId: string
 }): Promise<readonly IndexableSession[]> {
     const summaries = await input.sessions.list(input.agentId)
-    return summaries.map((summary) => ({
-        sessionKey: summary.sessionKey,
-        source: sessionSource(summary.sessionKey),
-        mtimeMs: Number.isFinite(Date.parse(summary.lastActivityAt))
-            ? Date.parse(summary.lastActivityAt)
-            : 0,
-        size: summary.messages,
-        read: async () => {
-            const page = await input.messages.page(input.agentId, summary.sessionKey, {
-                limit: MAX_INDEXED_SESSION_MESSAGES,
-            })
-            // `page` is newest-first for a UI; exchanges have to be paired in the order they happened.
-            return renderConversation([...page.messages].reverse(), summary.lastActivityAt)
-        },
-    }))
+    // A conversation switched out of recall is simply not handed over, so reconcile drops its passages.
+    return summaries
+        .filter((summary) => summary.recall !== false)
+        .map((summary) => ({
+            sessionKey: summary.sessionKey,
+            source: sessionSource(summary.sessionKey),
+            mtimeMs: Number.isFinite(Date.parse(summary.lastActivityAt))
+                ? Date.parse(summary.lastActivityAt)
+                : 0,
+            size: summary.messages,
+            read: async () => {
+                const page = await input.messages.page(input.agentId, summary.sessionKey, {
+                    limit: MAX_INDEXED_SESSION_MESSAGES,
+                })
+                // `page` is newest-first for a UI; exchanges have to be paired in the order they happened.
+                return renderConversation([...page.messages].reverse(), summary.lastActivityAt)
+            },
+        }))
 }

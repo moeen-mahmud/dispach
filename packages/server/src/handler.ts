@@ -115,6 +115,7 @@ import {
     ProjectBody,
     ProvisionBody,
     parseBody,
+    RecallBody,
     SecretsBody,
     SpaceWriterBody,
     StopBody,
@@ -913,26 +914,51 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     403,
                 )
             }
+            // `?include=env,git` (pilot.10, VelaCrew): a backup somebody restores from needs the channel
+            // tokens and a workspace's git history, and they asked for it in so many words. Opt-in, so
+            // a backup taken the way it always was still carries no secret.
+            const include = (context.url.searchParams.get("include") ?? "")
+                .split(",")
+                .map((part) => part.trim())
+                .filter((part) => part !== "")
+            const unknown = include.filter((part) => !Object.hasOwn(BACKUP_INCLUDE, part))
+            if (unknown.length > 0) {
+                return fail(
+                    {
+                        code: "backup_include_invalid",
+                        message: `include names ${unknown.join(", ")}, which a backup cannot add.`,
+                        hint: `Accepted: ${Object.keys(BACKUP_INCLUDE).join(", ")}, comma-separated. env adds each agent's .env (its secrets), git its .git directories.`,
+                        field: "include",
+                    },
+                    400,
+                )
+            }
+            const skip = new Set(BACKUP_SKIP)
+            for (const part of include) skip.delete(BACKUP_INCLUDE[part] ?? "")
             const dir = await mkdtemp(join(tmpdir(), "backup-"))
             const snapshot = join(dir, "store.db")
             await runtime.store.snapshot(snapshot)
             const entries: TarEntry[] = [{ name: "store.db", source: { path: snapshot } }]
-            const agents: { id: string; files: number }[] = []
+            const agents: { id: string; dir: string; files: number }[] = []
             for (const agent of runtime.list()) {
-                const files = await agentFiles(agent.dir)
+                // ponytail: every file is read into memory before the stream starts; stream from disk
+                // if a .git grows past what a backup request should hold.
+                const files = await agentFiles(agent.dir, skip)
                 for (const file of files) {
                     entries.push({
                         name: `agents/${agent.id}/${file.name}`,
                         source: { bytes: await readFile(file.path) },
                     })
                 }
-                agents.push({ id: agent.id, files: files.length })
+                // Where it lived, so a restore puts `agents/<id>/` back in the right directory.
+                agents.push({ id: agent.id, dir: agent.dir, files: files.length })
             }
             const manifest = {
                 createdAt: new Date().toISOString(),
                 version: VERSION,
                 agents,
-                excluded: [...BACKUP_SKIP],
+                included: include,
+                excluded: [...skip],
             }
             entries.unshift({
                 name: "backup.json",
@@ -3280,6 +3306,28 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         { capability: "write" },
     )
 
+    // An old wrong answer kept steering new ones through history recall, and deleting the chat was
+    // the only way to stop it (VelaCrew, pilot.10). This keeps the history and drops its passages.
+    router.add(
+        "POST",
+        "/v1/agents/:id/sessions/:key/recall",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(RecallBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const key = context.params.key ?? ""
+                const outside = outsideSession(context, key)
+                if (outside !== undefined) return outside
+                if ((await agent.store.sessions.get(agent.id, key)) === undefined)
+                    return notFound("session", key)
+                await agent.store.sessions.setRecall(agent.id, key, parsed.value.recall)
+                return json({ sessionKey: key, recall: parsed.value.recall })
+            }),
+        { capability: "write" },
+    )
+
     // ─── Introspection ───────────────────────────────────────────────────────────────────
 
     // ── Schedules ────────────────────────────────────────────────────────────────────────
@@ -5188,14 +5236,20 @@ function pendingDetail(outcome: ReloadOutcome): ErrorDetail | undefined {
 }
 
 /** Left out of a backup: secrets the embedder owns, and what is rebuilt rather than restored. */
-const BACKUP_SKIP = new Set([".env", ".venv", "node_modules", ".git"])
+const BACKUP_SKIP: ReadonlySet<string> = new Set([".env", ".venv", "node_modules", ".git"])
+
+/** What `?include=` may put back, by the name it is asked for. */
+const BACKUP_INCLUDE: Readonly<Record<string, string>> = { env: ".env", git: ".git" }
 
 /** Every regular file under an agent's directory, by its path relative to it, skips excluded. */
-async function agentFiles(root: string): Promise<{ name: string; path: string }[]> {
+async function agentFiles(
+    root: string,
+    skip: ReadonlySet<string>,
+): Promise<{ name: string; path: string }[]> {
     const found: { name: string; path: string }[] = []
     const walk = async (dir: string) => {
         for (const entry of await readdir(dir, { withFileTypes: true })) {
-            if (BACKUP_SKIP.has(entry.name)) continue
+            if (skip.has(entry.name)) continue
             const path = join(dir, entry.name)
             if (entry.isDirectory()) await walk(path)
             else if (entry.isFile())

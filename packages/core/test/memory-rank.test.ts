@@ -11,7 +11,7 @@
  */
 
 import { sessionSource } from "../src/memory/conversation.ts"
-import { fts5Retriever, syncFiles, syncSessions } from "../src/memory/fts5.ts"
+import { enumerateSessions, fts5Retriever, syncFiles, syncSessions } from "../src/memory/fts5.ts"
 import { document, splitPassages } from "../src/memory/passages.ts"
 import type { RetrievedPassage } from "../src/memory/retriever.ts"
 import {
@@ -602,6 +602,48 @@ describe("the acceptance criteria that are about the store, not the ranking", ()
             sessionSource("local:other"),
         ])
         expect(await store.sessions.get(AGENT, "local:abc")).toBeDefined()
+        await store.close()
+    })
+
+    test("a session switched out of recall keeps its history and loses its passages, until switched back (pilot.10)", async () => {
+        const store = await openMemoryStore()
+        for (const [key, said] of [
+            ["api:old", "they cannot identify who the owner is"],
+            ["api:new", "the deploy runs on fridays"],
+        ] as const) {
+            await store.messages.append(AGENT, key, [
+                { role: "user", content: `what about ${key}` },
+                { role: "assistant", content: said },
+            ])
+        }
+        const sync = async () =>
+            await syncSessions({
+                store: store.memory,
+                agentId: AGENT,
+                sessions: await enumerateSessions({
+                    sessions: store.sessions,
+                    messages: store.messages,
+                    agentId: AGENT,
+                }),
+                now: NOW,
+            })
+        const indexed = async () =>
+            (await store.memory.sources(AGENT)).map((source) => source.source).sort()
+        await sync()
+        expect(await indexed()).toEqual([sessionSource("api:new"), sessionSource("api:old")])
+
+        await store.sessions.setRecall(AGENT, "api:old", false)
+        // Gone at once, and a later index pass does not bring it back.
+        expect(await indexed()).toEqual([sessionSource("api:new")])
+        await sync()
+        expect(await indexed()).toEqual([sessionSource("api:new")])
+        expect((await store.sessions.get(AGENT, "api:old"))?.recall).toBe(false)
+        expect((await store.messages.page(AGENT, "api:old", {})).messages.length).toBe(2)
+
+        await store.sessions.setRecall(AGENT, "api:old", true)
+        await sync()
+        expect(await indexed()).toEqual([sessionSource("api:new"), sessionSource("api:old")])
+        expect((await store.sessions.get(AGENT, "api:old"))?.recall).toBeUndefined()
         await store.close()
     })
 

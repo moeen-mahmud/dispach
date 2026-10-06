@@ -83,6 +83,22 @@ export function classify(
             typeof shape.code === "string" && /^[a-z][a-z0-9_]{1,63}$/.test(shape.code)
                 ? shape.code
                 : undefined
+        // A 5xx is the vending service failing, not deciding: transient, so retried and reported as
+        // such, where it used to reach the turn as a generic model error (VelaCrew, pilot.10).
+        if (refusedStatus >= 500) {
+            return {
+                retryable: true,
+                status: refusedStatus,
+                error: new ModelError({
+                    code: own ?? "bedrock_credentials_unavailable",
+                    message: `The AWS credentials endpoint could not issue credentials for Bedrock (${modelId} in ${region}): status ${refusedStatus}${own === undefined ? "" : `, ${own}`}${typeof shape.detail === "string" ? ` — ${shape.detail}` : ""}.`,
+                    hint: "The container-credentials endpoint failed rather than declined: the service vending credentials is down or could not reach its own source. It is usually temporary; Dispach retried, and the next turn asks again.",
+                    field,
+                    status: refusedStatus,
+                    cause: error,
+                }),
+            }
+        }
         return {
             retryable: false,
             status: refusedStatus,

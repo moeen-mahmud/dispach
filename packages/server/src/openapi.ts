@@ -52,6 +52,7 @@ import {
     PresenceBody,
     ProjectBody,
     ProvisionBody,
+    RecallBody,
     SecretsBody,
     SpaceWriterBody,
     StopBody,
@@ -94,8 +95,17 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     "GET /v1/agents/:id": { summary: "One agent, with its dialect, window, counts and warnings." },
     "GET /v1/backup": {
         summary:
-            "The silo as a tar.gz: a consistent store snapshot and every hosted agent's directory, with a backup.json manifest. Never a .env file. An admin key with no agents scope.",
-        statuses: [{ code: 403, when: "the key is scoped to some agents" }],
+            "The silo as a tar.gz: a consistent store snapshot and every hosted agent's directory, with a backup.json manifest. No .env or .git unless asked for. An admin key with no agents scope.",
+        query: [
+            {
+                name: "include",
+                about: "env, git or env,git: add each agent's .env (its secrets) and .git directories.",
+            },
+        ],
+        statuses: [
+            { code: 400, when: "include names something other than env or git" },
+            { code: 403, when: "the key is scoped to some agents" },
+        ],
     },
     "GET /v1/agents/:id/export": {
         summary:
@@ -406,6 +416,10 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     "POST /v1/agents/:id/sessions/:key/phase": {
         summary: "Move a session into a declared phase.",
         body: PhaseBody,
+    },
+    "POST /v1/agents/:id/sessions/:key/recall": {
+        summary: "Keep a conversation out of history recall, or put it back; its messages stay.",
+        body: RecallBody,
     },
     "GET /v1/agents/:id/config": {
         summary: "Every manifest field this surface may set, what it does, and its current value.",

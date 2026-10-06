@@ -1152,6 +1152,18 @@ ALTER TABLE participants ADD COLUMN title TEXT;
 ALTER TABLE participants ADD COLUMN timezone TEXT;
 `,
     },
+    {
+        version: 28,
+        name: "session_recall",
+        /**
+         * Whether a conversation is indexed for history recall (pilot.10, VelaCrew). 1 for every
+         * existing row, so nothing recalled before stops being recalled. 0 keeps the history and
+         * drops its passages, for an old exchange that keeps steering new answers.
+         */
+        sql: `
+ALTER TABLE sessions ADD COLUMN recall INTEGER NOT NULL DEFAULT 1;
+`,
+    },
 ]
 
 export interface MigrationReport {

@@ -2060,7 +2060,15 @@ export class Agent {
                 ? `The agent asking is ${askedBy}.`
                 : `The agent asking is ${askedBy}, on behalf of ${asker}.`,
             "Your answer goes back to them, so it is written from what your owner shares, not from what they keep private.",
-        ].join(" ")
+            // Without this an agent with no calendar answered "3pm works, no conflict I'm aware of",
+            // and the asker relayed it as a commitment (VelaCrew, pilot.10). The owner's own ask reads
+            // everything, so it is not told this.
+            actingFor !== undefined && actingFor === ownerId
+                ? undefined
+                : "Their private notes and saved memory are not in this turn. Where the answer depends on something you cannot check here, such as their availability, a preference or a commitment, say you cannot confirm it rather than guessing.",
+        ]
+            .filter((line) => line !== undefined)
+            .join(" ")
     }
 
     async #readPlan(

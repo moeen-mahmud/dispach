@@ -116,6 +116,7 @@ interface SessionRow {
     peer_id: string
     thread: string | null
     phase: string | null
+    recall: number
     created_at: string
     updated_at: string
 }
@@ -314,6 +315,7 @@ function toSession(row: SessionRow): SessionRecord {
         peerId: row.peer_id,
         ...(row.thread === null ? {} : { thread: row.thread }),
         ...(row.phase === null ? {} : { phase: row.phase }),
+        ...(row.recall === 0 ? { recall: false as const } : {}),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     }
@@ -763,6 +765,10 @@ export class SqliteStore implements Store {
             ),
             sessionSetPhase: db.prepare(
                 "UPDATE sessions SET phase = ?, updated_at = ? WHERE agent_id = ? AND session_key = ?",
+            ),
+            sessionSetRecall: db.prepare(
+                // No `updated_at`: a switch is not activity, and bumping it would reorder the listing.
+                "UPDATE sessions SET recall = ? WHERE agent_id = ? AND session_key = ?",
             ),
             sessionDelete: db.prepare(
                 "DELETE FROM sessions WHERE agent_id = ? AND session_key = ?",
@@ -1288,6 +1294,19 @@ export class SqliteStore implements Store {
             setPhase: async (agentId, sessionKey, phase) => {
                 ensureSession(agentId, sessionKey)
                 q.sessionSetPhase.run(phase, nowIso(), agentId, sessionKey)
+            },
+            setRecall: async (agentId, sessionKey, recall) => {
+                ensureSession(agentId, sessionKey)
+                db.transaction(() => {
+                    q.sessionSetRecall.run(recall ? 1 : 0, agentId, sessionKey)
+                    // Dropped now, as `clear` does, rather than at the next turn's reconcile: the
+                    // switch exists because the passages are steering answers today. Switched back
+                    // on, the next index pass finds the source missing and indexes it again.
+                    if (!recall) {
+                        q.memoryDeleteSource.run(agentId, sessionSource(sessionKey))
+                        q.memorySourceDelete.run(agentId, sessionSource(sessionKey))
+                    }
+                })
             },
             clear: async (agentId, sessionKey) => {
                 // Files remain canonical and untouched. The session projection is derived from the

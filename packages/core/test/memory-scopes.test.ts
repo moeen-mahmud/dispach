@@ -248,6 +248,12 @@ describe("memory scopes", () => {
         )
     })
 
+    test("an asked agent is told what it cannot see, unless its own owner is asking (pilot.10)", async () => {
+        const line = "say you cannot confirm it rather than guessing"
+        expect((await peerAsk("user:bob")).adaSaw).toContain(line)
+        expect((await peerAsk("user:ada")).adaSaw).not.toContain(line)
+    })
+
     test("a timezone the runtime does not know is refused", async () => {
         const { runtime, hub } = await team()
         expect(

@@ -36,6 +36,11 @@ export interface SessionRecord {
     readonly thread?: string
     /** Phase-scoped tool visibility, persisted per session from Phase 7. */
     readonly phase?: string
+    /**
+     * Present, and false, on a conversation kept out of history recall (pilot.10). Absent means
+     * recalled, which is every session that existed before the flag.
+     */
+    readonly recall?: false
     /** RFC 3339 UTC. */
     readonly createdAt: string
     readonly updatedAt: string
@@ -137,6 +142,8 @@ export interface SessionStore {
     get(agentId: string, sessionKey: string): Promise<SessionRecord | undefined>
     list(agentId: string): Promise<readonly SessionSummary[]>
     setPhase(agentId: string, sessionKey: string, phase: string | undefined): Promise<void>
+    /** Keep a conversation out of history recall, or put it back. Its messages are untouched. */
+    setRecall(agentId: string, sessionKey: string, recall: boolean): Promise<void>
     /** Clears history, turns, and their derived session-memory source. Canonical files are untouched. */
     clear(agentId: string, sessionKey: string): Promise<void>
     /** Deletes the session and its derived session-memory source. Canonical files are untouched. */

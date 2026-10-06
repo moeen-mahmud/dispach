@@ -21,7 +21,10 @@ export interface AwsCredentials {
     readonly expiration?: Date
 }
 
-/** A 4xx from the endpoint, with its own code when the body carried one. */
+/**
+ * A 4xx or 5xx from the endpoint, with its own code when the body carried one. A 4xx is a refusal; a
+ * 5xx is the vending service failing (pilot.10), classified apart because it is worth retrying.
+ */
 export class CredentialsRefusedError extends Error {
     override readonly name = "CredentialsRefusedError"
     readonly status: number
@@ -29,7 +32,7 @@ export class CredentialsRefusedError extends Error {
     readonly detail: string | undefined
     constructor(status: number, code: string | undefined, detail: string | undefined) {
         super(
-            `The credentials endpoint refused with status ${status}${code === undefined ? "" : ` (${code})`}${detail === undefined ? "" : `: ${detail}`}`,
+            `The credentials endpoint ${status >= 500 ? "failed" : "refused"} with status ${status}${code === undefined ? "" : ` (${code})`}${detail === undefined ? "" : `: ${detail}`}`,
         )
         this.status = status
         this.code = code
@@ -96,7 +99,7 @@ export function containerCredentials(
                 if (typeof body[name] === "string") return body[name] as string
             return undefined
         }
-        if (response.status >= 400 && response.status < 500) {
+        if (response.status >= 400) {
             throw new CredentialsRefusedError(
                 response.status,
                 field("code", "Code"),
