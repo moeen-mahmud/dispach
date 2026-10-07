@@ -13,7 +13,7 @@
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { type BuiltInPlugins, Runtime } from "@dispach/core"
 import { createHandler, type Provisioner, type SecretAdmin } from "../src/handler.ts"
 import type { ClaimTicket } from "../src/keys.ts"
@@ -198,6 +198,7 @@ export async function harness(
 ) {
     const dir = workspace(options.manifest)
     for (const [name, content] of Object.entries(options.files ?? {})) {
+        mkdirSync(dirname(join(dir, name)), { recursive: true })
         writeFileSync(join(dir, name), content)
     }
     const runtime = await Runtime.create({

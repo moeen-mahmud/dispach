@@ -3958,6 +3958,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         // active. Named rather than counted: a skill's scripts are the part an
                         // operator has to have approved.
                         scripts: skill.scripts.map((plan) => plan.slug),
+                        // Whether those scripts become tools when it is active (pilot.14): false for
+                        // a skill `skills.trusted` does not name, true for every skill when it is absent.
+                        trusted:
+                            agent.manifest.skills?.trusted === undefined ||
+                            agent.manifest.skills.trusted.includes(skill.name),
                     })),
                 })
             }),

@@ -191,6 +191,11 @@ export const SETTINGS: readonly Setting[] = [
         agentListed: true,
     },
     {
+        path: "delivery.reply",
+        means: "channel replies: all (every step's text, default) or final (the last step's only)",
+        agentListed: true,
+    },
+    {
         // Settable for the same reason `channels` is: asked to run something every morning, an agent
         // that cannot write this can only describe the YAML and hand it back — which is the "make
         // your owner do the tedious half" failure `config_read` exists to end. Measured live before

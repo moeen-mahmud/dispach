@@ -10,7 +10,13 @@ import { expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { ConfigError, setInSource, type ToolProviderFactory, toolContext } from "@dispach/core"
+import {
+    ConfigError,
+    estimateTokens,
+    setInSource,
+    type ToolProviderFactory,
+    toolContext,
+} from "@dispach/core"
 import {
     CONFIG_READ_SPEC,
     CONFIG_SET_SPEC,
@@ -459,7 +465,9 @@ test("the summary fits the observation budget, which the whole file did not", as
     // Returning the manifest measured 2,766 tokens against a 2,000-token budget, so every call was
     // middle-cut and a real model read it three times in one turn hunting for what the cut removed —
     // eight thousand output tokens to change one line.
-    expect(output.length).toBeLessThan(4_000)
+    // In tokens, the unit the budget is in, with a quarter of it spare. It was 4,000 characters, a
+    // proxy for about 1,050 tokens that new settings rows outgrew while still far inside the budget.
+    expect(estimateTokens(output)).toBeLessThan(1_500)
     // What it needs is what can change and what it is now.
     expect(output).toContain("tools.policy.allow = []")
     expect(output).toContain("tools.local = [now]")

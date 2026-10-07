@@ -883,6 +883,11 @@ delivery:
 `default` names the channel used when a turn has no originating channel — scheduled runs,
 API-initiated turns.
 
+`reply` (since pilot.14) is what a channel reply carries: `all`, the default, is every step's prose
+joined, as before; `final` is the last step's alone (`finalText`) when there is one, so a lead-in the
+model repeats before each tool call reaches the person once. An API caller reads `finalText` from the
+turn's result or `turn.end` instead.
+
 ### `schedules`
 
 | Field | Required | Notes |

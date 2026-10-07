@@ -1146,7 +1146,9 @@ Listing includes disabled schedules by default. `?enabled=true` filters.
 
 ```
 GET /v1/agents/:id/tools     → resolved catalogue with tags, mutating, trust, phase visibility
-GET /v1/agents/:id/skills    → indexed skills with description, token cost and script slugs
+GET /v1/agents/:id/skills    → indexed skills with description, token cost, script slugs and
+                               `trusted` (whether those scripts become tools: false for a skill
+                               `skills.trusted` does not name; true for all when it is absent; pilot.14)
 GET /v1/agents/:id/context   → the assembled context for the next turn, with token counts per slot
 ```
 

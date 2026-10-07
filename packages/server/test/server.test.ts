@@ -18,6 +18,7 @@ import {
     cleanupWorkspaces,
     fakeSocket,
     harness,
+    MANIFEST,
     PHASED_MANIFEST,
     PINNED_MANIFEST,
     readSse,
@@ -265,6 +266,40 @@ describe("agents", () => {
             configured: boolean
         }
         expect(body).toEqual({ skills: [], configured: false })
+        await runtime.stop()
+    })
+
+    test("the skills listing says which skills may run their scripts (pilot.14)", async () => {
+        const skill = (name: string) =>
+            `---\nname: ${name}\ndescription: The ${name} skill does a thing.\n---\nDo it.\n`
+        const { call, runtime } = await harness({
+            manifest: `${MANIFEST}skills:\n  dir: ./skills\n  trusted: [ours]\n`,
+            files: {
+                "skills/ours/SKILL.md": skill("ours"),
+                "skills/theirs/SKILL.md": skill("theirs"),
+            },
+        })
+        const body = (await (await call("GET", "/v1/agents/assistant/skills")).json()) as {
+            skills: { name: string; trusted: boolean }[]
+        }
+        expect(Object.fromEntries(body.skills.map((entry) => [entry.name, entry.trusted]))).toEqual(
+            {
+                ours: true,
+                theirs: false,
+            },
+        )
+        await runtime.stop()
+    })
+
+    test("delivery.reply is a field PATCH /config sets (pilot.14)", async () => {
+        const { call, runtime, dir } = await harness()
+        const response = await call("PATCH", "/v1/agents/assistant/config", {
+            body: { path: "delivery.reply", value: "final" },
+        })
+        expect(response.status).toBe(200)
+        const { readFileSync } = await import("node:fs")
+        expect(readFileSync(join(dir, "agent.yaml"), "utf8")).toContain("reply: final")
+        expect(runtime.agent("assistant").manifest.delivery?.reply).toBe("final")
         await runtime.stop()
     })
 

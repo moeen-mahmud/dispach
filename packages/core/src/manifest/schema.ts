@@ -520,6 +520,12 @@ export const DeliverySchema = z
     .object({
         /** Channel used when a turn has no origin — schedules, API-initiated turns. */
         default: slug.optional(),
+        /**
+         * What a channel reply carries (pilot.14, VelaCrew). `all`, the default, is every step's prose
+         * joined, as before. `final` is the last step's alone (`finalText`) when there is one, so a
+         * lead-in the model repeats before each tool call reaches the person once.
+         */
+        reply: z.enum(["all", "final"]).default("all"),
         targets: z.record(z.string(), DeliveryTargetSchema).default({}),
     })
     .strict()

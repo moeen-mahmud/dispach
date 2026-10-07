@@ -613,7 +613,12 @@ export class ChannelHub {
                 steps: result.steps,
                 durationMs: result.durationMs,
             })
-            const text = result.text.trim() === "" ? (note ?? "") : result.text
+            // `delivery.reply: final` sends the last step's prose alone when there is one (pilot.14).
+            const reply =
+                bound.agent.manifest.delivery?.reply === "final" && result.finalText !== undefined
+                    ? result.finalText
+                    : result.text
+            const text = reply.trim() === "" ? (note ?? "") : reply
             const attachments = result.attachments ?? []
             if (text === "" && attachments.length === 0) return
 

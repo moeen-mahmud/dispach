@@ -526,6 +526,8 @@ channels:
 # first scheduled run, which is otherwise where it surfaces.
 delivery:
   default: tg                      # used when a turn has no origin — a schedule, or the API
+  # reply: final                   # a channel reply is the final answer alone, not every step's
+  #                                #   prose joined (all, the default)
   targets:
     owner: { channel: tg, to: "@moeen" }
 
