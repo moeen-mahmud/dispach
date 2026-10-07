@@ -62,7 +62,7 @@ export interface TurnLimits {
      * cap should be generous enough for real recovery, and this should be tight enough to catch a
      * repeat. Sizing one number for both is how a six-step budget came to cut an agent off mid-task.
      */
-    readonly noProgress: { readonly identicalCalls: number }
+    readonly noProgress: { readonly identicalCalls: number; readonly sameTool?: number | undefined }
     readonly turnTimeoutMs: number
     readonly toolTimeoutMs: number
     readonly maxParallelTools: number
@@ -614,6 +614,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
      */
     const identicalCalls = input.limits.noProgress.identicalCalls
     const recentCalls: string[] = []
+    const sameTool = input.limits.noProgress.sameTool
+    /** Calls per tool this turn, for `sameTool`. */
+    const callsByTool = new Map<string, number>()
 
     input.bus.emit(
         "turn.start",
@@ -803,6 +806,11 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     // messages it is handed rather than from `history`, because the ladder may have
                     // replaced that array by the time this runs.
                     protectedTail: Math.max(0, messages.length - initialHistoryLength),
+                    // Claude's signed thinking is bound to what precedes it, and a cached prefix is
+                    // only reused if each step appends to it; see `traceAfterInput`.
+                    traceAfterInput:
+                        input.role.capabilities.thinking === "anthropic" ||
+                        input.role.capabilities.promptCache === "bedrock",
                     input: promptInput,
                     ...(input.turnNote === undefined ? {} : { note: input.turnNote }),
                     ...(input.images === undefined || input.images.length === 0
@@ -1109,6 +1117,29 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     message: `The model produced no text and stopped at ${cap} — ${spent}${reasoning === "" ? "" : `, and ${reasoning.length} characters arrived as reasoning`}.`,
                     hint: capHint,
                     field: "model.main.maxTokens",
+                }
+                error = detail
+                input.bus.emit("agent.warning", detail, context)
+                break
+            }
+
+            // Same tool, new arguments, over and over: checked before the calls run, for the reason
+            // above. Counted per call, so one step calling a tool twice counts twice.
+            const over =
+                sameTool === undefined
+                    ? undefined
+                    : parsed.intents.find((intent) => {
+                          const count = (callsByTool.get(intent.slug) ?? 0) + 1
+                          callsByTool.set(intent.slug, count)
+                          return count > sameTool
+                      })
+            if (over !== undefined && sameTool !== undefined) {
+                reason = "no_progress"
+                const detail: ErrorDetail = {
+                    code: "no_progress",
+                    message: `The model called ${over.slug} more than ${sameTool} times in this turn, so the turn was stopped.`,
+                    hint: "Each call had new arguments, so the identical-call check could not see it, but the turn was going round one tool. Usually the tool returns a page or a delta the model keeps following; return more per call, or say in its result when there is nothing further. `limits.noProgress.sameTool` sets the number.",
+                    field: "limits.noProgress.sameTool",
                 }
                 error = detail
                 input.bus.emit("agent.warning", detail, context)

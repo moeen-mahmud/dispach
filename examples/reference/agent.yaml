@@ -363,6 +363,9 @@ limits:
   # end the turn as `no_progress`. Two is a retry, which is often right. Three is a pattern.
   noProgress:
     identicalCalls: 3
+    # Calls to one tool in a turn, whatever the arguments, before it ends as `no_progress`. Off when
+    # absent. For a tool the model keeps following (a mail delta, a paged lookup).
+    # sameTool: 12
   # Must exceed any upstream timeout on the model endpoint.
   turnTimeoutMs: 1800000
   toolTimeoutMs: 120000

@@ -23,6 +23,7 @@ const ENV = { MODEL_API_KEY: "test-key" }
 function workspace(
     toolsSection = "  local:\n    - now\n    - memory_write\n",
     dialect: "nlt" | "native" = "nlt",
+    extraLimits = "",
 ): string {
     const dir = mkdtempSync(join(tmpdir(), "tool-loop-"))
     writeFileSync(
@@ -44,7 +45,7 @@ tools:
 ${toolsSection}limits:
   maxSteps: 4
   turnTimeoutMs: 5000
-`,
+${extraLimits}`,
     )
     writeFileSync(join(dir, "IDENTITY.md"), "You are a test fixture.")
     return dir
@@ -89,7 +90,7 @@ function scripted(script: readonly string[]): Scripted {
 
 async function run(
     script: readonly string[],
-    options: { toolsSection?: string } = {},
+    options: { toolsSection?: string; extraLimits?: string } = {},
 ): Promise<{
     result: Awaited<ReturnType<import("../src/runtime/agent.ts").Agent["send"]>>
     history: readonly { role: string; content: string }[]
@@ -97,7 +98,7 @@ async function run(
     requests: Scripted["requests"]
     runtime: Runtime
 }> {
-    const dir = workspace(options.toolsSection)
+    const dir = workspace(options.toolsSection, "nlt", options.extraLimits)
     const { fetch, requests } = scripted(script)
     const runtime = await Runtime.create({ agents: [join(dir, "agent.yaml")], env: ENV, fetch })
     const events: AnyEvent[] = []
@@ -386,6 +387,26 @@ describe("no progress", () => {
         expect(result.reason).toBe("final")
         expect(result.text).toBe("Done.")
         await runtime.stop()
+    })
+
+    test("sameTool ends a turn going round one tool with new arguments (pilot.13)", async () => {
+        const script = [
+            "ACTION: memory_write\ntext: alpha\nEND",
+            "ACTION: memory_write\ntext: beta\nEND",
+            "ACTION: memory_write\ntext: gamma\nEND",
+            "Done.",
+        ]
+        const limited = await run(script, { extraLimits: "  noProgress:\n    sameTool: 2\n" })
+        expect(limited.result.reason).toBe("no_progress")
+        // The third call is refused before it runs: two writes happened, not three.
+        expect(limited.events.filter((event) => event.type === "tool.result").length).toBe(2)
+        const warning = limited.events.find(
+            (event) =>
+                event.type === "agent.warning" &&
+                (event.data as { field?: string }).field === "limits.noProgress.sameTool",
+        )
+        expect(JSON.stringify(warning?.data)).toContain("memory_write")
+        await limited.runtime.stop()
     })
 })
 

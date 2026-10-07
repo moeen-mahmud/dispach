@@ -219,6 +219,30 @@ describe("logged out is the one close that is not transient", () => {
         await channel.stop()
     })
 
+    test("a 515 restart-required close reconnects without reporting a disconnect (pilot.13)", async () => {
+        const closeWith = async (statusCode: number) => {
+            const fake = fakeBaileys()
+            const { host, states } = recorder()
+            const channel = transport(fake.api)
+            await channel.start(host)
+            await settle()
+            const before = fake.connects
+            fake.emit({
+                connection: "close",
+                lastDisconnect: { error: { output: { statusCode } } },
+            })
+            for (let i = 0; i < 40 && fake.connects === before; i += 1) await settle()
+            const reconnected = fake.connects > before
+            // Read before `stop()`, which reports its own disconnect.
+            const disconnected = states.some((state) => state.status === "disconnected")
+            await channel.stop()
+            return { reconnected, disconnected }
+        }
+        expect(await closeWith(515)).toEqual({ reconnected: true, disconnected: false })
+        // Any other close still says so.
+        expect((await closeWith(503)).disconnected).toBe(true)
+    })
+
     test("any other close keeps the session and reconnects", async () => {
         const fake = fakeBaileys()
         const { host } = recorder()

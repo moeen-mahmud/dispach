@@ -6,6 +6,10 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 
 ### Since 0.2.0-pilot.12
 
+- Claude 5.x (Sonnet 5.5, Opus 5.5, Fable 5.1) with thinking: a tool turn no longer fails at its second step with "Invalid signature in thinking block … bound to a different conversation". For a role whose thinking is replayed, the turn's own calls and results now follow its input instead of preceding it, so each step only appends to the last. On Bedrock, a replay that is still refused (a compaction or phase change mid-turn) is sent again once without thinking, and reported as a retry. Other models keep today's order.
+- Bedrock: prompt-caching models (Claude, Nova) get a rolling cache point at the end of every request, and their turn's trace follows the input, so each step of a tool loop reads the earlier steps from the cache instead of resending them at full price.
+- `limits.noProgress.sameTool: N` ends a turn as `no_progress` after N calls to one tool, whatever the arguments. Off unless set.
+- WhatsApp: a 515 "restart required" close reconnects at once, without showing "disconnected" or counting a failure.
 - A recalled excerpt of another conversation (`memory.includeHistory`) now says it is a different conversation and background only, not a task to continue. A new chat had taken a just-finished chat's task as its own and re-proposed it until `no_progress`.
 - New event `memory.recalled` lists the passages a turn's prompt recalled (`source`, `score`), so where something in a reply came from shows on the stream.
 - Bedrock: Amazon Nova's `<thinking>…</thinking>`, which it writes into its reply text once it is given tools, is now treated as reasoning: shown and stored as reasoning, never in the reply. A tag split across stream chunks is handled. Other models' text is untouched.

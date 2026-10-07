@@ -95,6 +95,12 @@ const PAIRING_CODE_DELAY_MS = 3_000
 
 /** Baileys' `loggedOut`, inlined so the bundle does not depend on the enum's runtime shape. */
 const LOGGED_OUT = 401
+/**
+ * WhatsApp asking the client to reconnect, as it does right after pairing and now and then on a
+ * healthy session (Baileys' `restartRequired`). Planned, so it is neither a failure nor a disconnect
+ * worth showing (pilot.13, VelaCrew): it read as a brief "disconnected" on every occurrence.
+ */
+const RESTART_REQUIRED = 515
 
 /**
  * Measured, reproduced at three levels, and said out loud rather than left to a README.
@@ -376,6 +382,8 @@ export class WhatsAppTransport implements ChannelTransport {
      */
     #sentIds: string[] = []
     #loop: Promise<void> | undefined
+    /** Set by a 515 close, so the loop reconnects without backing off. */
+    #restartNow = false
 
     constructor(options: WhatsAppTransportOptions) {
         this.id = options.id
@@ -548,7 +556,10 @@ export class WhatsAppTransport implements ChannelTransport {
                 this.#report(host, cause)
             }
             if (!this.#running) return
-            await sleep(this.#backoff())
+            // A restart WhatsApp asked for is taken at once; anything else backs off.
+            const now = this.#restartNow
+            this.#restartNow = false
+            if (!now) await sleep(this.#backoff())
         }
     }
 
@@ -700,6 +711,9 @@ export class WhatsAppTransport implements ChannelTransport {
                         host.status("disconnected", "pairing refused — trying once more")
                     }
                 }
+            } else if (code === RESTART_REQUIRED) {
+                // Reconnects at once, with no status change and no failure counted.
+                this.#restartNow = true
             } else {
                 this.#failures += 1
                 // Reported on the first failure and every eighth after it, so a long outage leaves

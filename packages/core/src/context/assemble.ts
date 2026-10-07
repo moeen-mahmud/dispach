@@ -123,6 +123,15 @@ export interface AssembleInput {
      * Optional because `previewContext` has no turn in flight and nothing to protect.
      */
     readonly protectedTail?: number
+    /**
+     * Put the turn's own trace (the protected tail) *after* the input and its per-turn blocks, rather
+     * than inside the history before them (pilot.13). For a model whose signed thinking is replayed:
+     * Claude 5.x binds each block to everything before it, so with the input after the trace, step two
+     * moved the input behind the step-one call and every replayed block was refused ("bound to a
+     * different conversation"). Off, the order is what it always was: small models keep the question
+     * last, after the observations.
+     */
+    readonly traceAfterInput?: boolean
     readonly input: string
     /** The embedder's note about this message, in `SLOT.note`. Trusted, this turn only. */
     readonly note?: string
@@ -358,8 +367,18 @@ export function assembleContext(input: AssembleInput): AssembledContext {
         message,
     }))
 
+    // The trace is always kept whole (the walk never drops inside the tail), so it is the last
+    // `protectedTail` history blocks.
+    const traceCount =
+        input.traceAfterInput === true
+            ? Math.min(historyBlocks.length, Math.max(0, input.protectedTail ?? 0))
+            : 0
+    const priorBlocks = historyBlocks.slice(0, historyBlocks.length - traceCount)
+    const traceBlocks = historyBlocks.slice(historyBlocks.length - traceCount)
+
     // Slot order, not insertion order: 0–3 lead so the cached prefix is the same bytes every
     // turn, 4 opens the uncached region, and the pinned tail follows the history it applies to.
+    // With `traceAfterInput` the turn's trace follows the input, so each step only appends.
     const blocks = [
         ...pinned.filter((b) => b.slot === SLOT.identity),
         ...pinned.filter((b) => b.slot === SLOT.tools),
@@ -368,11 +387,14 @@ export function assembleContext(input: AssembleInput): AssembledContext {
         ...pinned.filter((b) => b.slot === SLOT.volatile),
         ...pinned.filter((b) => b.slot === SLOT.skill),
         ...pinned.filter((b) => b.slot === SLOT.knowledge),
-        ...historyBlocks,
+        ...priorBlocks,
         ...pinned.filter((b) => b.slot === SLOT.reminder),
         ...pinned.filter((b) => b.slot === SLOT.memory),
         ...pinned.filter((b) => b.slot === SLOT.note),
-        ...pinned.filter((b) => b.slot === SLOT.input || b.slot === SLOT.error),
+        ...pinned.filter((b) => b.slot === SLOT.input),
+        ...traceBlocks,
+        // A repair note is per step, so it goes last whichever order is in use.
+        ...pinned.filter((b) => b.slot === SLOT.error),
     ]
 
     // Every block that was built must appear in the output, and this is a real defect it catches

@@ -17,7 +17,7 @@ import { describe, expect, test } from "./_harness.ts"
 
 const SIGNED = { text: "The user wants the time; call now.", signature: "sig-abc123" }
 
-function manifest(thinking: "anthropic" | "none"): string {
+function manifest(thinking: "anthropic" | "none", promptCache?: "bedrock"): string {
     const dir = mkdtempSync(join(tmpdir(), "thinking-"))
     writeFileSync(
         join(dir, "agent.yaml"),
@@ -28,7 +28,7 @@ model:
     id: some.claude-model
     api: scripted
     capabilities:
-      thinking: ${thinking}
+      thinking: ${thinking}${promptCache === undefined ? "" : `\n      promptCache: ${promptCache}`}
 tools:
   local:
     - now
@@ -62,10 +62,10 @@ function scripted() {
     return { transport, requests }
 }
 
-async function turn(thinking: "anthropic" | "none") {
+async function turn(thinking: "anthropic" | "none", promptCache?: "bedrock") {
     const model = scripted()
     const runtime = await Runtime.create({
-        agents: [manifest(thinking)],
+        agents: [manifest(thinking, promptCache)],
         store: ":memory:",
         env: {},
         modelTransports: { scripted: model.transport },
@@ -84,6 +84,32 @@ describe("thinking replay", () => {
         expect(reply.text).toBe("It is now.")
         expect(requests.length).toBe(2)
         expect(callOf(requests[1]?.messages ?? [])?.thinking).toEqual([SIGNED])
+    })
+
+    test("each step only appends: step two opens with step one's request, byte for byte (pilot.13)", async () => {
+        // Claude 5.x binds a signed block to everything before it. With the input after the trace,
+        // step two moved the question behind the step-one call and Bedrock refused the replay as
+        // "bound to a different conversation" (VelaCrew).
+        const { requests } = await turn("anthropic")
+        const first = requests[0]?.messages ?? []
+        const second = requests[1]?.messages ?? []
+        expect(second.slice(0, first.length)).toEqual([...first])
+        expect(second[first.length]?.origin).toBe("call")
+    })
+
+    test("a model whose transport caches the prompt gets append-only steps too (pilot.13)", async () => {
+        // The rolling cache point at the end of each Bedrock request is only read back if the next
+        // step starts with the same bytes.
+        const { requests } = await turn("none", "bedrock")
+        const first = requests[0]?.messages ?? []
+        const second = requests[1]?.messages ?? []
+        expect(second.slice(0, first.length)).toEqual([...first])
+    })
+
+    test("a model without replayed thinking keeps the question last, as before", async () => {
+        const { requests } = await turn("none")
+        const second = requests[1]?.messages ?? []
+        expect(second.at(-1)?.turnInput).toBe(true)
     })
 
     test("a model whose family does not take it back gets none", async () => {

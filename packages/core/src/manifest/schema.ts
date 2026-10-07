@@ -785,6 +785,13 @@ export const NoProgressSchema = z
          * is often correct — a transient failure deserves one more try. Three is a pattern.
          */
         identicalCalls: z.number().int().min(2).default(3),
+        /**
+         * Calls to any one tool in a turn, whatever the arguments, before it ends as `no_progress`
+         * (pilot.13). Absent is no limit, which is what every turn had before. For churn the
+         * identical-call check cannot see: a mail delta or a CRM lookup called forty times with new
+         * arguments each time.
+         */
+        sameTool: z.number().int().min(2).optional(),
     })
     .strict()
 

@@ -281,6 +281,15 @@ export function converseInput(
             last.content = [...(last.content ?? []), ...content]
         else messages.push({ role, content })
     }
+    // A rolling cache point at the end (pilot.13, VelaCrew): each step of a tool loop then reads every
+    // earlier step from the cache instead of resending it at full price. Measured on their Haiku 4.5:
+    // 2.0M prompt tokens over 50 calls with 0.56M cached, the cached figure stuck at the static prefix.
+    // It pays only because core keeps a caching role's steps append-only (`traceAfterInput`). The
+    // third of Converse's four points, beside the static prefix and the skill.
+    const tail = messages.at(-1)
+    if (caching && tail !== undefined && tail.content?.at(-1)?.cachePoint === undefined) {
+        tail.content = [...(tail.content ?? []), CACHE_POINT]
+    }
 
     const style = thinkingStyle(request.model)
     const effort = request.reasoningEffort

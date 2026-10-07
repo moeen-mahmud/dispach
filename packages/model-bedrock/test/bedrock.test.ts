@@ -106,10 +106,12 @@ describe("request mapping", () => {
             { reasoningContent: { reasoningText: { text: "Need the time.", signature: "sig-1" } } },
             { toolUse: { toolUseId: "tu_1", name: "now", input: { zone: "UTC" } } },
         ])
-        // The observation and the late system message merge into one user turn.
+        // The observation and the late system message merge into one user turn, and the request ends
+        // on a rolling cache point so the next step reads all of this from the cache (pilot.13).
         expect(input.messages?.[2]?.content).toEqual([
             { toolResult: { toolUseId: "tu_1", content: [{ text: "12:00" }] } },
             { text: "reminder: be brief" },
+            { cachePoint: { type: "default" } },
         ])
         expect(input.toolConfig?.tools?.[0]).toEqual({
             toolSpec: {
@@ -289,7 +291,23 @@ describe("request mapping", () => {
         expect(input.messages?.[0]?.content).toEqual([
             { text: "what is this?\n\n[image: files/c1/shot.png]" },
             { image: { format: "png", source: { bytes: png } } },
+            { cachePoint: { type: "default" } },
         ])
+    })
+
+    test("only a caching model gets the rolling cache point, and never two at the end (pilot.13)", () => {
+        const ask = (model: string, cacheBreakpoint?: true): ChatRequest => ({
+            model,
+            messages: [
+                { role: "user", content: "hi", ...(cacheBreakpoint ? { cacheBreakpoint } : {}) },
+            ],
+        })
+        const tail = (model: string, cacheBreakpoint?: true) =>
+            converseInput(ask(model, cacheBreakpoint), { ...CONFIG, id: model }).messages?.[0]
+                ?.content
+        expect(tail(MODEL)).toEqual([{ text: "hi" }, { cachePoint: { type: "default" } }])
+        expect(tail(MODEL, true)).toEqual([{ text: "hi" }, { cachePoint: { type: "default" } }])
+        expect(tail("openai.gpt-oss-120b-1:0")).toEqual([{ text: "hi" }])
     })
 })
 
@@ -430,6 +448,70 @@ describe("errors", () => {
             expect(calls).toBe(expectedCalls)
             expect(retries.length).toBe(expectedRetries)
             expect(status).toBe(failure === denied ? 403 : 429)
+        }
+    })
+})
+
+describe("a refused thinking replay (pilot.13)", () => {
+    test("is sent again once without thinking, reported as a retry, and a second refusal is final", async () => {
+        const refused = Object.assign(
+            new Error(
+                "messages.5.content.9: Invalid signature in thinking block. The block is bound to a different conversation.",
+            ),
+            { name: "ValidationException", $metadata: { httpStatusCode: 400 } },
+        )
+        for (const [refusals, expectedCalls, ok] of [
+            [1, 2, true],
+            [2, 2, false],
+        ] as const) {
+            const inputs: ConverseStreamCommandInput[] = []
+            const send: ConverseSend = async (input) => {
+                inputs.push(input)
+                if (inputs.length <= refusals) throw refused
+                return events([
+                    { contentBlockDelta: { contentBlockIndex: 0, delta: { text: "done" } } },
+                    { contentBlockStop: { contentBlockIndex: 0 } },
+                    { messageStop: { stopReason: "end_turn" } },
+                ])
+            }
+            const retries: number[] = []
+            const provider = bedrockTransport(async () => send).create({
+                id: "bedrock-converse:main",
+                field: "model.main",
+                config: CONFIG,
+                options: { region: "eu-west-1" },
+                onRetry: (info) => retries.push(info.status),
+            })
+            let failed = false
+            try {
+                await collect(
+                    provider.chat(
+                        {
+                            model: MODEL,
+                            messages: [
+                                { role: "user", content: "what time is it?" },
+                                {
+                                    role: "assistant",
+                                    content: "",
+                                    origin: "call",
+                                    toolCalls: [{ id: "t1", name: "now", arguments: "{}" }],
+                                    thinking: [{ text: "Need the time.", signature: "sig-1" }],
+                                },
+                                { role: "tool", content: "noon", toolCallId: "t1" },
+                            ],
+                        },
+                        new AbortController().signal,
+                    ),
+                )
+            } catch {
+                failed = true
+            }
+            expect(inputs.length).toBe(expectedCalls)
+            expect(JSON.stringify(inputs[0]?.messages)).toContain("reasoningContent")
+            expect(JSON.stringify(inputs[1]?.messages)).not.toContain("reasoningContent")
+            expect(JSON.stringify(inputs[1]?.messages)).toContain("toolUse")
+            expect(retries).toEqual([400])
+            expect(failed).toBe(!ok)
         }
     })
 })

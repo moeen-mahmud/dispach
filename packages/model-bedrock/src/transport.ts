@@ -66,6 +66,29 @@ export const sdkSender: SenderFactory = async (options) => {
     }
 }
 
+/** Claude 5.x's conversation check refusing a replayed thinking block. */
+function boundElsewhere(error: unknown): boolean {
+    return error instanceof Error && /bound to a different conversation/i.test(error.message)
+}
+
+/** The same request with every reasoning block removed, or `undefined` when it carried none. */
+function withoutThinking(
+    input: ConverseStreamCommandInput,
+): ConverseStreamCommandInput | undefined {
+    let found = false
+    const messages = (input.messages ?? [])
+        .map((message) => {
+            const content = (message.content ?? []).filter((block) => {
+                const reasoning = block.reasoningContent !== undefined
+                found ||= reasoning
+                return !reasoning
+            })
+            return { ...message, content }
+        })
+        .filter((message) => message.content.length > 0)
+    return found ? { ...input, messages } : undefined
+}
+
 /** A Nova model id, bare, cross-region (`eu.`) or as part of an ARN: its text carries `<thinking>`. */
 const NOVA = /(^|[./])amazon\.nova/
 
@@ -149,7 +172,8 @@ export function bedrockTransport(senderFactory: SenderFactory = sdkSender): Mode
                 async *chat(request, signal): AsyncIterable<ChatChunk> {
                     sender ??= senderFactory(options)
                     const send = await sender
-                    const input = converseInput(request, context.config)
+                    let input = converseInput(request, context.config)
+                    let stripped = false
                     for (let attempt = 1; ; attempt += 1) {
                         let started = false
                         try {
@@ -163,6 +187,19 @@ export function bedrockTransport(senderFactory: SenderFactory = sdkSender): Mode
                         } catch (error) {
                             // Cancellation is a state, not an exception.
                             if (signal.aborted) return
+                            // Claude 5.x refused a replayed thinking block because something before it
+                            // changed within the turn (pilot.13): a compaction, a phase change, a
+                            // middleware edit. The documented recovery: send it again without thinking,
+                            // once. Reported as a retry, so it is never silent.
+                            if (!started && !stripped && boundElsewhere(error)) {
+                                const without = withoutThinking(input)
+                                if (without !== undefined) {
+                                    input = without
+                                    stripped = true
+                                    context.onRetry?.({ status: 400, attempt, delayMs: 0 })
+                                    continue
+                                }
+                            }
                             const failure = classify(
                                 error,
                                 request.model,
