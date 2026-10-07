@@ -1628,7 +1628,7 @@ export interface Store {
     /**
      * A consistent copy of the whole store at `path`, taken while it stays open (pilot.9,
      * `GET /v1/backup`). `VACUUM INTO`, so the copy is one transaction's view and compacted; the
-     * file must not exist yet.
+     * file must not exist yet. The copy holds no leases: whatever restores it is a new process.
      */
     snapshot(path: string): Promise<void>
     /**

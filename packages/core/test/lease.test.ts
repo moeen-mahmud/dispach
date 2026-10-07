@@ -24,7 +24,7 @@ import {
     processAlive,
 } from "../src/runtime/lease.ts"
 import { Runtime } from "../src/runtime/runtime.ts"
-import { openMemoryStore } from "../src/store/sqlite/store.ts"
+import { openMemoryStore, SqliteStore } from "../src/store/sqlite/store.ts"
 import { describe, expect, test } from "./_harness.ts"
 
 const NOW = Date.parse("2026-08-17T02:00:00.000Z")
@@ -871,6 +871,30 @@ channels:
             const transport = runtime.channels.statusOf("test").find((s) => s.id === "sc")
             expect(transport).toBeDefined()
             await runtime.stop()
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
+    test("a store snapshot carries no leases, so a restore is not refused by the process it was taken from (pilot.12)", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "lease-snapshot-"))
+        try {
+            const store = await openMemoryStore()
+            await store.leases.claim({
+                agentId: "a",
+                runtimeId: "rt_old",
+                pid: 7,
+                mode: "daemon",
+                now: new Date().toISOString(),
+            })
+            const path = join(dir, "copy.db")
+            await store.snapshot(path)
+            // The live store keeps its own.
+            expect((await store.leases.get("a"))?.pid).toBe(7)
+            await store.close()
+            const copy = await SqliteStore.open({ path })
+            expect(await copy.leases.all()).toEqual([])
+            await copy.close()
         } finally {
             rmSync(dir, { recursive: true, force: true })
         }

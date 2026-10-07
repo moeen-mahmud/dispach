@@ -4,6 +4,10 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.11
+
+- A backup's `store.db` no longer carries the serve leases of the process it was taken from. A restore that started within 90 seconds of the backup was refused with `agent_already_serving`, naming a pid that belonged to something else in the new container.
+
 ### Since 0.2.0-pilot.10
 
 - `GET /v1/backup?include=home` adds the rest of the state directory under `home/`: stopped agents, templates, and anything an embedder keeps beside the store, such as a team drive and its git directory. It never adds the live `store.db*`, `logs/` or the `sources/` clone cache. `.env` files and the host token are added only with `include=env`, and `.git` directories only with `include=git`. `backup.json` records the directory, and the wire spec's restore steps cover it.

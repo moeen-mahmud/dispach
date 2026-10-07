@@ -385,7 +385,8 @@ directories it holds open.
    `backup.json`), beside the store. Copy them before step 2's directories, so a hosted agent's
    files win wherever the two overlap.
 4. Start the server. Migrations run forward at open, so a backup restores into the same version or a
-   newer one, never an older one.
+   newer one, never an older one. The snapshot carries no serve leases (pilot.12), so the first
+   start is never refused by the process the backup was taken from.
 
 Without `include=env`, each agent's `.env` has to be written again before it starts; without
 `include=git`, `.git` directories are absent. `.venv` and `node_modules` are rebuilt on first use.

@@ -2391,6 +2391,15 @@ export class SqliteStore implements Store {
         // A literal rather than a bound parameter: `VACUUM INTO` takes an expression, and binding it
         // is not something every SQLite build this runs on agrees about.
         this.#db.exec(`VACUUM INTO '${path.replaceAll("'", "''")}'`)
+        // The copy carries no leases (pilot.12, VelaCrew). A restore is always a new process, and a
+        // lease naming the old one's pid read as held in the new container, where that number
+        // belongs to something else: the first boot after a restore was refused for 90 s.
+        const copy = await openDatabase({ path })
+        try {
+            copy.exec("DELETE FROM runtime_leases")
+        } finally {
+            copy.close()
+        }
     }
 
     async close(): Promise<void> {
