@@ -369,6 +369,11 @@ export class ToolRegistry {
         return this.#bySlug.has(slug) || this.#byNormalised.has(normalise(slug))
     }
 
+    /** Which provider resolved a slug, or `undefined` when nothing did. */
+    providerOf(slug: string): string | undefined {
+        return (this.#bySlug.get(slug) ?? this.#byNormalised.get(normalise(slug)))?.spec.provider
+    }
+
     /**
      * Throws on an unknown slug rather than returning undefined.
      *

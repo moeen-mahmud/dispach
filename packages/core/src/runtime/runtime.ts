@@ -863,6 +863,7 @@ export class Runtime {
                 slugs: entry?.manifest.tools.pinned ?? [],
                 bus,
                 heal: (slugs) => runtime.#heal(agentId, slugs),
+                providerOf: (slug) => runtime.#agents.get(agentId)?.tools.providerOf(slug),
             })
         }
 
@@ -1234,6 +1235,7 @@ export class Runtime {
                 slugs: entry.manifest.tools.pinned,
                 bus: this.bus,
                 heal: (slugs) => this.#heal(agent.id, slugs),
+                providerOf: (slug) => agent.tools.providerOf(slug),
             })
         }
 
@@ -1415,8 +1417,13 @@ export class Runtime {
             chosen.map(async (provider) => {
                 const from = performance.now()
                 try {
+                    // Only slugs no other provider resolved, as in `refreshProviders`.
+                    const own = pinned.filter((slug) => {
+                        const owner = agent.tools.providerOf(slug)
+                        return owner === undefined || owner === provider.id
+                    })
                     const result = await (provider.refresh?.(
-                        pinned,
+                        own,
                         AbortSignal.timeout(TOOLS_REFRESH_TIMEOUT_MS),
                     ) ?? Promise.resolve({ fetched: 0, changed: [], missing: [] }))
                     this.bus.emit(
@@ -2369,9 +2376,19 @@ function refreshProviders(input: {
     readonly bus: EventBus
     /** Told which pinned slugs the provider can now resolve; the runtime decides whether to reload. */
     readonly heal?: (slugs: readonly string[]) => void
+    /** Which provider resolved each pinned slug at load, so one is never asked about another's. */
+    readonly providerOf?: (slug: string) => string | undefined
 }): void {
-    const { agentId, providers, slugs, bus, heal } = input
+    const { agentId, providers, bus, heal, providerOf } = input
     for (const provider of providers) {
+        // A slug another provider already answers for is not this one's to fetch. Composio was
+        // handed every pinned MCP tool and asked `GET /tools/<slug>` for each, on every reload: a 404
+        // apiece, 176 in four minutes on one VelaCrew silo (pilot.12). Unresolved slugs still go to
+        // everyone, which is what lets a refresh heal a tool the cache did not have yet.
+        const slugs = input.slugs.filter((slug) => {
+            const owner = providerOf?.(slug)
+            return owner === undefined || owner === provider.id
+        })
         // Most providers have nothing to fetch — `system` and `web` resolve from module
         // constants — so this skips them rather than requiring an empty implementation. With
         // several configured, each reports its own `tools.refreshed` and one failing leaves

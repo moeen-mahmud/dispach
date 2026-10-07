@@ -6,6 +6,7 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 
 ### Since 0.2.0-pilot.11
 
+- A tool provider is no longer asked to refresh a pinned slug another provider resolved. Composio fetched `GET /tools/<slug>` for every pinned MCP tool on each boot, reload and `tools/refresh`, and got a 404 each time; it now fetches only slugs nobody resolved, so a cold cache still heals.
 - A backup's `store.db` no longer carries the serve leases of the process it was taken from. A restore that started within 90 seconds of the backup was refused with `agent_already_serving`, naming a pid that belonged to something else in the new container.
 
 ### Since 0.2.0-pilot.10

@@ -128,4 +128,50 @@ describe("refreshing an agent's tools", () => {
         expect(code).toBe("tools_refresh_provider_unknown")
         await runtime.stop()
     })
+
+    test("a provider is never asked to refresh a slug another provider resolved (pilot.12)", async () => {
+        // `work` owns the two tickets; a Composio-like provider resolves nothing it was not warmed
+        // with. Before, it was handed both on every boot and reload and fetched each (a 404 apiece).
+        const asked: string[][] = []
+        const remote: ToolProviderFactory = () => ({
+            id: "remote",
+            resolve: async () => [],
+            list: async () => [],
+            refresh: async (slugs) => {
+                asked.push([...slugs])
+                return { fetched: 0, changed: [], missing: [...slugs] }
+            },
+        })
+        const dir = mkdtempSync(join(tmpdir(), "tools-refresh-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: test
+model:
+  main:
+    id: gpt-4o-mini
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+tools:
+  providers:
+    work: {}
+    remote: {}
+  pinned: [ticket_read, ticket_update, NOT_YET_CACHED]
+`,
+        )
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: { MODEL_API_KEY: "k" },
+            toolProviders: {
+                work: work({ slugs: ["ticket_read", "ticket_update"] }).factory,
+                remote,
+            },
+        })
+        await new Promise((done) => setTimeout(done, 20))
+        await runtime.refreshTools("test")
+        await runtime.stop()
+        // The boot refresh and the explicit one: only the slug nobody resolved, which is what lets a
+        // refresh still heal a tool the cache did not have yet.
+        expect(asked).toEqual([["NOT_YET_CACHED"], ["NOT_YET_CACHED"]])
+    })
 })
