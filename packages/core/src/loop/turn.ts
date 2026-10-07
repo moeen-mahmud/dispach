@@ -1338,10 +1338,19 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                                   if (base === undefined) return []
                                   const found = await base.registry.resolveMore(slugs)
                                   if (found.length === 0) return []
-                                  baseTools = withRenderedTools(base, found, true)
+                                  const layered = withRenderedTools(base, found, true)
+                                  // A turn narrowed to some tools (a schedule's `tools.allow`, a peer
+                                  // ask without `handoff`) stays narrowed: a pin cannot widen it.
+                                  baseTools =
+                                      input.toolsAllow === undefined
+                                          ? layered
+                                          : narrowedTools(layered, input.toolsAllow)
                                   views.clear()
                                   tools = viewFor(phase)
-                                  return found.map((tool) => tool.spec.slug)
+                                  const now = baseTools
+                                  return found
+                                      .map((tool) => tool.spec.slug)
+                                      .filter((slug) => now.registry.has(slug))
                               },
                               ...(input.phases === undefined
                                   ? {}
