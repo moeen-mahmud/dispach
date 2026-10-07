@@ -1500,8 +1500,32 @@ export class Runtime {
             return agent === undefined ? [] : [agent]
         })
         const running = () => agents.reduce((sum, agent) => sum + agent.inFlight, 0)
+        // A refusal before anything waited is announced too (pilot.14, VelaCrew): it used to throw
+        // with no event, so a webhook watching `agent.reloaded` never heard that a skill installed
+        // mid-turn had left the agent unable to reload.
+        const refused = (error: unknown): never => {
+            this.bus.emit(
+                "agent.reloaded",
+                {
+                    ok: false,
+                    adopted: [],
+                    waitedMs: 0,
+                    held: 0,
+                    disposed: false,
+                    error: isHarnessError(error)
+                        ? error.toDetail()
+                        : {
+                              code: "reload_failed",
+                              message: String(error),
+                              hint: "See the runtime log.",
+                          },
+                },
+                { agentId },
+            )
+            throw error
+        }
         if (running() === 0) {
-            const adopted = await this.replace(agentId)
+            const adopted = await this.replace(agentId).catch(refused)
             // Announced here too, so a surface watching for a reload it did not ask for — the
             // runtime's own, after a cache warmed — sees it the same way it sees a waited one.
             this.bus.emit(
@@ -1520,7 +1544,7 @@ export class Runtime {
 
         // Refused now rather than after the wait: the person asking should hear about a typo while
         // they are still looking at it, not when the last turn ends.
-        await this.#trial(source)
+        await this.#trial(source).catch(refused)
 
         const holdMs = this.#agents.get(agentId)?.manifest.limits.reloadHoldMs ?? 30_000
         const startedAt = Date.now()

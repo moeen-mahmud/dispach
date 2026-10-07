@@ -228,6 +228,7 @@ interface TurnRow {
     error_code: string | null
     error_message: string | null
     error_hint: string | null
+    error_detail: string | null
     started_at: string
     ended_at: string | null
     duration_ms: number | null
@@ -555,6 +556,7 @@ function toTurn(row: TurnRow): TurnRecord {
         ...(row.error_code === null ? {} : { errorCode: row.error_code }),
         ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
         ...(row.error_hint === null ? {} : { errorHint: row.error_hint }),
+        ...(row.error_detail === null ? {} : { errorDetail: row.error_detail }),
         startedAt: row.started_at,
         ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),
         ...(row.duration_ms === null ? {} : { durationMs: row.duration_ms }),
@@ -902,7 +904,8 @@ export class SqliteStore implements Store {
                     SET status = ?, text = ?, reasoning = ?, steps = ?,
                         prompt_tokens = ?, output_tokens = ?,
                         cached_prompt_tokens = ?, cache_source = ?, duration_ms = ?,
-                        error_code = ?, error_message = ?, error_hint = ?, ended_at = ?
+                        error_code = ?, error_message = ?, error_hint = ?, error_detail = ?,
+                        ended_at = ?
                   WHERE turn_id = ?`,
             ),
             turnGet: db.prepare("SELECT * FROM turns WHERE turn_id = ?"),
@@ -1435,6 +1438,7 @@ export class SqliteStore implements Store {
                     outcome.errorCode,
                     outcome.errorMessage,
                     outcome.errorHint,
+                    outcome.errorDetail ?? null,
                     nowIso(),
                     turnId,
                 )

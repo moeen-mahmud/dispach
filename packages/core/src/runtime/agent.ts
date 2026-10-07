@@ -1609,6 +1609,9 @@ export class Agent {
                       errorCode: result.error.code,
                       errorMessage: result.error.message,
                       errorHint: result.error.hint,
+                      ...(result.error.detail === undefined
+                          ? {}
+                          : { errorDetail: result.error.detail }),
                   }),
         })
 
@@ -2599,6 +2602,20 @@ export function resolveWorkspace(
     }
 
     const workspace = loadWorkspace({ refs, budgets: context.budgets, style })
+    // A template placeholder that reached the model unrendered (pilot.14, VelaCrew): a REMINDER.md
+    // copied raw carried `{{vars.userName}}`, and the model told the person they had pasted its
+    // instructions. A warning, never a refusal, since a file may quote template syntax on purpose.
+    // Read on the text the model receives, so a placeholder inside a stripped comment is not one.
+    for (const file of workspace.files) {
+        const found = [...new Set(file.content.match(/\{\{\s*vars\.[\w.-]+\s*\}\}/g) ?? [])]
+        if (found.length === 0) continue
+        warnings.push({
+            code: "workspace_unrendered_var",
+            message: `${file.name} reaches the model with ${found.length === 1 ? "a template placeholder" : "template placeholders"} still in it: ${found.join(", ")}.`,
+            hint: "These are filled in when an agent is provisioned from a template. A file copied in by hand keeps them literally, and the model reads them as text. Render the file, or PATCH /v1/agents/:id/vars to re-render the agent's template files.",
+            field: file.field,
+        })
+    }
     return { workspace, warnings }
 }
 

@@ -137,7 +137,7 @@ describe("a reload while a turn is running", () => {
     })
 
     test("a manifest broken on disk is refused at once, and the agent goes on serving", async () => {
-        const { runtime, old, path } = await boot()
+        const { runtime, old, path, events } = await boot()
         const before = runtime.agent("subject")
         old.hold()
         const first = before.send("one")
@@ -153,6 +153,15 @@ describe("a reload while a turn is running", () => {
         // Idle, the same: `replace` loads the new manifest before disposing the old instance.
         await expect(runtime.reload("subject")).rejects.toThrow()
         expect(runtime.agent("subject")).toBe(before)
+        // Both refusals reach the stream, and so a webhook (pilot.14): before, they only threw.
+        const refusals = events.filter(
+            (event) =>
+                event.type === "agent.reloaded" && (event.data as { ok: boolean }).ok === false,
+        )
+        expect(refusals.length).toBe(2)
+        expect(
+            (refusals[0]?.data as { error?: { code: string } } | undefined)?.error?.code,
+        ).toBeDefined()
         await runtime.stop()
     })
 

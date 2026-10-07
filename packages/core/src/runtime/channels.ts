@@ -564,9 +564,15 @@ export class ChannelHub {
 
         try {
             const senderId = `${message.channelType}:${message.senderId ?? message.peerId}`
+            // The channel's own model role, when its manifest entry names one (pilot.14). Read from
+            // the agent each time, never captured at registration.
+            const role = bound.agent.manifest.channels?.find(
+                (entry) => entry.id === transport.id,
+            )?.role
             const result = await bound.agent.send(input, {
                 sessionKey: message.sessionKey,
                 source: transport.id,
+                ...(role === undefined ? {} : { role }),
                 ...(images.length === 0 ? {} : { images }),
                 // A remote agent is an agent sender: untrusted text and no acting participant, which
                 // `participantOf` derives from `from` — so nothing it says can act for a person.

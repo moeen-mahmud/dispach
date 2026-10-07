@@ -1164,6 +1164,17 @@ ALTER TABLE participants ADD COLUMN timezone TEXT;
 ALTER TABLE sessions ADD COLUMN recall INTEGER NOT NULL DEFAULT 1;
 `,
     },
+    {
+        version: 29,
+        name: "turn_error_detail",
+        /**
+         * A failed turn's provider text, verbatim (pilot.14, VelaCrew): kept beside the message
+         * rather than in it, because AWS's text names the assumed-role ARN. NULL for every row before.
+         */
+        sql: `
+ALTER TABLE turns ADD COLUMN error_detail TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

@@ -137,6 +137,13 @@ function floorRefusal(path: string, value?: unknown): string | undefined {
         "where a provider sends its requests, and so its credentials, is not yours to decide. A person sets a provider's baseUrl"
     if (key.startsWith("tools.providers") && key.split(".").includes("baseurl")) return API_ADDRESS
     if (key.startsWith("tools.providers") && containsKey(value, "baseurl")) return API_ADDRESS
+    // Where the file tools may read (pilot.14): an agent that could turn `confineReads` off could read
+    // the other agents' notes the setting was there to keep out of reach.
+    const READ_REACH =
+        "which files you may read is not yours to widen. A person sets tools.providers.system.confineReads"
+    if (key.startsWith("tools.providers") && key.split(".").includes("confinereads"))
+        return READ_REACH
+    if (key.startsWith("tools.providers") && containsKey(value, "confinereads")) return READ_REACH
     if (key.startsWith("tools.providers") && key.split(".").includes("env")) return CHILD_ENV
     if (key.startsWith("tools.providers") && containsKey(value, "env")) return CHILD_ENV
     // Same two shapes as `writeRoots`: the path itself, and the key hidden inside a value. `channels`

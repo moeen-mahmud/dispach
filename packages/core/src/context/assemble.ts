@@ -15,7 +15,14 @@ import { IMAGE_TOKENS } from "../media/image-input.ts"
 import { isSessionSource, SESSION_SOURCE_PREFIX } from "../memory/conversation.ts"
 import { describeScope, scopeOfSource } from "../memory/scopes.ts"
 import type { ChatMessage, ImageInput } from "../model/provider.ts"
-import { type ContextBlock, NOTE_HEADER, SLOT, skillHeader, VOLATILE_HEADER } from "./blocks.ts"
+import {
+    type ContextBlock,
+    NOTE_HEADER,
+    REMINDER_HEADER,
+    SLOT,
+    skillHeader,
+    VOLATILE_HEADER,
+} from "./blocks.ts"
 import { isTurnStart } from "./compaction/stages.ts"
 import { estimateMessageTokens, estimateTokens } from "./tokens.ts"
 
@@ -271,7 +278,15 @@ export function assembleContext(input: AssembleInput): AssembledContext {
         )
     }
     if (input.reminder !== undefined && input.reminder.trim() !== "") {
-        pinned.push(block(SLOT.reminder, "system", input.reminder, true, "workspace-reminder"))
+        pinned.push(
+            block(
+                SLOT.reminder,
+                "system",
+                `${REMINDER_HEADER}\n\n${input.reminder}`,
+                true,
+                "workspace-reminder",
+            ),
+        )
     }
     if (input.note !== undefined && input.note !== "") {
         pinned.push(block(SLOT.note, "system", `${NOTE_HEADER}\n\n${input.note}`, true, "note"))

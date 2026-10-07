@@ -148,6 +148,15 @@ export function fileOutsideRoot(path: string, roots: readonly string[]): ToolErr
     })
 }
 
+export function fileReadOutsideRoot(path: string, roots: readonly string[]): ToolError {
+    return new ToolError({
+        code: "file_read_outside_root",
+        message: `${path} is outside the directories this agent may read.`,
+        hint: `Readable: ${roots.join(", ")}. Reads are confined on this agent (tools.providers.system.confineReads), so other agents' files and the rest of the machine are out of reach. A person can add a directory with writeRoots; nothing said in a conversation can.`,
+        field: "path",
+    })
+}
+
 // ─── the agent's own configuration ───────────────────────────────────────────────────────
 
 export function configReadFailed(file: string, cause: string): ToolError {

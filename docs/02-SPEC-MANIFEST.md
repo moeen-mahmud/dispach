@@ -361,6 +361,14 @@ permission rules; `write` is files **without** a shell, which is the only config
 `tools.providers.system` accepts `writeRoots` (extra writable directories) and `protect` (extra
 refused paths). Both widen their respective set; nothing narrows either.
 
+`tools.providers.system.confineReads: true` (since pilot.14) confines `file_read`, `glob` and `grep`
+to the same roots as writes: the agent's directory (its `workspace/` when there is one) and its
+`writeRoots`, compared on real paths, so a symlink pointing out of the workspace is refused too. Off,
+the default, a read may go anywhere except a secret, as before. In a silo shared by several agents
+that means one agent can read another's `MEMORY.md`, and this setting is what prevents it. The
+refusal is `file_read_outside_root`. `exec` is not bound by it, as it is not bound by any root, and
+`config_set` cannot set it.
+
 `tools.providers.system.env` (since pilot.9) decides what `exec` and a skill's scripts see of the
 environment: `inherit` (the default, and every agent before it), `scrub` (`PATH`, `HOME`, `USER`,
 `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `TERM`, `TMPDIR` and nothing else), or a list of
@@ -453,6 +461,7 @@ put the security fields out of reach; and two edits are refused whatever the pol
 | --- | --- |
 | a `writeRoots` list anywhere — `tools.providers.<id>.writeRoots`, or nested inside a `tools.providers` value | where the agent may write is the person's decision. Asked to create a file, an agent granted itself the whole home directory and wrote there |
 | any provider's `baseUrl` (Composio's, the web search backend's, Firecrawl's), by path or nested inside a `tools.providers` value | where a provider sends its requests is where its credential goes; an agent that could set it could send its token and every query anywhere |
+| the system provider's `confineReads`, by path or nested inside a `tools.providers` value | which files the agent may read is the person's; an agent that could turn it off could read the other agents' notes it keeps out of reach (pilot.14) |
 | the system provider's `env`, by path or nested inside a `tools.providers` value | what a command can see of the environment is containment; an agent that could set `inherit` back could hand its shell every secret the scrub keeps out |
 | replacing `tools.policy.deny` | its only purpose is removing a restriction someone set deliberately |
 | `tools.untrusted.onMutate: allow` | it turns off the check on outside content driving a write |
@@ -739,6 +748,7 @@ Common fields; type-specific fields are validated by the channel's own schema.
 | `id` | Unique within the agent. Used in session keys and delivery targets. |
 | `allowFrom` | Inbound allowlist. `["*"]` permits anyone. **Inbound only** — it has no effect on outbound delivery. |
 | `enabled` | Default true. |
+| `role` | A model role declared under `model:` that this channel's turns run on (pilot.14), e.g. WhatsApp on a cheaper role than the web chat. Absent is `main`. A role that is not declared refuses the manifest, in `validate`, at load and in a `config_set` edit, rather than falling back. An API turn picks a role per message with `POST …/messages {role}`. |
 
 Telegram: `tokenEnv`, `mode` (`longpoll` \| `webhook`), `webhookPath`, `secretTokenEnv`.
 

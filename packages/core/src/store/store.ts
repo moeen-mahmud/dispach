@@ -125,6 +125,8 @@ export interface TurnRecord {
     readonly errorCode?: string
     readonly errorMessage?: string
     readonly errorHint?: string
+    /** The provider's own words, when the error carried them (pilot.14). */
+    readonly errorDetail?: string
     readonly startedAt: string
     readonly endedAt?: string
     readonly durationMs?: number
@@ -214,6 +216,7 @@ export interface TurnStore {
             readonly errorCode?: string
             readonly errorMessage?: string
             readonly errorHint?: string
+            readonly errorDetail?: string
         },
     ): Promise<void>
     get(turnId: string): Promise<TurnRecord | undefined>

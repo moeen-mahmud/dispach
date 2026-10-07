@@ -497,6 +497,13 @@ export const ChannelSchema = z
         /** Inbound allowlist. `["*"]` permits anyone. Inbound only — no effect on delivery. */
         allowFrom: z.array(z.string().min(1)).optional(),
         enabled: z.boolean().default(true),
+        /**
+         * A model role declared under `model:` that this channel's turns run on (pilot.14, VelaCrew,
+         * OpenClaw's `modelByChannel`): WhatsApp on a cheaper model than the web chat. Absent is
+         * `main`, as before. A role that is not declared refuses the manifest rather than falling
+         * back, for the reason a schedule's `role:` does.
+         */
+        role: slug.optional(),
     })
     .passthrough()
 

@@ -30,7 +30,7 @@ import { grepPatternInvalid } from "./errors.ts"
 import { resolvePath } from "./files.ts"
 import { SYSTEM_PROVIDER_ID } from "./paths.ts"
 import { secretReason } from "./protect.ts"
-import { locate, type Roots } from "./root.ts"
+import { assertReadable, locate, type Roots } from "./root.ts"
 import type { ShellSessions } from "./session.ts"
 import { globToRegExp, walk } from "./walk.ts"
 
@@ -123,7 +123,11 @@ function rootFor(
     key: string,
 ): string {
     const given = typeof args.path === "string" && args.path.trim() !== "" ? args.path : "."
-    return resolvePath(given, options.sessions, key, options.roots.primary)
+    const root = resolvePath(given, options.sessions, key, options.roots.primary)
+    // ponytail: the starting directory is checked, not each file a walk reaches through a symlink
+    // inside it; check per file if a workspace is ever expected to hold links out.
+    assertReadable(root, options.roots)
+    return root
 }
 
 export function globHandler(options: SearchOptions): ToolHandler {

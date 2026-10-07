@@ -36,10 +36,11 @@
  * not read outside one directory would be answering a different question than the one anyone asked.
  */
 
-import { existsSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import type { JsonSchemaNode, ToolSpec } from "@dispach/core"
+import { fileReadOutsideRoot } from "./errors.ts"
 
 /**
  * Expand a leading `~` before anything compares the path to a root.
@@ -63,6 +64,12 @@ export interface Roots {
     readonly primary: string
     /** Additional writable roots from the manifest. Absolute. */
     readonly extra: readonly string[]
+    /**
+     * Reads confined to the same roots (pilot.14, `tools.providers.system.confineReads`). Off, a read
+     * may go anywhere but a secret, as it always could; on, another agent's notes in the same silo
+     * are out of reach too. `exec` is not bound by it, which its description says.
+     */
+    readonly confineReads: boolean
 }
 
 /**
@@ -72,7 +79,11 @@ export interface Roots {
  * answer cannot change while the process lives: a `workspace/` created later does not retroactively
  * become the root of a session already running under a different one.
  */
-export function resolveRoots(agentDir: string, writeRoots: readonly string[] = []): Roots {
+export function resolveRoots(
+    agentDir: string,
+    writeRoots: readonly string[] = [],
+    confineReads = false,
+): Roots {
     const base = resolve(agentDir)
     const workspace = resolve(base, WORKSPACE_DIR)
     return {
@@ -80,7 +91,29 @@ export function resolveRoots(agentDir: string, writeRoots: readonly string[] = [
         extra: writeRoots.map((entry) =>
             isAbsolute(entry) ? resolve(entry) : resolve(base, entry),
         ),
+        confineReads,
     }
+}
+
+/** A path with its symlinks followed, or as given when it does not exist yet. */
+function real(path: string): string {
+    try {
+        return realpathSync(path)
+    } catch {
+        return path
+    }
+}
+
+/**
+ * Refuse a read outside the roots when reads are confined. Both sides are real paths: a symlink
+ * inside the workspace that points at another agent's directory is that directory, and macOS's
+ * `/var` → `/private/var` would otherwise refuse every path under a temp root.
+ */
+export function assertReadable(absolute: string, roots: Roots): void {
+    if (!roots.confineReads) return
+    const target = real(absolute)
+    if (writable(roots).some((root) => within(target, real(root)))) return
+    throw fileReadOutsideRoot(absolute, writable(roots))
 }
 
 /** Is `absolute` inside `root`, counting the root itself? */
@@ -116,7 +149,9 @@ export function isWritable(absolute: string, roots: Roots): boolean {
 export function whereYouWork(roots: Roots, mode: "write" | "read" | "shell"): string {
     const extra = roots.extra.length === 0 ? "" : ` Also writable: ${roots.extra.join(", ")}.`
     if (mode === "read") {
-        return ` Relative paths are resolved against ${roots.primary}. Reading elsewhere is allowed — give an absolute path for it.`
+        return roots.confineReads
+            ? ` Relative paths are resolved against ${roots.primary}. Only ${writable(roots).join(", ")} can be read; anything elsewhere is refused.`
+            : ` Relative paths are resolved against ${roots.primary}. Reading elsewhere is allowed — give an absolute path for it.`
     }
     if (mode === "write") {
         return ` You work in ${roots.primary}. A relative path lands there, and that is where anything you create belongs unless the person names somewhere else. Writing anywhere else is refused.${extra}`

@@ -23,7 +23,9 @@ of this spec.
 ```
 
 `code` is stable and machine-readable. `hint` names the likely fix. Every error type in
-`errors.ts` populates it.
+`errors.ts` populates it. `detail`, when present, is a provider's own words verbatim, for an operator
+(pilot.14): AWS's text names the assumed-role ARN and the account, so it is kept out of `message`,
+which an embedder shows to people. A failed turn's record carries it as `errorDetail`.
 
 ### Error codes
 
@@ -1344,7 +1346,7 @@ stream still ends on its own turn's `turn.end`, so read `turnId` before treating
 | `plugin.slow` | setup over budget | `name`, `setupMs` |
 | `agent.loaded` | per agent | `tools`, `skills`, `schedules` (the manifest's **declared** count — this fires before reconciliation), `model` |
 | `agent.disposed` | this process stopped hosting an agent, without exiting | `reason` (`requested` \| `replaced` \| `stopped`) |
-| `agent.reloaded` | a reload finished — at once (`waitedMs: 0`) or after running turns; includes the runtime's own, after a cache warmed | `ok`, `adopted[]`, `waitedMs`, `held` (new turns that waited for it), `disposed`, `error?` — `ok: false` with `disposed: false` means the old instance is still serving |
+| `agent.reloaded` | a reload finished — at once (`waitedMs: 0`) or after running turns; includes the runtime's own, after a cache warmed | `ok`, `adopted[]`, `waitedMs`, `held` (new turns that waited for it), `disposed`, `error?` — `ok: false` with `disposed: false` means the old instance is still serving. A reload refused before anything waited (the manifest or a file on disk does not load) emits `ok: false` too, since pilot.14, beside the error the caller receives |
 | `agent.warning` | a fact true for the whole session, said at load | `code`, `message`, `hint`, `field?` |
 | `agent.channel.status` | connect/disconnect, or a channel now waiting on a person | `channelId`, `channelType`, `status` (`starting` \| `connected` \| `disconnected` \| `error` \| `needs_input`), `detail?`, `input?` (`{kind, payload, issuedAt, expiresAt?}`, present only with `needs_input`) |
 | `agent.channel.error` | channel failure that did not stop the channel | `channelId`, `code`, `message`, `hint` |
@@ -1389,7 +1391,7 @@ stream still ends on its own turn's `turn.end`, so read `turnId` before treating
 | `action.decided` | the owner answered it | `actionId`, `conversationId`, `status` (`done` \| `failed` \| `denied`) |
 | `memory.read` | a turn recalled someone's owner scope for somebody other than that person — a stand-in, a room, another caller (Phase 29). The owner's own requests, and unattributed work on their own agent, are not recorded | `scope`, `reader` (the agent), `sources`, `requestedBy?`, `onBehalfOf?` (set for a stand-in). The same record is kept for `GET /v1/participants/:id/memory/reads` |
 | `memory.recalled` | a turn's prompt carries recalled memory: notes, shared scopes, or excerpts of other conversations (`memory.includeHistory`) (pilot.13) | `passages: [{ source, score }]`, best first. A conversation's source is `session:<key>`. Not emitted when nothing was recalled, nor for a context preview |
-| `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs`, `attachments?` (`[{path, mimeType}]`, files a tool produced for the reply, relative to the agent's directory; a channel sends them after the text) |
+| `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs`, `finalText?` (the last step's prose alone, when any step wrote some; the reply joins every step's, so a lead-in repeated before each tool call appears once here (pilot.14). Taken before any `wrapTurn` middleware, like the `model.chunk` stream), `attachments?` (`[{path, mimeType}]`, files a tool produced for the reply, relative to the agent's directory; a channel sends them after the text) |
 | `error` | anything uncaught | `code`, `message`, `hint`, `stack?` |
 
 **What `units` counts, per first-party provider** (pilot.10). Where a provider reports its own

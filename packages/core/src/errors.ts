@@ -21,6 +21,11 @@ export interface ErrorDetail {
     readonly hint: string
     /** Dotted path into the manifest, where applicable: `tools.pinned[2]`. */
     readonly field?: string
+    /**
+     * A provider's own words, verbatim, for an operator (pilot.14). Kept out of `message`, which an
+     * embedder shows to people: AWS's text names the assumed-role ARN and the account.
+     */
+    readonly detail?: string
 }
 
 export interface HarnessErrorInit {
@@ -28,6 +33,7 @@ export interface HarnessErrorInit {
     message: string
     hint: string
     field?: string
+    detail?: string
     cause?: unknown
     /** Sub-failures, when one load surfaces several independent problems at once. */
     details?: ErrorDetail[]
@@ -74,6 +80,11 @@ export class HarnessError extends Error {
     readonly code: string
     readonly hint: string
     readonly field: string | undefined
+    /**
+     * Declared, not a field initialiser: set only when there is one, so an error without it prints
+     * exactly as before instead of with a `detail: undefined` line.
+     */
+    declare readonly detail?: string
     readonly details: ErrorDetail[]
 
     constructor(init: HarnessErrorInit) {
@@ -111,13 +122,18 @@ export class HarnessError extends Error {
         this.code = init.code
         this.hint = init.hint
         this.field = init.field
+        if (init.detail !== undefined) (this as { detail?: string }).detail = init.detail
         this.details = init.details ?? []
     }
 
     toDetail(): ErrorDetail {
-        return this.field === undefined
-            ? { code: this.code, message: this.message, hint: this.hint }
-            : { code: this.code, message: this.message, hint: this.hint, field: this.field }
+        return {
+            code: this.code,
+            message: this.message,
+            hint: this.hint,
+            ...(this.field === undefined ? {} : { field: this.field }),
+            ...(this.detail === undefined ? {} : { detail: this.detail }),
+        }
     }
 
     /** Multi-line, for a terminal. The wire surface uses `toDetail()` instead. */
@@ -125,6 +141,7 @@ export class HarnessError extends Error {
         const lines = [`${this.code}: ${this.message}`]
         if (this.field !== undefined) lines.push(`  field: ${this.field}`)
         lines.push(`  hint: ${this.hint}`)
+        if (this.detail !== undefined) lines.push(`  detail: ${this.detail}`)
 
         // A single failure is already fully described by the summary above — the wrapper adopts
         // its message, field, and hint. Printing it twice makes one problem look like two.

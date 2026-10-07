@@ -38,7 +38,7 @@ import { type MediaProviderFactory, resolveMedia } from "../media/provider.ts"
 import type { ToolProviderFactory } from "../tools/types.ts"
 import { resolveProviders } from "./providers.ts"
 import { type AgentManifest, AgentManifestSchema } from "./schema.ts"
-import { validateSchedules } from "./validate.ts"
+import { validateChannelRoles, validateSchedules } from "./validate.ts"
 import { removeInSource, setInSource, uncommentInSource } from "./yaml-edit.ts"
 
 export interface ManifestEdit {
@@ -172,7 +172,7 @@ export function prepareManifestEdit(
         parsed.data,
         Date.now(),
     )
-    const firstSchedule = scheduleFindings[0]
+    const firstSchedule = scheduleFindings[0] ?? validateChannelRoles(parsed.data)[0]
     if (firstSchedule !== undefined) {
         throw manifestEditInvalid(dotted, `${firstSchedule.message} ${firstSchedule.hint}`)
     }

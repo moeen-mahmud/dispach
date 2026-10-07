@@ -389,6 +389,22 @@ describe("no progress", () => {
         await runtime.stop()
     })
 
+    test("finalText is the last step's prose; text still joins every step's (pilot.14)", async () => {
+        const { result, events, runtime } = await run([
+            "Yes, Outlook. Let me try.\nACTION: memory_write\ntext: alpha\nEND",
+            "Yes, Outlook. Let me try.\nACTION: memory_write\ntext: beta\nEND",
+            "You have two unread messages.",
+        ])
+        expect(result.reason).toBe("final")
+        expect(result.text.match(/Let me try/g)?.length).toBe(2)
+        expect(result.finalText).toBe("You have two unread messages.")
+        const end = events.find((event) => event.type === "turn.end")
+        expect((end?.data as { finalText?: string } | undefined)?.finalText).toBe(
+            "You have two unread messages.",
+        )
+        await runtime.stop()
+    })
+
     test("sameTool ends a turn going round one tool with new arguments (pilot.13)", async () => {
         const script = [
             "ACTION: memory_write\ntext: alpha\nEND",

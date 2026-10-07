@@ -61,7 +61,8 @@ export function classify(
             status: code,
             error: new ModelError({
                 code: "model_http_error",
-                message: `Bedrock ${name} for ${modelId} in ${region}: ${message}`,
+                message: `Bedrock ${name} for ${modelId} in ${region}.`,
+                detail: message,
                 hint:
                     name === "ThrottlingException"
                         ? "Bedrock is throttling this account or model. Retries were spent; raise the model's quota in Service Quotas, spread load across a cross-region inference profile (eu., us., global.), or add a fallback."
@@ -147,13 +148,16 @@ export function classify(
         }
     }
 
+    // AWS's own text goes in `detail`, never `message` (pilot.14, VelaCrew): an access refusal names
+    // the assumed-role ARN and the account, and `message` is what an embedder shows to people.
     if (name === "AccessDeniedException" || status === 403) {
         return {
             retryable: false,
             status: 403,
             error: new ModelError({
                 code: "model_access_denied",
-                message: `Bedrock refused ${modelId} in ${region}: ${message}`,
+                message: `Bedrock refused ${modelId} in ${region}: these credentials may not invoke it.`,
+                detail: message,
                 hint: /being verified/i.test(message)
                     ? "The AWS account is new and AWS is still verifying it, which it says takes under two hours. Nothing in the manifest or the IAM policy changes this; retry once the account is verified."
                     : 'Either the credential is invalid or expired (Bedrock says "security token … invalid"), or it is not allowed to invoke this model. For the second, check the IAM policy grants bedrock:InvokeModelWithResponseStream on the model or inference profile, and that model access is enabled in the Bedrock console for this region. An embedder that revokes credentials as a budget stop lands here on purpose, which is why this never falls back.',
@@ -170,7 +174,8 @@ export function classify(
             status: 404,
             error: new ModelError({
                 code: "model_not_found",
-                message: `Bedrock has no model ${modelId} in ${region}: ${message}`,
+                message: `Bedrock has no model ${modelId} in ${region}.`,
+                detail: message,
                 hint: /use case details/i.test(message)
                     ? "Anthropic models on Bedrock need a one-time use-case form per AWS account: Bedrock console → Model catalog → an Anthropic model → submit the use case details. It applies about 15 minutes after submission."
                     : "Check the model id and region together: a cross-region profile id starts with its geography (eu., us., apac., global.), and a base model id needs on-demand access in that exact region.",
@@ -187,7 +192,8 @@ export function classify(
             status: undefined,
             error: new ModelError({
                 code: "model_unreachable",
-                message: `Cannot reach Bedrock in ${region}: ${message}`,
+                message: `Cannot reach Bedrock in ${region}.`,
+                detail: message,
                 hint: "Check outbound HTTPS to bedrock-runtime.<region>.amazonaws.com from this host; a default-deny network policy needs that endpoint listed.",
                 field,
                 cause: error,
@@ -201,11 +207,12 @@ export function classify(
         status: code,
         error: new ModelError({
             code: "model_http_error",
-            message: `Bedrock ${name} for ${modelId}: ${message}`,
+            message: `Bedrock ${name} for ${modelId}.`,
+            detail: message,
             hint:
                 name === "ValidationException"
-                    ? "Bedrock refused the request as malformed. The message names the field; a model that does not support a feature asked for (tools, thinking, prompt caching) is the usual cause."
-                    : "Bedrock refused the request. The message above is Bedrock's own.",
+                    ? "Bedrock refused the request as malformed. Its own words, in `detail`, name the field; a model that does not support a feature asked for (tools, thinking, prompt caching) is the usual cause."
+                    : "Bedrock refused the request. Its own words are in `detail`.",
             field,
             status: code,
             cause: error,

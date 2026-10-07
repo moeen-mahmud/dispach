@@ -219,8 +219,14 @@ function contentOf(message: ChatMessage): { role: "user" | "assistant"; content:
             ],
         }
     }
-    // `user`, and a `system` message after the conversation started.
-    const content: ContentBlock[] = message.content === "" ? [] : [{ text: message.content }]
+    // `user`, and a `system` message after the conversation started. Converse has no system role
+    // past the top, so that one is sent as user text, fenced so it never reads as the person's words
+    // (pilot.14, VelaCrew): unfenced, a reminder merged with the input looked pasted.
+    const text =
+        message.role === "system" && message.content !== ""
+            ? `<system>\n${message.content}\n</system>`
+            : message.content
+    const content: ContentBlock[] = text === "" ? [] : [{ text }]
     for (const image of message.images ?? []) {
         content.push({
             image: {

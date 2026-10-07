@@ -75,6 +75,15 @@ rule stated once at the top of a thirty-turn conversation is effectively in the 
 Re-asserting one or two rules at the recency position is the cheapest known countermeasure.
 One or two rules — it is not a second policy file.
 
+**The reminder is framed as the agent's own** (pilot.14). The runtime puts one line in front of it:
+*"From my own instructions, restated each turn so I keep them in mind. The person did not write
+this."* Write `REMINDER.md` to fit that line: in the first person, as the agent's own rules ("I confirm
+before I change a ticket"). Do not address the person, and do not quote what they might say. Without
+the frame, a transport that turns a later system message into user text (Bedrock Converse) delivered
+the reminder in the same message as the person's input, and a model told them they had pasted its
+instructions. A workspace file that still holds a `{{vars.…}}` placeholder when it reaches the model
+is reported as `workspace_unrendered_var`, at load and by `validate`.
+
 **Current input last of all.** Placing the query after long content improves response
 quality substantially on multi-document inputs.
 

@@ -152,6 +152,14 @@ export interface ContextBlock {
 export const NOTE_HEADER =
     "From the application this conversation runs in, about the next message. The person did not write this."
 
+/**
+ * The reminder tier's frame (pilot.14, VelaCrew). It was the one block after the history with none,
+ * and on a transport that turns a later system message into user text it read as something the
+ * person had pasted: asked "how are you", Haiku told them they had pasted its instructions.
+ */
+export const REMINDER_HEADER =
+    "From my own instructions, restated each turn so I keep them in mind. The person did not write this."
+
 export const VOLATILE_HEADER =
     "What I already know, carried from before this conversation and kept current. " +
     "Not a transcript — these are standing facts about the person I work for and my own working notes. " +

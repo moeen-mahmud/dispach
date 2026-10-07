@@ -227,6 +227,9 @@ tools:
   #       - ~/code/thing  #   absolute, or relative to this file
   #     protect:          # extra paths they refuse. Widening only — nothing removes a protection
   #       - "*.pem"
+  #     confineReads: true # file_read, glob and grep only inside this agent's directory and its
+  #                        #   writeRoots, so other agents' files in the same silo are out of reach.
+  #                        #   Off by default (reads go anywhere but a secret). Not exec.
   #     env: inherit      # what exec and skill scripts see: inherit (default, everything), scrub
   #                       #   (PATH, HOME, locale, TZ, TERM, TMPDIR only), or [NAMES] (scrub, plus
   #                       #   these). Scrub keeps the runtime's tokens out of anything a command can
@@ -493,6 +496,9 @@ channels:
     mode: longpoll                 # or webhook; channel-specific fields reach the plugin's schema
     tokenEnv: TELEGRAM_BOT_TOKEN
     allowFrom: ["@moeen"]
+    # This channel's turns on another model role declared under model:, e.g. a cheaper one for
+    # chat apps. Absent is main; a role that is not declared refuses the manifest.
+    # role: lite
     # webhookUrl: https://agent.example.com/v1/channels/tg/webhook/reference
     # secretTokenEnv: TELEGRAM_WEBHOOK_SECRET   # naming it and leaving it unset is refused
   # `telegram` is the only type this binary registers. A second one comes from a plugin — see

@@ -696,6 +696,11 @@ export interface EventDataMap {
         steps: number
         tokens: { prompt: number; output: number }
         durationMs: number
+        /**
+         * The last step's prose alone, when any step wrote some (pilot.14). The reply joins every
+         * step's; this is what to show when only the final answer should appear.
+         */
+        finalText?: string
         /** Files this turn produced for the reply, relative to the agent's directory. */
         attachments?: readonly { path: string; mimeType: string }[]
     }

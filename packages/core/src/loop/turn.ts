@@ -309,6 +309,13 @@ export interface TurnCompaction {
 export interface TurnResult {
     readonly turnId: string
     readonly text: string
+    /**
+     * The last step's prose alone (pilot.14, VelaCrew). `text` joins every step's prose, so a model
+     * that writes the same lead-in before each tool call ("Yes, Outlook. Let me try…") says it once
+     * per step there. Absent when no step wrote any, and when a `wrapTurn` middleware rewrote `text`,
+     * since it could still hold what that middleware removed.
+     */
+    readonly finalText?: string
     readonly reasoning: string
     readonly reason: TurnEndReason
     readonly steps: number
@@ -474,8 +481,11 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
             appended: [],
         }
     }
+    const { finalText, ...rest } = core
     return {
-        ...core,
+        ...rest,
+        // Kept only if the middleware left the reply alone; a rewrite may have removed text it holds.
+        ...(finalText !== undefined && outcome.text === core.text ? { finalText } : {}),
         text: outcome.text,
         reason: outcome.reason as TurnResult["reason"],
         steps: outcome.steps,
@@ -648,6 +658,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
     ]
     /** Prose from the current step that no history message carries yet. */
     let pendingProse = ""
+    let finalText = ""
     /** A mutating tool succeeded. Its effect happened, whatever the turn's outcome turns out to be. */
     let sideEffects = false
     /**
@@ -1080,6 +1091,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
             // steps: "let me check the calendar" is narration they should see, and the block that
             // follows it is not.
             if (parsed.text !== "") text = text === "" ? parsed.text : `${text}\n\n${parsed.text}`
+            if (parsed.text !== "") finalText = parsed.text
             pendingProse = parsed.text
 
             if (step.aborted) break
@@ -1445,6 +1457,8 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                 hint:
                     harness?.hint ??
                     "Unexpected failure inside the turn. The stack is on the `error` event; this is a bug worth reporting.",
+                // A provider's own words (pilot.14), kept beside the message rather than in it.
+                ...(harness?.detail === undefined ? {} : { detail: harness.detail }),
             }
             input.bus.emit(
                 "error",
@@ -1494,6 +1508,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                 ...(cacheSource === undefined ? {} : { cacheSource }),
             },
             durationMs,
+            ...(finalText === "" ? {} : { finalText }),
             ...(attachments.length === 0
                 ? {}
                 : {
@@ -1512,6 +1527,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
     return {
         turnId,
         text,
+        ...(finalText === "" ? {} : { finalText }),
         reasoning,
         reason,
         steps,

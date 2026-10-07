@@ -69,6 +69,8 @@ export interface SystemProviderOptions {
     readonly protect?: readonly string[]
     /** Extra writable directories. Absolute, or relative to the agent directory. */
     readonly writeRoots?: readonly string[]
+    /** Confine `file_read`, `glob` and `grep` to the same roots (pilot.14). Off by default. */
+    readonly confineReads?: boolean
 }
 
 function normalise(slug: string): string {
@@ -87,7 +89,11 @@ export class SystemProvider implements ToolProvider {
     readonly #tools: readonly Tool[]
 
     constructor(options: SystemProviderOptions) {
-        const roots = resolveRoots(options.dir, options.writeRoots ?? [])
+        const roots = resolveRoots(
+            options.dir,
+            options.writeRoots ?? [],
+            options.confineReads === true,
+        )
         const shared = {
             sessions: this.#sessions,
             agentDir: options.dir,
@@ -171,7 +177,7 @@ export const SYSTEM_TOOL_SLUGS: readonly string[] = [
  */
 export const SYSTEM_READONLY_SLUGS: readonly string[] = ["file_read", "glob", "grep"]
 
-const CONFIG_KEYS = ["protect", "writeRoots", "env"] as const
+const CONFIG_KEYS = ["protect", "writeRoots", "env", "confineReads"] as const
 
 export function systemFromConfig(
     context: ToolProviderContext,
@@ -191,6 +197,15 @@ export function systemFromConfig(
 
     const protect = context.config.protect
     const writeRoots = context.config.writeRoots
+    const confineReads = context.config.confineReads
+    if (confineReads !== undefined && typeof confineReads !== "boolean") {
+        throw new ConfigError({
+            code: "system_config_invalid",
+            message: "tools.providers.system.confineReads must be true or false.",
+            hint: "true confines file_read, glob and grep to the agent's directory and its writeRoots; false, or leaving it out, keeps reads unconfined as before.",
+            field: "tools.providers.system.confineReads",
+        })
+    }
     const policy = envPolicy(context.config.env)
     // The same policy reaches the skill-script runner this agent's plugin setup registered.
     onPolicy?.(policy)
@@ -203,5 +218,6 @@ export function systemFromConfig(
         ...(Array.isArray(writeRoots)
             ? { writeRoots: writeRoots.map((entry) => String(entry)) }
             : {}),
+        ...(confineReads === true ? { confineReads: true } : {}),
     })
 }

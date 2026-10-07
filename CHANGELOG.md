@@ -7,6 +7,13 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 ### Since 0.2.0-pilot.13
 
 - Bedrock: Nova no longer fails on the second call of a native tool turn with "extraneous key [cachePoint] is not permitted". pilot.13's rolling cache point is left out of a Nova message that carries a tool result; Claude keeps it.
+- `finalText` on a turn's result and on `turn.end`: the last step's prose alone. The reply still joins every step's, so a lead-in a model repeats before each tool call ("Yes, Outlook. Let me try…") appears once in `finalText`.
+- Errors take an optional `detail`: a provider's own words, verbatim. Bedrock now puts AWS's text there instead of in `message`, so an access refusal's assumed-role ARN is no longer in what an embedder shows people. A failed turn's record carries it as `errorDetail` (store migration 29).
+- `channels[].role` runs a channel's turns on a model role declared under `model:`, e.g. WhatsApp on a cheaper model than the web chat. Absent is `main`. A role that is not declared refuses the manifest.
+- The reminder tier now opens with a line saying it is the agent's own instructions and the person did not write it. On Bedrock, any system message after the start of the conversation is sent fenced in `<system>…</system>` rather than as bare user text. A model had read an unframed reminder as something the person pasted.
+- A workspace file that reaches the model with an unrendered `{{vars.…}}` placeholder is reported as `workspace_unrendered_var`, on the agent's warnings and by `validate`. A placeholder inside an HTML comment, which the model never sees, is not.
+- `tools.providers.system.confineReads: true` confines `file_read`, `glob` and `grep` to the agent's directory and its `writeRoots`, a symlink pointing out included, so in a silo one agent cannot read another's notes. Off by default; `config_set` cannot set it; `exec` is not bound by it.
+- A reload refused before it waited (a file on disk that does not load) now emits `agent.reloaded` with `ok: false`, as a refusal after the wait already did, so a webhook sees every refusal.
 
 ### Since 0.2.0-pilot.12
 

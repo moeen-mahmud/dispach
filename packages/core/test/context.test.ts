@@ -155,6 +155,15 @@ describe("workspace tiers in the assembled prompt", () => {
         expect(slots.indexOf(SLOT.reminder) < slots.indexOf(SLOT.input)).toBe(true)
     })
 
+    test("the reminder says it is the agent's own instructions, its words untouched (pilot.14)", () => {
+        // On a transport that turns a later system message into user text, an unframed reminder
+        // read as something the person had pasted.
+        const reminder = withTiers("Memory.").blocks.find((b) => b.slot === SLOT.reminder)
+        expect(reminder?.content.startsWith("From my own instructions")).toBe(true)
+        expect(reminder?.content).toContain("The person did not write this.")
+        expect(reminder?.content.endsWith("\n\nAnswer in prose.")).toBe(true)
+    })
+
     test("retrieved memory lands after the reminder and immediately before the input", () => {
         const assembled = assembleContext({
             identity: "You are a test fixture.",

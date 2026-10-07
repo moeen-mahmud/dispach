@@ -939,6 +939,23 @@ export interface ValidateOptions {
     now?: number
 }
 
+/** A channel's `role:` names a declared model role (pilot.14). One check for `validate`, load and edits. */
+export function validateChannelRoles(manifest: AgentManifest): ErrorDetail[] {
+    const declaredRoles = new Set<string>([...MODEL_ROLES, ...customRoleNames(manifest.model)])
+    return (manifest.channels ?? []).flatMap((channel, index) =>
+        channel.role === undefined || declaredRoles.has(channel.role)
+            ? []
+            : [
+                  {
+                      code: "channel_role_unknown",
+                      message: `Channel "${channel.id}" names the model role "${channel.role}", which is not declared under model:. Declared: ${[...declaredRoles].join(", ")}.`,
+                      hint: "Add the role under model:, or point the channel at one of the declared roles. Omit role to run its turns on main.",
+                      field: `channels[${index}].role`,
+                  },
+              ],
+    )
+}
+
 /** Every rule this build can enforce. Returns all failures; the caller decides how to report. */
 export function validateManifest(manifest: AgentManifest, options: ValidateOptions): ErrorDetail[] {
     return [
@@ -952,6 +969,7 @@ export function validateManifest(manifest: AgentManifest, options: ValidateOptio
         ...validateDialectSupport(manifest, options.capabilities),
         ...validateSchedules(options.raw, manifest, options.now ?? Date.now()),
         ...validateSubagents(manifest),
+        ...validateChannelRoles(manifest),
         ...validateSupportedSections(options.raw),
     ]
 }

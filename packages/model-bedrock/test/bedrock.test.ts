@@ -110,7 +110,9 @@ describe("request mapping", () => {
         // on a rolling cache point so the next step reads all of this from the cache (pilot.13).
         expect(input.messages?.[2]?.content).toEqual([
             { toolResult: { toolUseId: "tu_1", content: [{ text: "12:00" }] } },
-            { text: "reminder: be brief" },
+            // A later system message is user text on Converse, fenced so it never reads as the
+            // person's (pilot.14).
+            { text: "<system>\nreminder: be brief\n</system>" },
             { cachePoint: { type: "default" } },
         ])
         expect(input.toolConfig?.tools?.[0]).toEqual({
@@ -397,6 +399,24 @@ describe("errors", () => {
         )
         expect(noCreds.error.code).toBe("bedrock_credentials_missing")
         expect(noCreds.error.hint).toContain("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+    })
+
+    test("an access refusal keeps AWS's text, ARN and all, in detail and out of message (pilot.14)", () => {
+        const aws =
+            "User: arn:aws:sts::123456789012:assumed-role/silo-role/session is not authorized to perform: bedrock:InvokeModelWithResponseStream"
+        const denied = classify(
+            Object.assign(new Error(aws), {
+                name: "AccessDeniedException",
+                $metadata: { httpStatusCode: 403 },
+            }),
+            MODEL,
+            "eu-west-1",
+            "model.main",
+        )
+        expect(denied.error.message).not.toContain("arn:aws")
+        expect(denied.error.message).not.toContain("123456789012")
+        expect(denied.error.toDetail().detail).toBe(aws)
+        expect(denied.error.format()).toContain(`detail: ${aws}`)
     })
 
     test("a credentials endpoint that refuses is not a missing chain (pilot.4)", () => {

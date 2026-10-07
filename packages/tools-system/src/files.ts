@@ -48,7 +48,7 @@ import {
 } from "./errors.ts"
 import { SYSTEM_PROVIDER_ID } from "./paths.ts"
 import { protectedReason, secretReason } from "./protect.ts"
-import { expandTilde, isWritable, locate, type Roots, writable } from "./root.ts"
+import { assertReadable, expandTilde, isWritable, locate, type Roots, writable } from "./root.ts"
 import type { ShellSessions } from "./session.ts"
 
 /**
@@ -232,6 +232,7 @@ export function fileReadHandler(options: FileOptions): ToolHandler {
             options.roots.primary,
         )
 
+        assertReadable(path, options.roots)
         // The real path: a symlink named `notes.txt` that points at `.env` is still `.env`.
         const secret = secretReason(await realpath(path).catch(() => path)) ?? secretReason(path)
         if (secret !== undefined) throw fileSecret(path, secret)
