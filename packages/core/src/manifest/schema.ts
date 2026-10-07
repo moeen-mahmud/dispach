@@ -402,6 +402,13 @@ export const SkillsSchema = z
          * changing that formula invalidates this default, and both sides say so.
          */
         threshold: z.number().default(0.35),
+        /**
+         * The skills whose scripts may run (pilot.14, VelaCrew). Absent, every skill's do, as before;
+         * present, a skill not named here is still selected and read, but its scripts are not tools.
+         * The operator's list: a skill arriving by `git pull` or a person's upload cannot add itself,
+         * and `config_set` cannot change it.
+         */
+        trusted: z.array(z.string().min(1)).optional(),
         // No `budget`, and its absence is the design (decision 11.59). A per-turn token cap on skills
         // only ever converted "the right procedure" into "no procedure": `maxActive` already bounds a
         // turn to one body, so the second limit added no protection and produced a refusal at install,

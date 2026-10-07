@@ -569,6 +569,12 @@ factory the runtime builds agents with, handed over so a provider whose tools ed
 written: the same check the TUI, the web app and `PATCH /config` make (decision 14.24). A factory must
 construct without network I/O, which is what makes building one to validate its config safe.
 
+**`ctx.pinTools?.(slugs)`** (since pilot.14) is for a tool that has just added slugs to `tools.pinned`
+(`config_set` does). Slugs a provider resolves from what it already holds, with no network call, become
+callable on the next step of this turn and are re-rendered into the catalogue. It returns those slugs,
+and the agent queues a reload for when the turn ends, so the rest work from the next message. It is
+absent where no turn can take them.
+
 **`ctx.meter?.({provider, operation?, unit, units})`** (since pilot.9) reports what one call spent at a
 third party, in that party's own unit (`credits`, `requests`). The runtime emits it as a `tool.usage`
 event with the acting participant, so an embedder bills a user's web spend the way it bills

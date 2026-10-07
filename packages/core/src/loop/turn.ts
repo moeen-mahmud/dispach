@@ -193,6 +193,12 @@ export interface TurnInput {
     /** Declared phases and where this session currently is. Absent means one implicit phase. */
     readonly phases?: TurnPhases
     /**
+     * Told when a tool pinned this turn made `tools.pinned` differ from what the agent loaded with
+     * (pilot.14). The agent queues a reload, so whatever could not be added to this turn is there
+     * from the next message, with no restart.
+     */
+    readonly onPinned?: () => void
+    /**
      * Tools layered onto the registry for this turn only, beside any a skill brought.
      *
      * The same seam a skill's script tools use and for the same reason: they are **never** rendered
@@ -731,7 +737,8 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
             input.tools === undefined || input.toolsAllow === undefined
                 ? input.tools
                 : narrowedTools(input.tools, input.toolsAllow)
-        const baseTools =
+        // `let`: a tool pinned mid-turn (`pinTools`) is layered onto this and the views rebuilt.
+        let baseTools =
             ownTools === undefined || layered.length === 0
                 ? ownTools
                 : withRenderedTools(ownTools, layered, rendered.length > 0)
@@ -1320,6 +1327,22 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                               // change take effect on the *next step of this turn* rather than the next
                               // turn — deferring it would recreate the two-hop shape 4.7 refuses in the
                               // feature that exists for the models which fail it.
+                              // A tool pinned by `config_set` this turn (pilot.14): added for the next
+                              // step when a provider resolves it without the network, and rendered
+                              // into the catalogue, because a tool the catalogue does not list is one
+                              // the model will not call. Slot 1 changes for the rest of this turn,
+                              // the price of not asking the person twice (decision 14.96).
+                              pinTools: async (slugs: readonly string[]) => {
+                                  input.onPinned?.()
+                                  const base = baseTools
+                                  if (base === undefined) return []
+                                  const found = await base.registry.resolveMore(slugs)
+                                  if (found.length === 0) return []
+                                  baseTools = withRenderedTools(base, found, true)
+                                  views.clear()
+                                  tools = viewFor(phase)
+                                  return found.map((tool) => tool.spec.slug)
+                              },
                               ...(input.phases === undefined
                                   ? {}
                                   : {

@@ -628,6 +628,10 @@ export class Runtime {
                     // Resolved per call. `runtime` is assigned below this block, so this
                     // closure cannot be evaluated eagerly either.
                     resolveMember: (id) => runtime.agent(id),
+                    // Same laziness. A refused reload reports itself on `agent.reloaded`.
+                    requestReload: () => {
+                        runtime.reload(entry.manifest.id).catch(() => {})
+                    },
                     // Channels and plugins together: both are optional capabilities whose failure
                     // is a warning, and `agent.warnings` is the one array every surface reads.
                     warnings: [
@@ -1179,6 +1183,9 @@ export class Runtime {
                         .filter((loaded) => !prepared.memberIds.has(loaded.manifest.id))
                         .map((loaded) => loaded.manifest),
                 ),
+                requestReload: () => {
+                    this.reload(entry.manifest.id).catch(() => {})
+                },
                 warnings: [
                     ...(supply.failedPlugins ?? []),
                     ...built.warnings,
@@ -2249,6 +2256,8 @@ function instantiateAgent(input: {
     readonly registry: ToolRegistry | undefined
     readonly team: readonly TeamMemberConfig[] | undefined
     readonly resolveMember: (id: string) => HandoffTarget
+    /** Queue a reload of this agent once its turns end (a tool pinned mid-turn, pilot.14). */
+    readonly requestReload?: () => void
     readonly options: RuntimeOptions
     readonly bus: EventBus
     readonly store: Store
@@ -2344,6 +2353,7 @@ function instantiateAgent(input: {
         // plugin-supplied runner — the conditional-spread shape that has cost this repo
         // six debugging rounds.
         ...(runner === undefined ? {} : { scriptRunner: runner }),
+        ...(input.requestReload === undefined ? {} : { onPinned: input.requestReload }),
         ...(supply.middleware.length === 0 ? {} : { middleware: supply.middleware }),
         ...(supply.routes === undefined || supply.routes.length === 0
             ? {}

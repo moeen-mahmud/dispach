@@ -206,6 +206,46 @@ test("the system provider's env cannot be set by the agent, by path or inside a 
     expect(readFileSync(file, "utf8")).toBe(before)
 })
 
+test("skills.trusted cannot be set by the agent, by path or inside a value (pilot.14)", async () => {
+    const { set, file } = fixture()
+    const before = readFileSync(file, "utf8")
+    await expect(
+        set({ path: "skills.trusted", value: '["anything"]' }, toolContext({})),
+    ).rejects.toThrow(/not yours to decide/)
+    // `skills` is not settable at all, so a whole-block write is refused before its value is read.
+    await expect(
+        set(
+            { path: "skills", value: '{"dir": "./skills", "trusted": ["anything"]}' },
+            toolContext({}),
+        ),
+    ).rejects.toThrow()
+    expect(readFileSync(file, "utf8")).toBe(before)
+})
+
+test("a pin says what is usable now and that the rest is ready from the next message (pilot.14)", async () => {
+    const { set } = fixture()
+    const asked: string[][] = []
+    const now = await set(
+        { path: "tools.pinned", value: '["exec", "file_read"]' },
+        toolContext({
+            pinTools: async (slugs: readonly string[]) => {
+                asked.push([...slugs])
+                return ["file_read"]
+            },
+        }),
+    )
+    expect(asked).toEqual([["exec", "file_read"]])
+    expect(String(now)).toContain("Usable now, in this conversation: file_read")
+    const later = await set(
+        { path: "tools.pinned", value: '["exec"]' },
+        toolContext({ pinTools: async () => [] }),
+    )
+    expect(String(later)).toContain("from the person's next message")
+    // Where no turn can take it, the old sentence stands.
+    const none = await set({ path: "tools.pinned", value: '["exec", "grep"]' }, toolContext({}))
+    expect(String(none)).toContain("when the agent next starts")
+})
+
 test("confineReads cannot be set by the agent, by path or inside a value (pilot.14)", async () => {
     const { set, file } = fixture()
     const before = readFileSync(file, "utf8")

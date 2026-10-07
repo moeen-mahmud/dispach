@@ -13,6 +13,8 @@ A pre-release for the multiplayer runtime: one silo per user, run by a control p
 - The reminder tier now opens with a line saying it is the agent's own instructions and the person did not write it. On Bedrock, any system message after the start of the conversation is sent fenced in `<system>…</system>` rather than as bare user text. A model had read an unframed reminder as something the person pasted.
 - A workspace file that reaches the model with an unrendered `{{vars.…}}` placeholder is reported as `workspace_unrendered_var`, on the agent's warnings and by `validate`. A placeholder inside an HTML comment, which the model never sees, is not.
 - `tools.providers.system.confineReads: true` confines `file_read`, `glob` and `grep` to the agent's directory and its `writeRoots`, a symlink pointing out included, so in a silo one agent cannot read another's notes. Off by default; `config_set` cannot set it; `exec` is not bound by it.
+- `skills.trusted: [names]`: only these skills' scripts become tools. Any other skill, such as one a person uploaded or a community skill, is still used for its steps, and its scripts are listed as documentation only. Absent, every skill's scripts run, as before. `config_set` cannot set it.
+- A tool pinned with `config_set` works without a restart. When its provider already has it (a slug `composio_search` just found), it is callable on the next step of the same turn. Either way the agent reloads once the turn ends, so it is pinned from the next message. Plugin API: `ToolContext.pinTools(slugs)`.
 - A reload refused before it waited (a file on disk that does not load) now emits `agent.reloaded` with `ok: false`, as a refusal after the wait already did, so a webhook sees every refusal.
 
 ### Since 0.2.0-pilot.12

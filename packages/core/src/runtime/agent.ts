@@ -195,6 +195,11 @@ export interface AgentCreateOptions extends ResolveRolesOptions {
      */
     readonly scriptRunner?: ScriptRunner
     /**
+     * Asked when a turn pinned a tool through `config_set` (pilot.14). The runtime queues a reload,
+     * which waits for running turns, so the change is in force from the next message.
+     */
+    readonly onPinned?: () => void
+    /**
      * Plugin middleware for this agent, in registration order.
      *
      * Per agent rather than per runtime, for the same reason `setup` runs per agent: two agents in
@@ -468,6 +473,7 @@ export class Agent {
     #phases = new Map<string, string>()
     /** Absent when the embedder supplied none; then a skill's scripts are never discovered. */
     readonly #scriptRunner: ScriptRunner | undefined
+    readonly #onPinned: (() => void) | undefined
     readonly #middleware: readonly Middleware[]
     /**
      * What this agent answers over HTTP beyond `/v1`'s own routes, from its plugins. Rebuilt with the
@@ -516,6 +522,7 @@ export class Agent {
         knowledge: KnowledgeBase | undefined
         skills: SkillCatalogue | undefined
         scriptRunner: ScriptRunner | undefined
+        onPinned: (() => void) | undefined
         middleware: readonly Middleware[]
         pluginRoutes: readonly MountedRoute[]
         approve: ((request: ApprovalRequest) => Promise<boolean>) | undefined
@@ -552,6 +559,7 @@ export class Agent {
         this.knowledge = init.knowledge
         this.skills = init.skills
         this.#scriptRunner = init.scriptRunner
+        this.#onPinned = init.onPinned
         this.#middleware = init.middleware
         this.pluginRoutes = init.pluginRoutes
         this.#transcription = init.transcription
@@ -846,6 +854,7 @@ export class Agent {
             knowledge,
             skills,
             scriptRunner: options.scriptRunner,
+            onPinned: options.onPinned,
             middleware: options.middleware ?? [],
             pluginRoutes: options.pluginRoutes ?? [],
             approve: options.approve,
@@ -1462,6 +1471,7 @@ export class Agent {
         const result = await runTurn({
             agentId: this.id,
             meter,
+            ...(this.#onPinned === undefined ? {} : { onPinned: this.#onPinned }),
             ...(options.from?.id === undefined ? {} : { sender: options.from.id }),
             ...(this.#middleware.length === 0 ? {} : { middleware: this.#middleware }),
             sessionKey,
@@ -2309,12 +2319,19 @@ export class Agent {
 
         const role = this.roles.main.capabilities.promptStyle.skillsIn
         const runner = this.#scriptRunner
+        // `skills.trusted` (pilot.14, VelaCrew): when the operator lists the skills that may run code,
+        // only those get script tools. Absent, every skill does, as before.
+        const trusted = this.manifest.skills?.trusted
+        const mayRun = (name: string) => trusted === undefined || trusted.includes(name)
         return active.map((entry) => {
             // The catalogue record, for the scripts. `ActiveSkill` deliberately carries only what the
             // block needs; looking the record up here keeps the activation result from growing a second
             // copy of it that could drift.
             const record = catalogue.skills.find((skill) => skill.name === entry.name)
-            const scripts = record === undefined ? "" : renderScripts(record, runner !== undefined)
+            const scripts =
+                record === undefined
+                    ? ""
+                    : renderScripts(record, runner !== undefined, mayRun(record.name))
             return {
                 name: entry.name,
                 // The scripts section is appended, never interleaved — the authored body stays
@@ -2322,7 +2339,7 @@ export class Agent {
                 content: scripts === "" ? entry.content : `${entry.content}\n\n${scripts}`,
                 role,
                 tools:
-                    record === undefined || runner === undefined
+                    record === undefined || runner === undefined || !mayRun(record.name)
                         ? []
                         : skillScriptTools({ skill: record, runner }),
             }

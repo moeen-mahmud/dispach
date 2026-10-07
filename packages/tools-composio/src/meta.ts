@@ -250,9 +250,9 @@ export function renderSearch(
     lines.push("")
     lines.push(
         "These are not enabled yet. To enable them, add the slugs you need to tools.pinned with " +
-            "config_set — their definitions are already saved, so no other setup is needed — and then " +
-            "tell the person to restart the agent, because the tool list is fixed for a session. " +
-            "Pin only what the task needs.",
+            "config_set — their definitions are already saved, so no other setup is needed. " +
+            "config_set says which become usable in this conversation; the rest work from the " +
+            "person's next message, with no restart. Pin only what the task needs.",
     )
     return lines.join("\n")
 }

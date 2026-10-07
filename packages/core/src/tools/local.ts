@@ -424,5 +424,6 @@ export function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
         ...(overrides.memoryDir === undefined ? {} : { memoryDir: overrides.memoryDir }),
         ...(overrides.writeNote === undefined ? {} : { writeNote: overrides.writeNote }),
         ...(overrides.meter === undefined ? {} : { meter: overrides.meter }),
+        ...(overrides.pinTools === undefined ? {} : { pinTools: overrides.pinTools }),
     }
 }

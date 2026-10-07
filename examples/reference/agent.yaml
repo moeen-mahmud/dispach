@@ -421,6 +421,9 @@ skills:
   dir: ./skills
   maxActive: 1
   threshold: 0.35        # normalised BM25 floor; the shipped fixtures score 0.369–0.600
+  # trusted: [pdf, data-visualization]   # only these skills' scripts run; any other skill is read
+  #                                      # for its steps and its scripts are documentation only.
+  #                                      # Absent: every skill's scripts run. config_set cannot set it.
   # No `budget` field, and it was removed rather than never added. A token cap refused at install,
   # at load *and* mid-turn, and its first real use turned eleven ticked skills into nine installed —
   # `maxActive` already bounds a turn to one body, so the second limit only ever converted the right

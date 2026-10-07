@@ -266,6 +266,11 @@ export const SETTINGS: readonly Setting[] = [
         agentListed: false,
     },
     {
+        path: "skills.trusted",
+        means: "the skills whose scripts may run, by name. A skill not listed is still used for its steps, and its scripts are documentation only. Absent, every skill's scripts run",
+        agentListed: false,
+    },
+    {
         path: "tools.providers.<id>.writeRoots",
         means: "the directories a file tool may write to, for that provider. Nothing outside them is writable — and this binds file tools only, never exec, which carries its target inside a shell string",
         agentListed: false,

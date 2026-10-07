@@ -74,12 +74,15 @@ export class ToolRegistry {
      * question they asked the agent precisely because they did not want to read the manifest.
      */
     readonly notEnabled: readonly ToolAvailability[]
+    /** The providers it resolved from, kept for `resolveMore`. Never the built-in one. */
+    readonly #providers: readonly ToolProvider[]
 
     private constructor(init: {
         tools: readonly Tool[]
         dropped: readonly DroppedTool[]
         warnings: readonly ErrorDetail[]
         notEnabled?: readonly ToolAvailability[]
+        providers?: readonly ToolProvider[]
     }) {
         const bySlug = new Map<string, Tool>()
         const byNormalised = new Map<string, Tool>()
@@ -93,6 +96,33 @@ export class ToolRegistry {
         this.dropped = init.dropped
         this.warnings = init.warnings
         this.notEnabled = init.notEnabled ?? []
+        this.#providers = init.providers ?? []
+    }
+
+    /**
+     * Tools for slugs pinned after load, from what the providers can answer **without the network**
+     * (pilot.14): a slug `composio_search` just cached. `resolve()` is cache-only by contract, so this
+     * is too. Trust defaults the way it does at load, a provider tool `untrusted` unless it says
+     * otherwise, and a slug already here is not resolved twice. Returns what resolved; the rest wait
+     * for the reload.
+     */
+    async resolveMore(slugs: readonly string[]): Promise<readonly Tool[]> {
+        const wanted = slugs.filter((slug) => !this.has(slug))
+        if (wanted.length === 0) return []
+        const found = new Map<string, Tool>()
+        for (const provider of this.#providers) {
+            for (const tool of await provider.resolve(wanted)) {
+                const key = normalise(tool.spec.slug)
+                if (found.has(key) || this.has(tool.spec.slug)) continue
+                found.set(
+                    key,
+                    tool.spec.trust === undefined
+                        ? { ...tool, spec: { ...tool.spec, trust: "untrusted" } }
+                        : tool,
+                )
+            }
+        }
+        return [...found.values()]
     }
 
     /** An agent with no tools configured. Distinct from one whose resolution produced nothing. */
@@ -274,7 +304,7 @@ export class ToolRegistry {
             })
         }
 
-        return new ToolRegistry({ tools: kept, dropped, warnings, notEnabled })
+        return new ToolRegistry({ tools: kept, dropped, warnings, notEnabled, providers })
     }
 
     get size(): number {
@@ -317,6 +347,7 @@ export class ToolRegistry {
             dropped: this.dropped,
             warnings: this.warnings,
             notEnabled: this.notEnabled,
+            providers: this.#providers,
         })
     }
 
@@ -335,6 +366,7 @@ export class ToolRegistry {
             dropped: this.dropped,
             warnings: this.warnings,
             notEnabled: this.notEnabled,
+            providers: this.#providers,
         })
     }
 
@@ -357,6 +389,7 @@ export class ToolRegistry {
             dropped: this.dropped,
             warnings: this.warnings,
             notEnabled: this.notEnabled,
+            providers: this.#providers,
         })
     }
 

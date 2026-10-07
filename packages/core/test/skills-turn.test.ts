@@ -31,7 +31,12 @@ afterEach(() => {
     }
 })
 
-function agent(options: { readonly scripts?: Readonly<Record<string, string>> } = {}): string {
+function agent(
+    options: {
+        readonly scripts?: Readonly<Record<string, string>>
+        readonly trusted?: readonly string[]
+    } = {},
+): string {
     const dir = mkdtempSync(join(tmpdir(), "skills-turn-"))
     dirs.push(dir)
     writeFileSync(
@@ -53,7 +58,7 @@ skills:
   dir: ./skills
   maxActive: 1
   threshold: 0.35
-limits:
+${options.trusted === undefined ? "" : `  trusted: [${options.trusted.join(", ")}]\n`}limits:
   maxSteps: 2
   turnTimeoutMs: 5000
 `,
@@ -231,6 +236,29 @@ describe("scripts through a turn", () => {
         } finally {
             await runtime.stop()
         }
+    })
+
+    test("skills.trusted: a skill not on it keeps its procedure and loses its scripts (pilot.14)", async () => {
+        const turn = async (trusted: readonly string[]) => {
+            const { fetch, bodies } = recorder()
+            const runtime = await Runtime.create({
+                agents: [agent({ scripts: { "extract.py": "print(1)" }, trusted })],
+                env: ENV,
+                fetch,
+                scriptRunner: RUNNER,
+            })
+            try {
+                await runtime.agent("test").send("pull the tables out of this pdf")
+                return prompt(bodies[0] ?? {})
+            } finally {
+                await runtime.stop()
+            }
+        }
+        const untrusted = await turn(["chart-builder"])
+        expect(untrusted).toContain("Run the extractor")
+        expect(untrusted).toContain("which I may not run")
+        expect(untrusted).not.toContain("skill.pdf-processing.extract")
+        expect(await turn(["pdf-processing"])).toContain("skill.pdf-processing.extract")
     })
 
     test("without a runner the scripts are named as unavailable rather than hidden", async () => {

@@ -206,6 +206,13 @@ export interface ToolContext {
      */
     readonly setPhase?: (to: string) => Promise<void>
     /**
+     * Make slugs just added to `tools.pinned` callable for the rest of this turn (pilot.14). Adds the
+     * ones a provider can resolve without the network, a slug `composio_search` just cached, and
+     * returns them; the rest arrive with the reload the call also queues for when the turn ends.
+     * Absent where no turn can take them (a preview, a tool run outside a turn).
+     */
+    readonly pinTools?: (slugs: readonly string[]) => Promise<readonly string[]>
+    /**
      * Absolute path of the archive directory eviction writes to — `memory.dir`, resolved.
      *
      * Absent means the runtime has no memory configured, and `memory_write` then appends without

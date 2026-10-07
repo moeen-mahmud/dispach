@@ -137,6 +137,13 @@ function floorRefusal(path: string, value?: unknown): string | undefined {
         "where a provider sends its requests, and so its credentials, is not yours to decide. A person sets a provider's baseUrl"
     if (key.startsWith("tools.providers") && key.split(".").includes("baseurl")) return API_ADDRESS
     if (key.startsWith("tools.providers") && containsKey(value, "baseurl")) return API_ADDRESS
+    // Which skills may run code (pilot.14): an agent that could add a name could make any skill it was
+    // handed, a community one or one a person uploaded, run its scripts.
+    const SKILL_TRUST =
+        "which skills may run code is not yours to decide. A person lists them in skills.trusted"
+    if (key === "skills.trusted" || (key === "skills" && containsKey(value, "trusted"))) {
+        return SKILL_TRUST
+    }
     // Where the file tools may read (pilot.14): an agent that could turn `confineReads` off could read
     // the other agents' notes the setting was there to keep out of reach.
     const READ_REACH =
@@ -323,7 +330,7 @@ export function configReadHandler(options: ConfigOptions): ToolHandler {
 }
 
 export function configSetHandler(options: ConfigOptions): ToolHandler {
-    return async (args) => {
+    return async (args, context) => {
         const file = manifestPath(options)
         const path = typeof args.path === "string" ? args.path.trim() : ""
         const raw = typeof args.value === "string" ? args.value : String(args.value ?? "")
@@ -378,12 +385,25 @@ export function configSetHandler(options: ConfigOptions): ToolHandler {
         }
 
         const wasSet = result.before !== undefined
+        // A pin takes effect now where it can (pilot.14): the turn adds what a provider resolves from
+        // its cache, a slug `composio_search` just found, and queues a reload for the rest. Where no
+        // turn can take it, the old sentence stands, and it is still true.
+        const pinned =
+            path === "tools.pinned" && Array.isArray(value) && context.pinTools !== undefined
+                ? await context.pinTools(value.map(String))
+                : undefined
+        const effect =
+            pinned === undefined
+                ? "The configuration still validates. This takes effect when the agent next starts — nothing in the current conversation changes, so do not try the new tool yet."
+                : pinned.length > 0
+                  ? `The configuration still validates. Usable now, in this conversation: ${pinned.join(", ")}. Anything else listed here works from the person's next message, once the agent reloads after this turn.`
+                  : "The configuration still validates. The new tools work from the person's next message: the agent reloads once this turn ends, with no restart. Tell them it is ready for their next message; do not try the tool in this turn."
         return [
             `Set ${path} in ${file}.`,
             wasSet ? `It was: ${stringify(result.before).trim()}` : "It was not set before.",
             `It is now: ${stringify(value).trim()}`,
             "",
-            "The configuration still validates. This takes effect when the agent next starts — nothing in the current conversation changes, so do not try the new tool yet.",
+            effect,
             ...pendingSecrets(result.manifest, value),
         ].join("\n")
     }

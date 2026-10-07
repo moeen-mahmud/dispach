@@ -114,8 +114,19 @@ const SCRIPTS = "scripts"
  * Decision 4.53's lesson twice over: an absent capability the model cannot see is one it will invent a
  * workaround for, and `--system none` taught the same thing about a provider left unnamed.
  */
-export function renderScripts(skill: Skill, runnerAvailable: boolean): string {
+export function renderScripts(skill: Skill, runnerAvailable: boolean, trusted = true): string {
     if (skill.scripts.length === 0) return ""
+    // Outside `skills.trusted` (pilot.14): the procedure still applies, the scripts do not run, and the
+    // model is told so rather than left to find a way round it.
+    if (runnerAvailable && !trusted) {
+        return [
+            "## Scripts this skill ships, which I may not run",
+            "",
+            ...skill.scripts.map((plan) => `- scripts/${plan.file}`),
+            "",
+            "This skill is not on the list of skills trusted to run code here, so these are documentation only. I follow the steps above by other means and say so if a step needs one of these.",
+        ].join("\n")
+    }
     if (!runnerAvailable) {
         return [
             "## Scripts this skill ships, which I cannot run",

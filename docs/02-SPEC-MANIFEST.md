@@ -626,6 +626,7 @@ Measured, and the figure is not the one the rationale predicts: on a frontier mo
 | --- | --- | --- |
 | `dir` | `./skills` | Scanned for `*/SKILL.md`. Frontmatter only at boot; a configured directory that does not exist is a load failure. |
 | `maxActive` | 1 | Skill bodies injected per turn, into `SLOT.skill`. |
+| `trusted` | none | The skills whose scripts may run (pilot.14). Absent, every skill's scripts become tools while it is active, as before. Present, a skill not named here is still selected and its body read, but its scripts are listed as documentation only and are not tools. The operator's list: `config_set` cannot change it, and a skill arriving by `git pull` or an upload cannot add itself. Scripts run with the system provider's `env` policy, so `scrub` applies to them too. |
 | `threshold` | 0.35 | Normalised BM25 floor. Below it, no skill activates. Calibrated to the normalisation in `skills/select.ts`, where the shipped fixtures score 0.369–0.600 — **changing that formula invalidates this default**. |
 
 There is deliberately **no `budget` field** either. `maxActive` is the only limit on skills: a turn activates
