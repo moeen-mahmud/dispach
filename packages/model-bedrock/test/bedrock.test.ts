@@ -571,6 +571,78 @@ limits:
     })
 })
 
+describe("Nova's <thinking> in the text (pilot.13)", () => {
+    const deltas = (parts: string[]): ConverseStreamOutput[] => [
+        ...parts.map((text) => ({ contentBlockDelta: { contentBlockIndex: 0, delta: { text } } })),
+        { contentBlockStop: { contentBlockIndex: 0 } },
+        { messageStop: { stopReason: "end_turn" } },
+    ]
+    const joined = (chunks: ChatChunk[], type: "text" | "reasoning") =>
+        chunks.map((chunk) => (chunk.type === type ? chunk.delta : "")).join("")
+
+    test("is routed to reasoning, a tag cut across deltas included; other markup is left alone", async () => {
+        const chunks = await collect(
+            toChunks(
+                events(
+                    deltas([
+                        "<thin",
+                        "king>I need the",
+                        " tool.</thi",
+                        "nking>\n\nDone, <b>",
+                        "ok</b> <th",
+                    ]),
+                ),
+                { thinkingTags: true },
+            ),
+        )
+        expect(joined(chunks, "reasoning")).toBe("I need the tool.")
+        expect(joined(chunks, "text")).toBe("Done, <b>ok</b> <th")
+    })
+
+    test("is left in the text when the option is off", async () => {
+        const chunks = await collect(toChunks(events(deltas(["<thinking>x</thinking>hi"]))))
+        expect(joined(chunks, "text")).toBe("<thinking>x</thinking>hi")
+    })
+
+    test("a Nova reply reaches the person without it; a Claude one is untouched", async () => {
+        const reply = async (id: string) => {
+            const dir = mkdtempSync(join(tmpdir(), "bedrock-tags-"))
+            writeFileSync(
+                join(dir, "agent.yaml"),
+                `apiVersion: ${BRAND.apiVersion}
+id: tags
+model:
+  main:
+    id: ${id}
+    api: bedrock-converse
+    options:
+      region: eu-west-1
+`,
+            )
+            const runtime = await Runtime.create({
+                agents: [join(dir, "agent.yaml")],
+                env: {},
+                store: ":memory:",
+                modelTransports: {
+                    "bedrock-converse": bedrockTransport(
+                        async () => async () =>
+                            events(
+                                deltas([
+                                    "<thinking>The user wants a phase.</thinking>\n\nProposed.",
+                                ]),
+                            ),
+                    ),
+                },
+            })
+            const result = await runtime.agent("tags").send("add a phase")
+            await runtime.stop()
+            return result.text
+        }
+        expect(await reply("eu.amazon.nova-lite-v1:0")).toBe("Proposed.")
+        expect(await reply("eu.anthropic.claude-haiku-4-5-20251001-v1:0")).toContain("<thinking>")
+    })
+})
+
 test("a transport's load warnings reach the agent", async () => {
     const dir = mkdtempSync(join(tmpdir(), "bedrock-warn-"))
     writeFileSync(

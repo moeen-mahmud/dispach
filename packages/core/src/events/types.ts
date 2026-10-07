@@ -684,6 +684,13 @@ export interface EventDataMap {
         requestedBy?: string
         onBehalfOf?: string
     }
+    /**
+     * The passages history and note recall put into this turn's prompt (pilot.13), best first. A
+     * conversation's source is `session:<key>`. Not emitted when nothing was recalled.
+     */
+    "memory.recalled": {
+        passages: readonly { source: string; score: number }[]
+    }
     "turn.end": {
         reason: TurnEndReason
         steps: number
@@ -761,6 +768,7 @@ export const EVENT_TYPES = [
     "action.decided",
     "agent.assigned",
     "memory.read",
+    "memory.recalled",
     "turn.end",
     "error",
 ] as const satisfies readonly EventType[]

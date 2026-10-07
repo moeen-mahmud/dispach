@@ -232,6 +232,10 @@ export function assembleContext(input: AssembleInput): AssembledContext {
     // frame is a fact a small model will not connect to the question. Structure only — the passage's own
     // words are untouched, which is the line decision 4.19 draws.
     //
+    // The excerpt also says it is *not this conversation* (pilot.13, VelaCrew). "From an earlier
+    // conversation in this session's store", read immediately before the input, was taken by Nova as
+    // its own unfinished work: a brand-new chat re-proposed another chat's task until `no_progress`.
+    //
     // `isSessionSource` is imported rather than a `kind` field being threaded down from `#recall`,
     // deliberately: five separate debugging rounds here have gone to a field declared in one place and
     // dropped by a conditional spread in another, and the source string already carries the answer.
@@ -239,7 +243,7 @@ export function assembleContext(input: AssembleInput): AssembledContext {
         if (passage.text.trim() === "") continue
         const scope = scopeOfSource(passage.source)
         const provenance = isSessionSource(passage.source)
-            ? `From an earlier conversation in this session's store (${passage.source.slice(SESSION_SOURCE_PREFIX.length)}), on ${passage.at}:`
+            ? `From a different, earlier conversation (${passage.source.slice(SESSION_SOURCE_PREFIX.length)}), on ${passage.at}. It is not part of this conversation: use it as background, and do not continue its task unless asked to:`
             : scope !== undefined
               ? `From ${describeScope(scope)}, noted ${passage.at}:`
               : `From ${passage.source}, learned ${passage.at}:`

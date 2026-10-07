@@ -31,10 +31,71 @@ type Open =
     | { readonly kind: "tool"; readonly id: string; readonly name: string; input: string }
     | { readonly kind: "reasoning"; text: string; signature?: string; redacted?: string }
 
+const OPEN_TAG = "<thinking>"
+const CLOSE_TAG = "</thinking>"
+
+/** The length of the longest suffix of `text` that is a prefix of `tag`: held until it resolves. */
+function partialTag(text: string, tag: string): number {
+    for (let length = Math.min(tag.length - 1, text.length); length > 0; length -= 1) {
+        if (tag.startsWith(text.slice(-length))) return length
+    }
+    return 0
+}
+
+/**
+ * Nova writes its chain of thought into the *text* as `<thinking>…</thinking>` once it is given tools
+ * (pilot.13, VelaCrew): every native reply opened with it, and it reached the person's chat. Routed
+ * to `reasoning` instead, the way a model that reports reasoning separately is treated. Streamed, so
+ * a tag cut across two deltas is held until it resolves; whitespace right after a block is dropped so
+ * the reply does not open on a blank line.
+ */
+class ThinkingTags {
+    #held = ""
+    #inside = false
+    #trim = false
+
+    push(delta: string): ChatChunk[] {
+        const out: ChatChunk[] = []
+        let text = this.#held + delta
+        this.#held = ""
+        for (;;) {
+            const tag = this.#inside ? CLOSE_TAG : OPEN_TAG
+            const at = text.indexOf(tag)
+            if (at === -1) {
+                const keep = partialTag(text, tag)
+                this.#held = text.slice(text.length - keep)
+                out.push(...this.#emit(text.slice(0, text.length - keep)))
+                return out
+            }
+            out.push(...this.#emit(text.slice(0, at)))
+            this.#inside = !this.#inside
+            if (!this.#inside) this.#trim = true
+            text = text.slice(at + tag.length)
+        }
+    }
+
+    /** At the end of the stream: a held fragment was never a tag after all. */
+    flush(): ChatChunk[] {
+        const rest = this.#held
+        this.#held = ""
+        return this.#emit(rest)
+    }
+
+    #emit(text: string): ChatChunk[] {
+        if (this.#inside) return text === "" ? [] : [{ type: "reasoning", delta: text }]
+        const out = this.#trim ? text.trimStart() : text
+        if (out === "") return []
+        this.#trim = false
+        return [{ type: "text", delta: out }]
+    }
+}
+
 export async function* toChunks(
     events: AsyncIterable<ConverseStreamOutput>,
+    options: { readonly thinkingTags?: boolean } = {},
 ): AsyncIterable<ChatChunk> {
     const open = new Map<number, Open>()
+    const tags = options.thinkingTags === true ? new ThinkingTags() : undefined
 
     for await (const event of events) {
         if (event.contentBlockStart !== undefined) {
@@ -54,7 +115,8 @@ export async function* toChunks(
             const index = event.contentBlockDelta.contentBlockIndex ?? 0
             const delta = event.contentBlockDelta.delta
             if (delta?.text !== undefined) {
-                if (delta.text !== "") yield { type: "text", delta: delta.text }
+                if (tags !== undefined) yield* tags.push(delta.text)
+                else if (delta.text !== "") yield { type: "text", delta: delta.text }
             } else if (delta?.toolUse !== undefined) {
                 const block = open.get(index)
                 if (block?.kind === "tool") block.input += delta.toolUse.input ?? ""
@@ -100,6 +162,7 @@ export async function* toChunks(
         }
 
         if (event.messageStop !== undefined) {
+            if (tags !== undefined) yield* tags.flush()
             const reason = event.messageStop.stopReason ?? "end_turn"
             yield { type: "finish", reason: FINISH[reason] ?? reason }
             continue

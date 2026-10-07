@@ -66,6 +66,9 @@ export const sdkSender: SenderFactory = async (options) => {
     }
 }
 
+/** A Nova model id, bare, cross-region (`eu.`) or as part of an ARN: its text carries `<thinking>`. */
+const NOVA = /(^|[./])amazon\.nova/
+
 const optionsSchema = {
     safeParse(value: unknown) {
         const record = (typeof value === "object" && value !== null ? value : {}) as Record<
@@ -150,7 +153,9 @@ export function bedrockTransport(senderFactory: SenderFactory = sdkSender): Mode
                     for (let attempt = 1; ; attempt += 1) {
                         let started = false
                         try {
-                            for await (const chunk of toChunks(await send(input, signal))) {
+                            for await (const chunk of toChunks(await send(input, signal), {
+                                thinkingTags: NOVA.test(context.config.id),
+                            })) {
                                 started = true
                                 yield chunk
                             }

@@ -2008,6 +2008,20 @@ export class Agent {
                 budget: memory.budget,
             })
             if (audit !== undefined) await this.#auditReads(selected, sessionKey, audit)
+            // What slot 7 holds this turn, on the stream (pilot.13): without it, "where did that come
+            // from" could only be answered by previewing the context afterwards and hoping it matched.
+            if (audit !== undefined && selected.length > 0) {
+                this.#bus.emit(
+                    "memory.recalled",
+                    {
+                        passages: selected.map((hit) => ({
+                            source: hit.passage.source,
+                            score: Math.round(hit.score * 1000) / 1000,
+                        })),
+                    },
+                    { agentId: this.id, sessionKey, turnId: audit.turnId },
+                )
+            }
             return selected.map((hit) => ({
                 source: hit.passage.source,
                 at: hit.passage.at,

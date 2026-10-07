@@ -237,6 +237,14 @@ describe("a past conversation reaches the model", () => {
         const { fetch, bodies } = recorder("Noted.")
         const runtime = await Runtime.create({ agents: [manifest], env: ENV, fetch })
         const subject = runtime.agent("test")
+        const recalled: { sessionKey?: string; sources: string[] }[] = []
+        runtime.bus.on("memory.recalled", (event) => {
+            if (event.type !== "memory.recalled") return
+            recalled.push({
+                ...(event.sessionKey === undefined ? {} : { sessionKey: event.sessionKey }),
+                sources: event.data.passages.map((passage) => passage.source),
+            })
+        })
 
         await subject?.send("the deploy pipeline waits for a manual approval gate", {
             sessionKey: "local:first0",
@@ -250,9 +258,16 @@ describe("a past conversation reaches the model", () => {
         // three excerpts of its own earlier sessions answered correctly and then added "that's what the
         // saved notes say; the actual transcripts don't carry over" — wrong about its own state, while
         // holding the evidence.
-        expect(sent.includes("From an earlier conversation")).toBe(true)
+        expect(sent.includes("From a different, earlier conversation (local:first0)")).toBe(true)
+        // And says it is not this conversation, so its task is not taken for the current one
+        // (pilot.13: a new chat re-proposed another chat's task until no_progress).
+        expect(sent.includes("It is not part of this conversation")).toBe(true)
         expect(sent.includes("local:first0")).toBe(true)
         expect(sent.includes("session:local:first0")).toBe(false)
+        // On the stream too, naming the turn's session and what it recalled (pilot.13).
+        expect(recalled).toEqual([
+            { sessionKey: "local:secnd0", sources: ["session:local:first0"] },
+        ])
         await runtime.stop()
     })
 

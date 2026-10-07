@@ -4,6 +4,12 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.12
+
+- A recalled excerpt of another conversation (`memory.includeHistory`) now says it is a different conversation and background only, not a task to continue. A new chat had taken a just-finished chat's task as its own and re-proposed it until `no_progress`.
+- New event `memory.recalled` lists the passages a turn's prompt recalled (`source`, `score`), so where something in a reply came from shows on the stream.
+- Bedrock: Amazon Nova's `<thinking>…</thinking>`, which it writes into its reply text once it is given tools, is now treated as reasoning: shown and stored as reasoning, never in the reply. A tag split across stream chunks is handled. Other models' text is untouched.
+
 ### Since 0.2.0-pilot.11
 
 - A tool provider is no longer asked to refresh a pinned slug another provider resolved. Composio fetched `GET /tools/<slug>` for every pinned MCP tool on each boot, reload and `tools/refresh`, and got a 404 each time; it now fetches only slugs nobody resolved, so a cold cache still heals.

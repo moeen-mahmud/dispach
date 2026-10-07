@@ -1388,6 +1388,7 @@ stream still ends on its own turn's `turn.end`, so read `turnId` before treating
 | `action.deferred` | a stand-in queued a mutating call for its absent owner; nothing ran (Phase 28) | `actionId`, `conversationId`, `ownerId`, `requestedBy`, `slug` |
 | `action.decided` | the owner answered it | `actionId`, `conversationId`, `status` (`done` \| `failed` \| `denied`) |
 | `memory.read` | a turn recalled someone's owner scope for somebody other than that person — a stand-in, a room, another caller (Phase 29). The owner's own requests, and unattributed work on their own agent, are not recorded | `scope`, `reader` (the agent), `sources`, `requestedBy?`, `onBehalfOf?` (set for a stand-in). The same record is kept for `GET /v1/participants/:id/memory/reads` |
+| `memory.recalled` | a turn's prompt carries recalled memory: notes, shared scopes, or excerpts of other conversations (`memory.includeHistory`) (pilot.13) | `passages: [{ source, score }]`, best first. A conversation's source is `session:<key>`. Not emitted when nothing was recalled, nor for a context preview |
 | `turn.end` | complete | `reason`, `steps`, `tokens`, `durationMs`, `attachments?` (`[{path, mimeType}]`, files a tool produced for the reply, relative to the agent's directory; a channel sends them after the text) |
 | `error` | anything uncaught | `code`, `message`, `hint`, `stack?` |
 
