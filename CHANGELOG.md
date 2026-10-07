@@ -4,6 +4,10 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.13
+
+- Bedrock: Nova no longer fails on the second call of a native tool turn with "extraneous key [cachePoint] is not permitted". pilot.13's rolling cache point is left out of a Nova message that carries a tool result; Claude keeps it.
+
 ### Since 0.2.0-pilot.12
 
 - Claude 5.x (Sonnet 5.5, Opus 5.5, Fable 5.1) with thinking: a tool turn no longer fails at its second step with "Invalid signature in thinking block … bound to a different conversation". For a role whose thinking is replayed, the turn's own calls and results now follow its input instead of preceding it, so each step only appends to the last. On Bedrock, a replay that is still refused (a compaction or phase change mid-turn) is sent again once without thinking, and reported as a retry. Other models keep today's order.

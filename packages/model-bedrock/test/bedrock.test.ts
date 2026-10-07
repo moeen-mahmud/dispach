@@ -309,6 +309,41 @@ describe("request mapping", () => {
         expect(tail(MODEL, true)).toEqual([{ text: "hi" }, { cachePoint: { type: "default" } }])
         expect(tail("openai.gpt-oss-120b-1:0")).toEqual([{ text: "hi" }])
     })
+
+    test("Nova gets no cache point beside a tool result, which it refuses; Claude does (pilot.14)", () => {
+        const step = (model: string) =>
+            converseInput(
+                {
+                    model,
+                    messages: [
+                        { role: "user", content: "list my projects", turnInput: true },
+                        {
+                            role: "assistant",
+                            content: "",
+                            origin: "call",
+                            toolCalls: [{ id: "t1", name: "list", arguments: "{}" }],
+                        },
+                        { role: "tool", content: "[a, b]", toolCallId: "t1" },
+                    ],
+                },
+                { ...CONFIG, id: model },
+            )
+        const nova = JSON.stringify(step("amazon.nova-lite-v1:0").messages)
+        expect(nova).toContain("toolResult")
+        expect(nova).not.toContain("cachePoint")
+        expect(JSON.stringify(step(MODEL).messages?.at(-1)?.content?.at(-1))).toBe(
+            JSON.stringify({ cachePoint: { type: "default" } }),
+        )
+        // A Nova turn's first call still gets its tail point.
+        expect(
+            JSON.stringify(
+                converseInput(
+                    { model: "amazon.nova-lite-v1:0", messages: [{ role: "user", content: "hi" }] },
+                    { ...CONFIG, id: "amazon.nova-lite-v1:0" },
+                ).messages,
+            ),
+        ).toContain("cachePoint")
+    })
 })
 
 describe("stream mapping", () => {

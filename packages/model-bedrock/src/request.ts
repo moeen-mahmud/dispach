@@ -286,8 +286,21 @@ export function converseInput(
     // 2.0M prompt tokens over 50 calls with 0.56M cached, the cached figure stuck at the static prefix.
     // It pays only because core keeps a caching role's steps append-only (`traceAfterInput`). The
     // third of Converse's four points, beside the static prefix and the skill.
+    //
+    // Not for Nova when that message carries a tool result: Nova refuses a cachePoint there ("extraneous
+    // key [cachePoint] is not permitted", VelaCrew on pilot.13, every native tool turn's second call),
+    // while Claude takes it and read 99.7% of the step from the cache. Nova keeps its static prefix and
+    // the tail of a turn's first call.
     const tail = messages.at(-1)
-    if (caching && tail !== undefined && tail.content?.at(-1)?.cachePoint === undefined) {
+    const novaToolResult =
+        /(^|[./])amazon\.nova/.test(request.model) &&
+        (tail?.content ?? []).some((block) => block.toolResult !== undefined)
+    if (
+        caching &&
+        tail !== undefined &&
+        !novaToolResult &&
+        tail.content?.at(-1)?.cachePoint === undefined
+    ) {
         tail.content = [...(tail.content ?? []), CACHE_POINT]
     }
 
