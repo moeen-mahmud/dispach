@@ -24,4 +24,5 @@ Runtime installation is forbidden. A plugin must already be bundled, present in 
 
 First-party packages use the public API too. If your extension needs private core state, treat that as evidence that the public contract is incomplete and discuss the smallest contract change. Do not add a one-off escape hatch.
 
-Read the binding [plugin API specification](../../docs/03-SPEC-PLUGIN-API.md), then use existing channel and tool packages as implementation examples.
+Read the binding Plugin API specification at `docs/03-SPEC-PLUGIN-API.md`, then use existing channel
+and tool packages as implementation examples.

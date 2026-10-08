@@ -26,4 +26,5 @@ dispach validate milo
 
 Secrets are values in the environment; configuration stores only their variable names. Plugins resolve at boot, and the runtime never installs packages on demand.
 
-The authoritative field-by-field contract is [docs/02-SPEC-MANIFEST.md](../../../docs/02-SPEC-MANIFEST.md). Workspace configuration is specified separately in [docs/07-SPEC-WORKSPACE.md](../../../docs/07-SPEC-WORKSPACE.md). Use [`examples/reference/agent.yaml`](../../../examples/reference/agent.yaml) as the current full example.
+The authoritative field-by-field contracts are the Agent manifest specification and Workspace
+specification. The current full example is `examples/reference/agent.yaml`.

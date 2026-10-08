@@ -43,4 +43,5 @@ Keep the secret in the named environment variable. A literal key in the manifest
 
 The model's tool dialect is explicit configuration. `nlt` is the default; use `native` only when you intentionally choose provider-native function calling. Dispach does not change dialect when the model ID changes.
 
-The binding field reference is [Agent manifest specification](../../../docs/02-SPEC-MANIFEST.md). The generated starter in [`examples/reference`](../../../examples/reference/agent.yaml) shows a complete current manifest.
+The binding field reference is the Agent manifest specification. The generated starter at
+`examples/reference/agent.yaml` shows a complete current manifest.

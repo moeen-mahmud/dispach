@@ -25,4 +25,5 @@ Build the runtime image from the same commit before the end-to-end test. Otherwi
 
 Changes that add a lifecycle operation should cover busy-silo refusal, persistence behavior, authentication, and cleanup. Destructive operations must be explicit and must never report success after partial failure.
 
-Review [`packages/control/LICENSE.md`](../../packages/control/LICENSE.md) before contributing; this package uses a different license from the Apache-2.0 runtime.
+Review the control-plane license at `packages/control/LICENSE.md` before contributing; this package
+uses a different license from the Apache-2.0 runtime.

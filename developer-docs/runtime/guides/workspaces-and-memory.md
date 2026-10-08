@@ -24,4 +24,5 @@ Every configured file has a hard budget. Exceeding it names the file and stops l
 
 Memory uses SQLite FTS5 lexical search. `memory_write` resolves one editable target from the volatile tier, so the model does not choose arbitrary files. If no configured volatile file is writable, the tool refuses and names the problem.
 
-The binding tier order, budgets, rendering, and knowledge selection rules are in the [workspace specification](../../../docs/07-SPEC-WORKSPACE.md).
+The binding tier order, budgets, rendering, and knowledge selection rules are in the Workspace
+specification.

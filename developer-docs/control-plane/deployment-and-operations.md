@@ -31,4 +31,4 @@ Set `DISPACH_CONTROL_SUSPEND=on` only when losing channel connectivity during id
 
 Setting `DISPACH_CONTROL_HOOK_URL` enables the pilot monitor. It consumes signed runtime webhooks, measures rolling turn and tool-error rates, and alerts once on threshold crossing and once on recovery. Your deployment must allow silos to reach that hook URL.
 
-The complete environment table and routes are maintained in [`packages/control/README.md`](../../packages/control/README.md).
+The complete environment table and routes are maintained in `packages/control/README.md`.

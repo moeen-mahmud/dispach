@@ -31,4 +31,5 @@ Core imports no sibling packages. This keeps the embedder-facing harness usable 
 
 Local configuration, stores, manifests, and tool registries load before `runtime.ready`. Anything that needs network I/O starts afterwards and reports state through events. This boundary makes readiness a statement about the runtime itself rather than the speed of every external service.
 
-For binding details and rationales, read the repository's [architecture document](../../../docs/01-ARCHITECTURE.md) and [decision log](../../../docs/00-DECISIONS.md).
+For binding details and rationales, read the Architecture and Decision Log documents in the
+repository.

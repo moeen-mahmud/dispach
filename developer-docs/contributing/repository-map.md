@@ -20,4 +20,5 @@ The monorepo separates the harness, its transports, and optional providers.
 
 `packages/core` imports no sibling package. The dependency check also keeps the control plane isolated from the runtime in both directions.
 
-Before changing behavior, read [docs/00-DECISIONS.md](../../docs/00-DECISIONS.md), find the current work in [docs/05-PLAN.md](../../docs/05-PLAN.md), and inspect any binding specification for the surface you are touching.
+Before changing behavior, read the decision log at `docs/00-DECISIONS.md`, find the current work in
+`docs/05-PLAN.md`, and inspect any binding specification for the surface you are touching.

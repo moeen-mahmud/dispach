@@ -14,6 +14,6 @@ Start with [development setup](development-setup.md), then use the
 [repository map](repository-map.md) to find the owning package. [Making a change](making-a-change.md)
 explains which specifications and checks move with different kinds of work.
 
-Security reports follow [the private reporting process](../../SECURITY.md). Maintainers alone cut
+Security reports follow the private process in `SECURITY.md`. Maintainers alone cut
 releases; [releasing](releasing.md) documents that process so it is reviewable rather than tribal
 knowledge.

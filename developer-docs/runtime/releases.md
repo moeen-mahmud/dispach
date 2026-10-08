@@ -41,5 +41,5 @@ included in the published `dispach` npm package. Run it from a matching reposito
 the silo image to the same pilot version.
 
 Pilot APIs can change between revisions. Review the notes for every pilot release and the
-[`Unreleased` changelog](../../CHANGELOG.md) before upgrading. The stable `v0.1.x` line does not
-include the control plane.
+`Unreleased` section of `CHANGELOG.md` before upgrading. The stable `v0.1.x` line does not include
+the control plane.

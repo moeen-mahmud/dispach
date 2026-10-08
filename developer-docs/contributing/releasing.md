@@ -24,8 +24,8 @@ package is the runtime and CLI.
 Before preparing a release:
 
 1. Complete the checks in [Testing and evaluations](testing-and-evaluations.md).
-2. Run the manual pass in [`docs/13-QA.md`](../../docs/13-QA.md).
+2. Run the manual pass in `docs/13-QA.md`.
 3. Confirm the changelog describes user-visible behavior and migration needs.
 4. Verify generated documentation and the package tarball.
 
-The complete operational procedure and recovery notes are in [`RELEASING.md`](../../RELEASING.md).
+The complete operational procedure and recovery notes are in `RELEASING.md`.

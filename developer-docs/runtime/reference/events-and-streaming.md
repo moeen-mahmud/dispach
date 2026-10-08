@@ -27,4 +27,5 @@ The server-wide event endpoint can filter by event type and authorized agent sco
 
 In TypeScript, import `AnyEvent`, `EVENT_TYPES`, and narrowing helpers from `dispach/wire`, or consume the discriminated stream items returned by `dispach/client`.
 
-The authoritative schemas and delivery rules are in the [wire specification](../../../docs/04-SPEC-WIRE.md). The current endpoint shapes are in the [generated HTTP API](../../reference/README.md).
+The authoritative schemas and delivery rules are in the Wire protocol specification. The current
+endpoint shapes are in the [generated HTTP API](../../reference/README.md).

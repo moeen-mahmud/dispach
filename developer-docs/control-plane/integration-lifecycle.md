@@ -52,4 +52,5 @@ Use stable session keys and idempotency keys when sending messages. A disconnect
 
 Restore replaces the entire silo volume, including keys. Delete removes the container and its only volume and is irreversible.
 
-The checked-in [embedding walkthrough](../../packages/control/EMBEDDING.md) includes webhooks, usage, and error handling.
+The checked-in embedding walkthrough at `packages/control/EMBEDDING.md` includes webhooks, usage,
+and error handling.

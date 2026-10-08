@@ -64,4 +64,5 @@ for await (const item of turn.stream({ chunks: true })) {
 
 `tokens()` refuses a truncated replay by default because concatenating it would produce incomplete text without an obvious error. Use the full stream report before deliberately accepting a fragment.
 
-The checked-in package [client README](../../../packages/client/README.md) covers approvals, scoped keys, sessions, errors, and server-wide event streams.
+The package guide at `packages/client/README.md` covers approvals, scoped keys, sessions, errors,
+and server-wide event streams.
