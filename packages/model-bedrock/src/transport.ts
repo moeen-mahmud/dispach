@@ -27,7 +27,7 @@ import {
 } from "@dispach/core"
 import { containerCredentials } from "./credentials.ts"
 import { classify } from "./errors.ts"
-import { cachesPrompts, converseInput, roleWarnings } from "./request.ts"
+import { cachesPrompts, converseInput, roleWarnings, thinkingStyle } from "./request.ts"
 import { toChunks } from "./stream.ts"
 
 export interface BedrockOptions {
@@ -149,10 +149,17 @@ export function bedrockTransport(senderFactory: SenderFactory = sdkSender): Mode
         // The registry's Claude rows say `promptCache: none`, which is true of Anthropic's
         // OpenAI-compatible endpoint and false here: Converse takes explicit cache points. A manifest
         // that set `promptCache` itself keeps its value.
-        capabilities: (resolved, config) =>
-            config.capabilities?.promptCache === undefined && cachesPrompts(config.id)
-                ? { ...resolved, promptCache: "bedrock" }
-                : resolved,
+        // And an `openai.*` model gets the trace after the input (pilot.15): with it before, the tool
+        // result and the restated question merge into one user message and GPT-6 calls the tool again.
+        capabilities: (resolved, config) => {
+            const cached =
+                config.capabilities?.promptCache === undefined && cachesPrompts(config.id)
+                    ? { ...resolved, promptCache: "bedrock" as const }
+                    : resolved
+            return thinkingStyle(config.id) === "openai"
+                ? { ...cached, traceAfterInput: true }
+                : cached
+        },
         warnings: (config, field) => roleWarnings(config, field),
         create(context): ModelProvider {
             const options = context.options as BedrockOptions | undefined

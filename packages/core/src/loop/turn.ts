@@ -833,7 +833,8 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                     // only reused if each step appends to it; see `traceAfterInput`.
                     traceAfterInput:
                         input.role.capabilities.thinking === "anthropic" ||
-                        input.role.capabilities.promptCache === "bedrock",
+                        input.role.capabilities.promptCache === "bedrock" ||
+                        input.role.capabilities.traceAfterInput === true,
                     input: promptInput,
                     ...(input.turnNote === undefined ? {} : { note: input.turnNote }),
                     ...(input.images === undefined || input.images.length === 0

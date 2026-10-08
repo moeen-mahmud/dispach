@@ -651,6 +651,65 @@ limits:
     })
 })
 
+describe("a native tool turn on GPT-6 (pilot.15)", () => {
+    test("the tool result comes after the question, so the model answers instead of calling again", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "bedrock-gpt-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: luna
+model:
+  main:
+    id: global.openai.gpt-6-luna
+    api: bedrock-converse
+    reasoningEffort: low
+    options:
+      region: eu-west-1
+tools:
+  dialect: native
+  local:
+    - now
+limits:
+  maxSteps: 4
+  turnTimeoutMs: 5000
+`,
+        )
+        const inputs: ConverseStreamCommandInput[] = []
+        const send: ConverseSend = async (input) => {
+            inputs.push(input)
+            return inputs.length === 1
+                ? events(TOOL_STEP)
+                : events([
+                      { contentBlockDelta: { contentBlockIndex: 0, delta: { text: "Noon." } } },
+                      { contentBlockStop: { contentBlockIndex: 0 } },
+                      { messageStop: { stopReason: "end_turn" } },
+                  ])
+        }
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: {},
+            store: ":memory:",
+            modelTransports: { "bedrock-converse": bedrockTransport(async () => send) },
+        })
+        const agent = runtime.agent("luna")
+        await agent.send("hello", { sessionKey: "api:x" })
+        inputs.length = 0
+        const reply = await agent.send("what time is it?", { sessionKey: "api:x" })
+        await runtime.stop()
+
+        expect(reply.text).toBe("Noon.")
+        // Step two ends on the tool result. With the trace before the input, Converse merged the
+        // result and the restated question into one message, and GPT-6 read it as a new request.
+        const last = inputs[1]?.messages?.at(-1)
+        expect(last?.role).toBe("user")
+        expect(last?.content?.some((block) => block.toolResult?.toolUseId === "tu_1")).toBe(true)
+        const flat = JSON.stringify(inputs[1]?.messages)
+        expect(flat.lastIndexOf("what time is it?")).toBeLessThan(flat.lastIndexOf("toolUse"))
+        // And it caches nothing on Converse, so nothing claims it does.
+        expect(JSON.stringify(inputs[1])).not.toContain("cachePoint")
+    })
+})
+
 describe("an NLT tool turn on Nova", () => {
     /** One step of plain text, as Nova streams it. */
     const said = (text: string): ConverseStreamOutput[] => [

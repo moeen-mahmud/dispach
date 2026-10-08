@@ -64,6 +64,14 @@ export interface ModelCapabilities {
      */
     readonly vision?: boolean
     /**
+     * Put the turn's own tool trace after the input, as Claude-thinking and Bedrock-caching roles
+     * already have it (pilot.15). Set by a transport, never by the registry: it is a fact about how
+     * that transport lays out messages. Converse merges a tool result and the restated question into
+     * one user message, and GPT-6 on Bedrock read that as a new request and called the tool again
+     * until `no_progress`. Absent means today's order.
+     */
+    readonly traceAfterInput?: boolean
+    /**
      * How authored workspace files are rendered for this model.
      *
      * Derived from the model id rather than tabulated per row, and that is not a shortcut: the
