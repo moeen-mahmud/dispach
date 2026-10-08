@@ -28,7 +28,8 @@
         "@aws-sdk/client-bedrock-runtime": "3.1141.0",
         "@aws-sdk/client-polly": "3.1141.0",
         "@aws-sdk/client-transcribe-streaming": "3.1141.0",
-        "@dispach/core": "workspace:*"
+        "@dispach/core": "workspace:*",
+        "@dispach/model-bedrock": "workspace:*"
     },
     "private": true
 }

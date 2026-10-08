@@ -497,6 +497,7 @@ tools:
 | `headersEnv` | Header name → the variable holding its value, from the environment the agent loaded with. A missing variable fails the call that needs it, naming the variable. |
 | `participantHeader` | Sent with every call as the turn's acting participant id, and absent for a schedule, a peer agent or the operator, which is how the server tells the two apart. |
 | `turnHeader` | Since pilot.9. Sent with every call as the turn id, with the call id in `<turnHeader>-Call`, so a server can trace a write to the answer that made it. |
+| `personal` | Since pilot.15. `true` when the server acts as the agent's owner (their account, their data): its tools are then offered only to turns that act for the owner, like Composio's. Absent, they are shared. |
 | `policyArgs` | Tool name → the argument a `tools.policy` rule matches. For a proxy tool (`invoke_tool(toolName, arguments)`) this is the inner tool's name, so a rule can reach the call the proxy would make. |
 
 Tools are **pinned by name** like every other provider's, never exposed wholesale, so a server adding

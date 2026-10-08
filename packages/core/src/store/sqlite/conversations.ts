@@ -113,6 +113,7 @@ interface AssignmentRow {
     participant_id: string
     assigned_by: string | null
     assigned_at: string
+    channel_ids: string | null
 }
 
 const participantOf = (row: ParticipantRow): ParticipantRecord => ({
@@ -160,6 +161,9 @@ const assignmentOf = (row: AssignmentRow): AssignmentRecord => ({
     participantId: row.participant_id,
     ...(row.assigned_by === null ? {} : { assignedBy: row.assigned_by }),
     assignedAt: row.assigned_at,
+    ...(row.channel_ids === null
+        ? {}
+        : { channelIds: JSON.parse(row.channel_ids) as readonly string[] }),
 })
 
 export function sqliteConversations(db: SqlDatabase): ConversationStore & {
@@ -205,10 +209,11 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
               ORDER BY seq LIMIT ?`,
         ),
         assignmentUpsert: db.prepare(
-            `INSERT INTO agent_assignments (agent_id, participant_id, assigned_by, assigned_at)
-             VALUES (?, ?, ?, ?)
+            `INSERT INTO agent_assignments (agent_id, participant_id, assigned_by, assigned_at, channel_ids)
+             VALUES (?, ?, ?, ?, ?)
              ON CONFLICT (agent_id) DO UPDATE SET participant_id = excluded.participant_id,
-                 assigned_by = excluded.assigned_by, assigned_at = excluded.assigned_at`,
+                 assigned_by = excluded.assigned_by, assigned_at = excluded.assigned_at,
+                 channel_ids = excluded.channel_ids`,
         ),
         assignmentGet: db.prepare("SELECT * FROM agent_assignments WHERE agent_id = ?"),
         assignmentDelete: db.prepare("DELETE FROM agent_assignments WHERE agent_id = ?"),
@@ -379,6 +384,7 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
                 record.participantId,
                 record.assignedBy ?? null,
                 record.assignedAt,
+                record.channelIds === undefined ? null : JSON.stringify(record.channelIds),
             )
             const row = q.assignmentGet.get<AssignmentRow>(record.agentId)
             if (row === undefined) throw new Error(`assignment for "${record.agentId}" vanished`)

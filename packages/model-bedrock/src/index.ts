@@ -17,6 +17,11 @@
 import { type Plugin, VERSION } from "@dispach/core"
 import { bedrockTransport } from "./transport.ts"
 
+export {
+    type AwsCredentials,
+    CredentialsRefusedError,
+    containerCredentials,
+} from "./credentials.ts"
 export { classify } from "./errors.ts"
 export {
     cachesPrompts,

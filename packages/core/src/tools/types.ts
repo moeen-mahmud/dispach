@@ -90,6 +90,13 @@ export interface ToolSpec {
      */
     readonly trustReason?: string
     /**
+     * The tool acts as the agent's owner: their mail, their accounts (pilot.15). A turn acting for
+     * anyone else (another member asking, a stand-in, a channel sender who is not the owner) gets
+     * no such tool, and a call to one is refused with `tool_personal`. Set by the provider: Composio
+     * for every tool, MCP for a server declared `personal: true`. Absent, the tool is shared.
+     */
+    readonly personal?: boolean
+    /**
      * Which argument a `tools.policy` pattern matches against — `command` for a shell tool, `path`
      * for a file tool.
      *

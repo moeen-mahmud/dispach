@@ -59,6 +59,7 @@ import {
     ToolsRefreshBody,
     VarsBody,
     WebhookBody,
+    WorkspaceFileBody,
 } from "./wire-schemas.ts"
 
 /** One line per route, plus its body when it reads one. The only hand-written half. */
@@ -122,6 +123,22 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             {
                 code: 400,
                 when: "a path a bundle cannot carry, or a bundle the agent would not load",
+            },
+        ],
+    },
+    "PUT /v1/agents/:id/workspace/:file": {
+        summary:
+            "Replace one of the agent's declared workspace files; reload it, or diagnose it when it is not running.",
+        body: WorkspaceFileBody,
+        statuses: [
+            {
+                code: 400,
+                when: "a running agent would not load with the new text (the old text is put back)",
+            },
+            { code: 404, when: "a file the manifest does not declare" },
+            {
+                code: 409,
+                when: "an agent with no manifest file, or one whose manifest does not parse",
             },
         ],
     },

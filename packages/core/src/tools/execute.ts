@@ -57,6 +57,12 @@ export interface ExecuteInput {
      * `subagents[].timeoutMs` may be longer than any single tool should take (pilot.15).
      */
     readonly timeoutFor?: ReadonlyMap<string, number>
+    /**
+     * Personal tools withheld from this turn because it does not act for the agent's owner
+     * (pilot.15). Already absent from `registry`; a call naming one is refused as `tool_personal`
+     * and reported as `tool.gated`, rather than answered as a tool that does not exist.
+     */
+    readonly withheld?: ReadonlySet<string>
     /** Read-only calls only. Mutating calls always run one at a time. */
     readonly maxParallel: number
     /** Above this, an observation is cut to head and tail with a visible marker. */
@@ -496,6 +502,29 @@ async function decideAndRun(
 }
 
 export async function executeIntents(input: ExecuteInput): Promise<ExecuteOutcome> {
+    const withheld = input.withheld
+    if (withheld !== undefined && input.intents.some((intent) => withheld.has(intent.slug))) {
+        const rest = await executeIntents({
+            ...input,
+            intents: input.intents.filter((intent) => !withheld.has(intent.slug)),
+        })
+        if (rest.repair.length > 0) return rest
+        const ran = new Map(rest.results.map((result) => [result.callId, result]))
+        // In the order the calls were made, which the native protocol requires.
+        const results = input.intents.flatMap((intent) => {
+            if (!withheld.has(intent.slug)) {
+                const result = ran.get(intent.callId)
+                return result === undefined ? [] : [result]
+            }
+            input.bus.emit(
+                "tool.gated",
+                { slug: intent.slug, callId: intent.callId, reason: "personal", policy: "refuse" },
+                input.eventContext,
+            )
+            return [personalResult(intent)]
+        })
+        return { results, repair: [] }
+    }
     const { planned, repair } = planIntents(input.registry, input.intents)
 
     if (repair.length > 0) {
@@ -780,4 +809,24 @@ async function capObservation(
 
 function isAbortError(value: unknown): boolean {
     return value instanceof Error && value.name === "AbortError"
+}
+
+/** A personal tool asked for in a turn that is not its owner's (pilot.15). Nothing ran. */
+function personalResult(call: { readonly callId: string; readonly slug: string }): ToolResult {
+    return {
+        callId: call.callId,
+        slug: call.slug,
+        ok: false,
+        gated: true,
+        trust: "trusted",
+        output: `${call.slug} was not run. It acts as the person this agent belongs to, and this conversation is not theirs, so their connected apps are not available here. Answer without it, and say that this needs the owner.`,
+        error: {
+            code: "tool_personal",
+            message: `${call.slug} is the owner's, and this turn does not act for the owner.`,
+            hint: "Personal tools (Composio, MCP servers marked personal) run only when the turn acts for the agent's assigned owner, or for one of the owner's channelIds on PUT /v1/agents/:id/assignee.",
+        },
+        latencyMs: 0,
+        bytes: 0,
+        truncated: false,
+    }
 }

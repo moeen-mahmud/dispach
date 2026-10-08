@@ -408,3 +408,24 @@ tools:
         expect(prompts[1]).toMatch(/untrusted/i)
     })
 })
+
+describe("personal servers (pilot.15)", () => {
+    test("personal: true marks the server's tools, and anything but a boolean is refused", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "mcp-personal-"))
+        await provider(server().fetch, dir).mcp.refresh([])
+        const build = (personal: unknown) =>
+            new McpProvider({
+                dir,
+                env: { HULY_MCP_AUTH: "Bearer secret-value" },
+                servers: parseServers({ servers: { huly: { ...CONFIG.servers.huly, personal } } }),
+                fetch: server().fetch,
+            })
+        const [mine] = await build(true).resolve(["huly__get_version"])
+        expect(mine?.spec.personal).toBe(true)
+        const [shared] = await build(undefined).resolve(["huly__get_version"])
+        expect(shared?.spec.personal).toBeUndefined()
+        expect(() =>
+            parseServers({ servers: { huly: { ...CONFIG.servers.huly, personal: "yes" } } }),
+        ).toThrow(/personal must be true or false/)
+    })
+})

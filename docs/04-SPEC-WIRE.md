@@ -137,6 +137,11 @@ and WebSocket surfaces can return:
 | `config_path_unknown` | 400 | `PATCH /config` named a field this surface does not set. Carries the nearest real path — or, for `channels[].allowFrom`, the action that does set it. |
 | `config_value_unreadable` | 400 | `value` is not a string, is text no parser can read, or is absent without `remove: true`. It is read exactly as a terminal reads it. |
 | `config_remove_invalid` | 400 | `remove` is anything but `true`, or was sent together with a `value`. |
+| `agent_not_running` | — | Not a refusal: the `pending` on a write to an agent that is not running (pilot.15). The file changed; `POST /start` puts it in force. |
+| `workspace_file_unknown` | 404 | `PUT /workspace/:file` named a file the manifest does not declare (pilot.15). Nothing was written. |
+| `workspace_manifest_invalid` | 409 | The agent's manifest does not parse, so its workspace files cannot be named. Fix it with `PATCH /config` first. |
+| `workspace_content_required` | 400 | `PUT /workspace/:file` had no `content` string. |
+| `assignee_channel_ids_invalid` | 400 | `channelIds` on `PUT /assignee` is not a list of channel sender ids (pilot.15). Nothing was assigned. |
 | `config_changes_invalid` | 400 | A `PATCH /config` body named both a top-level `path` and `changes` (pilot.15). Nothing was written. |
 | `config_confirm_required` | 409 | One of the two edits whose only purpose is to stop a check running, without `confirm: true`. The message is the reason. Nothing was written. |
 | `config_not_editable` | 409 | The agent was loaded from an object rather than a file, so there is no manifest to change. |
@@ -331,6 +336,25 @@ GET  /v1/templates       → { templates: [{ name, description?, vars[], problem
 PATCH /v1/agents/:id/vars  { vars: {var: value, …} }   (admin, gated like POST /v1/agents; since 0.2.0-pilot.5)
                          → 200 | 202 { id, rendered[], skipped: [{ file, reason: "edited" | "memory" | "removed" }],
                                        reload: "none" | "loaded" | "pending" }
+PUT  /v1/agents/:id/workspace/:file  { content }     (admin; since 0.2.0-pilot.15)
+                         → 200 { id, file, written, loads, error?, applied, pending? }
+
+**An agent on disk that is not running is still reachable** (pilot.15). One that failed to load
+used to answer 404 on every route, so only a shell inside the container could repair it. Now:
+
+- `GET /v1/agents/:id` answers `{ id, status: "failed", error }` with the load error and its hint,
+  or `{ id, status: "not_running" }` when it would load. A stopped one keeps its stopped row.
+- `GET` and `PATCH /config` (and `changes[]`) and `PATCH /vars` edit its files with the usual checks.
+  Nothing is reloaded: the reply carries `applied: false` and `pending.code: "agent_not_running"`, and
+  `GET /config` says `running: false`.
+- `PUT /workspace/:file` replaces a file its manifest declares (a tier list, `context.files`, or the
+  soul), named by basename or by its path in the workspace. Any other name is
+  `workspace_file_unknown` (404). On a running agent it reloads, and a text that would stop the agent
+  loading is refused with the load error and the old text put back. On one that is not running it
+  writes and reports `loads` and `error`, so a repair can take several writes.
+- `context.budgets.static`, `.volatile`, `.reminder` and `.total` are settable by a person, so an
+  over-budget file can also be fixed by raising the budget.
+- `POST /start` then loads it from the files as they are now.
 
 POST   /v1/webhooks { url, types[], agents? } → 201 { subscriptionId, url, types, scope?, secret, … }
 GET    /v1/webhooks            → { webhooks: [{ subscriptionId, url, types, scope?, failing,
@@ -353,7 +377,7 @@ GET    /v1/actions?status                            → { actions: [{ id, agent
                                                                    requestedBy, slug, args, status, result?, … }] }
 POST   /v1/actions/:actionId { approve }             → the action, decided (`done`, `failed` or `denied`)
 GET    /v1/agents/:id/assignee                       → { id, assignment: { agentId, participantId, … } | null }
-PUT    /v1/agents/:id/assignee { participantId }     → { agentId, participantId, assignedBy?, assignedAt }
+PUT    /v1/agents/:id/assignee { participantId, channelIds? } → { agentId, participantId, channelIds?, assignedBy?, assignedAt }
 DELETE /v1/agents/:id/assignee                       → { id, unassigned }
 POST   /v1/memory/notes { scope, text }              → 201 { id, scope, text, writtenBy, createdAt }
 GET    /v1/memory/notes?scope                        → { notes: [...] }   (oldest first)
@@ -980,6 +1004,7 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/tools/refresh` | `admin` |
 | `PATCH /v1/agents/:id/vars` | `admin` |
+| `PUT /v1/agents/:id/workspace/:file` | `admin` |
 | `GET /v1/backup` | `admin` |
 | `GET /v1/agents/:id/export` | `admin` |
 | `POST /v1/agents/:id/import` | `admin` |
@@ -1241,7 +1266,8 @@ that is not there is the same.
 true }, …] }` instead of a top-level `path`. They are applied in order, each checked against the file
 as the earlier ones left it, then written once and reloaded once. Any refusal writes none of them.
 The reply carries `changes: [{ path, before, after, reflowed, changed }]` beside `reloaded`,
-`applied` and `pending?`. Sending both `path` and `changes` is `config_changes_invalid`.
+`applied` and `pending?`. Sending both `path` and `changes` is `config_changes_invalid`. The client's
+`setConfigs(changes)` sends it.
 
 Removing a block's last key removes the block too, so `limits.noProgress.sameTool` on a manifest
 whose `noProgress` holds nothing else leaves no empty `noProgress:`, which would not load.
@@ -1506,6 +1532,15 @@ instead of implying a fixed amount.
 Refusals are reported rather than dropped silently: an allowlist that quietly discards a message is
 indistinguishable from a channel that is not receiving at all. `sender` is the handle where the
 provider exposes one and the peer id otherwise — never the message body.
+
+**The owner's apps are the owner's** (pilot.15). A tool marked `personal` (every Composio tool, an
+MCP server declared `personal: true`) is offered only to a turn acting for the agent's assigned owner.
+A call naming one from anyone else's turn is refused with `tool_personal`, and `tool.gated` carries
+`reason: personal`. Someone else's turn means another member asking, a delegation from their agent, a
+stand-in, or a channel sender who is not listed. `channelIds` on the assignee lists the owner's own channel senders, as a
+channel turn names them (`whatsapp:8801711223344`, `slack:U0123ABC`). Without it no channel turn counts
+as the owner. An embedder sending a turn for somebody passes them as the participant, or the turn is
+the operator's and nothing is withheld.
 
 `tool.gated` fires when a mutating call is refused because untrusted content entered the turn. It is
 not an error: the model is told to report back and ask instead, and the turn continues. `policy` names

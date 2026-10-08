@@ -197,6 +197,15 @@ export const MessageBody = z.object({
 })
 
 /** `PATCH /v1/agents/:id/vars` */
+/** `PUT /v1/agents/:id/workspace/:file` (pilot.15): the file's whole new text. */
+export const WorkspaceFileBody = z.object({
+    content: refuse(z.string(), {
+        code: "workspace_content_required",
+        hint: 'Send { "content": "<the whole file>" }. It replaces the file; frontmatter included.',
+        description: "The file's new text, in full, frontmatter included.",
+    }),
+})
+
 export const VarsBody = z.object({
     vars: refuse(
         z.record(
@@ -543,7 +552,15 @@ export const ConversationMessageBody = z.object({
     }),
 })
 
-export const AssigneeBody = z.object({ participantId: participantId("assignee") })
+export const AssigneeBody = z.object({
+    participantId: participantId("assignee"),
+    channelIds: refuse(z.array(z.string().min(1)).optional(), {
+        code: "assignee_channel_ids_invalid",
+        hint: 'A list of the owner\'s own channel senders as a channel turn names them, e.g. ["whatsapp:8801711223344", "slack:U0123ABC"].',
+        description:
+            "The owner's own channel senders (pilot.15). A turn from one of these acts as the owner and keeps the owner's personal tools (Composio, MCP servers marked personal). Absent, no channel turn does.",
+    }),
+})
 
 export const PresenceBody = z.object({
     presence: refuse(z.enum(["online", "offline"]), {

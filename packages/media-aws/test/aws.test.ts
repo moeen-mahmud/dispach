@@ -14,7 +14,14 @@ import type {
     TranscriptResultStream,
 } from "@aws-sdk/client-transcribe-streaming"
 import { isHarnessError, type MediaProvider } from "@dispach/core"
-import { type AwsClients, awsMedia, encodingOf, ffmpegDecode } from "../src/index.ts"
+import { CredentialsRefusedError } from "@dispach/model-bedrock"
+import {
+    type AwsClients,
+    awsMedia,
+    clientCredentials,
+    encodingOf,
+    ffmpegDecode,
+} from "../src/index.ts"
 
 const signal = new AbortController().signal
 
@@ -321,5 +328,38 @@ describe("ffmpegDecode", () => {
     })
     test.skipIf(!hasFfmpeg)("rejects bytes that are not audio", async () => {
         await expect(ffmpegDecode(new Uint8Array([1, 2, 3]), signal)).rejects.toThrow()
+    })
+})
+
+describe("credentials (pilot.15)", () => {
+    test("a silo's container endpoint is read by Dispach, as Bedrock's is; a profile wins", () => {
+        const saved = process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI
+        process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI =
+            "http://169.254.170.2:4000/internal/aws-creds"
+        try {
+            expect(
+                typeof (clientCredentials({ region: "eu-west-2" }) as { credentials?: unknown })
+                    .credentials,
+            ).toBe("function")
+            expect(clientCredentials({ region: "eu-west-2", profile: "dev" })).toEqual({
+                profile: "dev",
+            })
+        } finally {
+            if (saved === undefined) delete process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI
+            else process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI = saved
+        }
+    })
+
+    test("the endpoint's own refusal code reaches the voice note's error", async () => {
+        const voice = provider({
+            transcribe: async () => async () => {
+                throw new CredentialsRefusedError(403, "credit_exhausted", "No credit left.")
+            },
+        })
+        const error = await refusal(async () =>
+            voice.transcribe?.({ bytes: new Uint8Array(3), mimeType: "audio/ogg" }, signal),
+        )
+        expect(error.code).toBe("credit_exhausted")
+        expect(error.message).toContain("No credit left.")
     })
 })

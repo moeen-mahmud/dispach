@@ -299,6 +299,7 @@ export class ConversationHub {
         readonly agentId: string
         readonly participantId: string
         readonly assignedBy?: string
+        readonly channelIds?: readonly string[]
     }): Promise<AssignmentRecord> {
         if (this.#agent(input.agentId) === undefined) {
             throw refused(
@@ -319,6 +320,7 @@ export class ConversationHub {
             agentId: input.agentId,
             participantId: input.participantId,
             ...(input.assignedBy === undefined ? {} : { assignedBy: input.assignedBy }),
+            ...(input.channelIds === undefined ? {} : { channelIds: input.channelIds }),
             assignedAt: this.#now().toISOString(),
         })
         this.#bus.emit(

@@ -382,8 +382,17 @@ interface ToolSpec {
   tags: string[]                // "read" | "write" | custom; drives phases and write quota
   mutating: boolean             // counts against reserveWrite; never parallelised
   alone?: true                  // must be the only call in its step (since 0.2.0-pilot.6)
+  personal?: true               // acts as the agent's owner (since 0.2.0-pilot.15)
 }
 ```
+
+**`personal` is for a tool that acts as the person the agent belongs to**: their mailbox, their
+connected accounts. A turn that does not act for the agent's assigned owner is not offered one, and a
+call naming one anyway is refused with `tool_personal` and a `tool.gated` event (`reason: personal`).
+That covers another member asking, a delegation from their agent, a stand-in, and a channel sender
+who is not in the assignment's `channelIds`. An unassigned agent, and a turn with no person (the
+operator, a schedule), are unaffected. Composio sets it on every tool. MCP sets it for a server
+declared `personal: true`.
 
 **`alone` is for a tool that reports on what other calls return.** Several calls may share a step
 and run in order, so a model can write a call and its report in one message and submit an answer

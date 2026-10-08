@@ -12,6 +12,7 @@
  *           participantHeader: X-Acting-Participant        # who the turn acts for (doc 16 R7)
  *           turnHeader: X-Dispach-Turn                     # which turn made the call (pilot.9)
  *           policyArgs: { invoke_tool: toolName }          # a proxy tool's inner tool, for policy
+ *           personal: true                                 # acts as the owner: only their turns (pilot.15)
  *   pinned: [huly__search_tools, huly__get_tool_schema, huly__invoke_tool]
  * ```
  *
@@ -57,6 +58,8 @@ export interface McpServerConfig {
     /** MCP tool name → the argument a policy rule matches. */
     readonly policyArgs: Readonly<Record<string, string>>
     readonly timeoutMs: number
+    /** Its tools act as the agent's owner, so only the owner's turns get them (pilot.15). */
+    readonly personal?: boolean
 }
 
 const SERVER_KEYS = [
@@ -66,6 +69,7 @@ const SERVER_KEYS = [
     "turnHeader",
     "policyArgs",
     "timeoutMs",
+    "personal",
 ] as const
 const DEFAULT_TIMEOUT_MS = 30_000
 /** `available()` is billed every turn; a server in native mode lists hundreds. */
@@ -185,9 +189,17 @@ export function parseServers(config: Readonly<Record<string, unknown>>): McpServ
                 `${field}.turnHeader`,
             )
         }
+        if (entry.personal !== undefined && typeof entry.personal !== "boolean") {
+            throw mcpConfigInvalid(
+                `${field}.personal must be true or false.`,
+                "true when the server acts as the agent's owner (their mailbox, their account), so only the owner's turns get its tools.",
+                `${field}.personal`,
+            )
+        }
         return {
             name,
             url: url.toString(),
+            ...(entry.personal === true ? { personal: true } : {}),
             ...(turnHeader === undefined ? {} : { turnHeader }),
             headersEnv: stringMap(
                 entry.headersEnv,
@@ -365,7 +377,10 @@ export class McpProvider implements ToolProvider {
 
     #toTool(server: McpServerConfig, tool: McpTool): Tool {
         return {
-            spec: toSpec(server.name, tool, server.policyArgs[tool.name]),
+            spec: {
+                ...toSpec(server.name, tool, server.policyArgs[tool.name]),
+                ...(server.personal === true ? { personal: true } : {}),
+            },
             handler: async (args: Readonly<Record<string, unknown>>, context: ToolContext) => {
                 // Only a person is forwarded. A schedule or a peer agent sends no header, which is
                 // how the server tells "nobody in particular" from somebody (decision 14.21).

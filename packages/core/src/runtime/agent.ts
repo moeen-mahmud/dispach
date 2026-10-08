@@ -1503,10 +1503,23 @@ export class Agent {
         const runtimeNote =
             [peerNote, options.runtimeNote].filter((note) => note !== undefined).join("\n\n") ||
             undefined
-        const toolsAllow =
+        // The owner's personal tools (Composio, MCP servers marked personal) only for a turn that acts
+        // for the owner (pilot.15): another member asking, a delegation from their agent, a stand-in
+        // or a channel sender who is not one of the owner's own gets none of them.
+        const withheld = (await this.#notTheOwners(participant))
+            ? this.tools
+                  .specs()
+                  .filter((spec) => spec.personal === true)
+                  .map((spec) => spec.slug)
+            : []
+        const peerAllow =
             options.peerAsk !== undefined && slugs.includes(HANDOFF)
                 ? (options.toolsAllow ?? slugs).filter((slug) => slug !== HANDOFF)
                 : options.toolsAllow
+        const toolsAllow =
+            withheld.length === 0
+                ? peerAllow
+                : (peerAllow ?? slugs).filter((slug) => !withheld.includes(slug))
         const remembered =
             child !== undefined
                 ? []
@@ -1627,6 +1640,7 @@ export class Agent {
                 ? {}
                 : { images: options.images }),
             ...(toolsAllow === undefined ? {} : { toolsAllow }),
+            ...(withheld.length === 0 ? {} : { withheld }),
             ...(options.turnNote === undefined ? {} : { turnNote: options.turnNote }),
             ...(options.turnTools === undefined ? {} : { turnTools: options.turnTools }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -2171,6 +2185,22 @@ export class Agent {
         ]
             .filter((line) => line !== undefined)
             .join(" ")
+    }
+
+    /**
+     * Whether this turn acts for someone other than the agent's assigned owner. No assignment, and a
+     * turn with no person (the operator, a schedule), are today's behaviour: nothing is withheld.
+     * A channel sender is the owner only when listed in the assignment's `channelIds`.
+     */
+    async #notTheOwners(participant: ActingParticipant | null): Promise<boolean> {
+        if (participant === null) return false
+        const assignment = await this.store.conversations.assignment(this.id)
+        if (assignment === undefined) return false
+        if (participant.onBehalfOf !== undefined) return true
+        return (
+            participant.id !== assignment.participantId &&
+            !(assignment.channelIds ?? []).includes(participant.id)
+        )
     }
 
     async #readPlan(

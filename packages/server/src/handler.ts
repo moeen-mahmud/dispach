@@ -12,12 +12,14 @@
  * why `TurnStreams` exists — a client that comes back has to be able to find out what it missed.
  */
 
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, relative, resolve as resolvePath, sep } from "node:path"
+import { basename, dirname, join, relative, resolve as resolvePath, sep } from "node:path"
 import type { Capability as Cap, KeyScope, ReloadOutcome, Setting } from "@dispach/core"
 import {
     type Agent,
+    AgentManifestSchema,
     type AgentStateRecord,
     type AnyEvent,
     agentOf,
@@ -38,6 +40,7 @@ import {
     keyLabelProblem,
     MAX_KEY_LABEL,
     type MountedRoute,
+    manifestDocument,
     manifestValueAt,
     nearest,
     newKeyId,
@@ -50,6 +53,7 @@ import {
     parseSettingValue,
     personSetting,
     phasesFor,
+    planWorkspace,
     prepareScheduleWrite,
     type Runtime,
     readImages,
@@ -122,6 +126,7 @@ import {
     ToolsRefreshBody,
     VarsBody,
     WebhookBody,
+    WorkspaceFileBody,
 } from "./wire-schemas.ts"
 
 /** Bodies larger than this are refused before a channel plugin sees them. */
@@ -805,6 +810,17 @@ export function createHandler(options: HandlerOptions): ServerHandler {
             ) {
                 const state = await runtime.store.agentState.get(id)
                 if (state !== undefined && !state.enabled) return json(stoppedRow(state))
+                // On disk and not running (pilot.15): say why rather than answer 404, which left an
+                // agent that failed to load with no way to find out over the API what was wrong.
+                const file = options.resolveAgent?.(id)
+                if (file !== undefined) {
+                    const error = await runtime.diagnose(file)
+                    return json({
+                        id,
+                        status: error === undefined ? "not_running" : "failed",
+                        ...(error === undefined ? {} : { error }),
+                    })
+                }
             }
             return withAgent(runtime, context, async (agent) => {
                 // Both of these were the literal `0`, for every agent, whatever was configured — and
@@ -1080,7 +1096,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "PATCH",
         "/v1/agents/:id/vars",
         (context) =>
-            withAgent(runtime, context, async (agent) => {
+            withTarget(runtime, options, context, async (target) => {
                 const rerender = options.provision?.rerender
                 if (rerender === undefined) {
                     return fail(
@@ -1110,7 +1126,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
 
                 let result: ReturnType<NonNullable<Provisioner["rerender"]>>
                 try {
-                    result = rerender({ agentDir: agent.dir, vars: parsed.value.vars })
+                    result = rerender({
+                        agentDir: target.agent?.dir ?? dirname(target.file ?? ""),
+                        vars: parsed.value.vars,
+                    })
                 } catch (error) {
                     if (isHarnessError(error)) {
                         return fail(
@@ -1123,7 +1142,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const respond = (reload: "none" | "loaded" | "pending", status = 200) =>
                     json(
                         {
-                            id: agent.id,
+                            id: target.id,
                             rendered: result.rendered,
                             skipped: result.skipped,
                             reload,
@@ -1131,11 +1150,120 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         status,
                     )
                 if (result.rendered.length === 0) return respond("none")
+                // Not running (pilot.15): re-rendering the template is how a template change that
+                // broke the agent is undone, and `POST /start` loads the result.
+                if (target.agent === undefined) return respond("none")
                 try {
-                    const outcome = await runtime.reload(agent.id)
+                    const outcome = await runtime.reload(target.id)
                     return respond(outcome.status, outcome.status === "pending" ? 202 : 200)
                 } catch (error) {
                     result.undo()
+                    if (isHarnessError(error)) return fail(error.toDetail(), 400)
+                    throw error
+                }
+            }),
+        { capability: "admin" },
+    )
+
+    /**
+     * Replace one of the agent's workspace files (pilot.15, VelaCrew): only a file its manifest
+     * declares (a tier list, `context.files`, or the soul), so this cannot write anywhere else. A
+     * running agent is reloaded and, if the file makes it refuse to load, the old text is put back
+     * and the reason returned. An agent that is not running gets the file and a diagnosis, so a repair
+     * can take several writes before `POST /start`. `admin`: it changes the agent's instructions.
+     */
+    router.add(
+        "PUT",
+        "/v1/agents/:id/workspace/:file",
+        (context) =>
+            withTarget(runtime, options, context, async (target) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(WorkspaceFileBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const manifest = target.file
+                if (manifest === undefined) {
+                    return fail(
+                        {
+                            code: "config_not_editable",
+                            message: `"${target.id}" was loaded from an object, so it has no files to write.`,
+                            hint: "An embedder holding new settings passes the new object to dispose() and adopt().",
+                        },
+                        409,
+                    )
+                }
+                const read = AgentManifestSchema.safeParse(
+                    manifestDocument(await readFile(manifest, "utf8")),
+                )
+                if (!read.success) {
+                    return fail(
+                        {
+                            code: "workspace_manifest_invalid",
+                            message: `${target.id}'s manifest does not parse, so its workspace files cannot be named.`,
+                            hint: "Fix the manifest first: PATCH /v1/agents/:id/config, and GET /v1/agents/:id for what is wrong.",
+                        },
+                        409,
+                    )
+                }
+                const dir = dirname(manifest)
+                const contextConfig = read.data.context
+                const workspaceDir = resolvePath(dir, contextConfig.workspace)
+                const soul = contextConfig.soul
+                const declared = [
+                    ...planWorkspace(contextConfig, dir).refs.map((ref) => ref.path),
+                    ...[soul?.file, soul?.distilled]
+                        .filter((name): name is string => name !== undefined)
+                        .map((name) => resolvePath(workspaceDir, name)),
+                ]
+                const name = context.params.file ?? ""
+                const path = declared.find(
+                    (candidate) =>
+                        candidate === resolvePath(workspaceDir, name) ||
+                        basename(candidate) === name,
+                )
+                if (path === undefined) {
+                    return fail(
+                        {
+                            code: "workspace_file_unknown",
+                            message: `${name} is not one of ${target.id}'s workspace files.`,
+                            hint: `Declared: ${declared.map((candidate) => basename(candidate)).join(", ") || "none"}. A new file is added to context.static or context.volatile with PATCH /config first.`,
+                            field: "file",
+                        },
+                        404,
+                    )
+                }
+                const before = existsSync(path) ? readFileSync(path, "utf8") : undefined
+                mkdirSync(dirname(path), { recursive: true })
+                writeFileSync(path, parsed.value.content, "utf8")
+                const written = basename(path)
+                if (target.agent === undefined) {
+                    const error = await runtime.diagnose(manifest)
+                    return json({
+                        id: target.id,
+                        file: written,
+                        written: true,
+                        loads: error === undefined,
+                        ...(error === undefined ? {} : { error }),
+                        applied: false,
+                        pending: notRunning(target.id),
+                    })
+                }
+                try {
+                    const outcome = await runtime.reload(target.id)
+                    return json({
+                        id: target.id,
+                        file: written,
+                        written: true,
+                        loads: true,
+                        ...(outcome.status === "pending"
+                            ? { applied: false, pending: pendingDetail(outcome) }
+                            : { applied: true }),
+                    })
+                } catch (error) {
+                    // Refused before the running agent was touched: put the old text back, so the
+                    // file on disk is the one in force.
+                    if (before === undefined) rmSync(path, { force: true })
+                    else writeFileSync(path, before, "utf8")
                     if (isHarnessError(error)) return fail(error.toDetail(), 400)
                     throw error
                 }
@@ -2935,6 +3063,9 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                             agentId: agent.id,
                             participantId: parsed.value.participantId,
                             ...(bound === undefined ? {} : { assignedBy: bound }),
+                            ...(parsed.value.channelIds === undefined
+                                ? {}
+                                : { channelIds: parsed.value.channelIds }),
                         }),
                     )
                 } catch (error) {
@@ -3554,11 +3685,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "GET",
         "/v1/agents/:id/config",
         (context) =>
-            withAgent(runtime, context, async (agent) => {
-                const source = runtime.sourceOf(agent.id)
-                const file = typeof source === "string" ? source : undefined
+            withTarget(runtime, options, context, async (target) => {
+                const file = target.file
                 const text = file === undefined ? undefined : await readFile(file, "utf8")
                 return json({
+                    // False for an agent on disk that is not running (pilot.15): its file is still
+                    // editable here, and `POST /start` brings it up on the result.
+                    running: target.agent !== undefined,
                     // Named rather than implied: an object-form manifest has no file to edit, and a
                     // client that cannot tell will offer a form whose save can only fail.
                     ...(file === undefined ? { editable: false } : { editable: true, file }),
@@ -3584,7 +3717,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "PATCH",
         "/v1/agents/:id/config",
         (context) =>
-            withAgent(runtime, context, async (agent) => {
+            withTarget(runtime, options, context, async (target) => {
                 const body = await readJson(context.request)
                 if (body.kind === "error") return fail(body.error, 400)
                 const parsed = parseBody(ConfigBody, body.value)
@@ -3607,12 +3740,12 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     { ...parsed.value, path: parsed.value.path ?? "" },
                 ]
 
-                const source = runtime.sourceOf(agent.id)
+                const source = target.file
                 if (typeof source !== "string") {
                     return fail(
                         {
                             code: "config_not_editable",
-                            message: `"${agent.id}" was loaded from an object, not from a file, so it has no manifest to change.`,
+                            message: `"${target.id}" was loaded from an object, not from a file, so it has no manifest to change.`,
                             hint: "An embedder holding new settings passes the new object to dispose() and adopt(). This route edits a manifest on disk.",
                         },
                         409,
@@ -3722,9 +3855,12 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                  * the file is already in force, and reloading for it is the "keeps reloading" report.
                  */
                 let applied: ErrorDetail | undefined
-                if (results.written) {
+                if (results.written && target.agent === undefined) {
+                    // Not running (pilot.15): the file is fixed, and nothing is replaced until it starts.
+                    applied = notRunning(target.id)
+                } else if (results.written) {
                     try {
-                        applied = pendingDetail(await runtime.reload(agent.id))
+                        applied = pendingDetail(await runtime.reload(target.id))
                     } catch (error) {
                         if (!isHarnessError(error)) throw error
                         applied = error.toDetail()
@@ -3740,7 +3876,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         results.edits[index]?.changed === true,
                 )
                 const peers = offerChanged
-                    ? await reloadAskers(runtime, agent.id, applied === undefined)
+                    ? await reloadAskers(runtime, target.id, applied === undefined)
                     : undefined
 
                 const reported = results.edits.map((result, index) => ({
@@ -4800,6 +4936,43 @@ function stoppedRow(state: AgentStateRecord) {
         status: "disabled" as const,
         ...(state.reason === undefined ? {} : { reason: state.reason }),
         ...(state.disabledAt === undefined ? {} : { disabledAt: state.disabledAt }),
+    }
+}
+
+/**
+ * The agent a file route acts on (pilot.15): one this process hosts, or one on disk it is not running,
+ * found through `resolveAgent` as `start` finds it. An agent that failed to load answered 404 on every
+ * route, so nothing over the API could repair it; its files are still files. Same scope check and the
+ * same 404 as `withAgent` for anything out of reach or imaginary.
+ */
+function withTarget(
+    runtime: Runtime,
+    options: HandlerOptions,
+    context: RequestContext,
+    work: (target: {
+        readonly id: string
+        readonly file: string | undefined
+        readonly agent: Agent | undefined
+    }) => Promise<Response> | Response,
+): Promise<Response> | Response {
+    const id = context.params.id ?? ""
+    if (!reachesAgent(context.principal, id)) return notFound("agent", id)
+    const agent = runtime.list().find((candidate) => candidate.id === id)
+    if (agent !== undefined) {
+        const source = runtime.sourceOf(id)
+        return work({ id, agent, file: typeof source === "string" ? source : undefined })
+    }
+    const file = options.resolveAgent?.(id)
+    if (file === undefined) return notFound("agent", id)
+    return work({ id, agent: undefined, file })
+}
+
+/** The `pending` for a write to an agent that is not running: in force once it starts. */
+function notRunning(id: string): ErrorDetail {
+    return {
+        code: "agent_not_running",
+        message: `${id} is not running, so the change is on disk and not yet in force.`,
+        hint: `POST /v1/agents/${id}/start loads it from the files as they are now. GET /v1/agents/${id} says whether they load.`,
     }
 }
 

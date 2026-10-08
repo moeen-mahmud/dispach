@@ -257,6 +257,8 @@ export interface TurnInput {
      * what the agent may call without breaking what the turn itself brings.
      */
     readonly toolsAllow?: readonly string[]
+    /** Personal tools withheld from this turn (pilot.15). See `ExecuteInput.withheld`. */
+    readonly withheld?: readonly string[]
     /** Every mutating call is queued rather than run: a stand-in's turn. See `ExecuteInput.defer`. */
     readonly deferMutations?: ExecuteInput["defer"]
     /** Forwarded to `ToolContext.writeNote`: set when this agent is the space writer (Phase 29). */
@@ -1388,6 +1390,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                           ...(tools.timeoutFor === undefined
                               ? {}
                               : { timeoutFor: tools.timeoutFor }),
+                          ...(input.withheld === undefined || input.withheld.length === 0
+                              ? {}
+                              : { withheld: new Set(input.withheld) }),
                           maxParallel: input.limits.maxParallelTools,
                           observationMaxTokens: tools.observationMaxTokens,
                           ...(tools.eventDetail === undefined

@@ -40,6 +40,7 @@ import {
     type MediaProviderFactory,
     type Plugin,
 } from "@dispach/core"
+import { CredentialsRefusedError, containerCredentials } from "@dispach/model-bedrock"
 
 export interface AwsMediaOptions {
     readonly region: string
@@ -134,12 +135,25 @@ export const ffmpegDecode: Decode = (bytes, signal) =>
         child.stdin.end(Buffer.from(bytes))
     })
 
+/**
+ * A named profile when the manifest gives one; otherwise a container-credentials endpoint read by
+ * Dispach, the provider Bedrock uses (pilot.15, VelaCrew). The SDK's own container provider refuses
+ * a `FULL_URI` host outside its allowlist, so a silo's `169.254.170.2:4000` failed every voice note
+ * with "not a valid container metadata service hostname" while Bedrock worked; and read by Dispach,
+ * the endpoint's refusal (`credit_exhausted`) reaches the error instead of a generic SDK one.
+ */
+export function clientCredentials(options: AwsMediaOptions) {
+    if (options.profile !== undefined) return { profile: options.profile }
+    const container = containerCredentials(process.env)
+    return container === undefined ? {} : { credentials: container }
+}
+
 export const sdkClients: AwsClients = {
     async transcribe(options) {
         const sdk = await import("@aws-sdk/client-transcribe-streaming")
         const client = new sdk.TranscribeStreamingClient({
             region: options.region,
-            ...(options.profile === undefined ? {} : { profile: options.profile }),
+            ...clientCredentials(options),
         })
         return async (input, signal) => {
             const response = await client.send(new sdk.StartStreamTranscriptionCommand(input), {
@@ -155,7 +169,7 @@ export const sdkClients: AwsClients = {
         const sdk = await import("@aws-sdk/client-bedrock-runtime")
         const client = new sdk.BedrockRuntimeClient({
             region: options.region,
-            ...(options.profile === undefined ? {} : { profile: options.profile }),
+            ...clientCredentials(options),
         })
         return async (input, signal) => {
             const response = await client.send(
@@ -174,7 +188,7 @@ export const sdkClients: AwsClients = {
         const sdk = await import("@aws-sdk/client-polly")
         const client = new sdk.PollyClient({
             region: options.region,
-            ...(options.profile === undefined ? {} : { profile: options.profile }),
+            ...clientCredentials(options),
         })
         return async (input, signal) => {
             const response = await client.send(
@@ -267,6 +281,23 @@ async function* chunks(bytes: Uint8Array): AsyncIterable<AudioStream> {
 }
 
 function refused(cause: unknown, field: string): MediaError {
+    // The credentials endpoint said no, and why: its own code (`credit_exhausted`) is the error's, so an
+    // embedder that stopped a user's credit sees that rather than an AWS refusal (pilot.15).
+    if (cause instanceof CredentialsRefusedError) {
+        const own =
+            cause.code !== undefined && /^[a-z][a-z0-9_]{1,63}$/.test(cause.code)
+                ? cause.code
+                : undefined
+        return new MediaError({
+            code: own ?? "media_credentials_unavailable",
+            message: `The AWS credentials endpoint ${cause.status >= 500 ? "could not issue" : "refused"} credentials (status ${cause.status}${own === undefined ? "" : `, ${own}`})${cause.detail === undefined ? "" : `: ${cause.detail.replace(/\.$/, "")}`}.`,
+            hint:
+                cause.status >= 500
+                    ? "The service vending credentials failed rather than declined; it is usually temporary."
+                    : "The container-credentials endpoint declined. Its own words are above; nothing here can override it.",
+            field,
+        })
+    }
     const name = cause instanceof Error ? cause.name : ""
     const message = cause instanceof Error ? cause.message : String(cause)
     return new MediaError({

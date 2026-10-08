@@ -750,6 +750,11 @@ export interface MemoryReadRecord {
 export interface AssignmentRecord {
     readonly agentId: string
     readonly participantId: string
+    /**
+     * The owner's own channel senders, as a channel turn names them (`whatsapp:+8801…`, `slack:U123`):
+     * a turn from one of these acts as the owner, so it keeps the owner's personal tools (pilot.15).
+     */
+    readonly channelIds?: readonly string[]
     readonly assignedBy?: string
     readonly assignedAt: string
 }

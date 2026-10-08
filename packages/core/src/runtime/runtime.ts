@@ -1334,6 +1334,26 @@ export class Runtime {
      * thrown away. On a bus of its own, so a trial's `plugin.loaded` and warnings are not reported
      * as if they happened, and with every provider it built stopped again.
      */
+    /**
+     * Why an agent on disk would not load, or `undefined` when it would (pilot.15). The reload trial,
+     * run on its own and discarded: nothing is hosted, disposed or adopted. For an agent this runtime
+     * is not hosting, so a surface can say what is wrong with it instead of answering 404.
+     */
+    async diagnose(source: AgentSource): Promise<ErrorDetail | undefined> {
+        try {
+            await this.#trial(source)
+            return undefined
+        } catch (error) {
+            return isHarnessError(error)
+                ? error.toDetail()
+                : {
+                      code: "agent_load_failed",
+                      message: String(error),
+                      hint: "See the runtime log for the stack.",
+                  }
+        }
+    }
+
     async #trial(source: AgentSource): Promise<void> {
         const prepared = await prepareAgents({
             sources: [source],

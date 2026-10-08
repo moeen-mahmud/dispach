@@ -137,7 +137,9 @@ export class ComposioProvider implements ToolProvider {
             out.push(this.#toTool(mapTool(raw)))
         }
         this.#assumedMutating = assumed
-        return out
+        // Every Composio tool is the owner's (pilot.15): it acts on the account connected for this
+        // agent's entity, meta tools included, since `composio_connect` would connect an app to it.
+        return out.map((tool) => ({ ...tool, spec: { ...tool.spec, personal: true } }))
     }
 
     /**

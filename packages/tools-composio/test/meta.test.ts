@@ -404,3 +404,17 @@ test("the workbench observes what the code printed, not the envelope it came in"
     expect(renderWorkbench({ stdout: "", stderr: "" })).toContain("printed nothing")
     expect(renderWorkbench({ stdout: "", stderr: "boom" })).toContain("stderr:\nboom")
 })
+
+test("every Composio tool is the owner's, meta tools included (pilot.15)", async () => {
+    const { ComposioProvider } = await import("../src/provider.ts")
+    const { mkdtempSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const provider = new ComposioProvider({
+        dir: mkdtempSync(join(tmpdir(), "composio-personal-")),
+        env: { COMPOSIO_API_KEY: "k" },
+        fetch: async () => new Response("{}", { status: 200 }),
+    })
+    const tools = await provider.resolve(["composio_search", "composio_connect"])
+    expect(tools.map((tool) => tool.spec.personal)).toEqual([true, true])
+})

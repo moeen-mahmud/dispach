@@ -305,6 +305,12 @@ export interface AgentClient {
      */
     removeConfig(path: string, options?: { readonly confirm?: boolean }): Promise<ConfigWriteResult>
     /**
+     * Several changes in one request: applied in order, each checked against the file the earlier ones
+     * left, written once and applied with **one** reload (pilot.15). Any refusal writes none of them.
+     * A change already in the file writes nothing; when none changed, nothing reloads.
+     */
+    setConfigs(changes: readonly ConfigChange[]): Promise<ConfigWriteManyResult>
+    /**
      * Connect or disconnect a channel, and set its credential.
      *
      * One call for three things, because they are one decision — is this channel working — and a
@@ -535,6 +541,29 @@ export interface ConfigWriteResult {
     /** Whether the running agent was replaced, so the change is in force now. */
     readonly applied: boolean
     /** Why it is not, when `applied` is false. The write already happened either way. */
+    readonly pending?: { readonly code: string; readonly message: string; readonly hint: string }
+    /** False when the value was already the one in the file: nothing was written (pilot.15). */
+    readonly changed?: boolean
+    /** Whether the agent was reloaded for this write. False when nothing changed (pilot.15). */
+    readonly reloaded?: boolean
+}
+
+/** One change for `setConfigs`: a value as text (the `config` command's syntax), or a removal. */
+export type ConfigChange =
+    | { readonly path: string; readonly value: string; readonly confirm?: boolean }
+    | { readonly path: string; readonly remove: true; readonly confirm?: boolean }
+
+export interface ConfigWriteManyResult {
+    readonly changes: readonly {
+        readonly path: string
+        readonly before: unknown
+        readonly after: unknown
+        readonly reflowed: boolean
+        readonly changed: boolean
+    }[]
+    /** Whether the agent was reloaded: once for all of them, or not at all when nothing changed. */
+    readonly reloaded: boolean
+    readonly applied: boolean
     readonly pending?: { readonly code: string; readonly message: string; readonly hint: string }
 }
 
@@ -1381,6 +1410,11 @@ export function createClient(options: ClientOptions): DispachClient {
                         remove: true,
                         ...(options?.confirm === undefined ? {} : { confirm: options.confirm }),
                     },
+                }),
+
+            setConfigs: (changes) =>
+                json<ConfigWriteManyResult>("PATCH", at("/config"), {
+                    body: { changes: changes.map((change) => ({ ...change })) },
                 }),
 
             setChannel: (channelId, changes) =>

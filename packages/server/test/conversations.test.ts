@@ -115,6 +115,25 @@ describe("a key bound to a participant, in conversations", () => {
         expect(((await cleared.json()) as { assignment: unknown }).assignment).toBeNull()
     })
 
+    test("an assignment carries the owner's own channel ids (pilot.15)", async () => {
+        const { call, ada } = await setup()
+        const put = await call("PUT", "/v1/agents/assistant/assignee", {
+            token: ada,
+            body: { participantId: "user:bob", channelIds: ["whatsapp:8801711223344"] },
+        })
+        expect(put.status).toBe(200)
+        const read = (await (await call("GET", "/v1/agents/assistant/assignee")).json()) as {
+            assignment: { channelIds?: string[] } | null
+        }
+        expect(read.assignment?.channelIds).toEqual(["whatsapp:8801711223344"])
+        const bad = await call("PUT", "/v1/agents/assistant/assignee", {
+            token: ada,
+            body: { participantId: "user:bob", channelIds: "whatsapp:1" },
+        })
+        expect(bad.status).toBe(400)
+        expect(await codeOf(bad)).toBe("assignee_channel_ids_invalid")
+    })
+
     test("a participant carries a title and a timezone; an unknown zone is refused (pilot.9)", async () => {
         const { call } = await setup()
         const made = await call("POST", "/v1/participants", {

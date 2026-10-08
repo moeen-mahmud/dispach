@@ -636,6 +636,38 @@ describe("introspection", () => {
     })
 })
 
+describe("configuration writes (pilot.15)", () => {
+    test("setConfigs makes several changes in one reload, and a repeated one reloads nothing", async () => {
+        const { client, runtime } = await harness()
+        const agent = client.agent("assistant")
+        let reloads = 0
+        runtime.bus.on("agent.reloaded", () => {
+            reloads += 1
+        })
+        const first = await agent.setConfigs([
+            { path: "limits.maxSteps", value: "12" },
+            { path: "model.main.temperature", value: "0.2" },
+        ])
+        expect(first.changes.map((change) => change.changed)).toEqual([true, true])
+        expect(first.reloaded).toBe(true)
+        expect(reloads).toBe(1)
+        const again = await agent.setConfigs([
+            { path: "limits.maxSteps", value: "12" },
+            { path: "model.main.temperature", remove: true },
+        ])
+        expect(again.changes.map((change) => change.changed)).toEqual([false, true])
+        expect(reloads).toBe(2)
+        const same = await agent.setConfig("limits.maxSteps", "12")
+        expect({ changed: same.changed, reloaded: same.reloaded }).toEqual({
+            changed: false,
+            reloaded: false,
+        })
+        expect(reloads).toBe(2)
+        expect(runtime.list()[0]?.manifest.limits.maxSteps).toBe(12)
+        await runtime.stop()
+    })
+})
+
 describe("the frame mapper", () => {
     /** A synthetic SSE body, so a frame this client's own paths never produce can be tested. */
     function sse(frames: { event: string; data: unknown }[]): ReadableStream<Uint8Array> {

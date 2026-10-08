@@ -162,6 +162,13 @@ export const SETTINGS: readonly Setting[] = [
     // Person-only (pilot.15, VelaCrew): the loop guard is what stops a turn that is going nowhere,
     // so the agent loosening its own is the agent widening its containment. `sameTool` has its own
     // row so a template's leftover value can be removed without restating `identicalCalls`.
+    // Person-only (pilot.15): a workspace file over its tier's budget stops the agent loading, and
+    // raising the budget over the API is one of the two ways back without a shell.
+    ...(["static", "volatile", "reminder", "total"] as const).map((tier) => ({
+        path: `context.budgets.${tier}`,
+        means: `token budget for the ${tier === "total" ? "whole workspace" : `${tier} tier`}; a file over it stops the agent loading`,
+        agentListed: false,
+    })),
     {
         path: "limits.noProgress",
         means: "when a turn is stopped for going nowhere, as a map: {identicalCalls: <n, default 3>, sameTool: <n, off when absent>}",

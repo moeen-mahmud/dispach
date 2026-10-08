@@ -1175,6 +1175,18 @@ ALTER TABLE sessions ADD COLUMN recall INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE turns ADD COLUMN error_detail TEXT;
 `,
     },
+    {
+        version: 30,
+        name: "assignment_channel_ids",
+        /**
+         * The owner's own channel senders (pilot.15), as a JSON array: what lets a WhatsApp turn from the
+         * owner count as the owner for the personal-tools fence. NULL for every row before: no channel
+         * sender is the owner until the embedder says which ones are.
+         */
+        sql: `
+ALTER TABLE agent_assignments ADD COLUMN channel_ids TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {
