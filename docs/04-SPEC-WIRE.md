@@ -137,6 +137,7 @@ and WebSocket surfaces can return:
 | `config_path_unknown` | 400 | `PATCH /config` named a field this surface does not set. Carries the nearest real path — or, for `channels[].allowFrom`, the action that does set it. |
 | `config_value_unreadable` | 400 | `value` is not a string, is text no parser can read, or is absent without `remove: true`. It is read exactly as a terminal reads it. |
 | `config_remove_invalid` | 400 | `remove` is anything but `true`, or was sent together with a `value`. |
+| `config_changes_invalid` | 400 | A `PATCH /config` body named both a top-level `path` and `changes` (pilot.15). Nothing was written. |
 | `config_confirm_required` | 409 | One of the two edits whose only purpose is to stop a check running, without `confirm: true`. The message is the reason. Nothing was written. |
 | `config_not_editable` | 409 | The agent was loaded from an object rather than a file, so there is no manifest to change. |
 | `channel_patch_empty` | 400 | Neither `enabled` nor `credential` was sent. "Send something" is a sentence rather than a schema: a union expressing it names neither field in its error. |
@@ -1156,7 +1157,7 @@ GET /v1/agents/:id/context   → the assembled context for the next turn, with t
 
 ```
 GET   /v1/agents/:id/config     → every field this surface may set, what it does, and its current value
-PATCH /v1/agents/:id/config     → set one field, then replace the agent so it takes effect
+PATCH /v1/agents/:id/config     → set one field, or several, then replace the agent so it takes effect
 ```
 
 `model.<role>` (since 0.2.0-pilot.7) is the one path a person fills in: `{path: "model.fast", value:
@@ -1228,8 +1229,22 @@ They are the two edits whose only purpose is to stop a check running.
 The reply reports the write and the *application* separately:
 
 ```json
-{ "path": "limits.maxSteps", "before": 6, "after": 40, "reflowed": false, "applied": true }
+{ "path": "limits.maxSteps", "before": 6, "after": 40, "reflowed": false, "changed": true, "reloaded": true, "applied": true }
 ```
+
+**A value already in the file is not a change** (pilot.15). Compared as values, not text, so `"40"`
+for a `40` already there is equal too. Nothing is written and nothing reloads: `changed: false`,
+`reloaded: false`, `applied: true`, because what was asked is already in force. A removal of a field
+that is not there is the same.
+
+**Several changes in one request** (pilot.15): `{ "changes": [{ "path", "value" }, { "path", "remove":
+true }, …] }` instead of a top-level `path`. They are applied in order, each checked against the file
+as the earlier ones left it, then written once and reloaded once. Any refusal writes none of them.
+The reply carries `changes: [{ path, before, after, reflowed, changed }]` beside `reloaded`,
+`applied` and `pending?`. Sending both `path` and `changes` is `config_changes_invalid`.
+
+Removing a block's last key removes the block too, so `limits.noProgress.sameTool` on a manifest
+whose `noProgress` holds nothing else leaves no empty `noProgress:`, which would not load.
 
 An agent's settings are fixed for its instance's lifetime, so the change is applied by replacing the
 agent. `dispose` refuses while a turn is in flight — the file is written by then, so the reply says
@@ -1357,7 +1372,7 @@ stream still ends on its own turn's `turn.end`, so read `turnId` before treating
 | `handoff.result` | how it ended | `member`, `sessionKey`, `kind`, `name?`, `callId?`, `outcome`, `steps`, `tokens`, `errorCode?` |
 | `approval.requested` | a call is waiting on a person | `approvalId`, `slug`, `callId`, `match?`, `mutating`, `reason` |
 | `approval.resolved` | how it ended | `approvalId`, `slug`, `granted`, `by` |
-| `turn.start` | inbound accepted | `source`, `inputTokens`, `trust`, `from?` |
+| `turn.start` | inbound accepted | `source`, `inputTokens`, `trust`, `from?`, `inputKind?` (`voice` for a transcribed voice note) |
 | `context.assembled` | per turn | `slots: [{slot, label, tokens, pinned}]`, `total` |
 | `context.pressure` | per step, after compaction | `fraction` (of the prompt actually sent), `tokens`, `budget`, `source: reported \| corrected \| estimated`, `peak?` (what the ladder faced) |
 | `compaction.stage` | per stage that ran | `stage`, `before`, `after`, `changed`, `digest?: model \| mechanical` |
@@ -1384,7 +1399,7 @@ stream still ends on its own turn's `turn.end`, so read `turnId` before treating
 | `schedule.skipped` | occurrences passed with nothing running | `scheduleId`, `kind`, `reason`, `missed`, `missedAtLeast` |
 | `schedule.deferred` | a fire arrived mid-run | `scheduleId`, `kind` |
 | `schedule.error` | unreadable schedule, or the turn it started failed | `scheduleId`, `code`, `message`, `hint` |
-| `media.result` | a media call finished | `callId` (a ledger key, like `model.result`'s, and on its usage row), `kind` (`transcription` \| `image`), `provider`, `model`, `latencyMs`, `images?`, `audioSeconds?` (when the provider or the channel reported a duration), `sender?` (Phase 26j) |
+| `media.result` | a media call finished | `callId` (a ledger key, like `model.result`'s, and on its usage row), `kind` (`transcription` \| `image` \| `speech`), `provider`, `model`, `latencyMs`, `images?`, `audioSeconds?` (when the provider or the channel reported a duration), `characters?` (a speech call's characters spoken, pilot.15), `sender?` (Phase 26j) |
 | `tool.usage` | a tool reported what one call spent at a third party | `slug`, `callId`, `provider` (`tavily`, `firecrawl`, …), `operation?` (`search`, `scrape`, `crawl`, `map`), `unit` (`credits` \| `requests`), `units`, `participant?` (the acting participant, whom it is billed to). Zero or more per call (pilot.9) |
 | `conversation.message` | a message in a room or DM | `conversationId`, `messageId`, `authorId`, `origin` (`human` \| `agent`, stamped by the runtime), `text`, `mentions`, `hop`, `turnId?` (an agent's reply). A stand-in's messages carry `onBehalfOf` in the log. An agent's carries its `agentId` in the envelope; a human's carries none (Phase 27) |
 | `conversation.skipped` | a message addressed an agent that did not answer | `conversationId`, `messageId`, `reason` (`hop_limit` \| `refused` \| `failed`), `detail`, `hop`, `ceiling` (the agent's `limits.maxHops`) |

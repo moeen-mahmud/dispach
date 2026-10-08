@@ -32,13 +32,14 @@
 import { readFileSync, writeFileSync } from "node:fs"
 import { readFile, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
+import { isDeepStrictEqual } from "node:util"
 import { isMap, isSeq, parseDocument } from "yaml"
 import { HarnessError, isHarnessError } from "../errors.ts"
 import { type MediaProviderFactory, resolveMedia } from "../media/provider.ts"
 import type { ToolProviderFactory } from "../tools/types.ts"
 import { resolveProviders } from "./providers.ts"
 import { type AgentManifest, AgentManifestSchema } from "./schema.ts"
-import { validateChannelRoles, validateSchedules } from "./validate.ts"
+import { validateChannelRoles, validateSchedules, validateSubagents } from "./validate.ts"
 import { removeInSource, setInSource, uncommentInSource } from "./yaml-edit.ts"
 
 export interface ManifestEdit {
@@ -94,10 +95,12 @@ export interface ManifestEditResult {
     readonly reflowed: boolean
     /** The validated manifest, for a caller that wants to say something about the result. */
     readonly manifest: ReturnType<typeof AgentManifestSchema.parse>
+    /** False when the value was already the one there: nothing was written for it. */
+    readonly changed: boolean
 }
 
 /** What a validated edit produced, before anybody has written it. */
-export interface PreparedEdit extends Omit<ManifestEditResult, "after"> {
+export interface PreparedEdit extends Omit<ManifestEditResult, "after" | "changed"> {
     /** The complete new file contents. */
     readonly next: string
 }
@@ -172,7 +175,13 @@ export function prepareManifestEdit(
         parsed.data,
         Date.now(),
     )
-    const firstSchedule = scheduleFindings[0] ?? validateChannelRoles(parsed.data)[0]
+    // Subagents too (pilot.15): `subagents` became settable, and a child naming a slug the parent does
+    // not pin is refused at load, so a writer that skipped this would report success on a manifest the
+    // next boot refuses. Run on every edit, because unpinning a slug a child uses is the same failure.
+    const firstSchedule =
+        scheduleFindings[0] ??
+        validateChannelRoles(parsed.data)[0] ??
+        validateSubagents(parsed.data)[0]
     if (firstSchedule !== undefined) {
         throw manifestEditInvalid(dotted, `${firstSchedule.message} ${firstSchedule.hint}`)
     }
@@ -198,19 +207,13 @@ export function prepareManifestEdit(
  *
  * Reads the file itself instead of taking source text: a caller that read it earlier would be writing
  * over whatever happened in between, and this is a file the agent, the person and `init` all touch.
+ *
+ * A value equal to the one already there writes nothing and reports `changed: false` (pilot.15,
+ * VelaCrew), so a surface that applies its whole configuration every time can skip the reload.
  */
 export async function editManifest(edit: ManifestEdit): Promise<ManifestEditResult> {
-    let source: string
-    try {
-        source = await readFile(edit.file, "utf8")
-    } catch (cause) {
-        throw manifestEditUnreadable(edit.file, cause)
-    }
-    const prepared = prepareManifestEdit(source, edit)
-    checkProviders(edit, prepared.manifest)
-    checkMedia(edit, prepared.manifest)
-    await writeFile(edit.file, prepared.next, "utf8")
-    return { ...prepared, after: edit.remove === true ? undefined : edit.value }
+    const { edits } = await editManifestChanges(edit.file, [edit])
+    return edits[0] as ManifestEditResult
 }
 
 /**
@@ -227,11 +230,65 @@ export function editManifestSync(edit: ManifestEdit): ManifestEditResult {
     } catch (cause) {
         throw manifestEditUnreadable(edit.file, cause)
     }
-    const prepared = prepareManifestEdit(source, edit)
-    checkProviders(edit, prepared.manifest)
-    checkMedia(edit, prepared.manifest)
-    writeFileSync(edit.file, prepared.next, "utf8")
-    return { ...prepared, after: edit.remove === true ? undefined : edit.value }
+    const applied = applyChanges(source, edit.file, [edit])
+    if (applied.next !== source) writeFileSync(edit.file, applied.next, "utf8")
+    return applied.edits[0] as ManifestEditResult
+}
+
+/** One edit of several to one file: `ManifestEdit` without the file, which they share. */
+export type ManifestChange = Omit<ManifestEdit, "file">
+
+/**
+ * Several edits to one file, applied in order, validated, and written **once** (pilot.15, VelaCrew:
+ * one PATCH per setting was one reload per setting). Each is checked against the file as the ones
+ * before it left it, so an edit that depends on another goes after it. Any refusal writes nothing.
+ */
+export async function editManifestChanges(
+    file: string,
+    changes: readonly ManifestChange[],
+): Promise<{ readonly edits: readonly ManifestEditResult[]; readonly written: boolean }> {
+    let source: string
+    try {
+        source = await readFile(file, "utf8")
+    } catch (cause) {
+        throw manifestEditUnreadable(file, cause)
+    }
+    const applied = applyChanges(source, file, changes)
+    const written = applied.next !== source
+    if (written) await writeFile(file, applied.next, "utf8")
+    return { edits: applied.edits, written }
+}
+
+function applyChanges(
+    source: string,
+    file: string,
+    changes: readonly ManifestChange[],
+): { readonly next: string; readonly edits: readonly ManifestEditResult[] } {
+    let current = source
+    const edits: ManifestEditResult[] = []
+    for (const change of changes) {
+        const edit = { ...change, file }
+        const prepared = prepareManifestEdit(current, edit)
+        // Compared as values, not as text: a value written in a different spelling (`"3"` for `3`'s
+        // twin, a re-quoted string) that reads back the same is not a change worth a reload.
+        const changed = !isDeepStrictEqual(
+            prepared.before,
+            plain(parseDocument(prepared.next), edit.path),
+        )
+        if (changed) {
+            checkProviders(edit, prepared.manifest)
+            checkMedia(edit, prepared.manifest)
+            current = prepared.next
+        }
+        edits.push({
+            before: prepared.before,
+            after: edit.remove === true ? undefined : edit.value,
+            reflowed: changed && prepared.reflowed,
+            manifest: prepared.manifest,
+            changed,
+        })
+    }
+    return { next: current, edits }
 }
 
 /**
@@ -341,7 +398,7 @@ function checkProviders(edit: ManifestEdit, manifest: AgentManifest): void {
  */
 function checkMedia(edit: ManifestEdit, manifest: AgentManifest): void {
     if (edit.mediaProviders === undefined || edit.path[0] !== "media") return
-    for (const section of ["transcription", "image"] as const) {
+    for (const section of ["transcription", "image", "speech"] as const) {
         const config = manifest.media?.[section]
         if (config === undefined) continue
         try {

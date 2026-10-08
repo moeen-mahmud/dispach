@@ -21,12 +21,14 @@ export const IMAGE_GENERATE = "image_generate"
 export const MEDIA_DIR = "media"
 
 export interface MediaUsage {
-    readonly kind: "transcription" | "image"
+    readonly kind: "transcription" | "image" | "speech"
     readonly provider: string
     readonly model: string
     readonly latencyMs: number
     readonly images?: number
     readonly audioSeconds?: number
+    /** Characters spoken, for `speech`. */
+    readonly characters?: number
     readonly sessionKey: string
     readonly turnId?: string
     readonly sender?: string

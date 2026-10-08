@@ -444,3 +444,46 @@ test("a submit in the same step as the call it reports on is refused, so nothing
     )
     await runtime.stop()
 })
+
+describe("a child's own bound (pilot.15)", () => {
+    const slowManifest = (timeout: string) =>
+        manifest(`limits:
+  toolTimeoutMs: 1500
+subagents:
+  - name: inbox
+    task: Read the mailbox and say what needs attention.
+    tools: [mail_list, mail_send, mail_raw]
+    route:
+      tools: [mail_list]${timeout}`)
+
+    async function run(timeout: string) {
+        const seen: Seen = { sent: [], participants: [] }
+        const scripted = model(LIST_THEN_SUBMIT)
+        // Each of the child's two model calls takes 400 ms: 800 ms of work against a routed call
+        // the tool bound gives 500 ms (1,500 less the child's one-second margin).
+        const slow: FetchLike = async (url, init) => {
+            if (String(init?.body ?? "").includes("submit_artifact")) {
+                await new Promise((resolve) => setTimeout(resolve, 400))
+            }
+            return scripted.fetch(url, init)
+        }
+        const runtime = await Runtime.create({
+            agents: [slowManifest(timeout)],
+            env: { MODEL_API_KEY: "k" },
+            fetch: slow,
+            toolProviders: { mail: mail(seen) },
+        })
+        await runtime.agent("test")?.send("anything new?", { sessionKey: "api:p" })
+        const after = scripted.parent[1] ?? ""
+        await runtime.stop()
+        return after
+    }
+
+    test("subagents[].timeoutMs bounds the routed call instead of limits.toolTimeoutMs", async () => {
+        expect(await run("\n    timeoutMs: 5000")).toContain("Two unread, one from Ada")
+    })
+
+    test("without it the tool bound still applies, so the child runs out of time", async () => {
+        expect(await run("")).not.toContain("Two unread, one from Ada")
+    })
+})

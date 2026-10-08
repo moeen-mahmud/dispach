@@ -331,7 +331,16 @@ describe("the configuration block", () => {
     test("names the file, so the agent knows its settings are a file at all", () => {
         // The failure: an agent asked to put itself on Telegram started writing a bridge. It had
         // config_set pinned and no idea a `channels` setting existed.
-        const text = renderConfigSummary({ ...base, manifest: manifestFor() })
+        const text = renderConfigSummary({
+            ...base,
+            manifest: manifestFor(),
+            contextFiles: [
+                { name: "SOUL.md", tier: "static" },
+                { name: "AGENTS.md", tier: "static" },
+                { name: "USER.md", tier: "volatile" },
+                { name: "MEMORY.md", tier: "volatile" },
+            ],
+        })
         expect(text).toContain("/agents/milo/agent.yaml")
         expect(text).toContain("configuration, not something to build")
     })
@@ -479,6 +488,21 @@ describe("the configuration block", () => {
         expect(text.includes("I edit it with config_set")).toBe(false)
     })
 
+    test("names every file by tier, and qualifies the per-conversation ones", () => {
+        const row = (files: { name: string; tier: string }[]) =>
+            renderConfigSummary({ ...base, manifest: manifestFor(), contextFiles: files })
+                .split("\n")
+                .find((line) => line.includes("context files"))
+        expect(
+            row([
+                { name: "SOUL.md", tier: "static" },
+                { name: "REMINDER.md", tier: "reminder" },
+                { name: "MEMORY.md", tier: "volatile" },
+            ]),
+        ).toContain("SOUL.md, REMINDER.md every turn; MEMORY.md in private conversations")
+        expect(row([])).toContain("context files  none")
+    })
+
     test("it stays small — this is paid on every turn of every session, forever", () => {
         const text = renderConfigSummary({ ...base, manifest: manifestFor() })
         // A guard against drift, not a precise budget: the whole manifest cost 2,766 tokens and
@@ -491,7 +515,11 @@ describe("the configuration block", () => {
         // measured — an agent holding three excerpts of its own earlier sessions still asserted that
         // "the transcripts themselves don't carry over", having no row to tell it otherwise.
         // `estimateTokens` is biased about 10% high, so the real figure sits near 200.
-        expect(estimateTokens(text)).toBeLessThan(260)
+        //
+        // Raised to 300 for the `context files` row (pilot.15), measured with the four files `init`
+        // generates: an agent asked whether its files were loading found none here, said no, and
+        // re-read every one of them until `no_progress`.
+        expect(estimateTokens(text)).toBeLessThan(300)
     })
 })
 

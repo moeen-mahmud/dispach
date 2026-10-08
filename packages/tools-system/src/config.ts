@@ -320,6 +320,7 @@ export function configReadHandler(options: ConfigOptions): ToolHandler {
             "Settings config_set can change, with their current values:",
             rows,
             "",
+            ...contextFiles(doc),
             "Anything not on this list is not settable from a conversation. A change takes effect when the agent next starts, not in the current conversation.",
             "",
             "Some edits are refused whatever the rules say. Removing a check: replacing tools.policy.deny, or setting tools.untrusted.onMutate to allow. Deciding reach: a writeRoots list anywhere, the system provider's env, any provider's baseUrl, a channel's allowFrom, and server.host or server.tokenEnv. Enabling a capability is what a person asks you for; where you may write, who may talk to you, and what address you listen on are theirs — name what you need and why, and let them add it.",
@@ -327,6 +328,38 @@ export function configReadHandler(options: ConfigOptions): ToolHandler {
             `The whole file, comments and all, is at ${file} — read it with file_read if that tool is enabled, or ask the person to open it.`,
         ].join("\n")
     }
+}
+
+/**
+ * The workspace files the manifest loads, read-only (pilot.15, VelaCrew). Told "check your config",
+ * a model called this tool, found no context section, and concluded that nothing loaded its files,
+ * trusting the tool over the files' own text in its prompt. So the section names them and says
+ * where they already are. Not settable here: which files define the agent is the person's.
+ */
+function contextFiles(doc: ReturnType<typeof parseDocument>): string[] {
+    const list = (path: string[]): string[] => {
+        const value = doc.getIn(path, false)
+        const plain = isMap(value) || isSeq(value) ? value.toJS(doc) : value
+        if (Array.isArray(plain)) return plain.map(String)
+        return typeof plain === "string" && plain !== "" ? [plain] : []
+    }
+    const rows = (
+        [
+            ["context.soul.file", list(["context", "soul", "file"])],
+            ["context.static", list(["context", "static"])],
+            ["context.files", list(["context", "files"])],
+            ["context.volatile", list(["context", "volatile"])],
+            ["context.reminder", list(["context", "reminder"])],
+        ] as const
+    )
+        .filter(([, names]) => names.length > 0)
+        .map(([path, names]) => `- ${path} = [${names.join(", ")}]`)
+    if (rows.length === 0) return []
+    return [
+        "Context files (read-only here). These files are loaded into my instructions every turn, under their names, so I never need to read them; volatile ones only in private conversations:",
+        ...rows,
+        "",
+    ]
 }
 
 export function configSetHandler(options: ConfigOptions): ToolHandler {

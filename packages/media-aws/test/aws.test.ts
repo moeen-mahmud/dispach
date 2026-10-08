@@ -5,12 +5,16 @@
  */
 
 import { describe, expect, test } from "bun:test"
+import { spawnSync } from "node:child_process"
+import { mkdtempSync, readFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type {
     StartStreamTranscriptionCommandInput,
     TranscriptResultStream,
 } from "@aws-sdk/client-transcribe-streaming"
 import { isHarnessError, type MediaProvider } from "@dispach/core"
-import { type AwsClients, awsMedia, encodingOf } from "../src/index.ts"
+import { type AwsClients, awsMedia, encodingOf, ffmpegDecode } from "../src/index.ts"
 
 const signal = new AbortController().signal
 
@@ -21,6 +25,12 @@ function provider(clients: Partial<AwsClients>, model?: string): MediaProvider {
         },
         invoke: async () => {
             throw new Error("no invoke client")
+        },
+        speak: async () => {
+            throw new Error("no speak client")
+        },
+        decode: async () => {
+            throw Object.assign(new Error("spawn ffmpeg ENOENT"), { code: "ENOENT" })
         },
         ...clients,
     }).create({
@@ -111,7 +121,7 @@ describe("Amazon Transcribe", () => {
         expect(chunks).toEqual([8192, 8192, 3616])
     })
 
-    test("a container it cannot read is refused naming the provider that can, before any call", async () => {
+    test("a container it cannot read, with no ffmpeg to convert it, is refused before any call", async () => {
         let called = false
         const voice = provider({
             transcribe: async () => {
@@ -123,9 +133,56 @@ describe("Amazon Transcribe", () => {
             voice.transcribe?.({ bytes: new Uint8Array(1), mimeType: "audio/webm" }, signal),
         )
         expect(error.code).toBe("media_audio_unsupported")
+        expect(error.hint).toContain("ffmpeg")
         expect(error.hint).toContain("openai provider")
         expect(called).toBe(false)
         expect(encodingOf("audio/flac")).toBe("flac")
+    })
+
+    test("a WebM or M4A note is decoded to 16 kHz PCM and streamed as that (pilot.15)", async () => {
+        let sent: StartStreamTranscriptionCommandInput | undefined
+        const decoded: string[] = []
+        const voice = provider({
+            decode: async (bytes) => {
+                decoded.push(String(bytes.byteLength))
+                return new Uint8Array(32)
+            },
+            transcribe: async () => async (input) => {
+                sent = input
+                return (async function* () {
+                    yield {
+                        TranscriptEvent: {
+                            Transcript: {
+                                Results: [
+                                    { IsPartial: false, Alternatives: [{ Transcript: "hi" }] },
+                                ],
+                            },
+                        },
+                    } as TranscriptResultStream
+                })()
+            },
+        })
+        const heard = await voice.transcribe?.(
+            { bytes: new Uint8Array(5), mimeType: "audio/mp4" },
+            signal,
+        )
+        expect(heard?.text).toBe("hi")
+        expect(decoded).toEqual(["5"])
+        expect(sent?.MediaEncoding).toBe("pcm")
+        expect(sent?.MediaSampleRateHertz).toBe(16_000)
+    })
+
+    test("Ogg/Opus is never decoded", async () => {
+        let decoded = false
+        const voice = provider({
+            decode: async () => {
+                decoded = true
+                return new Uint8Array(0)
+            },
+            transcribe: async () => async () => (async function* () {})(),
+        })
+        await voice.transcribe?.({ bytes: new Uint8Array(3), mimeType: "audio/ogg" }, signal)
+        expect(decoded).toBe(false)
     })
 
     test("an access refusal names the IAM actions", async () => {
@@ -188,5 +245,81 @@ describe("Nova Canvas", () => {
     test("options are checked at load", () => {
         const parsed = awsMedia().optionsSchema?.safeParse({ regoin: "eu-west-2" })
         expect(parsed?.success).toBe(false)
+    })
+})
+
+describe("speech (pilot.15)", () => {
+    const speaker = (clients: Partial<AwsClients>, options: Record<string, unknown> = {}) =>
+        awsMedia({
+            transcribe: async () => {
+                throw new Error("no transcribe client")
+            },
+            invoke: async () => {
+                throw new Error("no invoke client")
+            },
+            decode: async () => new Uint8Array(0),
+            speak: async () => {
+                throw new Error("no speak client")
+            },
+            ...clients,
+        }).create({
+            field: "media.speech",
+            config: { provider: "aws", timeoutMs: 1000, maxCharacters: 3000 },
+            options: { region: "eu-west-2", ...options },
+            env: {},
+        })
+
+    test("asks Polly for Ogg/Opus with the voice and engine, defaulting to Joanna and neural", async () => {
+        const asked: unknown[] = []
+        const make = (options: Record<string, unknown>) =>
+            speaker(
+                {
+                    speak: async () => async (input) => {
+                        asked.push(input)
+                        return { bytes: new Uint8Array([1, 2]), characters: 5 }
+                    },
+                },
+                options,
+            )
+        const spoken = await make({}).synthesize?.({ text: "Hello" }, signal)
+        expect(spoken).toEqual({
+            bytes: new Uint8Array([1, 2]),
+            mimeType: "audio/ogg; codecs=opus",
+            characters: 5,
+        })
+        await make({ voiceId: "Amy", engine: "generative", languageCode: "en-GB" }).synthesize?.(
+            { text: "Hi" },
+            signal,
+        )
+        expect(asked).toEqual([
+            { text: "Hello", voiceId: "Joanna", engine: "neural" },
+            { text: "Hi", voiceId: "Amy", engine: "generative", languageCode: "en-GB" },
+        ])
+    })
+
+    test("an access refusal names polly:SynthesizeSpeech", async () => {
+        const error = await refusal(async () =>
+            speaker({
+                speak: async () => async () => {
+                    throw Object.assign(new Error("no"), { name: "AccessDeniedException" })
+                },
+            }).synthesize?.({ text: "x" }, signal),
+        )
+        expect(error.hint).toContain("polly:SynthesizeSpeech")
+    })
+})
+
+describe("ffmpegDecode", () => {
+    const hasFfmpeg = spawnSync("ffmpeg", ["-version"]).status === 0
+    test.skipIf(!hasFfmpeg)("turns an M4A clip into 16 kHz mono PCM", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "decode-"))
+        const path = join(dir, "tone.m4a")
+        spawnSync("ffmpeg", ["-loglevel", "error", "-f", "lavfi", "-i", "sine=d=1", path])
+        const pcm = await ffmpegDecode(new Uint8Array(readFileSync(path)), signal)
+        // One second, mono, 16-bit, 16 kHz — within an encoder frame of 32,000 bytes.
+        expect(Math.abs(pcm.byteLength - 32_000)).toBeLessThan(4096)
+    })
+    test.skipIf(!hasFfmpeg)("rejects bytes that are not audio", async () => {
+        await expect(ffmpegDecode(new Uint8Array([1, 2, 3]), signal)).rejects.toThrow()
     })
 })

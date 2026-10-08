@@ -166,7 +166,10 @@ export interface WhatsAppSocket {
     }
     sendMessage(
         jid: string,
-        content: { text: string } | { image: Uint8Array; mimetype: string; caption?: string },
+        content:
+            | { text: string }
+            | { image: Uint8Array; mimetype: string; caption?: string }
+            | { audio: Uint8Array; mimetype: string; ptt: boolean },
     ): Promise<{ key?: { id?: string } } | undefined>
     sendPresenceUpdate(presence: string, jid?: string): Promise<void>
     logout(): Promise<void>
@@ -313,6 +316,7 @@ export class WhatsAppTransport implements ChannelTransport {
         // ambiguity it would be hiding.
         idempotentSend: false,
         attachments: true,
+        voiceNotes: true,
         minSendIntervalMs: MIN_SEND_INTERVAL_MS,
     }
 
@@ -458,11 +462,19 @@ export class WhatsAppTransport implements ChannelTransport {
                 jidOf(message.recipient),
                 attachment === undefined
                     ? { text: message.text }
-                    : {
-                          image: await readFile(attachment.path),
-                          mimetype: attachment.mimeType,
-                          ...(message.text === "" ? {} : { caption: message.text }),
-                      },
+                    : attachment.mimeType.startsWith("audio/")
+                      ? // `ptt` is what makes it a voice note — the waveform bubble — rather than an
+                        // audio file; WhatsApp plays it only as Ogg/Opus, which media.speech returns.
+                        {
+                            audio: await readFile(attachment.path),
+                            mimetype: "audio/ogg; codecs=opus",
+                            ptt: true,
+                        }
+                      : {
+                            image: await readFile(attachment.path),
+                            mimetype: attachment.mimeType,
+                            ...(message.text === "" ? {} : { caption: message.text }),
+                        },
             )
             const id = sent?.key?.id
             if (id !== undefined && id !== null) {

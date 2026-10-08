@@ -122,6 +122,11 @@ FROM node:24-trixie-slim AS runtime
 #   deliberately absent so there is one obvious HTTP client rather than two.
 # - **`ca-certificates`** so an HTTPS call from the shell verifies rather than failing oddly.
 # - **`jq`** because a model pipes JSON constantly and it costs about a megabyte.
+# - **`ffmpeg`** for **voice notes** that are not Ogg/Opus or FLAC (pilot.15). Amazon Transcribe
+#   streaming reads only those and PCM, so a Slack clip (WebM) or a Teams memo (M4A) is decoded to
+#   16 kHz PCM by `media-aws` first. Without it those notes are refused with a hint naming it.
+#   A static build copied in below, not Debian's package: `apt-get install ffmpeg` pulled ~570 MB of
+#   codec, GPU and X libraries into a 711 MB image; the static binary is ~100 MB.
 # - **`tzdata`** for **schedules**. `zone.ts` walks local calendar fields through `Intl`; with no zone
 #   database a named zone cannot resolve, and a cron silently running in UTC is exactly the failure
 #   the DST handling exists to prevent.
@@ -145,6 +150,10 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
 # build makes no network call of its own. It is a statically linked musl binary, which runs fine on
 # glibc — that is what static linking is for.
 COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /uvx /usr/local/bin/
+
+# `ffmpeg` the same way and for the same reasons: pinned (by digest, multi-arch), statically linked
+# against musl, no package manager involved. Only `ffmpeg`; `ffprobe` is never called.
+COPY --from=mwader/static-ffmpeg:7.1.1@sha256:11a44711684c0b9f754c047dcd64235b8b52deab251bd0e0a86f22faa160749c /ffmpeg /usr/local/bin/
 
 # The application: the published package, installed the way a laptop installs it. `npm i -g` puts
 # `dispach` on `/usr/local/bin` and the package under `/usr/local/lib/node_modules`. `--omit=dev`

@@ -714,3 +714,32 @@ test("through a real runtime, config_set is handed the runtime's providers and u
     await runtime.stop()
     expect(message).toContain("Refused by fake.")
 })
+
+test("the summary names the context files and says they are already loaded (pilot.15)", async () => {
+    const { file, read } = fixture()
+    writeFileSync(
+        file,
+        `${MANIFEST}context:\n  static: [SOUL.md, AGENTS.md]\n  volatile: [USER.md, MEMORY.md]\n  reminder: REMINDER.md\n`,
+    )
+    // Told "check your config", a model read this, found no files, and said nothing loads them.
+    const output = await read({}, toolContext({}))
+    expect(output).toContain("- context.static = [SOUL.md, AGENTS.md]")
+    expect(output).toContain("- context.volatile = [USER.md, MEMORY.md]")
+    expect(output).toContain("- context.reminder = [REMINDER.md]")
+    expect(output).toContain("loaded into my instructions every turn, under their names")
+    expect(estimateTokens(output)).toBeLessThan(1_500)
+})
+
+test("the agent cannot write its own subagents (pilot.15)", async () => {
+    const { set } = fixture()
+    // Person- or engine-only: an agent routing its own calls could send a gated write through a child.
+    await expect(
+        set(
+            {
+                path: "subagents",
+                value: "[{name: x, task: y, tools: [now], route: {tools: [now]}}]",
+            },
+            toolContext({}),
+        ),
+    ).rejects.toThrow(/subagents/)
+})

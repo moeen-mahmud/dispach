@@ -74,14 +74,14 @@ function fakeBaileys(): {
     emit: (update: ConnectionUpdate) => void
     deliver: (upsert: MessagesUpsert) => void
     saveCreds: () => Promise<void>
-    sent: { jid: string; text: string; image?: string }[]
+    sent: { jid: string; text: string; image?: string; voice?: boolean }[]
 } {
     const handlers: {
         update?: (update: ConnectionUpdate) => void
         creds?: () => void | Promise<void>
         messages?: (upsert: MessagesUpsert) => void
     } = {}
-    const sent: { jid: string; text: string; image?: string }[] = []
+    const sent: { jid: string; text: string; image?: string; voice?: boolean }[] = []
     const state = { connects: 0 }
 
     const socket: WhatsAppSocket = {
@@ -100,7 +100,9 @@ function fakeBaileys(): {
             sent.push(
                 "text" in content
                     ? { jid, text: content.text }
-                    : { jid, text: content.caption ?? "", image: content.mimetype },
+                    : "audio" in content
+                      ? { jid, text: "", voice: content.ptt && content.mimetype.includes("opus") }
+                      : { jid, text: content.caption ?? "", image: content.mimetype },
             )
             return { key: { id: "WA1" } }
         },
@@ -993,6 +995,29 @@ describe("media", () => {
             text: "",
             image: "image/png",
         })
+        await channel.stop()
+    })
+
+    test("an audio attachment goes out as a voice note (ptt, Ogg/Opus) (pilot.15)", async () => {
+        const fake = fakeBaileys()
+        const { host } = recorder()
+        const channel = transport(fake.api)
+        await channel.start(host)
+        await settle()
+        const path = join(authDir, "reply.ogg")
+        writeFileSync(path, new Uint8Array([0x4f, 0x67]))
+        const result = await channel.send({
+            channelId: "wa",
+            recipient: "8801711223344",
+            text: "",
+            attachment: { path, mimeType: "audio/ogg" },
+            idempotencyKey: "k1",
+            chunkIndex: 0,
+            chunkTotal: 1,
+        })
+        expect(result.ok).toBe(true)
+        expect(fake.sent[0]).toEqual({ jid: "8801711223344@s.whatsapp.net", text: "", voice: true })
+        expect(channel.limits.voiceNotes).toBe(true)
         await channel.stop()
     })
 })

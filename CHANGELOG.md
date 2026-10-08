@@ -4,6 +4,20 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.14
+
+- `PATCH /v1/agents/:id/config` with a value already in the file writes nothing and does not reload the agent; the reply says `changed: false, reloaded: false`. A configuration applied in full on every sync no longer reloads the agent once per setting.
+- `PATCH /config` takes `{changes: [{path, value} | {path, remove: true}, …]}`: several settings checked together, written once, one reload. Any refusal writes none. The single `{path, value}` body is unchanged.
+- Removing a block's last key removes the block, so removing `limits.noProgress.sameTool` no longer leaves an empty `noProgress:` that would not load.
+- `limits.noProgress` and `limits.noProgress.sameTool` are settable by a person through `PATCH /config` and the `config` command. `config_set` cannot change them.
+- `media.speech`: a voice note is answered with the text reply and then a voice note of it. Typed messages are answered in text only, as before. The provider is `aws` (Amazon Polly: `options {region, voiceId, engine}`; needs `polly:SynthesizeSpeech`) or `openai` (`/audio/speech`). Voice notes go out on WhatsApp and Telegram, an audio file on Slack, and none on Teams. A long reply becomes several notes. Each note emits `media.result {kind: "speech", characters}`.
+- Amazon Transcribe voice notes in formats other than Ogg/Opus and FLAC (Slack WebM, Teams M4A, MP3) are decoded with `ffmpeg` first. They were refused before. The image now includes `ffmpeg`.
+- `turn.start` carries `inputKind: "voice"` when the input was a transcribed voice note.
+- Each workspace file now reaches the model labelled with its name, in the model's delimiter style (`<file name="SOUL.md" tier="static">`, `## SOUL.md`, or `SOUL.md:`). The configuration block gains a `context files` row naming the files, and `config_read`'s summary lists `context.soul.file`, `context.static`, `context.volatile` and `context.reminder` (read-only) with the same note. Asked whether its files were loading, an agent saw no names, said they were not, and re-read them until `no_progress`. The first turn after upgrading misses the prompt cache once, because the cached prefix changed.
+- `subagents` is settable as a whole list by a person or embedder through `PATCH /config` and `changes[]`, checked as at load (`subagent_tool_not_pinned` and the rest). The agent's `config_set` cannot set it. Any edit that unpins a slug a child uses is now refused instead of breaking the next boot.
+- `subagents[].timeoutMs` bounds a child's routed calls instead of `limits.toolTimeoutMs`, so a slow child can get minutes while every other tool keeps its own bound.
+- To stop an earlier conversation from being recalled (`includeHistory`), use `POST /v1/agents/:id/sessions/:key/recall {"recall": false}`, which keeps the history (pilot.10), or `DELETE /v1/agents/:id/sessions/:key`, which removes it and its index entries. A note saved in `MEMORY.md` is a file and has to be edited.
+
 ### Since 0.2.0-pilot.13
 
 - Bedrock: Nova no longer fails on the second call of a native tool turn with "extraneous key [cachePoint] is not permitted". pilot.13's rolling cache point is left out of a Nova message that carries a tool result; Claude keeps it.

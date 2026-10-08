@@ -12,9 +12,9 @@
  * to an in-memory SQLite database rather than to a different implementation.
  */
 
-import { randomUUID } from "node:crypto"
-import { statSync } from "node:fs"
-import { isAbsolute, resolve } from "node:path"
+import { randomBytes, randomUUID } from "node:crypto"
+import { mkdirSync, statSync, writeFileSync } from "node:fs"
+import { basename, isAbsolute, join, resolve } from "node:path"
 import type { InboundAudio } from "../channels/channel.ts"
 import { assembleContext, historyReport, slotReport } from "../context/assemble.ts"
 import { type Calibration, UNCALIBRATED } from "../context/budget.ts"
@@ -53,9 +53,14 @@ import { runTurn, type ToolRuntime, type TurnCompaction, type TurnResult } from 
 import type { EnvSource } from "../manifest/env.ts"
 import type { LoadedManifest } from "../manifest/load.ts"
 import { resolveProviders } from "../manifest/providers.ts"
-import type { AgentManifest, ModelRole, TranscriptionConfig } from "../manifest/schema.ts"
+import type {
+    AgentManifest,
+    ModelRole,
+    SpeechConfig,
+    TranscriptionConfig,
+} from "../manifest/schema.ts"
 import { fallbackWarnings, scheduleDeliveryWarnings } from "../manifest/validate.ts"
-import { imageGenerateTool, type MediaUsage } from "../media/image-tool.ts"
+import { imageGenerateTool, MEDIA_DIR, type MediaUsage } from "../media/image-tool.ts"
 import {
     MediaError,
     type MediaProvider,
@@ -63,6 +68,7 @@ import {
     resolveMedia,
     withDeadline,
 } from "../media/provider.ts"
+import { speakable, speechChunks } from "../media/speech.ts"
 import {
     enumerateFiles,
     enumerateSessions,
@@ -244,6 +250,8 @@ export interface AgentSendOptions {
     readonly sessionKey?: string
     readonly signal?: AbortSignal
     readonly source?: string
+    /** What the input was before it was text: `voice`, a transcribed voice note (pilot.15). */
+    readonly inputKind?: "voice"
     /** Supply a turn id to hand a client its handle before the turn starts. */
     readonly turnId?: string
     /**
@@ -483,6 +491,9 @@ export class Agent {
     readonly #transcription:
         | { readonly config: TranscriptionConfig; readonly provider: MediaProvider }
         | undefined
+    readonly #speech:
+        | { readonly config: SpeechConfig; readonly provider: MediaProvider }
+        | undefined
     /** Who sent each running turn, so a media call made inside it is billed like its tokens. */
     readonly #senders = new Map<string, string>()
     /**
@@ -529,6 +540,7 @@ export class Agent {
         transcription:
             | { readonly config: TranscriptionConfig; readonly provider: MediaProvider }
             | undefined
+        speech: { readonly config: SpeechConfig; readonly provider: MediaProvider } | undefined
     }) {
         this.id = init.loaded.manifest.id
         this.manifest = init.loaded.manifest
@@ -563,6 +575,7 @@ export class Agent {
         this.#middleware = init.middleware
         this.pluginRoutes = init.pluginRoutes
         this.#transcription = init.transcription
+        this.#speech = init.speech
 
         const memory = init.loaded.manifest.memory
         if (memory === undefined) {
@@ -859,6 +872,7 @@ export class Agent {
             pluginRoutes: options.pluginRoutes ?? [],
             approve: options.approve,
             transcription,
+            speech: media.speech,
         })
         self = agent
         return agent
@@ -1034,8 +1048,16 @@ export class Agent {
         const byRoute = new Map(
             children.flatMap((child) => child.route.tools.map((slug) => [slug, child] as const)),
         )
+        const timeoutFor = new Map(
+            children.flatMap((child) =>
+                child.timeoutMs === undefined
+                    ? []
+                    : child.route.tools.map((slug) => [slug, child.timeoutMs as number] as const),
+            ),
+        )
         this.#routedToolRuntime = {
             ...base,
+            ...(timeoutFor.size === 0 ? {} : { timeoutFor }),
             registry: base.registry.withSwapped((tool) => {
                 const child = byRoute.get(tool.spec.slug)
                 return child === undefined
@@ -1092,6 +1114,57 @@ export class Agent {
         }
     }
 
+    /** Whether `speak` can do anything: `media.speech` is configured. */
+    get canSpeak(): boolean {
+        return this.#speech !== undefined
+    }
+
+    /**
+     * A reply, spoken (pilot.15): markup removed, cut at `maxCharacters`, each piece synthesised
+     * under the section's deadline and saved in the agent's `media/` as an Ogg/Opus file. Returns
+     * the files in order, ready to deliver as voice notes. Throws a `MediaError` with a hint; the
+     * caller has already delivered the text, so a failure here costs the audio and nothing else.
+     */
+    async speak(
+        text: string,
+        options: { readonly sessionKey: string; readonly turnId?: string },
+    ): Promise<readonly { readonly path: string; readonly mimeType: string }[]> {
+        const configured = this.#speech
+        if (configured === undefined) {
+            throw new MediaError({
+                code: "media_speech_unconfigured",
+                message: `${this.id} has no speech configured, so it cannot answer in a voice note.`,
+                hint: "Add media.speech to the manifest (provider aws or openai) through PATCH /v1/agents/:id/config or the config command.",
+                field: "media.speech",
+            })
+        }
+        const { config, provider } = configured
+        const synthesize = provider.synthesize as NonNullable<MediaProvider["synthesize"]>
+        const files: { path: string; mimeType: string }[] = []
+        const dir = join(this.dir, MEDIA_DIR)
+        for (const piece of speechChunks(speakable(text), config.maxCharacters)) {
+            const started = performance.now()
+            const audio = await withDeadline(config.timeoutMs, "Speaking the reply", (signal) =>
+                synthesize.call(provider, { text: piece }, signal),
+            )
+            mkdirSync(dir, { recursive: true })
+            const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)
+            const path = join(dir, `${stamp}-${randomBytes(3).toString("hex")}.ogg`)
+            writeFileSync(path, audio.bytes)
+            this.#recordMedia({
+                kind: "speech",
+                provider: config.provider,
+                model: config.model ?? config.provider,
+                latencyMs: Math.round(performance.now() - started),
+                characters: audio.characters ?? piece.length,
+                sessionKey: options.sessionKey,
+                ...(options.turnId === undefined ? {} : { turnId: options.turnId }),
+            })
+            files.push({ path, mimeType: audio.mimeType })
+        }
+        return files
+    }
+
     /** Whether `transcribe` can do anything. A channel asks before it bothers the sender. */
     get canTranscribe(): boolean {
         return this.#transcription !== undefined
@@ -1145,6 +1218,7 @@ export class Agent {
                 latencyMs: usage.latencyMs,
                 ...(usage.images === undefined ? {} : { images: usage.images }),
                 ...(usage.audioSeconds === undefined ? {} : { audioSeconds: usage.audioSeconds }),
+                ...(usage.characters === undefined ? {} : { characters: usage.characters }),
                 ...(sender === undefined ? {} : { sender }),
             },
             {
@@ -1542,6 +1616,7 @@ export class Agent {
                 : {}),
             bus: this.#bus,
             source,
+            ...(options.inputKind === undefined ? {} : { inputKind: options.inputKind }),
             ...(options.from === undefined ? {} : { from: options.from }),
             ...(participant === null ? {} : { participant }),
             ...(options.deferMutations === undefined
@@ -2532,6 +2607,10 @@ export class Agent {
                 schedulerStarted: this.#schedulerStarted,
                 serverListening: this.#serverListening,
                 servedElsewhere: this.#servedElsewhere,
+                // The same files, under the same names, as the labels in the tiers carry.
+                contextFiles: this.workspace.files
+                    .filter((file) => file.content !== "")
+                    .map((file) => ({ name: basename(file.path), tier: file.tier })),
                 // Absent, not zero, when no block is configured — the row distinguishes "off" from
                 // "no such concept", and only this side knows which it is.
                 ...(this.skills === undefined

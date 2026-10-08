@@ -842,6 +842,11 @@ media:
     apiKeyEnv: OPENAI_API_KEY    # a variable name, never a key
     timeoutMs: 60000             # hard: download and transcription together
     maxBytes: 26214400           # refused before downloading when the channel reports a size
+  speech:                        # a voice note is answered with a voice note too (pilot.15)
+    provider: aws                # aws (Polly) | openai (any /audio/speech endpoint)
+    options: { region: eu-west-2, voiceId: Amy, engine: neural }
+    timeoutMs: 60000             # per voice note
+    maxCharacters: 3000          # a longer reply becomes several notes, split at sentences
   image:                         # declaring it registers the image_generate tool
     provider: aws
     model: amazon.nova-canvas-v1:0
@@ -850,10 +855,23 @@ media:
     timeoutMs: 120000
 ```
 
-Both sections are optional and each names its own provider, so voice can go to one backend and
-images to another. `aws` takes `options: {region, profile?, languageCode?, sampleRate?}` and the
-default AWS credential chain; Transcribe streaming reads OGG/Opus (Telegram, WhatsApp) and FLAC, so
-Slack's WebM clips and Teams' M4A memos need `openai`.
+Every section is optional and each names its own provider, so voice can go to one backend and
+images to another. `aws` takes `options: {region, profile?, languageCode?, sampleRate?, voiceId?,
+engine?}` and the default AWS credential chain. Transcribe streaming reads OGG/Opus (Telegram,
+WhatsApp) and FLAC as they are; anything else, Slack's WebM clips and Teams' M4A memos among them, is
+decoded to 16 kHz PCM by `ffmpeg` first (pilot.15), which the image carries. Without `ffmpeg` on the
+PATH those notes are refused with a hint naming it. `openai` takes every format directly.
+
+**A spoken reply** (`speech`, pilot.15) follows the text reply to a turn that began as a voice note,
+and only such a turn: a typed message is never answered in audio. The text is delivered first, so
+nobody waits on the synthesis to read the answer. Markdown is removed before it is spoken, code
+blocks are left out, and a reply over `maxCharacters` becomes several voice notes split at sentence
+ends. The audio is Ogg/Opus, sent as a voice note on WhatsApp (`ptt`) and Telegram (`sendVoice`) and
+as an audio file on Slack. Teams gets the text alone. A failed synthesis costs the voice note only:
+the sender already has the text, and `agent.channel.error` carries the cause. `aws` is Polly
+(`voiceId` default `Joanna`, `engine` default `neural`; the role needs `polly:SynthesizeSpeech`);
+`openai` takes `options.voice` (default `alloy`) and `model` (default `gpt-4o-mini-tts`). Each note is
+a `media.result` with `kind: speech` and `characters`.
 
 **A voice note** is transcribed after `allowFrom` and before the turn, framed for the model as
 `[Voice note, transcribed]` and followed by any caption. If no transcription is configured, the
@@ -980,7 +998,7 @@ Load order is manifest order; middleware composes outermost-first. A plugin whos
 | --- | --- | --- |
 | `maxSteps` | 40 | Steps per turn before forced termination. Hitting it emits `turn.end` with `reason: max_steps` — an honest failure, not a silent truncation. Generous, because a step budget is not a plan: real work recovers, and each recovery costs a step. A six-step budget cut a live agent off one step after it had installed the dependency it needed, its reply ending on "Let me install it". `noProgress` is what stops a loop; this only stops a runaway. |
 | `noProgress.identicalCalls` | 3 | Identical consecutive tool calls — same slug **and** same arguments — before the turn ends as `reason: no_progress`. This is the guard a small `maxSteps` was standing in for, and it is better at the job: the same call with the same arguments cannot return a different answer, so the remaining steps would only repeat it. Two is a retry, which is often correct; three is a pattern. Compared before the calls run, because a loop that has already executed twice has had its side effects twice. |
-| `noProgress.sameTool` | none | Calls to any one tool in a turn, whatever the arguments, before the turn ends as `reason: no_progress` (pilot.13). For churn `identicalCalls` cannot see: a mail delta or a lookup called again and again with new arguments. Absent means no limit. Checked before the calls run, and counted per call. |
+| `noProgress.sameTool` | none | Calls to any one tool in a turn, whatever the arguments, before the turn ends as `reason: no_progress` (pilot.13). For churn `identicalCalls` cannot see: a mail delta or a lookup called again and again with new arguments. Absent means no limit. Checked before the calls run, and counted per call. A person sets `limits.noProgress` or removes `limits.noProgress.sameTool` with `PATCH /config`; the agent's `config_set` cannot loosen its own loop guard (pilot.15). |
 | `turnTimeoutMs` | 1800000 | 30 min. Must exceed any upstream timeout on the model endpoint. |
 | `toolTimeoutMs` | 120000 | Per tool execution. |
 | `maxParallelTools` | 4 | Read-only tools only; mutating tools always serialise. |
@@ -1086,6 +1104,13 @@ subagents:
 | `artifact` | Optional JSON Schema object. Absent: `{summary: string}`, told to keep every id, name, date and amount exactly. One string, because a list is the field a model formats wrong. |
 | `model` | Optional role name (`subagent_role_unknown` when undeclared). Absent: `model.subagent`, else `main`. Usage rows and `model.result` say `role: subagent` either way, with `model` naming the endpoint. |
 | `maxSteps` | Optional. Lowers `limits.maxSteps` for the child, never raises it. |
+| `timeoutMs` | Optional (pilot.15). The routed call's bound in place of `limits.toolTimeoutMs`, for this child's `route.tools` only, so a child making fifteen slow reads can have five minutes without `exec` getting five minutes too. The child is still ended a second before it, so it reports a timeout instead of being abandoned. |
+
+`subagents` is set as a whole list by a person or an embedder: `PATCH /config` (alone or in
+`changes[]`) and the `config` command, checked exactly as at load. The agent's `config_set` cannot set
+it. Every edit is checked against it, so unpinning a slug a child still uses is refused too. An engine
+that rebuilds both writes `tools.pinned` first when adding a child's tools and `subagents` first when
+removing them, or sends both in one `changes[]` in that order.
 
 **What a child inherits, and nothing more.** The parent's taint (a child of a turn that read
 untrusted content starts tainted, so `untrusted.onMutate` applies from its first step), its

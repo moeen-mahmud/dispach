@@ -248,6 +248,8 @@ export interface EventDataMap {
         inputTokens: number
         trust: Trust
         from?: { id: string; kind: SenderKind }
+        /** `voice` when the input is a transcribed voice note (pilot.15); absent for typed text. */
+        inputKind?: "voice"
     }
     "context.assembled": { slots: ContextSlotReport[]; total: number }
     /**
@@ -386,7 +388,7 @@ export interface EventDataMap {
      */
     "media.result": {
         callId: string
-        kind: "transcription" | "image"
+        kind: "transcription" | "image" | "speech"
         provider: string
         model: string
         latencyMs: number
@@ -394,6 +396,8 @@ export interface EventDataMap {
         images?: number
         /** Present on a transcription whose duration the provider or the channel reported. */
         audioSeconds?: number
+        /** Present on a speech call: characters spoken, what Polly and OpenAI bill (pilot.15). */
+        characters?: number
         sender?: string
     }
     /**

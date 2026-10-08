@@ -16,6 +16,7 @@ import { DEFAULT_PROMPT_STYLE } from "../src/model/prompt-style.ts"
 import { parseWorkspaceFile, strip } from "../src/workspace/frontmatter.ts"
 import {
     DEFAULT_WORKSPACE_BUDGETS,
+    labelled,
     loadWorkspace,
     planWorkspace,
     ruleBudgetFailure,
@@ -118,9 +119,10 @@ describe("tiers", () => {
             reminder: "REMINDER.md",
         })
 
-        expect(workspace.static).toBe("Identity.\n\nPolicy.")
-        expect(workspace.volatile).toBe("Memory.")
-        expect(workspace.reminder).toBe("Reminder.")
+        // Each file under its own name (pilot.15): bare, a model could not tell SOUL.md was loaded.
+        expect(workspace.static).toBe("## AGENT.md\n\nIdentity.\n\n## POLICY.md\n\nPolicy.")
+        expect(workspace.volatile).toBe("## MEMORY.md\n\nMemory.")
+        expect(workspace.reminder).toBe("## REMINDER.md\n\nReminder.")
         expect(workspace.files.length).toBe(4)
     })
 
@@ -175,7 +177,7 @@ describe("budgets", () => {
         const dir = workspaceDir({ "AGENT.md": body })
         // Comfortably inside the default 700, so it loads whole rather than being trimmed to it.
         const { workspace } = load(dir, { static: ["AGENT.md"] })
-        expect(workspace.static).toBe(body.trim())
+        expect(workspace.static).toBe(`## AGENT.md\n\n${body.trim()}`)
     })
 
     test("the tier total is checked even when every file is individually fine", () => {
@@ -231,7 +233,7 @@ describe("budgets", () => {
         const comment = `<!-- ${"note ".repeat(400)} -->`
         const dir = workspaceDir({ "AGENT.md": `${comment}\nShort identity.` })
         const { workspace } = load(dir, { static: ["AGENT.md"] })
-        expect(workspace.static).toBe("Short identity.")
+        expect(workspace.static).toBe("## AGENT.md\n\nShort identity.")
         expect(workspace.tokens.static < 20).toBe(true)
     })
 })
@@ -243,7 +245,7 @@ describe("the context.files alias", () => {
 
         const { plan, workspace } = load(dir, { files: ["IDENTITY.md"] })
 
-        expect(workspace.static).toBe("Legacy identity.")
+        expect(workspace.static).toBe("## IDENTITY.md\n\nLegacy identity.")
         expect(plan.refs[0]?.tier).toBe("static")
         expect(plan.warnings.length).toBe(1)
         expect(plan.warnings[0]?.code).toBe("context_files_deprecated")
@@ -513,5 +515,15 @@ describe("soul rule counting", () => {
         expect(message).toContain('"AGENTS.md: You must reply in English."')
         expect(message).toContain('"AGENTS.md: Always cite sources."')
         expect(message).not.toContain("IDENTITY.md:")
+    })
+})
+
+describe("file labels (pilot.15)", () => {
+    test("each delimiter style names the file and its tier", () => {
+        expect(labelled("SOUL.md", "static", "Body.", "xml")).toBe(
+            '<file name="SOUL.md" tier="static">\nBody.\n</file>',
+        )
+        expect(labelled("SOUL.md", "static", "Body.", "markdown")).toBe("## SOUL.md\n\nBody.")
+        expect(labelled("SOUL.md", "static", "Body.", "plain")).toBe("SOUL.md:\nBody.")
     })
 })

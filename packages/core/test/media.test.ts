@@ -24,6 +24,7 @@ import {
     resolveMedia,
     withDeadline,
 } from "../src/index.ts"
+import { speakable, speechChunks } from "../src/media/speech.ts"
 import { describe, expect, test } from "./_harness.ts"
 
 async function until(check: () => boolean, what: string): Promise<void> {
@@ -80,11 +81,18 @@ const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
 
 type Transcribe = () => Promise<{ text: string; durationS?: number }>
 
+/** What the fake provider was asked to say, across every boot in this file. */
+const spoken: string[] = []
+
 function fakeMedia(transcribe: Transcribe): MediaProviderFactory {
     return {
         create: () => ({
             transcribe: () => transcribe(),
             generateImage: async () => ({ bytes: PNG, mimeType: "image/png" }),
+            synthesize: async (request) => {
+                spoken.push(request.text)
+                return { bytes: new Uint8Array([0x4f, 0x67]), mimeType: "audio/ogg; codecs=opus" }
+            },
         }),
     }
 }
@@ -93,6 +101,7 @@ async function boot(options: {
     media?: string
     transcribe?: Transcribe
     attachments?: boolean
+    voiceNotes?: boolean
     allowFrom?: string
     vision?: boolean
 }) {
@@ -125,6 +134,7 @@ ${options.media ?? ""}`,
             maxMessageChars: 4096,
             idempotentSend: false,
             ...(options.attachments === undefined ? {} : { attachments: options.attachments }),
+            ...(options.voiceNotes === undefined ? {} : { voiceNotes: options.voiceNotes }),
         },
         start: async (h: ChannelHost) => {
             host = h
@@ -209,6 +219,37 @@ describe("the openai media provider", () => {
         expect((form?.get("file") as File | null)?.name).toBe("voice.ogg")
     })
 
+    test("speech posts the text for Ogg/Opus with the voice option (pilot.15)", async () => {
+        const bodies: Record<string, unknown>[] = []
+        const urls: string[] = []
+        const provider = OPENAI_MEDIA_PROVIDER.create({
+            field: "media.speech",
+            config: {
+                provider: "openai",
+                timeoutMs: 1000,
+                maxCharacters: 3000,
+                options: { voice: "nova" },
+            },
+            options: { voice: "nova" },
+            env: { OPENAI_API_KEY: "sk-test" },
+            fetch: async (url, init) => {
+                urls.push(String(url))
+                bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+                return new Response(new Uint8Array([1, 2, 3]))
+            },
+        })
+        const spoken = await provider.synthesize?.({ text: "Hi" }, new AbortController().signal)
+        expect(urls).toEqual(["https://api.openai.com/v1/audio/speech"])
+        expect(bodies[0]).toEqual({
+            model: "gpt-4o-mini-tts",
+            voice: "nova",
+            input: "Hi",
+            response_format: "opus",
+        })
+        expect(spoken?.mimeType).toBe("audio/ogg; codecs=opus")
+        expect(spoken?.bytes.byteLength).toBe(3)
+    })
+
     test("a missing key, an unknown provider and a provider that cannot do the job are refused at load", async () => {
         const manifest = (media: object) => ({ media }) as Parameters<typeof resolveMedia>[0]
         expect(
@@ -271,9 +312,17 @@ describe("voice notes on a channel", () => {
                 results.push(`${event.data.kind}:${event.data.audioSeconds}`)
             }
         })
+        const kinds: (string | undefined)[] = []
+        runtime.bus.on("turn.start", (event) => {
+            if (event.type === "turn.start") kinds.push(event.data.inputKind)
+        })
         deliver("", voice([]))
         await until(() => sent.length === 1, "the reply")
-        expect(inputs).toEqual(["[Voice note, transcribed]\nhello there"])
+        deliver("typed")
+        await until(() => sent.length === 2, "the second reply")
+        // pilot.15: the turn says it began as a voice note, and a typed one says nothing.
+        expect(kinds).toEqual(["voice", undefined])
+        expect(inputs).toEqual(["[Voice note, transcribed]\nhello there", "typed"])
         expect(sent[0]?.text).toBe("Heard you.")
         // The provider's duration wins over the channel's when both are known.
         expect(results).toEqual(["transcription:4"])
@@ -471,5 +520,63 @@ describe("changing media through settings never takes the agent down", () => {
         await until(() => sent.length === 1, "a reply from the old agent")
         expect(sent[0]?.text).toBe("Heard you.")
         await runtime.stop()
+    })
+})
+
+const SPEECH = `${TRANSCRIPTION}  speech:\n    provider: fake\n    model: voice-1\n`
+
+describe("spoken replies (pilot.15)", () => {
+    test("a voice note is answered in text and then a voice note; a typed message in text alone", async () => {
+        spoken.length = 0
+        const { runtime, sent, deliver } = await boot({
+            media: SPEECH,
+            attachments: true,
+            voiceNotes: true,
+        })
+        const kinds: string[] = []
+        runtime.bus.on("media.result", (event) => {
+            if (event.type === "media.result")
+                kinds.push(`${event.data.kind}:${event.data.characters}`)
+        })
+        deliver("", voice([]))
+        await until(() => sent.length === 2, "the text and the voice note")
+        expect(sent[0]?.text).toBe("Heard you.")
+        expect(sent[0]?.attachment).toBeUndefined()
+        expect(sent[1]?.attachment?.mimeType).toBe("audio/ogg; codecs=opus")
+        expect(sent[1]?.attachment?.path).toContain("/media/")
+        expect(spoken).toEqual(["Heard you."])
+        expect(kinds).toEqual(["transcription:undefined", "speech:10"])
+
+        deliver("typed")
+        await until(() => sent.length === 3, "the typed reply")
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(sent.length).toBe(3)
+        expect(spoken).toEqual(["Heard you."])
+        await runtime.stop()
+    })
+
+    test("a channel without voice notes gets the text alone, and no speech is billed", async () => {
+        spoken.length = 0
+        const { runtime, sent, deliver } = await boot({ media: SPEECH, attachments: true })
+        deliver("", voice([]))
+        await until(() => sent.length === 1, "the text")
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(sent.length).toBe(1)
+        expect(spoken).toEqual([])
+        await runtime.stop()
+    })
+})
+
+describe("speakable and speechChunks", () => {
+    test("markup goes, words stay", () => {
+        expect(
+            speakable("## Plan\n- **Ship** it, see [docs](http://x)\n```\ncode\n```\nDone `now`."),
+        ).toBe("Plan\nShip it, see docs\n \nDone now.")
+    })
+    test("a long reply is split at sentences and nothing is lost", () => {
+        const text = "One two three. Four five six. Seven."
+        const chunks = speechChunks(text, 16)
+        expect(chunks).toEqual(["One two three.", "Four five six.", "Seven."])
+        expect(speechChunks("abcdefghij", 4)).toEqual(["abcd", "efgh", "ij"])
     })
 })

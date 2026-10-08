@@ -146,4 +146,26 @@ describe("Telegram media", () => {
         // An empty caption is not sent: Telegram would render it as a blank line under the photo.
         expect(form.has("caption")).toBe(false)
     })
+
+    test("an audio attachment goes out as a voice note, not a photo or a file (pilot.15)", async () => {
+        const { transport, calls } = bot()
+        const dir = mkdtempSync(join(tmpdir(), "tg-media-"))
+        const path = join(dir, "reply.ogg")
+        writeFileSync(path, new Uint8Array([0x4f, 0x67, 0x67, 0x53]))
+        const result = await transport.send({
+            channelId: "tg",
+            recipient: "42",
+            text: "",
+            attachment: { path, mimeType: "audio/ogg; codecs=opus" },
+            idempotencyKey: "k",
+            chunkIndex: 0,
+            chunkTotal: 1,
+        })
+        expect(result).toEqual({ ok: true, providerMessageId: "9" })
+        const call = calls.at(-1)
+        expect(call?.url.endsWith("/sendVoice")).toBe(true)
+        const form = call?.body as FormData
+        expect((form.get("voice") as File).name).toBe("reply.ogg")
+        expect(transport.limits.voiceNotes).toBe(true)
+    })
 })

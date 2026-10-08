@@ -12,7 +12,12 @@
 
 import { ConfigError, HarnessError } from "../errors.ts"
 import type { EnvSource } from "../manifest/env.ts"
-import type { AgentManifest, ImageConfig, TranscriptionConfig } from "../manifest/schema.ts"
+import type {
+    AgentManifest,
+    ImageConfig,
+    SpeechConfig,
+    TranscriptionConfig,
+} from "../manifest/schema.ts"
 import type { FetchLike } from "../model/provider.ts"
 import type { ConfigSchema } from "../plugins/plugin.ts"
 
@@ -41,15 +46,33 @@ export interface GeneratedImage {
     readonly mimeType: string
 }
 
+export interface SpeechRequest {
+    /** Plain text, markup already removed, within the section's `maxCharacters`. */
+    readonly text: string
+}
+
+export interface SpokenAudio {
+    /** Ogg/Opus: what a WhatsApp or Telegram voice note is, so no channel has to convert it. */
+    readonly bytes: Uint8Array
+    readonly mimeType: string
+    /** Characters the provider billed, when it says. */
+    readonly characters?: number
+}
+
 export interface MediaProvider {
     transcribe?(audio: AudioInput, signal: AbortSignal): Promise<Transcript>
     generateImage?(request: ImageRequest, signal: AbortSignal): Promise<GeneratedImage>
+    /** Text to speech for `media.speech` (pilot.15). */
+    synthesize?(request: SpeechRequest, signal: AbortSignal): Promise<SpokenAudio>
 }
 
+type MediaField = "media.transcription" | "media.image" | "media.speech"
+type MediaSection = TranscriptionConfig | ImageConfig | SpeechConfig
+
 export interface MediaProviderContext {
-    /** `media.transcription` or `media.image`, for errors that name a field. */
+    /** `media.transcription`, `media.image` or `media.speech`, for errors that name a field. */
     readonly field: string
-    readonly config: TranscriptionConfig | ImageConfig
+    readonly config: MediaSection
     /** `config.options` after the provider's own `optionsSchema`. */
     readonly options: unknown
     readonly env: EnvSource
@@ -72,8 +95,8 @@ export class MediaError extends HarnessError {
  * than falling back — the same rule as an unknown model transport or tool slug.
  */
 export function mediaProviderFor(
-    field: "media.transcription" | "media.image",
-    config: TranscriptionConfig | ImageConfig,
+    field: MediaField,
+    config: MediaSection,
     factories: ReadonlyMap<string, MediaProviderFactory>,
     context: { readonly env: EnvSource; readonly fetch?: FetchLike },
 ): MediaProvider {
@@ -109,11 +132,16 @@ export function mediaProviderFor(
         env: context.env,
         ...(context.fetch === undefined ? {} : { fetch: context.fetch }),
     })
-    const half = field === "media.transcription" ? provider.transcribe : provider.generateImage
+    const [half, does] =
+        field === "media.transcription"
+            ? [provider.transcribe, "transcribe audio"]
+            : field === "media.speech"
+              ? [provider.synthesize, "speak text"]
+              : [provider.generateImage, "generate images"]
     if (half === undefined) {
         throw new ConfigError({
             code: "media_provider_incapable",
-            message: `The ${config.provider} media provider does not ${field === "media.transcription" ? "transcribe audio" : "generate images"}.`,
+            message: `The ${config.provider} media provider does not ${does}.`,
             hint: "Name a provider that does in this section; the two sections may name different providers.",
             field: `${field}.provider`,
         })
@@ -190,8 +218,9 @@ async function failure(response: Response, what: string, field: string): Promise
 }
 
 /**
- * `openai`: `/audio/transcriptions` and `/images/generations` on any endpoint that speaks them —
- * OpenAI, Groq, a gateway fronting Deepgram or a local Whisper server.
+ * `openai`: `/audio/transcriptions`, `/audio/speech` and `/images/generations` on any endpoint that
+ * speaks them — OpenAI, Groq, a gateway fronting Deepgram or a local Whisper server. Speech takes
+ * `options.voice` (default `alloy`) and asks for `opus`, which OpenAI answers as Ogg/Opus.
  */
 export const OPENAI_MEDIA_PROVIDER: MediaProviderFactory = {
     create(context) {
@@ -229,6 +258,26 @@ export const OPENAI_MEDIA_PROVIDER: MediaProviderFactory = {
                 return {
                     text: typeof body.text === "string" ? body.text : "",
                     ...(typeof body.duration === "number" ? { durationS: body.duration } : {}),
+                }
+            },
+            async synthesize(request, signal) {
+                const options = (config.options ?? {}) as { voice?: unknown }
+                const response = await doFetch(`${baseUrl}/audio/speech`, {
+                    method: "POST",
+                    headers: { authorization, "content-type": "application/json" },
+                    body: JSON.stringify({
+                        model: config.model ?? "gpt-4o-mini-tts",
+                        voice: typeof options.voice === "string" ? options.voice : "alloy",
+                        input: request.text,
+                        response_format: "opus",
+                    }),
+                    signal,
+                })
+                if (!response.ok) throw await failure(response, "The speech request", field)
+                return {
+                    bytes: new Uint8Array(await response.arrayBuffer()),
+                    mimeType: "audio/ogg; codecs=opus",
+                    characters: request.text.length,
                 }
             },
             async generateImage(request, signal) {
@@ -281,6 +330,7 @@ export interface ResolvedMedia {
         readonly provider: MediaProvider
     }
     readonly image?: { readonly config: ImageConfig; readonly provider: MediaProvider }
+    readonly speech?: { readonly config: SpeechConfig; readonly provider: MediaProvider }
 }
 
 /**
@@ -299,7 +349,16 @@ export function resolveMedia(
     const factories = new Map([...BUILT_IN_MEDIA_PROVIDERS, ...(context.providers ?? [])])
     const transcription = manifest.media?.transcription
     const image = manifest.media?.image
+    const speech = manifest.media?.speech
     return {
+        ...(speech === undefined
+            ? {}
+            : {
+                  speech: {
+                      config: speech,
+                      provider: mediaProviderFor("media.speech", speech, factories, context),
+                  },
+              }),
         ...(transcription === undefined
             ? {}
             : {

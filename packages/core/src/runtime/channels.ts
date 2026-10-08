@@ -572,6 +572,7 @@ export class ChannelHub {
             const result = await bound.agent.send(input, {
                 sessionKey: message.sessionKey,
                 source: transport.id,
+                ...(message.audio === undefined ? {} : { inputKind: "voice" as const }),
                 ...(role === undefined ? {} : { role }),
                 ...(images.length === 0 ? {} : { images }),
                 // A remote agent is an agent sender: untrusted text and no acting participant, which
@@ -633,6 +634,9 @@ export class ChannelHub {
                 ...(attachments.length === 0 ? {} : { attachments }),
             })
             await bound.outbox.drain(agentId)
+            if (message.audio !== undefined && reply.trim() !== "") {
+                await this.#speak(bound, transport, message, reply, result.turnId)
+            }
         } catch (cause) {
             stopTyping()
             // A governor refusal ran nothing, so no loop event reports it — and the person is waiting.
@@ -666,6 +670,57 @@ export class ChannelHub {
                     hint: "The sender received no reply. The turn's own error event carries the cause; this one records that a waiting person was affected.",
                 },
                 { agentId, sessionKey: message.sessionKey },
+            )
+        }
+    }
+
+    /**
+     * The reply to a voice note, as a voice note too (pilot.15), sent after the text.
+     *
+     * After rather than instead: the text is already delivered, so a person never waits on the
+     * synthesis to read the answer, and a speech failure costs the audio alone — reported to the
+     * operator, never to the sender, who has their answer. Its own delivery key, so a retried turn
+     * does not speak twice and the text's chunks keep theirs.
+     */
+    async #speak(
+        bound: Bound,
+        transport: ChannelTransport,
+        message: InboundMessage,
+        reply: string,
+        turnId: string,
+    ): Promise<void> {
+        if (!bound.agent.canSpeak || transport.limits.voiceNotes !== true) return
+        try {
+            const files = await bound.agent.speak(reply, {
+                sessionKey: message.sessionKey,
+                turnId,
+            })
+            if (files.length === 0) return
+            await bound.outbox.enqueue({
+                agentId: bound.agent.id,
+                sessionKey: message.sessionKey,
+                channelId: transport.id,
+                recipient: message.peerId,
+                key: `voice:${turnId}`,
+                ...(message.thread === undefined ? {} : { thread: message.thread }),
+                text: "",
+                attachments: files,
+            })
+            await bound.outbox.drain(bound.agent.id)
+        } catch (cause) {
+            this.#bus.emit(
+                "agent.channel.error",
+                {
+                    channelId: transport.id,
+                    code: isHarnessError(cause) ? cause.code : "media_failed",
+                    message: `The reply to a voice note on ${transport.id} was not spoken: ${
+                        cause instanceof Error ? cause.message : String(cause)
+                    }`,
+                    hint: isHarnessError(cause)
+                        ? cause.hint
+                        : "The text reply was delivered; only the voice note is missing. Check media.speech's provider and credentials.",
+                },
+                { agentId: bound.agent.id, sessionKey: message.sessionKey },
             )
         }
     }

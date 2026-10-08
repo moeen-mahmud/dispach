@@ -352,7 +352,7 @@ export const StopBody = z.object({
  * `confirm` is the person's acknowledgement of the two edits whose only purpose is to stop a check
  * running — carried as a field rather than a query flag because it belongs to the edit it approves.
  */
-export const ConfigBody = z.object({
+const ConfigChange = z.object({
     path: refuse(z.string().min(1), {
         code: "config_path_unknown",
         hint: "GET /v1/agents/:id/config lists every field this surface may change, with what each one does.",
@@ -374,6 +374,17 @@ export const ConfigBody = z.object({
     confirm: annotate(
         z.boolean().optional(),
         "Required only for a field whose own row carries a `confirm` sentence. Absent is not consent.",
+    ),
+})
+
+/**
+ * One change, or several under `changes` applied as one write and one reload (pilot.15, VelaCrew:
+ * applying a configuration a setting at a time reloaded the agent once per setting). Not both.
+ */
+export const ConfigBody = ConfigChange.partial({ path: true }).extend({
+    changes: annotate(
+        z.array(ConfigChange).min(1).optional(),
+        "Several changes, each `{path, value}` or `{path, remove: true}`, applied in order and checked against the file as the earlier ones left it. One write and one reload; any refusal writes nothing. Sent instead of a top-level `path`.",
     ),
 })
 

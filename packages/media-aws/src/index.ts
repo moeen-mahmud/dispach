@@ -19,8 +19,14 @@
  * **Transcribe streaming, not batch.** Batch transcription reads from S3, which would add a bucket, a
  * lifecycle and a second IAM surface for a thirty-second voice note. Streaming takes the bytes
  * directly — in OGG/Opus (Telegram, WhatsApp) or FLAC. Anything else (a Slack clip is WebM, a Teams
- * memo M4A) is refused with a hint naming the `openai` provider, which takes those.
+ * memo M4A) is decoded to 16 kHz PCM by `ffmpeg` first (pilot.15), which the image carries; without
+ * it on the PATH those formats are refused with a hint saying so.
+ *
+ * **Polly for `media.speech`** (pilot.15), asked for `ogg_opus`, which is what a WhatsApp or Telegram
+ * voice note already is, so nothing is transcoded on the way out. `voiceId` and `engine` are options.
  */
+
+import { spawn } from "node:child_process"
 
 import type {
     AudioStream,
@@ -42,7 +48,25 @@ export interface AwsMediaOptions {
     readonly languageCode?: string
     /** The Opus sample rate. Voice notes on Telegram and WhatsApp are 48 kHz. */
     readonly sampleRate?: number
+    /** Polly's voice for `media.speech`, `Joanna` when absent. */
+    readonly voiceId?: string
+    /** Polly's engine: `neural` when absent; `standard`, `long-form` or `generative`. */
+    readonly engine?: string
 }
+
+/** Synthesises one piece of speech; returns the audio and the characters Polly billed. */
+export type SpeakSend = (
+    input: {
+        readonly text: string
+        readonly voiceId: string
+        readonly engine: string
+        readonly languageCode?: string
+    },
+    signal: AbortSignal,
+) => Promise<{ readonly bytes: Uint8Array; readonly characters?: number }>
+
+/** Audio in some container, as 16 kHz mono 16-bit PCM. Rejects when it cannot. */
+export type Decode = (bytes: Uint8Array, signal: AbortSignal) => Promise<Uint8Array>
 
 /** Opens one Transcribe stream. The default imports the SDK lazily; a test replaces it. */
 export type TranscribeSend = (
@@ -59,7 +83,56 @@ export type InvokeSend = (
 export interface AwsClients {
     readonly transcribe: (options: AwsMediaOptions) => Promise<TranscribeSend>
     readonly invoke: (options: AwsMediaOptions) => Promise<InvokeSend>
+    readonly speak: (options: AwsMediaOptions) => Promise<SpeakSend>
+    readonly decode: Decode
 }
+
+/** The sample rate audio is decoded to: what Transcribe recommends for speech. */
+const PCM_RATE = 16_000
+
+/**
+ * `ffmpeg` reading the bytes on stdin and writing raw PCM on stdout. No shell: the arguments are an
+ * array, and the input is the person's own audio, never a path. Killed when the deadline aborts.
+ */
+export const ffmpegDecode: Decode = (bytes, signal) =>
+    new Promise((resolve, reject) => {
+        const child = spawn(
+            "ffmpeg",
+            ["-hide_banner", "-loglevel", "error", "-i", "pipe:0"].concat([
+                "-f",
+                "s16le",
+                "-ac",
+                "1",
+                "-ar",
+                String(PCM_RATE),
+                "pipe:1",
+            ]),
+            { stdio: ["pipe", "pipe", "pipe"] },
+        )
+        const out: Buffer[] = []
+        const err: Buffer[] = []
+        const onAbort = () => child.kill("SIGKILL")
+        signal.addEventListener("abort", onAbort, { once: true })
+        child.stdout.on("data", (chunk: Buffer) => out.push(chunk))
+        child.stderr.on("data", (chunk: Buffer) => err.push(chunk))
+        child.on("error", (cause) => {
+            signal.removeEventListener("abort", onAbort)
+            reject(cause)
+        })
+        child.on("close", (code) => {
+            signal.removeEventListener("abort", onAbort)
+            if (code === 0) resolve(new Uint8Array(Buffer.concat(out)))
+            else
+                reject(
+                    new Error(
+                        Buffer.concat(err).toString("utf8").trim() || `ffmpeg exited ${code}`,
+                    ),
+                )
+        })
+        // A closed stdin (ffmpeg gave up on a bad header) is reported by `close`, not here.
+        child.stdin.on("error", () => {})
+        child.stdin.end(Buffer.from(bytes))
+    })
 
 export const sdkClients: AwsClients = {
     async transcribe(options) {
@@ -97,9 +170,53 @@ export const sdkClients: AwsClients = {
             return new TextDecoder().decode(response.body)
         }
     },
+    async speak(options) {
+        const sdk = await import("@aws-sdk/client-polly")
+        const client = new sdk.PollyClient({
+            region: options.region,
+            ...(options.profile === undefined ? {} : { profile: options.profile }),
+        })
+        return async (input, signal) => {
+            const response = await client.send(
+                new sdk.SynthesizeSpeechCommand({
+                    Text: input.text,
+                    OutputFormat: "ogg_opus",
+                    VoiceId: input.voiceId as NonNullable<
+                        ConstructorParameters<typeof sdk.SynthesizeSpeechCommand>[0]["VoiceId"]
+                    >,
+                    Engine: input.engine as ConstructorParameters<
+                        typeof sdk.SynthesizeSpeechCommand
+                    >[0]["Engine"],
+                    ...(input.languageCode === undefined
+                        ? {}
+                        : {
+                              LanguageCode: input.languageCode as ConstructorParameters<
+                                  typeof sdk.SynthesizeSpeechCommand
+                              >[0]["LanguageCode"],
+                          }),
+                }),
+                { abortSignal: signal },
+            )
+            if (response.AudioStream === undefined) throw new Error("Polly returned no audio.")
+            return {
+                bytes: await response.AudioStream.transformToByteArray(),
+                ...(response.RequestCharacters === undefined
+                    ? {}
+                    : { characters: response.RequestCharacters }),
+            }
+        }
+    },
+    decode: ffmpegDecode,
 }
 
-const OPTION_KEYS = new Set(["region", "profile", "languageCode", "sampleRate"])
+const OPTION_KEYS = new Set([
+    "region",
+    "profile",
+    "languageCode",
+    "sampleRate",
+    "voiceId",
+    "engine",
+])
 
 const optionsSchema = {
     safeParse(value: unknown) {
@@ -120,6 +237,13 @@ const optionsSchema = {
         }
         if (record.sampleRate !== undefined && typeof record.sampleRate !== "number") {
             return fail("sampleRate is a number of hertz")
+        }
+        for (const key of ["voiceId", "engine", "languageCode"] as const) {
+            if (record[key] !== undefined && typeof record[key] !== "string") {
+                return fail(
+                    `${key} is text, e.g. ${key === "engine" ? "neural" : key === "voiceId" ? "Joanna" : "en-GB"}`,
+                )
+            }
         }
         return { success: true as const, data: record as unknown as AwsMediaOptions }
     },
@@ -150,10 +274,12 @@ function refused(cause: unknown, field: string): MediaError {
         message: `AWS refused the request (${name || "error"}): ${message}`,
         hint:
             name === "AccessDeniedException" || name === "UnrecognizedClientException"
-                ? "The role needs transcribe:StartStreamTranscription for voice notes and bedrock:InvokeModel on the image model; check the pod's service account or the credentials in the environment."
+                ? "The role needs transcribe:StartStreamTranscription for voice notes, polly:SynthesizeSpeech for spoken replies, and bedrock:InvokeModel on the image model; check the pod's service account or the credentials in the environment."
                 : name === "ValidationException"
                   ? "Nova Canvas takes a prompt of at most 1,024 characters and a size whose sides are multiples of 16 between 320 and 4096."
-                  : "AWS's own words are above.",
+                  : name === "TextLengthExceededException"
+                    ? "Lower media.speech.maxCharacters; each voice note is one Polly request."
+                    : "AWS's own words are above.",
         field,
     })
 }
@@ -174,16 +300,28 @@ export function awsMedia(clients: AwsClients = sdkClients): MediaProviderFactory
             // One client per provider, built on first use.
             let transcriber: Promise<TranscribeSend> | undefined
             let invoker: Promise<InvokeSend> | undefined
+            let speaker: Promise<SpeakSend> | undefined
             const provider: MediaProvider = {
                 async transcribe(audio, signal) {
-                    const encoding = encodingOf(audio.mimeType)
-                    if (encoding === undefined) {
-                        throw new MediaError({
-                            code: "media_audio_unsupported",
-                            message: `Amazon Transcribe streaming cannot read ${audio.mimeType}.`,
-                            hint: "It takes OGG/Opus (Telegram and WhatsApp voice notes) and FLAC. Slack clips (WebM) and Teams memos (M4A) need the openai provider in media.transcription.",
-                            field: `${context.field}.provider`,
-                        })
+                    const native = encodingOf(audio.mimeType)
+                    let bytes = audio.bytes
+                    if (native === undefined) {
+                        // Transcribe streaming reads Ogg/Opus, FLAC and PCM; anything else is decoded.
+                        try {
+                            bytes = await clients.decode(audio.bytes, signal)
+                        } catch (cause) {
+                            const missing = (cause as { code?: unknown }).code === "ENOENT"
+                            throw new MediaError({
+                                code: "media_audio_unsupported",
+                                message: missing
+                                    ? `Amazon Transcribe streaming cannot read ${audio.mimeType}, and ffmpeg, which would convert it, is not installed.`
+                                    : `${audio.mimeType} could not be converted for Amazon Transcribe: ${cause instanceof Error ? cause.message : String(cause)}`,
+                                hint: missing
+                                    ? "Install ffmpeg on the PATH (the container image carries it), or use the openai provider in media.transcription."
+                                    : "The file is probably not audio, or is damaged. Ogg/Opus and FLAC are sent as they are.",
+                                field: `${context.field}.provider`,
+                            })
+                        }
                     }
                     transcriber ??= clients.transcribe(options)
                     try {
@@ -192,9 +330,12 @@ export function awsMedia(clients: AwsClients = sdkClients): MediaProviderFactory
                             {
                                 LanguageCode: (options.languageCode ??
                                     "en-US") as StartStreamTranscriptionCommandInput["LanguageCode"],
-                                MediaEncoding: encoding,
-                                MediaSampleRateHertz: options.sampleRate ?? 48_000,
-                                AudioStream: chunks(audio.bytes),
+                                MediaEncoding: native ?? "pcm",
+                                MediaSampleRateHertz:
+                                    native === undefined
+                                        ? PCM_RATE
+                                        : (options.sampleRate ?? 48_000),
+                                AudioStream: chunks(bytes),
                             },
                             signal,
                         )
@@ -214,6 +355,32 @@ export function awsMedia(clients: AwsClients = sdkClients): MediaProviderFactory
                         }
                     } catch (cause) {
                         if (cause instanceof MediaError) throw cause
+                        throw refused(cause, context.field)
+                    }
+                },
+                async synthesize(request, signal) {
+                    speaker ??= clients.speak(options)
+                    try {
+                        const send = await speaker
+                        const spoken = await send(
+                            {
+                                text: request.text,
+                                voiceId: options.voiceId ?? "Joanna",
+                                engine: options.engine ?? "neural",
+                                ...(options.languageCode === undefined
+                                    ? {}
+                                    : { languageCode: options.languageCode }),
+                            },
+                            signal,
+                        )
+                        return {
+                            bytes: spoken.bytes,
+                            mimeType: "audio/ogg; codecs=opus",
+                            ...(spoken.characters === undefined
+                                ? {}
+                                : { characters: spoken.characters }),
+                        }
+                    } catch (cause) {
                         throw refused(cause, context.field)
                     }
                 },
@@ -268,7 +435,11 @@ export default {
     permissions: [
         {
             kind: "network",
-            hosts: ["transcribestreaming.*.amazonaws.com", "bedrock-runtime.*.amazonaws.com"],
+            hosts: [
+                "transcribestreaming.*.amazonaws.com",
+                "bedrock-runtime.*.amazonaws.com",
+                "polly.*.amazonaws.com",
+            ],
         },
     ],
     setup(context) {

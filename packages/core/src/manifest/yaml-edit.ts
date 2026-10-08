@@ -24,7 +24,7 @@
  * wrong one.
  */
 
-import { parse } from "yaml"
+import { parse, parseDocument } from "yaml"
 
 /**
  * How a value is written into the file. Nothing else is settable, so nothing else is handled.
@@ -239,7 +239,15 @@ export function removeInSource(source: string, path: readonly string[]): string 
     const at = findKey(lines, path[path.length - 1] ?? "", walked.indent, walked.searchFrom)
     if (at === undefined) return source
     const end = endOfBlock(lines, at, walked.indent)
-    return [...lines.slice(0, at), ...lines.slice(end + 1)].join("\n")
+    const next = [...lines.slice(0, at), ...lines.slice(end + 1)].join("\n")
+    // A parent left with no keys reads back as null, which the schema refuses for a map: removing a
+    // template's only `limits.noProgress.sameTool` left `noProgress:` behind (pilot.15, VelaCrew). An
+    // empty parent goes too, and so on upwards, so "remove" means the default comes back.
+    const parent = path.slice(0, -1)
+    if (parent.length > 0 && parseDocument(next).getIn([...parent]) == null) {
+        return removeInSource(next, parent) ?? next
+    }
+    return next
 }
 
 export function setInSource(

@@ -235,6 +235,18 @@ export class TelegramApi {
         return this.call<TelegramMessage>("sendPhoto", form, signal)
     }
 
+    /** Ogg/Opus as a voice note: the playable waveform bubble, not a file (pilot.15). */
+    sendVoice(
+        input: { chatId: string; voice: Blob; filename: string; threadId?: number },
+        signal?: AbortSignal,
+    ): Promise<TelegramMessage> {
+        const form = new FormData()
+        form.set("chat_id", input.chatId)
+        form.set("voice", input.voice, input.filename)
+        if (input.threadId !== undefined) form.set("message_thread_id", String(input.threadId))
+        return this.call<TelegramMessage>("sendVoice", form, signal)
+    }
+
     getFile(fileId: string, signal?: AbortSignal): Promise<{ file_path?: string }> {
         return this.call<{ file_path?: string }>("getFile", { file_id: fileId }, signal)
     }

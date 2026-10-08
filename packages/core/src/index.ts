@@ -121,7 +121,9 @@ export {
 export { type EndContext, endedBadly, endNote } from "./loop/turn-end.ts"
 export {
     editManifest,
+    editManifestChanges,
     editManifestSync,
+    type ManifestChange,
     type ManifestEdit,
     type ManifestEditResult,
     manifestDocument,

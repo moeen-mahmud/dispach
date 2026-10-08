@@ -159,6 +159,19 @@ export const SETTINGS: readonly Setting[] = [
         means: "how long any single tool may take",
         agentListed: true,
     },
+    // Person-only (pilot.15, VelaCrew): the loop guard is what stops a turn that is going nowhere,
+    // so the agent loosening its own is the agent widening its containment. `sameTool` has its own
+    // row so a template's leftover value can be removed without restating `identicalCalls`.
+    {
+        path: "limits.noProgress",
+        means: "when a turn is stopped for going nowhere, as a map: {identicalCalls: <n, default 3>, sameTool: <n, off when absent>}",
+        agentListed: false,
+    },
+    {
+        path: "limits.noProgress.sameTool",
+        means: "stop a turn after this many calls in a row to one tool, whatever the arguments. Absent, off",
+        agentListed: false,
+    },
     {
         path: "context.observationMaxTokens",
         means: "how much of a tool's output reaches the model",
@@ -226,7 +239,7 @@ export const SETTINGS: readonly Setting[] = [
         // an env var *name*; `.env` is protected, so the agent can enable a provider and cannot
         // supply its secret — which is the person's by construction.
         path: "media",
-        means: "voice notes and images: {transcription, image}, each {provider: openai|aws, model, apiKeyEnv}",
+        means: "voice notes, spoken replies and images: {transcription, speech, image}, each {provider: openai|aws, model, apiKeyEnv, options}",
         toAgent:
             "image adds image_generate after a restart; filling in the key variable is the person's",
         agentListed: true,
@@ -268,6 +281,14 @@ export const SETTINGS: readonly Setting[] = [
     {
         path: "delegation.to",
         means: 'the other members\' agents this one may ask, by id, or "*" for every agent that offers. A peer ask is one hop: the asked agent answers, and cannot ask onward',
+        agentListed: false,
+    },
+    // Person- or engine-only (pilot.15, VelaCrew), written as a whole list. A child narrows its parent's
+    // tools by construction, but which work leaves the parent's context is the operator's design, and
+    // an agent able to route its own calls could route a gated write through a child it wrote.
+    {
+        path: "subagents",
+        means: "children that run routed tool calls in their own context, as a list of {name, task, tools, route: {tools}, model?, maxSteps?, timeoutMs?}. Each tool must be pinned, and each routed slug belongs to one child",
         agentListed: false,
     },
     {

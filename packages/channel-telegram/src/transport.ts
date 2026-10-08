@@ -79,6 +79,7 @@ export class TelegramTransport implements ChannelTransport {
         idempotentSend: false,
         minSendIntervalMs: MIN_SEND_INTERVAL_MS,
         attachments: true,
+        voiceNotes: true,
     }
 
     readonly #api: TelegramApi
@@ -170,18 +171,30 @@ export class TelegramTransport implements ChannelTransport {
                           },
                           signal,
                       )
-                    : await this.#api.sendPhoto(
-                          {
-                              chatId: message.recipient,
-                              photo: new Blob([await readFile(attachment.path)], {
-                                  type: attachment.mimeType,
-                              }),
-                              filename: basename(attachment.path),
-                              caption: message.text,
-                              ...(threadId === undefined ? {} : { threadId }),
-                          },
-                          signal,
-                      )
+                    : attachment.mimeType.startsWith("audio/")
+                      ? await this.#api.sendVoice(
+                            {
+                                chatId: message.recipient,
+                                voice: new Blob([await readFile(attachment.path)], {
+                                    type: "audio/ogg",
+                                }),
+                                filename: basename(attachment.path),
+                                ...(threadId === undefined ? {} : { threadId }),
+                            },
+                            signal,
+                        )
+                      : await this.#api.sendPhoto(
+                            {
+                                chatId: message.recipient,
+                                photo: new Blob([await readFile(attachment.path)], {
+                                    type: attachment.mimeType,
+                                }),
+                                filename: basename(attachment.path),
+                                caption: message.text,
+                                ...(threadId === undefined ? {} : { threadId }),
+                            },
+                            signal,
+                        )
             return { ok: true, providerMessageId: String(sent.message_id) }
         } catch (cause) {
             if (cause instanceof TelegramApiError) {

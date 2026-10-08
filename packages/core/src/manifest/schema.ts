@@ -640,6 +640,13 @@ export const SubagentSchema = z
         model: z.string().min(1).optional(),
         /** Lowers the parent's `limits.maxSteps` for the child, never raises it. */
         maxSteps: z.number().int().positive().optional(),
+        /**
+         * The routed call's bound in milliseconds, in place of `limits.toolTimeoutMs` for this child's
+         * `route.tools` only (pilot.15). A child reading fifteen messages one call at a time needs
+         * longer than one tool should be given, and raising the tool bound would raise it for `exec`
+         * too. The child is still ended a second before it, so it reports a timeout.
+         */
+        timeoutMs: z.number().int().positive().optional(),
     })
     .strict()
 
@@ -680,6 +687,24 @@ export const MediaSchema = z
                     .int()
                     .positive()
                     .default(25 * 1024 * 1024),
+            })
+            .strict()
+            .optional(),
+        /**
+         * Speaks the reply to a voice note as a voice note too (pilot.15, VelaCrew), after the text,
+         * on a channel that can carry one. Only a turn that began as a voice note is answered in
+         * audio; typed messages are never spoken to. The provider returns Ogg/Opus, which is what a
+         * WhatsApp or Telegram voice note is.
+         */
+        speech: z
+            .object({
+                ...MediaSectionFields,
+                timeoutMs: z.number().int().positive().default(60_000),
+                /**
+                 * Characters per voice note. A longer reply becomes several notes split at sentence
+                 * ends rather than being cut: 3,000 is Polly's limit for one request.
+                 */
+                maxCharacters: z.number().int().positive().default(3000),
             })
             .strict()
             .optional(),
@@ -957,6 +982,7 @@ export type StandInConfig = z.infer<typeof StandInSchema>
 export type DelegationConfig = z.infer<typeof DelegationSchema>
 export type TranscriptionConfig = NonNullable<MediaConfig["transcription"]>
 export type ImageConfig = NonNullable<MediaConfig["image"]>
+export type SpeechConfig = NonNullable<MediaConfig["speech"]>
 export type PluginRef = z.infer<typeof PluginRefSchema>
 export type LimitsConfig = z.infer<typeof LimitsSchema>
 export type ServerConfig = z.infer<typeof ServerSchema>

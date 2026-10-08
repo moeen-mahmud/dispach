@@ -94,6 +94,8 @@ export interface ToolRuntime {
     readonly wireTokens: number
     /** The agent's directory. A tool touching the filesystem resolves against it, not the cwd. */
     readonly dir: string
+    /** Routed slugs whose subagent declares its own `timeoutMs`, used instead of the tool bound. */
+    readonly timeoutFor?: ReadonlyMap<string, number>
     /** Where `memory_write` lands, resolved from the workspace at load. Absent means no workspace
      * declared anywhere writable, and the tool falls back to the agent's own directory. */
     readonly writeTarget?: WorkspaceWriteTarget
@@ -220,6 +222,8 @@ export interface TurnInput {
     readonly middleware?: readonly Middleware[]
     /** Where the turn came from, for the `turn.start` event: `repl`, `api`, `schedule`, … */
     readonly source: string
+    /** `voice` when the input is a transcribed voice note, for the `turn.start` event. */
+    readonly inputKind?: "voice"
     /**
      * Who sent `input`, when it was not the operator.
      *
@@ -642,6 +646,7 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
             // reporting the bare message would understate every peer turn by the notice's length.
             inputTokens: estimateMessageTokens(promptInput),
             trust: inputTrust,
+            ...(input.inputKind === undefined ? {} : { inputKind: input.inputKind }),
             ...(input.from === undefined
                 ? {}
                 : { from: { id: input.from.id, kind: input.from.kind } }),
@@ -1379,6 +1384,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                           bus: input.bus,
                           eventContext: stepContext,
                           timeoutMs: input.limits.toolTimeoutMs,
+                          ...(tools.timeoutFor === undefined
+                              ? {}
+                              : { timeoutFor: tools.timeoutFor }),
                           maxParallel: input.limits.maxParallelTools,
                           observationMaxTokens: tools.observationMaxTokens,
                           ...(tools.eventDetail === undefined

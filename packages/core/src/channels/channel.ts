@@ -125,7 +125,8 @@ export interface OutboundMessage {
     readonly chunkTotal: number
     /**
      * A file to send, with `text` as its caption (usually empty). Only handed to a transport whose
-     * `limits.attachments` is true; for any other, the reply names the file in words instead.
+     * `limits.attachments` is true; for any other, the reply names the file in words instead. An
+     * `audio/*` type is a voice note, and only reaches a transport declaring `limits.voiceNotes`.
      */
     readonly attachment?: { readonly path: string; readonly mimeType: string }
 }
@@ -179,6 +180,12 @@ export interface ChannelLimits {
     readonly minSendIntervalMs?: number
     /** Whether `send` can carry `OutboundMessage.attachment` — an image the agent generated. */
     readonly attachments?: boolean
+    /**
+     * Whether an `audio/*` attachment goes out as a playable voice note — WhatsApp's `ptt`,
+     * Telegram's `sendVoice` — rather than as a file (pilot.15). Only a channel declaring it is sent
+     * the spoken reply to a voice note; the others get the text alone, as before.
+     */
+    readonly voiceNotes?: boolean
 }
 
 /**

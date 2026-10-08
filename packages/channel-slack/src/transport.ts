@@ -77,6 +77,8 @@ export class SlackTransport implements ChannelTransport {
         idempotentSend: false,
         minSendIntervalMs: 1_000,
         attachments: true,
+        // An uploaded Ogg/Opus plays inline in Slack, which has no separate voice-note message.
+        voiceNotes: true,
     }
     readonly #appToken: string
     readonly #botToken: string

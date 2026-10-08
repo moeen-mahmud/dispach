@@ -84,6 +84,16 @@ the reminder in the same message as the person's input, and a model told them th
 instructions. A workspace file that still holds a `{{vars.…}}` placeholder when it reaches the model
 is reported as `workspace_unrendered_var`, at load and by `validate`.
 
+**Every file arrives under its own name** (pilot.15). Each file in a tier is labelled in the active
+`promptStyle.delimiters`: `<file name="SOUL.md" tier="static">…</file>` for `xml`, a `## SOUL.md`
+heading for `markdown`, `SOUL.md:` for `plain`. Slot 2 has a `context files` row listing the static and
+reminder files as loaded every turn, and the volatile files as loaded in private conversations,
+because slot 2 is frozen per agent while a room or a stand-in turn withholds the volatile tier. The
+labels show what a given turn actually carries. Before this, the files' text was joined bare: an agent
+asked whether SOUL.md was loaded could not connect the name to the text it was reading, said it was
+not, and re-read every file until `no_progress`. A label is structure, like the `<example>` rendering,
+and never changes the author's prose. It costs a few tokens per file, outside the file's own `budget:`.
+
 **Current input last of all.** Placing the query after long content improves response
 quality substantially on multi-document inputs.
 

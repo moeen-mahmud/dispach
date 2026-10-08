@@ -15,7 +15,7 @@
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative, resolve as resolvePath, sep } from "node:path"
-import type { Capability as Cap, KeyScope, ReloadOutcome } from "@dispach/core"
+import type { Capability as Cap, KeyScope, ReloadOutcome, Setting } from "@dispach/core"
 import {
     type Agent,
     type AgentStateRecord,
@@ -25,7 +25,7 @@ import {
     type ConversationRecord,
     type ErrorDetail,
     EVENT_TYPES,
-    editManifest,
+    editManifestChanges,
     entryPhase,
     exportBundle,
     formatSessionKey,
@@ -3589,6 +3589,23 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 if (body.kind === "error") return fail(body.error, 400)
                 const parsed = parseBody(ConfigBody, body.value)
                 if (!parsed.ok) return fail(parsed.error, 400)
+                const single = parsed.value.changes === undefined
+                if (single === (parsed.value.path === undefined)) {
+                    return fail(
+                        {
+                            code: single ? "config_path_unknown" : "config_changes_invalid",
+                            message: single
+                                ? "A request named no path."
+                                : "A request named both a path and changes.",
+                            hint: 'Send { "path", "value" } for one change, or { "changes": [{ "path", "value" }, ...] } for several in one reload.',
+                            field: single ? "path" : "changes",
+                        },
+                        400,
+                    )
+                }
+                const requested = parsed.value.changes ?? [
+                    { ...parsed.value, path: parsed.value.path ?? "" },
+                ]
 
                 const source = runtime.sourceOf(agent.id)
                 if (typeof source !== "string") {
@@ -3602,79 +3619,87 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     )
                 }
 
-                const setting = personSetting(parsed.value.path) ?? settingByPath(parsed.value.path)
-                // `via` and the placeholder paths are in `SETTINGS` and not in
-                // `PERSON_SETTABLE_PATHS`, so the membership test is the one that decides — and the
-                // refusal reads the row anyway, because `channels[].allowFrom` can name the command
-                // that does set it instead of answering "no such setting" about a real field.
-                if (setting === undefined || personSetting(parsed.value.path) === undefined) {
-                    return fail(
-                        {
-                            code: "config_path_unknown",
-                            message:
-                                setting?.via === undefined
-                                    ? `"${parsed.value.path}" is not a field this surface sets.`
-                                    : `"${parsed.value.path}" is set by \`${setting.via}\`, not by a dotted path.`,
-                            hint:
-                                setting?.via === undefined
-                                    ? `GET /v1/agents/:id/config lists every one. Nearest: ${nearest(parsed.value.path, PERSON_SETTABLE_PATHS) ?? PERSON_SETTABLE_PATHS.join(", ")}.`
-                                    : "It is a key inside a list entry, and the source editor matches a key at an indent — it cannot index a sequence. That action also validates the handle against the service that issues it.",
-                            field: "path",
-                        },
-                        400,
-                    )
+                const settings: Setting[] = []
+                for (const change of requested) {
+                    const setting = personSetting(change.path) ?? settingByPath(change.path)
+                    // `via` and the placeholder paths are in `SETTINGS` and not in
+                    // `PERSON_SETTABLE_PATHS`, so the membership test is the one that decides — and the
+                    // refusal reads the row anyway, because `channels[].allowFrom` can name the command
+                    // that does set it instead of answering "no such setting" about a real field.
+                    if (setting === undefined || personSetting(change.path) === undefined) {
+                        return fail(
+                            {
+                                code: "config_path_unknown",
+                                message:
+                                    setting?.via === undefined
+                                        ? `"${change.path}" is not a field this surface sets.`
+                                        : `"${change.path}" is set by \`${setting.via}\`, not by a dotted path.`,
+                                hint:
+                                    setting?.via === undefined
+                                        ? `GET /v1/agents/:id/config lists every one. Nearest: ${nearest(change.path, PERSON_SETTABLE_PATHS) ?? PERSON_SETTABLE_PATHS.join(", ")}.`
+                                        : "It is a key inside a list entry, and the source editor matches a key at an indent — it cannot index a sequence. That action also validates the handle against the service that issues it.",
+                                field: "path",
+                            },
+                            400,
+                        )
+                    }
+
+                    // Exactly one of the two: a value with `remove` is a request that means two things.
+                    const removing = change.remove === true
+                    if (removing === (change.value !== undefined)) {
+                        return fail(
+                            {
+                                code: removing
+                                    ? "config_remove_invalid"
+                                    : "config_value_unreadable",
+                                message: removing
+                                    ? "A request named both a value and remove: true."
+                                    : "A request named neither a value nor remove: true.",
+                                hint: 'Send { "path", "value" } to set a field, or { "path", "remove": true } to take it out.',
+                                field: removing ? "remove" : "value",
+                            },
+                            400,
+                        )
+                    }
+
+                    // The two edits whose only purpose is to stop a check running. Refused rather than
+                    // logged: `confirm` absent is not consent, and the sentence is the row's own, so the
+                    // terminal and the browser ask the same question in the same words.
+                    if (setting.confirm !== undefined && change.confirm !== true) {
+                        return fail(
+                            {
+                                code: "config_confirm_required",
+                                message: setting.confirm,
+                                hint: 'Send { "confirm": true } beside the value to make this change anyway. Nothing has been written.',
+                                field: "confirm",
+                            },
+                            409,
+                        )
+                    }
+                    settings.push(setting)
                 }
 
-                // Exactly one of the two: a value with `remove` is a request that means two things.
-                const removing = parsed.value.remove === true
-                if (removing === (parsed.value.value !== undefined)) {
-                    return fail(
-                        {
-                            code: removing ? "config_remove_invalid" : "config_value_unreadable",
-                            message: removing
-                                ? "A request named both a value and remove: true."
-                                : "A request named neither a value nor remove: true.",
-                            hint: 'Send { "path", "value" } to set a field, or { "path", "remove": true } to take it out.',
-                            field: removing ? "remove" : "value",
-                        },
-                        400,
-                    )
-                }
-
-                // The two edits whose only purpose is to stop a check running. Refused rather than
-                // logged: `confirm` absent is not consent, and the sentence is the row's own, so the
-                // terminal and the browser ask the same question in the same words.
-                if (setting.confirm !== undefined && parsed.value.confirm !== true) {
-                    return fail(
-                        {
-                            code: "config_confirm_required",
-                            message: setting.confirm,
-                            hint: 'Send { "confirm": true } beside the value to make this change anyway. Nothing has been written.',
-                            field: "confirm",
-                        },
-                        409,
-                    )
-                }
-
-                let result: Awaited<ReturnType<typeof editManifest>>
+                let results: Awaited<ReturnType<typeof editManifestChanges>>
                 try {
-                    result = await editManifest({
-                        file: source,
-                        // The concrete path: `model.fast`, not the row's `model.<role>`.
-                        path: parsed.value.path.split("."),
-                        // One parser for the person's two editors — see `ConfigBody`. Throws by name
-                        // rather than guessing, because guessing is how `tools.pinned: "exec"`
-                        // becomes a one-character tool list.
-                        value:
-                            parsed.value.value === undefined
-                                ? undefined
-                                : parseSettingValue(parsed.value.value),
-                        ...(removing ? { remove: true as const } : {}),
-                        // Refuses a provider config the provider would refuse (an MCP server with a
-                        // credential in its URL), rather than writing it and dropping the provider.
-                        providers: runtime.toolProviderFactories,
-                        mediaProviders: runtime.mediaProviderFactories,
-                    })
+                    results = await editManifestChanges(
+                        source,
+                        requested.map((change) => ({
+                            // The concrete path: `model.fast`, not the row's `model.<role>`.
+                            path: change.path.split("."),
+                            // One parser for the person's two editors — see `ConfigBody`. Throws by
+                            // name rather than guessing, because guessing is how `tools.pinned: "exec"`
+                            // becomes a one-character tool list.
+                            value:
+                                change.value === undefined
+                                    ? undefined
+                                    : parseSettingValue(change.value),
+                            ...(change.remove === true ? { remove: true as const } : {}),
+                            // Refuses a provider config the provider would refuse (an MCP server with
+                            // a credential in its URL), rather than writing it and dropping the provider.
+                            providers: runtime.toolProviderFactories,
+                            mediaProviders: runtime.mediaProviderFactories,
+                        })),
+                    )
                 } catch (error) {
                     if (isHarnessError(error)) return fail(error.toDetail(), 400)
                     throw error
@@ -3692,30 +3717,44 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                  * already written at that point and saying so is the only honest answer — the edit
                  * takes effect at the next start, which is exactly what `dispach config set` reports.
                  * Returning 409 and implying nothing happened would be rule 8 with better manners.
+                 *
+                 * Nothing written, nothing reloaded (pilot.15, VelaCrew): a value equal to the one in
+                 * the file is already in force, and reloading for it is the "keeps reloading" report.
                  */
                 let applied: ErrorDetail | undefined
-                try {
-                    applied = pendingDetail(await runtime.reload(agent.id))
-                } catch (error) {
-                    if (!isHarnessError(error)) throw error
-                    applied = error.toDetail()
+                if (results.written) {
+                    try {
+                        applied = pendingDetail(await runtime.reload(agent.id))
+                    } catch (error) {
+                        if (!isHarnessError(error)) throw error
+                        applied = error.toDetail()
+                    }
                 }
 
                 // A roster is rendered at load, so an offer that changed is invisible to every agent
                 // that may ask this one until each reloads. Done here, after this agent's own reload,
                 // because theirs reads this agent's new manifest; reported per peer, never swallowed.
-                const peers =
-                    parsed.value.path === "delegation.offer"
-                        ? await reloadAskers(runtime, agent.id, applied === undefined)
-                        : undefined
+                const offerChanged = requested.some(
+                    (change, index) =>
+                        change.path === "delegation.offer" &&
+                        results.edits[index]?.changed === true,
+                )
+                const peers = offerChanged
+                    ? await reloadAskers(runtime, agent.id, applied === undefined)
+                    : undefined
 
-                return json({
-                    path: setting.path,
+                const reported = results.edits.map((result, index) => ({
+                    path: settings[index]?.path ?? "",
                     before: result.before,
                     after: result.after,
                     // A reflowed file is correct and its comments have moved, which is a surprise a
                     // person should hear from the surface that did it rather than from `git diff`.
                     reflowed: result.reflowed,
+                    changed: result.changed,
+                }))
+                return json({
+                    ...(single ? reported[0] : { changes: reported }),
+                    reloaded: results.written && applied === undefined,
                     ...(applied === undefined
                         ? { applied: true }
                         : { applied: false, pending: applied }),

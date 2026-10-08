@@ -52,6 +52,11 @@ export interface ExecuteInput {
     readonly bus: EventBus
     readonly eventContext: EventContext
     readonly timeoutMs: number
+    /**
+     * A per-slug bound in place of `timeoutMs`: a routed slug runs a subagent whose own
+     * `subagents[].timeoutMs` may be longer than any single tool should take (pilot.15).
+     */
+    readonly timeoutFor?: ReadonlyMap<string, number>
     /** Read-only calls only. Mutating calls always run one at a time. */
     readonly maxParallel: number
     /** Above this, an observation is cut to head and tail with a visible marker. */
@@ -671,8 +676,9 @@ async function runOne(
         return result
     }
 
+    const timeoutMs = input.timeoutFor?.get(tool.spec.slug) ?? input.timeoutMs
     const timeout = new AbortController()
-    const timer = setTimeout(() => timeout.abort(), input.timeoutMs)
+    const timer = setTimeout(() => timeout.abort(), timeoutMs)
     // The turn's cancellation and this call's timeout are different outcomes, so they stay separate
     // controllers and the handler is handed the union.
     const signal = AbortSignal.any([input.context.signal, timeout.signal])
@@ -683,7 +689,7 @@ async function runOne(
                 tool.handler(args, {
                     ...input.context,
                     signal,
-                    deadlineMs: input.timeoutMs,
+                    deadlineMs: timeoutMs,
                     callId: intent.callId,
                     tainted,
                     meter: (usage) => {
@@ -712,7 +718,7 @@ async function runOne(
                     () => {
                         reject(
                             timeout.signal.aborted
-                                ? toolTimedOut(tool.spec.slug, input.timeoutMs)
+                                ? toolTimedOut(tool.spec.slug, timeoutMs)
                                 : new DOMException("aborted", "AbortError"),
                         )
                     },

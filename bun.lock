@@ -57,7 +57,7 @@
     },
     "packages/cli": {
       "name": "dispach",
-      "version": "0.2.0-pilot.4",
+      "version": "0.2.0-pilot.14",
       "bin": {
         "dispach": "dist/index.js",
       },
@@ -117,6 +117,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@aws-sdk/client-bedrock-runtime": "3.1141.0",
+        "@aws-sdk/client-polly": "3.1141.0",
         "@aws-sdk/client-transcribe-streaming": "3.1141.0",
         "@dispach/core": "workspace:*",
       },
@@ -192,6 +193,8 @@
     "@alcalzone/ansi-tokenize": ["@alcalzone/ansi-tokenize@0.3.0", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^5.0.0" } }, "sha512-p+CMKJ93HFmLkjXKlXiVGlMQEuRb6H0MokBSwUsX+S6BRX8eV5naFZpQJFfJHjRZY0Hmnqy1/r6UWl3x+19zYA=="],
 
     "@aws-sdk/client-bedrock-runtime": ["@aws-sdk/client-bedrock-runtime@3.1141.0", "", { "dependencies": { "@aws-sdk/core": "^3.978.1", "@aws-sdk/credential-provider-node": "^3.972.84", "@aws-sdk/eventstream-handler-node": "^3.972.35", "@aws-sdk/middleware-eventstream": "^3.972.30", "@aws-sdk/middleware-websocket": "^3.972.54", "@aws-sdk/token-providers": "3.1141.0", "@aws-sdk/types": "^3.974.6", "@smithy/core": "^3.35.0", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-AoA3qW7HcFDa2MoZu9hozh68mBYI5KyvhHxN8Cbi5UtSTDDfq0JXW2fXGg7UzVNKVPRyRq2lrOQRzKPB1UEDxQ=="],
+
+    "@aws-sdk/client-polly": ["@aws-sdk/client-polly@3.1141.0", "", { "dependencies": { "@aws-sdk/core": "^3.978.1", "@aws-sdk/credential-provider-node": "^3.972.84", "@aws-sdk/eventstream-handler-node": "^3.972.35", "@aws-sdk/middleware-eventstream": "^3.972.30", "@aws-sdk/types": "^3.974.6", "@smithy/core": "^3.35.0", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-bSaZMb4xPI8OxAjBSbJg6RdtbnKJK11Pc65aKTa/JH6OzFZhtT8/Kv0mMaLBIs3vSyIkCNBfrbWcd3hzs38VnQ=="],
 
     "@aws-sdk/client-transcribe-streaming": ["@aws-sdk/client-transcribe-streaming@3.1141.0", "", { "dependencies": { "@aws-sdk/core": "^3.978.1", "@aws-sdk/credential-provider-node": "^3.972.84", "@aws-sdk/eventstream-handler-node": "^3.972.35", "@aws-sdk/middleware-eventstream": "^3.972.30", "@aws-sdk/middleware-sdk-transcribe-streaming": "^3.972.33", "@aws-sdk/middleware-websocket": "^3.972.54", "@aws-sdk/types": "^3.974.6", "@smithy/core": "^3.35.0", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-tZW+o9NHCWFD6qO3qQvyaAT8KSL5wP/1yNsdt6+U7aurGbtXN57d0taoOwFisNZrYjwWFWNA9P6IbOL8rPlBlg=="],
 

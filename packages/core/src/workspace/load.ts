@@ -20,7 +20,7 @@
  */
 
 import { readFileSync, statSync } from "node:fs"
-import { isAbsolute, resolve } from "node:path"
+import { basename, isAbsolute, resolve } from "node:path"
 import { estimateTokens } from "../context/tokens.ts"
 import {
     type ConfigError,
@@ -192,10 +192,14 @@ export function loadWorkspace(options: LoadWorkspaceOptions): Workspace {
         })
     }
 
+    // Each file is labelled with its name in the active delimiter style (pilot.15, VelaCrew). With the
+    // contents joined bare, a model asked whether SOUL.md was loaded had no way to tie the text it was
+    // reading to that name, answered that it was not, and re-read every file until `no_progress`.
+    // A label is structure, never a rewrite of the author's prose.
     const join = (tier: Tier): string =>
         byTier(tier)
-            .map((file) => file.content)
-            .filter((content) => content !== "")
+            .filter((file) => file.content !== "")
+            .map((file) => labelled(basename(file.path), tier, file.content, style.delimiters))
             .join("\n\n")
 
     return {
@@ -498,4 +502,16 @@ function largest(files: readonly WorkspaceFile[]): string {
         if (biggest === undefined || file.tokens > biggest.tokens) biggest = file
     }
     return biggest?.name ?? "(none)"
+}
+
+/** One workspace file's text under its own name, in the delimiter style the model is rendered for. */
+export function labelled(
+    name: string,
+    tier: Tier,
+    content: string,
+    delimiters: PromptStyle["delimiters"],
+): string {
+    if (delimiters === "xml") return `<file name="${name}" tier="${tier}">\n${content}\n</file>`
+    if (delimiters === "markdown") return `## ${name}\n\n${content}`
+    return `${name}:\n${content}`
 }

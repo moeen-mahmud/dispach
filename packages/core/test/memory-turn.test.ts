@@ -532,3 +532,20 @@ describe("memory_write evicts rather than growing without bound", () => {
         await second.stop()
     })
 })
+
+describe("the agent can tell which files it was given (pilot.15)", () => {
+    test("each file arrives under its name, and slot 2 lists them by tier", async () => {
+        const { manifest } = agent({ carried: "- Moeen likes short answers." })
+        const { fetch, bodies } = recorder()
+        const runtime = await Runtime.create({ agents: [manifest], env: ENV, fetch })
+        await runtime.agent("test")?.send("are your files loading?")
+        const sent = prompt(bodies[0])
+        // The bytes that went to the endpoint, at the far end of the pipeline.
+        expect(sent).toMatch(/SOUL\.md[\s\S]*A test fixture\./)
+        expect(sent).toMatch(/MEMORY\.md[\s\S]*Moeen likes short answers/)
+        expect(sent).toContain(
+            "context files  SOUL.md every turn; MEMORY.md in private conversations",
+        )
+        await runtime.stop()
+    })
+})
