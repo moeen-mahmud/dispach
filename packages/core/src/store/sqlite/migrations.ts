@@ -1187,6 +1187,18 @@ ALTER TABLE turns ADD COLUMN error_detail TEXT;
 ALTER TABLE agent_assignments ADD COLUMN channel_ids TEXT;
 `,
     },
+    {
+        version: 31,
+        name: "turn_participant",
+        /**
+         * The acting participant a turn was taken for (pilot.15): what lets `memory_forget` reach the
+         * messages a person said and no one else's. `sender` records a channel or peer sender only; an
+         * API turn for a participant left nothing. NULL for every row before.
+         */
+        sql: `
+ALTER TABLE turns ADD COLUMN participant_id TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

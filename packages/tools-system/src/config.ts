@@ -109,6 +109,42 @@ const AGENT_ROWS = SETTINGS.filter((entry) => entry.agentListed)
  * `value` is optional because two of the three depend only on the path, and those have to fire before
  * the value is even parsed.
  */
+const HIDDEN_IDENTITY = "(hidden by the operator)"
+/** What names a model or its vendor: under `model.<role>` (fallbacks too) and `media.<section>`. */
+const MODEL_IDENTITY = new Set(["id", "api", "baseurl", "options", "apikeyenv"])
+const MEDIA_IDENTITY = new Set(["model", "provider", "baseurl", "options", "apikeyenv"])
+
+function hidden(doc: { getIn(path: readonly string[]): unknown }): boolean {
+    return doc.getIn(["context", "modelIdentity"]) === "hidden"
+}
+
+/**
+ * `context.modelIdentity: hidden` (pilot.15): replace every value that names the model or its vendor,
+ * wherever the read started — `model` whole, one role, or the id itself. Nothing else is touched, so
+ * the agent still reads and tunes the rest of its configuration.
+ */
+export function redactIdentity(path: readonly string[], value: unknown): unknown {
+    const keys = path.map((segment) => segment.toLowerCase())
+    if (keys[0] === "model" && keys.slice(2).some((key) => MODEL_IDENTITY.has(key))) {
+        return HIDDEN_IDENTITY
+    }
+    if (keys[0] === "media" && keys[2] !== undefined && MEDIA_IDENTITY.has(keys[2])) {
+        return HIDDEN_IDENTITY
+    }
+    if (Array.isArray(value)) {
+        return value.map((entry, index) => redactIdentity([...path, String(index)], entry))
+    }
+    if (typeof value === "object" && value !== null) {
+        return Object.fromEntries(
+            Object.entries(value).map(([key, entry]) => [
+                key,
+                redactIdentity([...path, key], entry),
+            ]),
+        )
+    }
+    return value
+}
+
 function floorRefusal(path: string, value?: unknown): string | undefined {
     const key = path.toLowerCase()
     const ALLOW_FROM =
@@ -280,7 +316,9 @@ export function configReadHandler(options: ConfigOptions): ToolHandler {
             if (value === undefined) {
                 return `${asked} is not set in this configuration. It can be — see config_read with no path for the full list.`
             }
-            return `${asked}:\n${stringify(isMap(value) || isSeq(value) ? value.toJS(doc) : value).trimEnd()}`
+            const plain = isMap(value) || isSeq(value) ? value.toJS(doc) : value
+            const shown = hidden(doc) ? redactIdentity(asked.split("."), plain) : plain
+            return `${asked}:\n${stringify(shown).trimEnd()}`
         }
 
         // A summary with the current values, not the file.
@@ -295,7 +333,8 @@ export function configReadHandler(options: ConfigOptions): ToolHandler {
             const current = doc.getIn(entry.path.split("."), false)
             // Lists inline as `[a, b]` rather than as block YAML flattened onto one line, which
             // renders `- a - b` and reads as a subtraction.
-            const value = isMap(current) || isSeq(current) ? current.toJS(doc) : current
+            const plain = isMap(current) || isSeq(current) ? current.toJS(doc) : current
+            const value = hidden(doc) ? redactIdentity(entry.path.split("."), plain) : plain
             const shown =
                 value === undefined || value === null
                     ? "(not set)"
@@ -325,7 +364,12 @@ export function configReadHandler(options: ConfigOptions): ToolHandler {
             "",
             "Some edits are refused whatever the rules say. Removing a check: replacing tools.policy.deny, or setting tools.untrusted.onMutate to allow. Deciding reach: a writeRoots list anywhere, the system provider's env, any provider's baseUrl, a channel's allowFrom, and server.host or server.tokenEnv. Enabling a capability is what a person asks you for; where you may write, who may talk to you, and what address you listen on are theirs — name what you need and why, and let them add it.",
             "",
-            `The whole file, comments and all, is at ${file} — read it with file_read if that tool is enabled, or ask the person to open it.`,
+            // Hidden (pilot.15): pointing at the raw file would point past the redaction above.
+            ...(hidden(doc)
+                ? []
+                : [
+                      `The whole file, comments and all, is at ${file} — read it with file_read if that tool is enabled, or ask the person to open it.`,
+                  ]),
         ].join("\n")
     }
 }

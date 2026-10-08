@@ -26,6 +26,7 @@ import {
     envOverridden,
     type GovernorError,
     type HarnessError,
+    memoryForgetRefused,
     memoryNotConfigured,
     modelNoVision,
     modelWindowFamily,
@@ -69,6 +70,7 @@ import {
     withDeadline,
 } from "../media/provider.ts"
 import { speakable, speechChunks } from "../media/speech.ts"
+import { forgetNotes, matchesQuery, memoryFiles, notesIn } from "../memory/forget.ts"
 import {
     enumerateFiles,
     enumerateSessions,
@@ -101,7 +103,13 @@ import type { Middleware } from "../plugins/middleware.ts"
 import { loadSkills, type SkillCatalogue } from "../skills/index.ts"
 import { activateSkills } from "../skills/load.ts"
 import { renderScripts, skillScriptTools } from "../skills/tools.ts"
-import type { SessionSummary, Store, TurnRecord } from "../store/store.ts"
+import {
+    FORGOTTEN_MARKER,
+    type MessageReach,
+    type SessionSummary,
+    type Store,
+    type TurnRecord,
+} from "../store/store.ts"
 import { routedTool, type SubagentRunner } from "../team/subagents.ts"
 import { HANDOFF } from "../team/supervisor.ts"
 import { type DialectId, passThroughFilter, type StreamFilter } from "../tools/dialect/dialect.ts"
@@ -109,9 +117,10 @@ import { nativeDialect, nativeWireTokens } from "../tools/dialect/native.ts"
 import { nltDialect } from "../tools/dialect/nlt.ts"
 import { eventDetail } from "../tools/event-detail.ts"
 import { type ApprovalRequest, type ExecuteInput, executeIntents } from "../tools/execute.ts"
+import { MEMORY_DIR } from "../tools/local.ts"
 import { onceOnlyTools } from "../tools/policy.ts"
 import { ToolRegistry } from "../tools/registry.ts"
-import type { ScriptRunner, Tool, ToolSpec } from "../tools/types.ts"
+import type { ForgetRequest, ForgetResult, ScriptRunner, Tool, ToolSpec } from "../tools/types.ts"
 import { activateKnowledge, type KnowledgeBase, loadKnowledge } from "../workspace/knowledge.ts"
 import {
     loadWorkspace,
@@ -1469,6 +1478,7 @@ export class Agent {
         await this.store.sessions.ensure(this.id, sessionKey)
         const history = await this.store.messages.history(this.id, sessionKey)
 
+        const actingId = (options.participant ?? participantOf(options.from))?.id
         await this.store.turns.start({
             turnId,
             agentId: this.id,
@@ -1479,6 +1489,8 @@ export class Agent {
             input,
             ...(options.from === undefined ? {} : { sender: options.from }),
             ...(options.turnNote === undefined ? {} : { note: options.turnNote }),
+            // Who the turn was for (pilot.15): what `memory_forget` matches a person's messages by.
+            ...(actingId === undefined ? {} : { participantId: actingId }),
         })
 
         // A subagent gets its task and its tools, and none of what an ordinary turn adds on: no
@@ -1555,6 +1567,7 @@ export class Agent {
         if (options.from?.id !== undefined) this.#senders.set(turnId, options.from.id)
         if (options.deferMutations !== undefined) this.#defers.set(turnId, options.deferMutations)
         this.#inputs.set(turnId, input)
+        const spaceWriter = (await this.store.conversations.spaceWriter()) === `agent:${this.id}`
         const result = await runTurn({
             agentId: this.id,
             meter,
@@ -1647,7 +1660,7 @@ export class Agent {
             // A turn that may not read private memory may not write it either (QA 0.2.0): the
             // generated `policy.allow` names `memory_write`, so any room member could otherwise
             // put words into the agent's own notes. The space writer's notes are the team's.
-            ...((await this.store.conversations.spaceWriter()) === `agent:${this.id}`
+            ...(spaceWriter
                 ? { writeNote: (text: string) => this.#writeSpaceNote(text) }
                 : plan.private
                   ? {}
@@ -1656,6 +1669,26 @@ export class Agent {
                             throw privateMemoryRefused()
                         },
                     }),
+            // `memory_forget` reaches exactly the memory `memory_write` would write on this turn (pilot.15).
+            forgetMemory: spaceWriter
+                ? (request) => this.#forget("space", request, { sessionKey, turnId })
+                : plan.private
+                  ? (request) =>
+                        this.#forget("private", request, {
+                            sessionKey,
+                            turnId,
+                            // A person reaches what they said; the owner also what predates attribution.
+                            reach:
+                                participant === null
+                                    ? {}
+                                    : {
+                                          participant: participant.id,
+                                          unattributed: participant.id === plan.owner,
+                                      },
+                        })
+                  : async () => {
+                        throw memoryForgetRefused()
+                    },
             ...(child?.taintedBy === undefined ? {} : { taintedBy: child.taintedBy }),
             ...(child?.parent === undefined ? {} : { parent: child.parent }),
         }).finally(() => {
@@ -1719,10 +1752,48 @@ export class Agent {
         }
         // After the append, so this turn is in the corpus before the next one asks about it — and after
         // `turns.finish`, so a failure to index cannot lose the audit record.
+        await this.#redactForgetConversation(sessionKey, turnId)
         await this.#indexHistory()
 
         this.#reportManifestChange()
         return result
+    }
+
+    /** Turns in a session that listed or deleted with `memory_forget`, until a deletion lands. */
+    readonly #forgetSessions = new Map<string, Set<string>>()
+    /** Turns in which `memory_forget` deleted something. */
+    readonly #forgotThisTurn = new Set<string>()
+
+    #forgetTurns(sessionKey: string): Set<string> {
+        const existing = this.#forgetSessions.get(sessionKey)
+        if (existing !== undefined) return existing
+        const created = new Set<string>()
+        this.#forgetSessions.set(sessionKey, created)
+        return created
+    }
+
+    /**
+     * After a turn that deleted with `memory_forget`, redact the conversation that asked for it: the
+     * listing quoted every note it found, and the person's request usually names the thing. Left in
+     * place, the next session's recall answers from that exchange and forgetting looks broken
+     * (pilot.15, VelaCrew). Done before indexing, so the index never holds the text.
+     */
+    async #redactForgetConversation(sessionKey: string, turnId: string): Promise<void> {
+        if (!this.#forgotThisTurn.delete(turnId)) return
+        const turns = [...(this.#forgetSessions.get(sessionKey) ?? [])]
+        this.#forgetSessions.delete(sessionKey)
+        const touched = await this.store.messages.redactTurns(this.id, turns, FORGOTTEN_MARKER)
+        // The listing went out on webhooks too, as this conversation's replies and tool results.
+        await this.store.webhooks.scrubBodies(
+            this.id,
+            touched.texts
+                .map((text) => text.trim())
+                .filter((text) => text.length >= MIN_SCRUB_LENGTH),
+            FORGOTTEN_MARKER,
+        )
+        for (const key of touched.sessions) {
+            await this.store.memory.dropSource(this.id, sessionSource(key))
+        }
     }
 
     /**
@@ -2225,6 +2296,157 @@ export class Agent {
             ...(owner === undefined ? {} : { owner }),
             projects: await conversations.projectsOf(this.id),
         })
+    }
+
+    /**
+     * `memory_forget`'s two halves (pilot.15): a query lists, ids delete. Private memory is the carried
+     * file and the archives — what `memory_write` and eviction wrote. The space is its notes table, and
+     * only the space writer is handed `"space"` (checked at turn start in `send`). Recall reconciles the
+     * index against both on every read, so nothing else has to be told.
+     */
+    async #forget(
+        scope: "private" | "space",
+        request: ForgetRequest,
+        context: {
+            readonly sessionKey: string
+            readonly turnId: string
+            readonly reach?: MessageReach
+        },
+    ): Promise<ForgetResult> {
+        const conversations = this.store.conversations
+        if (scope === "space") {
+            const notes = (await conversations.notes("space")).map((note) => ({
+                id: note.id,
+                source: "space",
+                text: note.text,
+            }))
+            if ("query" in request) {
+                return {
+                    scope,
+                    notes: notes.filter((note) => matchesQuery(note.text, request.query)),
+                    missing: [],
+                }
+            }
+            const wanted = new Set(request.ids)
+            const gone = notes.filter((note) => wanted.has(note.id))
+            for (const note of gone) await conversations.deleteNote(note.id)
+            return this.#forgotten(scope, gone, request.ids, context)
+        }
+
+        const target = writeTarget(this.workspace)
+        const files = memoryFiles({
+            ...(target?.path === undefined || target.mode === "refused"
+                ? {}
+                : { carried: { source: target.name, path: target.path } }),
+            archiveDir: this.#memory?.dir ?? join(this.dir, MEMORY_DIR),
+        })
+        const reach = context.reach ?? {}
+        if ("query" in request) {
+            const notes = (await notesIn(files)).filter((note) =>
+                matchesQuery(note.text, request.query),
+            )
+            // Past conversations too: recall answers from them, so a forgotten note that was also said
+            // aloud would otherwise come straight back (pilot.15, VelaCrew).
+            const words = request.query.split(/\s+/).filter((word) => word !== "")
+            const said = (
+                await this.store.messages.findProse(this.id, words, reach, FORGET_MESSAGE_LIMIT)
+            )
+                .filter((message) => matchesQuery(message.content, request.query))
+                .map((message) => ({
+                    id: `${FORGET_MESSAGE_PREFIX}${message.id}`,
+                    source: `conversation, ${message.createdAt.slice(0, 10)}, ${message.role === "user" ? "said to you" : "your reply"}`,
+                    text: snippet(message.content),
+                }))
+            this.#forgetTurns(context.sessionKey).add(context.turnId)
+            return { scope, notes: [...notes, ...said], missing: [] }
+        }
+        const messageIds = request.ids
+            .filter((id) => id.startsWith(FORGET_MESSAGE_PREFIX))
+            .map((id) => Number(id.slice(FORGET_MESSAGE_PREFIX.length)))
+            .filter((id) => Number.isInteger(id))
+        const gone = await forgetNotes(files, new Set(request.ids))
+        const redacted = await this.store.messages.redact(
+            this.id,
+            messageIds,
+            reach,
+            FORGOTTEN_MARKER,
+        )
+        // Then the same words wherever else they were written: `memory_write`'s own call carries the
+        // note as its argument, and an earlier listing quoted it (pilot.15, VelaCrew).
+        const needles = [
+            ...gone
+                .filter((note) => !note.id.startsWith(FORGET_MESSAGE_PREFIX))
+                .map((note) => noteBody(note.text)),
+            ...redacted.map((message) => message.content.trim()),
+        ].filter((needle) => needle.length >= MIN_SCRUB_LENGTH)
+        const scrubbed = await this.store.messages.scrub(this.id, needles, reach, FORGOTTEN_MARKER)
+        // The turn that saved a deleted note is the exact link to the reply that restated it in the
+        // agent's own words, which no text match finds ("Remembered: your accountant is …").
+        const saving = await this.store.messages.redactTurns(
+            this.id,
+            scrubbed.writeTurns,
+            FORGOTTEN_MARKER,
+        )
+        // And the silo's own copy of what webhooks carried: a `turn.end` or `message` event quoted it.
+        await this.store.webhooks.scrubBodies(
+            this.id,
+            [...needles, ...saving.texts.map((text) => text.trim())].filter(
+                (needle) => needle.length >= MIN_SCRUB_LENGTH,
+            ),
+            FORGOTTEN_MARKER,
+        )
+        // The index re-reads a file only when a later private turn asks, and a stale passage of a
+        // deleted note would sit in the store until then (pilot.15): re-read now.
+        if (gone.length > 0 && this.#memory !== undefined) await this.#syncMemory(this.#memory.dir)
+        // The history index is keyed on a session's activity and length, and a redaction changes
+        // neither, so its passages are dropped outright and the next recall re-indexes the session.
+        for (const key of new Set([
+            ...redacted.map((message) => message.sessionKey),
+            ...scrubbed.sessions,
+            ...saving.sessions,
+        ])) {
+            await this.store.memory.dropSource(this.id, sessionSource(key))
+        }
+        if (gone.length > 0 || redacted.length > 0) {
+            this.#forgetTurns(context.sessionKey).add(context.turnId)
+            this.#forgotThisTurn.add(context.turnId)
+        }
+        return this.#forgotten(
+            scope,
+            [
+                ...gone,
+                ...redacted.map((message) => ({
+                    id: `${FORGET_MESSAGE_PREFIX}${message.id}`,
+                    source: "conversation",
+                    text: snippet(message.content),
+                })),
+            ],
+            request.ids,
+            context,
+            redacted.length,
+        )
+    }
+
+    #forgotten(
+        scope: string,
+        gone: ForgetResult["notes"],
+        ids: readonly string[],
+        context: { readonly sessionKey: string; readonly turnId: string },
+        messages = 0,
+    ): ForgetResult {
+        const found = new Set(gone.map((note) => note.id))
+        if (gone.length > 0) {
+            this.#bus.emit(
+                "memory.forgotten",
+                {
+                    scope,
+                    count: gone.length - messages,
+                    ...(messages === 0 ? {} : { messages }),
+                },
+                { agentId: this.id, sessionKey: context.sessionKey, turnId: context.turnId },
+            )
+        }
+        return { scope, notes: gone, missing: ids.filter((id) => !found.has(id)) }
     }
 
     /** `memory_write` for the space writer: a team note, indexed at the next read of the space. */
@@ -2766,4 +2988,30 @@ function readWorkspace(
     }
 
     return { workspace, warnings }
+}
+
+/** How a past message is named to `memory_forget`: its row id behind a prefix no note id uses. */
+const FORGET_MESSAGE_PREFIX = "msg_"
+/** Past messages one listing returns; a broader query is asked to narrow down by the tool. */
+const FORGET_MESSAGE_LIMIT = 50
+
+/** A listed message, one line, short enough that thirty of them fit an observation. */
+function snippet(text: string): string {
+    const line = text.replace(/\s+/g, " ").trim()
+    return line.length <= 200 ? line : `${line.slice(0, 199)}…`
+}
+
+/**
+ * Shorter than this, forgotten text is not looked for elsewhere: "yes" or "ok" would match half the
+ * store, and a scrub that redacts unrelated messages is worse than one that leaves a trace.
+ */
+const MIN_SCRUB_LENGTH = 12
+
+/** A note's words as `memory_write` was given them: the bullet, stamp and tags removed. */
+function noteBody(text: string): string {
+    return text
+        .replace(/^[-*+]\s+/, "")
+        .replace(/\*\*\d{4}-\d{2}-\d{2}T[^*]*\*\*/, "")
+        .replace(/_\([^)]*\)_/, "")
+        .trim()
 }

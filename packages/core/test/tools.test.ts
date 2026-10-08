@@ -1030,7 +1030,12 @@ describe("execution", () => {
 describe("the local provider", () => {
     test("offers exactly the built-ins, and resolves nothing else", async () => {
         const local = localProvider()
-        expect(await local.list?.()).toEqual(["now", "memory_write", "artifact_read"])
+        expect(await local.list?.()).toEqual([
+            "now",
+            "memory_write",
+            "memory_forget",
+            "artifact_read",
+        ])
         expect((await local.resolve(["gmail_send"])).length).toBe(0)
     })
 })

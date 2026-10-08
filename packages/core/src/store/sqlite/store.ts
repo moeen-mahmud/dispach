@@ -37,6 +37,7 @@ import type {
     MemorySourceState,
     MemoryStore,
     MessagePage,
+    MessageReach,
     MessageStore,
     OperatorKeyRecord,
     OperatorKeyStore,
@@ -63,7 +64,7 @@ import type {
     WebhookStore,
     WebhookSubscription,
 } from "../store.ts"
-import { DEFAULT_KEY_TOUCH_MS } from "../store.ts"
+import { DEFAULT_KEY_TOUCH_MS, FORGOTTEN_MARKER } from "../store.ts"
 import { sqliteConversations } from "./conversations.ts"
 import type { OpenOptions, SqlDatabase, SqlParam, SqlStatement } from "./driver.ts"
 import { openDatabase } from "./driver.ts"
@@ -152,6 +153,78 @@ interface MessageRow {
  */
 const MESSAGE_COLUMNS =
     "id, session_key, turn_id, role, content, tool_calls, tool_call_id, origin, tainted, created_at"
+const PREFIXED_MESSAGE_COLUMNS = MESSAGE_COLUMNS.split(", ")
+    .map((column) => `m.${column}`)
+    .join(", ")
+
+function escapeLike(text: string): string {
+    return text.replace(/[\\%_]/g, (char) => `\\${char}`)
+}
+
+/**
+ * Prose a person or the model wrote (no `origin`), not already forgotten, within `reach`. A turn
+ * "is" a participant's when it was taken for them or sent by them; `unattributed` adds turns that
+ * record nobody, which is every API turn before migration 31.
+ */
+function proseWhere(reach: MessageReach): { sql: string; params: SqlParam[] } {
+    const scoped = reachWhere(reach)
+    return {
+        sql: `m.origin IS NULL AND m.role IN ('user', 'assistant') AND ${scoped.sql}`,
+        params: scoped.params,
+    }
+}
+
+/** Not already forgotten, and within `reach`. Shared by the prose search and the scrub. */
+function reachWhere(reach: MessageReach): { sql: string; params: SqlParam[] } {
+    const base = `m.content <> '${FORGOTTEN_MARKER.replaceAll("'", "''")}'`
+    if (reach.participant === undefined) return { sql: base, params: [] }
+    const unattributed =
+        reach.unattributed === true ? " OR (t.participant_id IS NULL AND t.sender IS NULL)" : ""
+    return {
+        sql: `${base} AND (t.participant_id = ? OR t.sender = ?${unattributed})`,
+        params: [reach.participant, reach.participant],
+    }
+}
+
+/** A stored tool-call list with every argument value replaced by `marker`. */
+function blankArguments(calls: unknown, marker: string): unknown {
+    if (!Array.isArray(calls)) return calls
+    return calls.map((call) => {
+        if (typeof call !== "object" || call === null || !("arguments" in call)) return call
+        const raw = (call as { arguments: unknown }).arguments
+        if (typeof raw !== "string") return call
+        try {
+            return {
+                ...call,
+                arguments: JSON.stringify(scrubValue(JSON.parse(raw), () => true, marker)),
+            }
+        } catch {
+            return { ...call, arguments: JSON.stringify({}) }
+        }
+    })
+}
+
+/** Every string in a parsed tool-call list that contains forgotten text, replaced; the shape kept. */
+function scrubValue(value: unknown, hit: (text: string) => boolean, marker: string): unknown {
+    if (typeof value === "string") {
+        // A native call's `arguments` is itself JSON, so look inside before judging the string whole.
+        if (value.startsWith("{") || value.startsWith("[")) {
+            try {
+                return JSON.stringify(scrubValue(JSON.parse(value), hit, marker))
+            } catch {
+                // Not JSON after all: judged as text below.
+            }
+        }
+        return hit(value) ? marker : value
+    }
+    if (Array.isArray(value)) return value.map((entry) => scrubValue(entry, hit, marker))
+    if (typeof value === "object" && value !== null) {
+        return Object.fromEntries(
+            Object.entries(value).map(([key, entry]) => [key, scrubValue(entry, hit, marker)]),
+        )
+    }
+    return value
+}
 
 /**
  * The origin union without `undefined`.
@@ -886,8 +959,8 @@ export class SqliteStore implements Store {
             turnInsert: db.prepare(
                 `INSERT INTO turns
                      (turn_id, agent_id, session_key, status, source, input,
-                      sender, sender_name, sender_kind, note, started_at)
-                 VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)`,
+                      sender, sender_name, sender_kind, note, participant_id, started_at)
+                 VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)`,
             ),
             // `OR IGNORE` rather than `ON CONFLICT DO UPDATE`: a second claim must **not** move the
             // key onto the new turn id. The whole point is that the first turn keeps it.
@@ -1395,6 +1468,169 @@ export class SqliteStore implements Store {
             },
             count: async (agentId, sessionKey) =>
                 q.messageCount.get<{ c: number }>(agentId, sessionKey)?.c ?? 0,
+            findProse: async (agentId, words, reach, limit) => {
+                if (words.length === 0) return []
+                const where = proseWhere(reach)
+                const like = words.map(() => "AND lower(m.content) LIKE ? ESCAPE '\\'").join(" ")
+                const rows = db
+                    .prepare(
+                        `SELECT ${PREFIXED_MESSAGE_COLUMNS} FROM messages m
+                           LEFT JOIN turns t ON t.turn_id = m.turn_id
+                          WHERE m.agent_id = ? AND ${where.sql} ${like}
+                          ORDER BY m.id DESC LIMIT ?`,
+                    )
+                    .all<MessageRow>(
+                        agentId,
+                        ...where.params,
+                        ...words.map((word) => `%${escapeLike(word.toLowerCase())}%`),
+                        limit,
+                    )
+                return rows.map(toMessage)
+            },
+            redact: async (agentId, ids, reach, marker) => {
+                if (ids.length === 0) return []
+                const where = proseWhere(reach)
+                const rows = db
+                    .prepare(
+                        `SELECT ${PREFIXED_MESSAGE_COLUMNS} FROM messages m
+                           LEFT JOIN turns t ON t.turn_id = m.turn_id
+                          WHERE m.agent_id = ? AND ${where.sql}
+                            AND m.id IN (${ids.map(() => "?").join(", ")})`,
+                    )
+                    .all<MessageRow>(agentId, ...where.params, ...ids)
+                const found = rows.map(toMessage)
+                db.transaction(() => {
+                    for (const message of found) {
+                        db.prepare("UPDATE messages SET content = ? WHERE id = ?").run(
+                            marker,
+                            message.id,
+                        )
+                        if (message.turnId === undefined) continue
+                        // The turn row is the audit record of the same words: the input for a person's
+                        // message, the reply and the reasoning that produced it for the agent's.
+                        if (message.role === "user") {
+                            db.prepare("UPDATE turns SET input = ? WHERE turn_id = ?").run(
+                                marker,
+                                message.turnId,
+                            )
+                        } else {
+                            db.prepare(
+                                "UPDATE turns SET text = ?, reasoning = '' WHERE turn_id = ?",
+                            ).run(marker, message.turnId)
+                        }
+                    }
+                })
+                return found
+            },
+            scrub: async (agentId, needles, reach, marker) => {
+                if (needles.length === 0) return { sessions: [], writeTurns: [] }
+                const where = reachWhere(reach)
+                // The arguments are stored as JSON, so a needle is looked for in its JSON-escaped form.
+                const forms = needles.map((needle) => JSON.stringify(needle).slice(1, -1))
+                const match = needles
+                    .map(() => "(m.content LIKE ? ESCAPE '\\' OR m.tool_calls LIKE ? ESCAPE '\\')")
+                    .join(" OR ")
+                const rows = db
+                    .prepare(
+                        `SELECT ${PREFIXED_MESSAGE_COLUMNS} FROM messages m
+                           LEFT JOIN turns t ON t.turn_id = m.turn_id
+                          WHERE m.agent_id = ? AND ${where.sql} AND (${match})`,
+                    )
+                    .all<MessageRow>(
+                        agentId,
+                        ...where.params,
+                        ...needles.flatMap((needle, index) => [
+                            `%${escapeLike(needle)}%`,
+                            `%${escapeLike(forms[index] ?? needle)}%`,
+                        ]),
+                    )
+                // LIKE matched case-insensitively; the replacement is exact, so only rows it changes count.
+                const hit = (text: string) => needles.some((needle) => text.includes(needle))
+                const touched = new Set<string>()
+                const writeTurns = new Set<string>()
+                db.transaction(() => {
+                    for (const row of rows) {
+                        const content = hit(row.content) ? marker : row.content
+                        const calls =
+                            row.tool_calls === null
+                                ? null
+                                : JSON.stringify(
+                                      scrubValue(JSON.parse(row.tool_calls), hit, marker),
+                                  )
+                        // Compared re-serialised, so formatting alone never counts as a change.
+                        const before =
+                            row.tool_calls === null
+                                ? null
+                                : JSON.stringify(JSON.parse(row.tool_calls))
+                        const callsChanged = calls !== before
+                        if (content === row.content && !callsChanged) continue
+                        // A `memory_write` whose argument held the text is the turn that saved the note.
+                        if (
+                            row.turn_id !== null &&
+                            callsChanged &&
+                            row.tool_calls?.includes('"memory_write"') === true
+                        ) {
+                            writeTurns.add(row.turn_id)
+                        }
+                        db.prepare(
+                            "UPDATE messages SET content = ?, tool_calls = ? WHERE id = ?",
+                        ).run(content, calls, row.id)
+                        touched.add(row.session_key)
+                    }
+                })
+                return { sessions: [...touched], writeTurns: [...writeTurns] }
+            },
+            redactTurns: async (agentId, turnIds, marker) => {
+                if (turnIds.length === 0) return { sessions: [], texts: [] }
+                const list = turnIds.map(() => "?").join(", ")
+                const sessions = db
+                    .prepare(
+                        `SELECT DISTINCT session_key FROM messages
+                          WHERE agent_id = ? AND turn_id IN (${list})`,
+                    )
+                    .all<{ session_key: string }>(agentId, ...turnIds)
+                // What is about to be replaced, so the caller can look for it in the webhook log.
+                const texts = [
+                    ...db
+                        .prepare(
+                            `SELECT content FROM messages
+                              WHERE agent_id = ? AND origin IS NULL AND role IN ('user', 'assistant')
+                                AND turn_id IN (${list})`,
+                        )
+                        .all<{ content: string }>(agentId, ...turnIds)
+                        .map((row) => row.content),
+                    ...db
+                        .prepare(
+                            `SELECT input, text FROM turns WHERE agent_id = ? AND turn_id IN (${list})`,
+                        )
+                        .all<{ input: string; text: string }>(agentId, ...turnIds)
+                        .flatMap((row) => [row.input, row.text]),
+                ].filter((text) => text !== marker && text.trim() !== "")
+                const calls = db
+                    .prepare(
+                        `SELECT id, tool_calls FROM messages
+                          WHERE agent_id = ? AND tool_calls IS NOT NULL AND turn_id IN (${list})`,
+                    )
+                    .all<{ id: number; tool_calls: string }>(agentId, ...turnIds)
+                db.transaction(() => {
+                    db.prepare(
+                        `UPDATE messages SET content = ?
+                          WHERE agent_id = ? AND role <> 'system' AND turn_id IN (${list})`,
+                    ).run(marker, agentId, ...turnIds)
+                    // Every argument value goes; each call's id and name stay, so the trace replays.
+                    for (const row of calls) {
+                        db.prepare("UPDATE messages SET tool_calls = ? WHERE id = ?").run(
+                            JSON.stringify(blankArguments(JSON.parse(row.tool_calls), marker)),
+                            row.id,
+                        )
+                    }
+                    db.prepare(
+                        `UPDATE turns SET input = ?, text = ?, reasoning = ''
+                          WHERE agent_id = ? AND turn_id IN (${list})`,
+                    ).run(marker, marker, agentId, ...turnIds)
+                })
+                return { sessions: sessions.map((row) => row.session_key), texts }
+            },
         }
 
         this.turns = {
@@ -1412,6 +1648,7 @@ export class SqliteStore implements Store {
                         record.sender?.name ?? null,
                         record.sender?.kind ?? null,
                         record.note ?? null,
+                        record.participantId ?? null,
                         ts,
                     )
                 })
@@ -2212,6 +2449,38 @@ export class SqliteStore implements Store {
             ...(row.last_error === null ? {} : { lastError: row.last_error }),
         })
         this.webhooks = {
+            scrubBodies: async (agentId, needles, marker) => {
+                if (needles.length === 0) return 0
+                const forms = needles.map((needle) => JSON.stringify(needle).slice(1, -1))
+                const rows = db
+                    .prepare(
+                        `SELECT subscription_id, message_id, body FROM webhook_deliveries
+                          WHERE agent_id = ? AND (${forms.map(() => "body LIKE ? ESCAPE '\\'").join(" OR ")})`,
+                    )
+                    .all<{ subscription_id: string; message_id: string; body: string }>(
+                        agentId,
+                        ...forms.map((form) => `%${escapeLike(form)}%`),
+                    )
+                const hit = (text: string) => needles.some((needle) => text.includes(needle))
+                let changed = 0
+                db.transaction(() => {
+                    for (const row of rows) {
+                        let body: string
+                        try {
+                            body = JSON.stringify(scrubValue(JSON.parse(row.body), hit, marker))
+                        } catch {
+                            body = hit(row.body) ? JSON.stringify(marker) : row.body
+                        }
+                        if (body === row.body) continue
+                        db.prepare(
+                            `UPDATE webhook_deliveries SET body = ?
+                              WHERE subscription_id = ? AND message_id = ?`,
+                        ).run(body, row.subscription_id, row.message_id)
+                        changed += 1
+                    }
+                })
+                return changed
+            },
             create: async (sub) => {
                 q.webhookInsert.run(
                     sub.subscriptionId,

@@ -777,6 +777,31 @@ export function privateMemoryRefused(): ToolError {
     })
 }
 
+export function memoryForgetRefused(): ToolError {
+    return new ToolError({
+        code: "memory_forget_refused",
+        message:
+            "This conversation cannot change your private memory: it is a room or a stand-in, and private notes are for the person you work for.",
+        hint: "Nothing was deleted. The person you work for can ask for it in their own conversation; a person's shared notes are deleted with DELETE /v1/memory/notes/:id.",
+    })
+}
+
+export function memoryForgetArguments(): ToolError {
+    return new ToolError({
+        code: "memory_forget_arguments",
+        message: "memory_forget needs either `query` or `ids`, not both and not neither.",
+        hint: "Call it with `query` first to see what matches, show the person, then call it again with the `ids` they confirm.",
+    })
+}
+
+export function memoryForgetUnavailable(): ToolError {
+    return new ToolError({
+        code: "memory_forget_unavailable",
+        message: "Memory cannot be changed from here: nothing runs turns in this context.",
+        hint: "memory_forget works inside a turn of a running agent.",
+    })
+}
+
 export function artifactUnavailable(): ToolError {
     return new ToolError({
         code: "artifact_unavailable",

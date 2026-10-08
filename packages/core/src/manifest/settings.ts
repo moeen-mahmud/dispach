@@ -81,7 +81,7 @@ export const SETTINGS: readonly Setting[] = [
         // description that did not mention it — the cheapest kind of wrong documentation to find and
         // the easiest to leave.
         path: "tools.local",
-        means: "built-in tools: now, memory_write, artifact_read",
+        means: "built-in tools: now, memory_write, memory_forget, artifact_read",
         agentListed: true,
     },
     {
@@ -177,6 +177,12 @@ export const SETTINGS: readonly Setting[] = [
     {
         path: "limits.noProgress.sameTool",
         means: "stop a turn after this many calls in a row to one tool, whatever the arguments. Absent, off",
+        agentListed: false,
+    },
+    // Person-only (pilot.15): an agent that could set this back to `shown` could un-hide itself.
+    {
+        path: "context.modelIdentity",
+        means: "shown or hidden: whether the agent can see which model it runs on (hidden keeps tuning settable)",
         agentListed: false,
     },
     {

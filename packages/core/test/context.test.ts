@@ -345,6 +345,18 @@ describe("the configuration block", () => {
         expect(text).toContain("configuration, not something to build")
     })
 
+    test("context.modelIdentity: hidden keeps the model's name out of the prompt, not its window", () => {
+        const hidden = renderConfigSummary({
+            ...base,
+            manifest: manifestFor({ context: { modelIdentity: "hidden" } }),
+        })
+        expect(hidden).not.toContain("deepseek")
+        expect(hidden).toContain("hidden by the operator · nlt dialect")
+        expect(hidden).toContain("token window")
+        const shown = renderConfigSummary({ ...base, manifest: manifestFor() })
+        expect(shown).toContain("deepseek-v4-flash · nlt dialect")
+    })
+
     test("an absent capability is a row saying none, never a missing row", () => {
         // A missing row reads as "no such concept". A row saying `none` reads as a switch that is
         // off — which is the difference between inventing a bridge and writing four lines of YAML.

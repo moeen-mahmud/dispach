@@ -43,7 +43,7 @@ import { HarnessError } from "../errors.ts"
 import { strip, withoutFrontmatter } from "../workspace/frontmatter.ts"
 
 /** A top-level list item and the lines it occupies. */
-interface Entry {
+export interface Entry {
     readonly start: number
     /** Exclusive. */
     readonly end: number
@@ -162,7 +162,8 @@ export function planEviction(raw: string, budget: number): EvictionPlan {
     }
 }
 
-function removeEntries(lines: readonly string[], evict: readonly Entry[]): string {
+/** The file without these entries. Shared by eviction and `memory_forget`. */
+export function removeEntries(lines: readonly string[], evict: readonly Entry[]): string {
     const drop = new Set<number>()
     for (const entry of evict) {
         for (let i = entry.start; i < entry.end; i += 1) drop.add(i)

@@ -25,7 +25,11 @@ import {
 
 const signal = new AbortController().signal
 
-function provider(clients: Partial<AwsClients>, model?: string): MediaProvider {
+function provider(
+    clients: Partial<AwsClients>,
+    model?: string,
+    field: "media.transcription" | "media.image" = "media.transcription",
+): MediaProvider {
     return awsMedia({
         transcribe: async () => {
             throw new Error("no transcribe client")
@@ -41,7 +45,7 @@ function provider(clients: Partial<AwsClients>, model?: string): MediaProvider {
         },
         ...clients,
     }).create({
-        field: "media.transcription",
+        field,
         config: {
             provider: "aws",
             ...(model === undefined ? {} : { model }),
@@ -247,6 +251,27 @@ describe("Nova Canvas", () => {
         )
         expect(error.code).toBe("media_provider_empty")
         expect(error.message).toContain("blocked by filter")
+    })
+
+    test("an access refusal is worded for the person, then names the permission", async () => {
+        const images = provider(
+            {
+                invoke: async () => async () => {
+                    throw Object.assign(new Error("no"), { name: "AccessDeniedException" })
+                },
+            },
+            undefined,
+            "media.image",
+        )
+        const error = await refusal(async () =>
+            images.generateImage?.({ prompt: "x", size: "1024x1024" }, signal),
+        )
+        // An agent repeats the hint to the person it is talking to (pilot.15, VelaCrew).
+        expect(error.hint).toStartWith(
+            "This agent's AWS credentials do not allow image generation.",
+        )
+        expect(error.hint).toContain("bedrock:InvokeModel")
+        expect(error.hint).not.toContain("service account")
     })
 
     test("options are checked at load", () => {

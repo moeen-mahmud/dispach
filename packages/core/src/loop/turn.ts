@@ -41,7 +41,13 @@ import { phaseSetTool } from "../tools/local.ts"
 import type { PolicyConfig } from "../tools/policy.ts"
 import type { ToolRegistry } from "../tools/registry.ts"
 import type { OnMutate } from "../tools/trust.ts"
-import type { DisplacedArtifact, Tool, ToolResult, WorkspaceWriteTarget } from "../tools/types.ts"
+import type {
+    DisplacedArtifact,
+    Tool,
+    ToolContext,
+    ToolResult,
+    WorkspaceWriteTarget,
+} from "../tools/types.ts"
 import { newStepId, newTurnId } from "./ids.ts"
 import { allowFor, otherPhases, type PhaseMap } from "./phases.ts"
 import {
@@ -263,6 +269,8 @@ export interface TurnInput {
     readonly deferMutations?: ExecuteInput["defer"]
     /** Forwarded to `ToolContext.writeNote`: set when this agent is the space writer (Phase 29). */
     readonly writeNote?: (text: string) => Promise<string>
+    /** Forwarded to `ToolContext.forgetMemory` (pilot.15). */
+    readonly forgetMemory?: ToolContext["forgetMemory"]
     /**
      * The turn starts tainted, by this source: a subagent of a parent turn that had read untrusted
      * content. Its task was written by a model that read it, so the write gate applies from step one.
@@ -1321,6 +1329,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                               ...(input.writeNote === undefined
                                   ? {}
                                   : { writeNote: input.writeNote }),
+                              ...(input.forgetMemory === undefined
+                                  ? {}
+                                  : { forgetMemory: input.forgetMemory }),
                               // Wired from the compaction seam rather than from `tools`, because the
                               // artifact store and the compaction that fills it are one capability:
                               // an agent with a store but no thresholds has no pointers to follow,

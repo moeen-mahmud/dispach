@@ -695,6 +695,12 @@ export interface EventDataMap {
     "memory.recalled": {
         passages: readonly { source: string; score: number }[]
     }
+    /**
+     * `memory_forget` deleted notes (pilot.15): how many, and from which memory; `messages` counts past
+     * conversation messages it redacted, when any. The notes themselves
+     * are not repeated here, so an audit trail of deletions does not become a copy of what was deleted.
+     */
+    "memory.forgotten": { scope: string; count: number; messages?: number }
     "turn.end": {
         reason: TurnEndReason
         steps: number
@@ -778,6 +784,7 @@ export const EVENT_TYPES = [
     "agent.assigned",
     "memory.read",
     "memory.recalled",
+    "memory.forgotten",
     "turn.end",
     "error",
 ] as const satisfies readonly EventType[]

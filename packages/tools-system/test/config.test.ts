@@ -743,3 +743,41 @@ test("the agent cannot write its own subagents (pilot.15)", async () => {
         ),
     ).rejects.toThrow(/subagents/)
 })
+
+// ─── context.modelIdentity (pilot.15) ────────────────────────────────────────────────────
+
+test("hidden: config_read names no model or vendor, and the rest still reads and sets", async () => {
+    const { file, read, set } = fixture()
+    writeFileSync(
+        file,
+        `${MANIFEST}context:\n  modelIdentity: hidden\nmedia:\n  image:\n    provider: aws\n    model: amazon.nova-canvas-v1:0\n    options:\n      region: eu-west-1\n`,
+    )
+    const reads = [
+        String(await read({}, toolContext({}))),
+        String(await read({ path: "model" }, toolContext({}))),
+        String(await read({ path: "model.main.id" }, toolContext({}))),
+        String(await read({ path: "media" }, toolContext({}))),
+    ]
+    for (const text of reads) {
+        for (const leak of ["deepseek", "MODEL_API_KEY", "nova", "provider: aws", "eu-west-1"]) {
+            expect(text).not.toContain(leak)
+        }
+    }
+    expect(reads[1]).toContain("(hidden by the operator)")
+    expect(reads[0]).not.toContain("read it with file_read")
+    // Tuning is still the agent's.
+    expect(reads[1]).toContain("temperature: 0.3")
+    await set({ path: "model.main.temperature", value: "0.7" }, toolContext({}))
+    expect(readFileSync(file, "utf8")).toContain("temperature: 0.7")
+    // And it cannot un-hide itself.
+    await expect(
+        set({ path: "context.modelIdentity", value: "shown" }, toolContext({})),
+    ).rejects.toThrow()
+})
+
+test("shown (the default): config_read is unchanged", async () => {
+    const { read } = fixture()
+    expect(String(await read({ path: "model.main.id" }, toolContext({})))).toContain(
+        "deepseek-chat",
+    )
+})

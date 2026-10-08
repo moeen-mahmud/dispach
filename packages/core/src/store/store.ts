@@ -180,6 +180,67 @@ export interface MessageStore {
         },
     ): Promise<MessagePage>
     count(agentId: string, sessionKey: string): Promise<number>
+    /**
+     * Prose messages (no `origin`, user or assistant) across this agent's sessions containing every
+     * word, case-insensitive, newest first (pilot.15, `memory_forget`). Already forgotten ones are not
+     * returned.
+     */
+    findProse(
+        agentId: string,
+        words: readonly string[],
+        reach: MessageReach,
+        limit: number,
+    ): Promise<readonly StoredMessage[]>
+    /**
+     * Replace these messages' text with `marker`, and the matching text on their turn rows (the input
+     * for a person's message; the reply and reasoning for the agent's). Only within `reach`, so an id
+     * outside it is left alone. Returns what was redacted, as it was.
+     */
+    redact(
+        agentId: string,
+        ids: readonly number[],
+        reach: MessageReach,
+        marker: string,
+    ): Promise<readonly StoredMessage[]>
+    /**
+     * Replace the text of every message these turns wrote, of any kind, and their turn rows' input,
+     * reply and reasoning (pilot.15): the conversation in which a person asked to forget something
+     * quotes it. Each tool call keeps its id and name, because a native trace without them is refused
+     * on replay; every argument value is replaced. Returns the sessions touched.
+     */
+    redactTurns(agentId: string, turnIds: readonly string[], marker: string): Promise<RedactedTurns>
+    /**
+     * Replace forgotten text wherever else it was written, within `reach` (pilot.15): a message of any
+     * kind whose text contains a needle becomes `marker`, and a tool call whose arguments contain one
+     * keeps its shape with that value replaced, so a native trace still replays. `memory_write`'s own
+     * call is the case that made this necessary: its `text` argument is the fact, verbatim. Returns the
+     * sessions it changed, and the turns whose `memory_write` call carried a needle: the turn that saved
+     * a note is the exact link to the reply that restated it, which no text match finds.
+     */
+    scrub(
+        agentId: string,
+        needles: readonly string[],
+        reach: MessageReach,
+        marker: string,
+    ): Promise<{ readonly sessions: readonly string[]; readonly writeTurns: readonly string[] }>
+}
+
+/** What `redactTurns` changed: the sessions, and the text it replaced, for the webhook scrub. */
+export interface RedactedTurns {
+    readonly sessions: readonly string[]
+    readonly texts: readonly string[]
+}
+
+/** The text a forgotten message keeps, so a session's order and pairing survive (pilot.15). */
+export const FORGOTTEN_MARKER = "[forgotten at the person's request]"
+
+/**
+ * Whose messages a call may reach (pilot.15). Absent `participant`: every session of the agent. Present:
+ * turns taken for that participant or sent by them, and, with `unattributed`, turns that record nobody.
+ */
+export interface MessageReach {
+    readonly participant?: string
+    readonly unattributed?: boolean
 }
 
 export interface TurnStore {
@@ -197,6 +258,8 @@ export interface TurnStore {
          */
         readonly input: string
         readonly sender?: TurnSender
+        /** The acting participant, when the turn was taken for one (pilot.15). */
+        readonly participantId?: string
         /** The embedder's note about this message, kept for debugging and replay. Never history. */
         readonly note?: string
     }): Promise<TurnRecord>
@@ -1032,6 +1095,13 @@ export interface WebhookStore {
     ): Promise<readonly WebhookDeliveryRecord[]>
     /** What these agents' subscriptions still owe. */
     backlog(agentIds: readonly string[]): Promise<DeliveryBacklog>
+    /**
+     * Replace forgotten text in this agent's delivery log (pilot.15, `memory_forget`): every string in a
+     * body that contains a needle becomes `marker`, the envelope kept. Sent rows are a record of what
+     * left, and the copy already delivered is the receiver's; this is the silo's own copy. Returns the
+     * rows changed.
+     */
+    scrubBodies(agentId: string, needles: readonly string[], marker: string): Promise<number>
 }
 
 /**

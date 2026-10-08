@@ -15,6 +15,8 @@ import { join } from "node:path"
 import {
     artifactNotFound,
     artifactUnavailable,
+    memoryForgetArguments,
+    memoryForgetUnavailable,
     phaseNotAvailable,
     phaseUnknown,
     workspaceNotEditable,
@@ -375,7 +377,85 @@ export function phaseSetTool(init: {
     }
 }
 
-const LOCAL_TOOLS: readonly Tool[] = [now, memoryWrite, artifactRead]
+/** At most this many matches are listed; a broader query is asked to narrow down. */
+const FORGET_LIST_LIMIT = 30
+
+/**
+ * Deletes notes the agent saved (pilot.15), in two calls: a `query` lists, `ids` delete.
+ *
+ * The listing step is what makes this safe to hand a model. "Forget Acme" deleting every note that
+ * mentions Acme, with nothing shown first, removes things the person meant to keep and cannot be undone.
+ * Which memory a call may change is decided by the agent per turn (`ToolContext.forgetMemory`).
+ */
+const memoryForget: Tool = {
+    spec: {
+        slug: "memory_forget",
+        provider: LOCAL_PROVIDER_ID,
+        summary: "Finds and deletes saved notes, and what was said in past conversations.",
+        whenToUse:
+            "the person asks you to forget something you noted. Call it with `query` first, show the person what matched, then call it with the `ids` they confirm",
+        whenNotToUse:
+            "to tidy notes nobody asked you to remove, or with `ids` you have not shown the person",
+        mutating: true,
+        tags: ["write", "memory"],
+        parameters: {
+            type: "object",
+            properties: {
+                query: {
+                    type: "string",
+                    description:
+                        "Words every matching note or past message contains, case-insensitive. Lists matches; deletes nothing.",
+                },
+                ids: {
+                    type: "array",
+                    items: { type: "string" },
+                    description:
+                        "Ids from a previous listing (notes and conversation messages). Deletes exactly these.",
+                },
+            },
+        },
+    },
+    async handler(args, context) {
+        const query = typeof args.query === "string" ? args.query.trim() : ""
+        const ids = Array.isArray(args.ids)
+            ? args.ids.map((id) => String(id).trim()).filter((id) => id !== "")
+            : []
+        if ((query === "") === (ids.length === 0)) throw memoryForgetArguments()
+        if (context.forgetMemory === undefined) throw memoryForgetUnavailable()
+
+        const where = (scope: string) =>
+            scope === "space" ? "the team's shared memory" : "your notes"
+        if (query !== "") {
+            const result = await context.forgetMemory({ query })
+            if (result.notes.length === 0)
+                return `No note in ${where(result.scope)} contains "${query}".`
+            const shown = result.notes.slice(0, FORGET_LIST_LIMIT)
+            const more =
+                result.notes.length > shown.length
+                    ? `\n${result.notes.length - shown.length} more match; use more words to narrow it down.`
+                    : ""
+            return (
+                [
+                    `${result.notes.length} ${result.notes.length === 1 ? "note" : "notes"} in ${where(result.scope)} ${result.notes.length === 1 ? "matches" : "match"}. Nothing is deleted yet: show these to the person, then call memory_forget with the ids they confirm.`,
+                    ...shown.map((note) => `- ${note.id} (${note.source}): ${note.text}`),
+                ].join("\n") + more
+            )
+        }
+
+        const result = await context.forgetMemory({ ids })
+        const gone =
+            result.notes.length === 0
+                ? `Nothing was deleted from ${where(result.scope)}.`
+                : `Deleted ${result.notes.length} ${result.notes.length === 1 ? "note" : "notes"} from ${where(result.scope)}; they will not be recalled again.`
+        const missing =
+            result.missing.length === 0
+                ? ""
+                : ` No note has ${result.missing.length === 1 ? "the id" : "the ids"} ${result.missing.join(", ")}: already gone, or not yours to delete here.`
+        return gone + missing
+    },
+}
+
+const LOCAL_TOOLS: readonly Tool[] = [now, memoryWrite, memoryForget, artifactRead]
 
 /**
  * Slugs a manifest may name in `tools.local`.
@@ -423,6 +503,7 @@ export function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
         ...(overrides.setPhase === undefined ? {} : { setPhase: overrides.setPhase }),
         ...(overrides.memoryDir === undefined ? {} : { memoryDir: overrides.memoryDir }),
         ...(overrides.writeNote === undefined ? {} : { writeNote: overrides.writeNote }),
+        ...(overrides.forgetMemory === undefined ? {} : { forgetMemory: overrides.forgetMemory }),
         ...(overrides.meter === undefined ? {} : { meter: overrides.meter }),
         ...(overrides.pinTools === undefined ? {} : { pinTools: overrides.pinTools }),
     }

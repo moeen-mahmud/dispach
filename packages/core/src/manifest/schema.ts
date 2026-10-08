@@ -279,6 +279,12 @@ export const ContextSchema = z
         reserveOutput: z.number().int().positive().default(4096),
         observationMaxTokens: z.number().int().positive().default(2000),
         /**
+         * Whether the agent may see which model it runs on (pilot.15, VelaCrew). `hidden` drops the
+         * model and media ids, endpoints, transports and key names from the prompt and from
+         * `config_read`; everything else stays readable and settable. Events and the API keep them.
+         */
+        modelIdentity: z.enum(["shown", "hidden"]).default("shown"),
+        /**
          * **Deprecated from Phase 3.5** — an alias for `static`, warning at load.
          *
          * Kept resolving against the *manifest* directory rather than the workspace directory, which

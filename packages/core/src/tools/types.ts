@@ -232,6 +232,28 @@ export interface ToolContext {
      * designated space writer (Phase 29). Returns the observation. Absent: the workspace file, as ever.
      */
     readonly writeNote?: (text: string) => Promise<string>
+    /**
+     * `memory_forget` (pilot.15): list the notes a query matches, or delete the ones named. Resolved
+     * per turn by the agent, because which memory a turn may change is the memory `memory_write` would
+     * write there: private on a private turn, the space for the space writer, refused otherwise.
+     * Absent where no turn runs, and the tool then refuses rather than reporting nothing found.
+     */
+    readonly forgetMemory?: (request: ForgetRequest) => Promise<ForgetResult>
+}
+
+export type ForgetRequest = { readonly query: string } | { readonly ids: readonly string[] }
+
+export interface ForgetResult {
+    /** `private`, or `space` for the space writer. */
+    readonly scope: string
+    /** What the query matched, or what the ids deleted. */
+    readonly notes: readonly {
+        readonly id: string
+        readonly source: string
+        readonly text: string
+    }[]
+    /** Ids that named nothing: already gone, or never this turn's to delete. */
+    readonly missing: readonly string[]
 }
 
 /** What `artifact_read` needs to know about a displaced observation. Structural on purpose. */

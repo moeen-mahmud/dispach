@@ -138,7 +138,8 @@ export function renderConfigSummary(input: ConfigSummaryInput): string {
     const rows: [string, string][] = [
         [
             "model",
-            `${manifest.model.main.id} · ${manifest.tools.dialect} dialect · ${input.window} token window`,
+            // Hidden by the operator (pilot.15): the window and dialect stay, because the model plans with them.
+            `${manifest.context?.modelIdentity === "hidden" ? "hidden by the operator" : manifest.model.main.id} · ${manifest.tools.dialect} dialect · ${input.window} token window`,
         ],
         ["tools", describeTools(input)],
         ["skills", describeSkills(manifest, input.skillNames)],

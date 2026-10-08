@@ -280,6 +280,21 @@ async function* chunks(bytes: Uint8Array): AsyncIterable<AudioStream> {
     }
 }
 
+/**
+ * Plain words first, because an agent passes a hint on to the person it is talking to (pilot.15,
+ * VelaCrew): "the pod's service account" means nothing to them. The permission an operator grants
+ * follows, for whoever reads the log.
+ */
+function deniedHint(field: string): string {
+    const [what, permission] =
+        field === "media.transcription"
+            ? ["voice notes", "transcribe:StartStreamTranscription"]
+            : field === "media.speech"
+              ? ["spoken replies", "polly:SynthesizeSpeech"]
+              : ["image generation", "bedrock:InvokeModel on the image model"]
+    return `This agent's AWS credentials do not allow ${what}. Whoever runs the agent grants ${permission} to its AWS role.`
+}
+
 function refused(cause: unknown, field: string): MediaError {
     // The credentials endpoint said no, and why: its own code (`credit_exhausted`) is the error's, so an
     // embedder that stopped a user's credit sees that rather than an AWS refusal (pilot.15).
@@ -305,7 +320,7 @@ function refused(cause: unknown, field: string): MediaError {
         message: `AWS refused the request (${name || "error"}): ${message}`,
         hint:
             name === "AccessDeniedException" || name === "UnrecognizedClientException"
-                ? "The role needs transcribe:StartStreamTranscription for voice notes, polly:SynthesizeSpeech for spoken replies, and bedrock:InvokeModel on the image model; check the pod's service account or the credentials in the environment."
+                ? deniedHint(field)
                 : name === "ValidationException"
                   ? "Nova Canvas takes a prompt of at most 1,024 characters and a size whose sides are multiples of 16 between 320 and 4096."
                   : name === "TextLengthExceededException"

@@ -196,6 +196,7 @@ tools:
   local:
     - now             # read-only: runs in parallel with other reads
     - memory_write    # mutating: serialises, holds a reserved write slot, never retried
+    - memory_forget   # mutating: lists by query, deletes only the ids it listed
     - artifact_read   # follows the pointer compaction leaves behind; without it the detail is gone
 
   budget:

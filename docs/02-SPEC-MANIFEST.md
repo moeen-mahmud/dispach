@@ -250,6 +250,7 @@ the provider caches nothing: DeepSeek caches context automatically server-side a
 | `window` | from capabilities | Total token budget. |
 | `reserveOutput` | 4096 | How much of the window to keep free for the reply, so the prompt cannot crowd it out. A **prompt-budget** number: it never becomes `max_tokens`. |
 | `observationMaxTokens` | 2000 | Above this a single tool observation is trimmed to head+tail with an artifact pointer. |
+| `modelIdentity` | `shown` | `hidden` keeps the agent from seeing which model it runs on (pilot.15). The prompt's settings summary keeps the dialect and window and drops the model id. `config_read` shows `(hidden by the operator)` for `model.<role>` (fallbacks too) `id`, `api`, `baseUrl`, `options` and `apiKeyEnv`, and `media.<section>` `provider`, `model`, `baseUrl`, `options` and `apiKeyEnv`, whether read whole or by path; every other setting, model tuning included, stays readable and settable. Person-only: `config_set` refuses it. Events and the HTTP API keep the real ids. Not covered: `file_read` or `exec` on `agent.yaml`, and an error text that names the model. |
 | `files` | `[]` | **Deprecated.** Alias for `static`, warning at load and naming the replacement. Keeps resolving against the *manifest* directory rather than `workspace`, which is what makes it an alias rather than a rename. Setting both `files` and `static` is a load failure, not a merge. |
 | `thresholds` | `snip .60 · micro .70 · collapse .80 · reset .88 · trim .95` | Compaction ladder trigger fractions **of the prompt budget** — `window` minus `reserveOutput`, not of the whole window. Measured against the window, a large reserve lets `assembleContext`'s oldest-first trim run while the ladder still reports mild pressure, which is the common case on a reasoning model. Must be strictly ascending **in stage order** and within `(0, 1)`; validated. The stage order is `snip → micro → collapse → reset → trim`, ordered by how much information each rung destroys rather than how many bytes it frees: `snip` and `micro` leave an `artifact_read` pointer, `collapse` and `reset` leave the meaning as a digest, `trim` leaves nothing. So `trim` is last despite freeing the most, and it is the fallback for the case where a digest would have grown the prompt and the no-growth guard refused it. A manifest ordered for the pre-reorder ladder (`trim` first) is refused by name, with the rewrite in the hint. |
 
@@ -300,7 +301,7 @@ case-insensitive and whole-word against the current input. See `07-SPEC-WORKSPAC
 | `budget.reserveWrite` | 6 | Slots held for mutating tools so reads cannot starve writes. |
 | `pinned` | `[]` | Slugs resolved at load. **An unknown slug is a warning and the tool is absent** (0.1.3), with the slug and provider named — unless a provider claims it with `explainUnresolved()`, which is consulted only once a slug is missing after *every* provider has answered. Warned rather than refused because the commonest cause is a missing *credential*, not a typo; `available()` is what tells the model it was not given a tool its manifest asks for. A cold Composio cache reports itself and names the warm command; the generic nearest-match message would blame correct slugs. |
 | `search.enabled` | false | Exposes a provider search meta-tool as an escape hatch. Off by default: search-then-execute is two-hop reasoning and small models fail it. |
-| `local` | `[]` | Built-in tools: `artifact_read`, `memory_write`, `phase_set`, `handoff`, `now`. `artifact_read` follows the pointer compaction leaves behind, so an agent with compaction enabled and this tool unpinned can see that detail was removed and cannot retrieve it. |
+| `local` | `[]` | Built-in tools: `artifact_read`, `memory_write`, `memory_forget`, `phase_set`, `handoff`, `now`. `artifact_read` follows the pointer compaction leaves behind, so an agent with compaction enabled and this tool unpinned can see that detail was removed and cannot retrieve it. |
 | `policy.mode` | `allow` | What happens to a call no rule mentions. `allow` because **pinning is the primary authorization** — an agent has only the tools its manifest pinned. `ask` on an unattended run means `onNoApprover` answers it, so a schedule would do nothing. |
 | `policy.allow` / `policy.deny` | `[]` | `Tool` or `Tool(pattern)`. Evaluated **deny → allow, first match, specificity never reorders** — so a deny carries no exceptions. A rule naming a primary content field (`exec(command:…)`) is refused: a compound command defeats it. |
 | `policy.onNoApprover` | `deny` | What `ask` means with nobody to ask — a schedule, a pipe, a channel with no approver. |
@@ -656,6 +657,25 @@ Two tiers, one writer. `memory_write` appends to the **carried** file — the wo
 in the `volatile` tier, present in slot 4 on every turn — and when that file passes its budget the
 oldest notes move into `dir`, where only retrieval reaches them. So a fact said a minute ago is still
 carried, and one from June is found by searching. Nothing is deleted at either step.
+
+`memory_forget` (pilot.15, pinned like `memory_write` and mutating) is the person's way to take a note
+back, in two calls: `{query}` lists the notes containing every word of it, with ids, and deletes
+nothing; `{ids}` deletes exactly those. It reaches what `memory_write` would write on that turn — the
+carried file and `dir` on a private turn, the `space` for the space writer — and is refused in a room or
+a stand-in (`memory_forget_refused`). Only top-level list items are notes; headings and prose stay. A
+person's `owner:` and `project:` notes are deleted over `DELETE /v1/memory/notes/:id`. On a private
+turn the listing also shows past conversation messages (`msg_<id>`, "said to you" or "your reply")
+from turns the acting participant took — their own, never another member's; the owner also reaches
+turns that record no participant, which is every API turn before migration 31, and a turn with no
+participant reaches every session. Deleting one **redacts** it in place: the message text and its
+turn row's input, reply and reasoning become `[forgotten at the person's request]`, so recall, a
+rebuild and an export cannot bring it back, and it cannot be undone. The conversation in which the
+person asked to forget is redacted the same way when a deletion lands, because its listing quoted
+what was found; its tool calls keep their id and name, so a native trace still replays, and every
+argument value is replaced. The forgotten text is then looked for in every other message within the
+same reach, tool calls and results included (`memory_write`'s call carries the note verbatim): a
+message containing it is redacted, and a tool argument containing it is replaced with the call kept.
+Text under 12 characters is not looked for elsewhere. A turn whose `memory_write` call saved a deleted note is redacted whole, its reply included, because a reply restating the note in the agent's own words is found by no text match. The memory index is re-read as part of the delete. The silo's own webhook delivery log (`webhook_deliveries.body`) is scrubbed the same way, envelope kept; the copy a receiver already holds is theirs. Emits `memory.forgotten`.
 
 | Field | Default | Notes |
 | --- | --- | --- |

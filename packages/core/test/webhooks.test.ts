@@ -237,6 +237,39 @@ describe("delivery", () => {
         await t.store.close()
     })
 
+    test("forgetting scrubs the agent's own delivery log, envelope kept (pilot.15)", async () => {
+        const t = await setup()
+        const fact = "my dentist is Dr Rahman"
+        const enqueue = (agentId: string) => {
+            const body = JSON.stringify({
+                type: "turn.end",
+                agentId,
+                data: { finalText: `Noted: ${fact}` },
+            })
+            return t.store.webhooks.enqueue({
+                subscriptionId: "wh_1",
+                messageId: webhookMessageId("wh_1", body),
+                agentId,
+                eventType: "turn.end",
+                body,
+                at: new Date().toISOString(),
+            })
+        }
+        await enqueue("a")
+        await enqueue("b")
+        expect(await t.store.webhooks.scrubBodies("a", [fact], "[forgotten]")).toBe(1)
+        const rows = await t.store.webhooks.claimDue(["a", "b"], "9999-01-01T00:00:00Z", 10)
+        const byAgent = Object.fromEntries(rows.map((row) => [row.agentId, JSON.parse(row.body)]))
+        expect(byAgent.a).toEqual({
+            type: "turn.end",
+            agentId: "a",
+            data: { finalText: "[forgotten]" },
+        })
+        // Another agent's log is not this forget's to touch.
+        expect(byAgent.b.data.finalText).toContain("Rahman")
+        await t.store.close()
+    })
+
     test("the same event enqueued twice is one delivery", async () => {
         const t = await setup()
         const body = '{"same":true}'
