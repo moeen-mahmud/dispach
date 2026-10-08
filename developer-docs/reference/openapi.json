@@ -1,0 +1,1793 @@
+{
+    "openapi": "3.1.0",
+    "info": {
+        "title": "Dispach agent server",
+        "version": "0.1.3",
+        "description": "Generated from the router table and the request schemas — see openapi.ts. The binding contract is docs/04-SPEC-WIRE.md, which is checked against the code; @dispach/client's types are the response reference."
+    },
+    "servers": [
+        {
+            "url": "http://localhost:7420",
+            "description": "Local server. Replace this with the URL of your deployment."
+        }
+    ],
+    "components": {
+        "securitySchemes": {
+            "bearer": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "An operator key or the configured token."
+            }
+        },
+        "schemas": {
+            "Error": {
+                "type": "object",
+                "description": "Every failure has this shape. `hint` is never absent — it is the part that says what to do.",
+                "properties": {
+                    "error": {
+                        "type": "object",
+                        "required": [
+                            "code",
+                            "message",
+                            "hint"
+                        ],
+                        "properties": {
+                            "code": {
+                                "type": "string"
+                            },
+                            "message": {
+                                "type": "string"
+                            },
+                            "hint": {
+                                "type": "string"
+                            },
+                            "field": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "security": [
+        {
+            "bearer": []
+        }
+    ],
+    "paths": {
+        "/v1/health": {
+            "get": {
+                "summary": "Liveness, the version, and how many agents are hosted.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/v1/ready": {
+            "get": {
+                "summary": "Whether a turn can be served yet.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "503": {
+                        "description": "still starting; channels may still be connecting"
+                    }
+                }
+            }
+        },
+        "/v1/activity": {
+            "get": {
+                "summary": "Whether the process is idle, and when it must next be woken. For an external waker.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "403": {
+                        "description": "the key is scoped to agents or sessions"
+                    }
+                }
+            }
+        },
+        "/v1/agents": {
+            "get": {
+                "summary": "Every agent this server knows about, hosted or switched off.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            },
+            "post": {
+                "summary": "Create an agent, from answers or from a template, and adopt it into this host, live.",
+                "responses": {
+                    "201": {
+                        "description": "created; `adopted` is empty with an `error` if it is not running"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "403": {
+                        "description": "neither a loopback bind nor an authenticated admin credential"
+                    },
+                    "501": {
+                        "description": "this server has no provisioner"
+                    }
+                },
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "type": "object",
+                                "properties": {
+                                    "answers": {
+                                        "code": "provision_answers_required",
+                                        "hint": "Send { \"answers\": { \"name\": \"milo\", … } }. Every step you leave out takes its default, exactly as `init --yes` does with flags; GET /v1/provision lists them.",
+                                        "description": "A subset of the wizard's steps, as strings. `GET /v1/provision` lists every step with its prompt, default and choices. Send this or `template`, not both.",
+                                        "type": "object",
+                                        "propertyNames": {
+                                            "type": "string"
+                                        },
+                                        "additionalProperties": {
+                                            "type": "string",
+                                            "code": "provision_answer_invalid",
+                                            "hint": "Answers arrive as strings from the terminal and from here, and are validated per step. Send the value as a string — including a boolean-looking choice, whose values are named in GET /v1/provision.",
+                                            "description": "One answer. Always text, whatever the step's type looks like."
+                                        }
+                                    },
+                                    "template": {
+                                        "code": "provision_template_invalid",
+                                        "hint": "Send the template's name as a string. GET /v1/templates lists what this server has.",
+                                        "description": "Create the agent from a template in this server's sandbox instead of from answers. Needs `name`; takes `vars`.",
+                                        "type": "string",
+                                        "minLength": 1
+                                    },
+                                    "name": {
+                                        "code": "provision_name_required",
+                                        "hint": "Send { \"template\": \"…\", \"name\": \"Acme store\" }. The id every route keys on is derived from it.",
+                                        "description": "The new agent's name, with `template`. Its slug becomes the id; the template sees both as {{agent.name}} and {{agent.id}}.",
+                                        "type": "string"
+                                    },
+                                    "vars": {
+                                        "code": "template_value_invalid",
+                                        "hint": "Send { \"vars\": { \"store\": \"Acme\" } }, every value a string. GET /v1/templates lists each template's variables.",
+                                        "description": "Values for the template's declared variables. A secret variable's value goes to the agent's .env and is never returned.",
+                                        "type": "object",
+                                        "propertyNames": {
+                                            "type": "string"
+                                        },
+                                        "additionalProperties": {
+                                            "type": "string",
+                                            "code": "template_value_invalid",
+                                            "hint": "Template values are one line of text, sent as strings.",
+                                            "description": "One variable's value."
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}": {
+            "get": {
+                "summary": "One agent, with its dialect, window, counts and warnings.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/reload": {
+            "post": {
+                "summary": "Re-read the manifest by replacing the agent with a new instance.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "a team member, which has no manifest of its own"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "a turn is running — it is not aborted to apply a change"
+                    }
+                }
+            }
+        },
+        "/v1/openapi.json": {
+            "get": {
+                "summary": "This document.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/docs": {
+            "get": {
+                "summary": "A browser reference over this document.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/v1/provision": {
+            "get": {
+                "summary": "The questions creating an agent asks, and whether this server can answer them.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/v1/templates": {
+            "get": {
+                "summary": "The templates an agent can be created from, and the variables each declares.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/secrets": {
+            "get": {
+                "summary": "Which variables the agent's manifest reads, and whether each is set. Never a value.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "501": {
+                        "description": "this server has no credential writer"
+                    }
+                }
+            },
+            "put": {
+                "summary": "Write the agent's credentials into its .env and apply them: reload or adopt.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "written; `applied` says whether the agent is running on them"
+                    },
+                    "400": {
+                        "description": "a variable the manifest does not read, or an empty value"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "501": {
+                        "description": "this server has no credential writer"
+                    }
+                },
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "type": "object",
+                                "properties": {
+                                    "values": {
+                                        "type": "object",
+                                        "propertyNames": {
+                                            "type": "string"
+                                        },
+                                        "additionalProperties": {
+                                            "type": "string",
+                                            "code": "secret_value_invalid",
+                                            "hint": "Send each value as a non-empty string.",
+                                            "description": "One variable's value. Written to the agent's .env at 0600; never returned."
+                                        },
+                                        "code": "secrets_values_required",
+                                        "hint": "Send { \"values\": { \"MODEL_API_KEY\": \"…\" } }. GET /v1/agents/:id/secrets lists the variables this agent reads.",
+                                        "description": "Variables to write into the agent's .env, keyed by name. Only names the agent's manifest reads are accepted."
+                                    }
+                                },
+                                "required": [
+                                    "values"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/stop": {
+            "post": {
+                "summary": "Switch an agent off durably and drop it from this host now.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "a turn is running"
+                    }
+                },
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "type": "object",
+                                "properties": {
+                                    "reason": {
+                                        "code": "agent_stop_invalid",
+                                        "hint": "A short note, recorded on the row and shown wherever the agent is reported as off.",
+                                        "description": "Why, for whoever reads the listing later.",
+                                        "type": "string"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/start": {
+            "post": {
+                "summary": "Switch it back on and have this host adopt it.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "501": {
+                        "description": "this server cannot look up manifests"
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/messages": {
+            "post": {
+                "summary": "Start a turn. Returns once accepted; the turn runs detached.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "accepted"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "429": {
+                        "description": "over limits.maxConcurrentTurns or limits.tokens; nothing recorded"
+                    }
+                },
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "type": "object",
+                                "properties": {
+                                    "text": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "code": "message_text_required",
+                                        "hint": "Send { \"text\": \"...\" }. An empty turn would be billed for a full prompt and produce nothing.",
+                                        "description": "What to say to the agent."
+                                    },
+                                    "sessionKey": {
+                                        "description": "Which conversation this belongs to. Defaults to `api:default`.",
+                                        "type": "string",
+                                        "minLength": 1
+                                    },
+                                    "deliver": {
+                                        "anyOf": [
+                                            {
+                                                "type": "string",
+                                                "const": "none"
+                                            },
+                                            {
+                                                "type": "object",
+                                                "properties": {
+                                                    "channel": {
+                                                        "type": "string",
+                                                        "minLength": 1
+                                                    },
+                                                    "to": {
+                                                        "type": "string",
+                                                        "minLength": 1
+                                                    }
+                                                },
+                                                "required": [
+                                                    "channel",
+                                                    "to"
+                                                ]
+                                            }
+                                        ],
+                                        "code": "deliver_invalid",
+                                        "hint": "A bare channel id is not enough on an API turn: the request has no originating conversation, so there is no recipient to infer. Send { \"channel\": \"tg\", \"to\": \"12345\" }, or \"none\" to read the reply from the event stream.",
+                                        "description": "Where the reply goes. \"none\" leaves it on the event stream and in the store."
+                                    },
+                                    "from": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {
+                                                "type": "string",
+                                                "minLength": 1,
+                                                "code": "sender_invalid",
+                                                "hint": "Send { \"from\": { \"id\": \"agent:ops-bot\", \"kind\": \"agent\" } }, or omit it entirely for a turn the token-holder is sending itself.",
+                                                "description": "Stable identifier for the sender. Appears on the turn row and in events."
+                                            },
+                                            "kind": {
+                                                "type": "string",
+                                                "enum": [
+                                                    "user",
+                                                    "agent"
+                                                ],
+                                                "code": "sender_invalid",
+                                                "hint": "This field decides the trust boundary — \"agent\" fences the message and blocks mutating tools for the turn, \"user\" does not — so there is no default and an unknown value is refused rather than guessed at. A turn the token-holder is sending itself omits \"from\".",
+                                                "description": "The trust boundary. \"agent\" fences the text as data and blocks mutating tools for the whole turn."
+                                            },
+                                            "name": {
+                                                "code": "sender_invalid",
+                                                "hint": "A display name, shown beside the sender id. Omit it rather than sending an empty string.",
+                                                "description": "Human-readable name for the sender.",
+                                                "type": "string"
+                                            }
+                                        },
+                                        "required": [
+                                            "id",
+                                            "kind"
+                                        ],
+                                        "description": "Attribution for a turn somebody other than the token-holder is sending. Omit for your own."
+                                    },
+                                    "stream": {
+                                        "description": "Stream the turn's events inline as SSE rather than returning a handle.",
+                                        "type": "boolean"
+                                    },
+                                    "chunks": {
+                                        "description": "Include per-token `model.chunk` frames. Off by default — the reader decides.",
+                                        "type": "boolean"
+                                    }
+                                },
+                                "required": [
+                                    "text"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/turns/{turnId}/stream": {
+            "get": {
+                "summary": "One turn's events as SSE, replayed from the start and then live.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "turnId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "chunks",
+                        "in": "query",
+                        "required": false,
+                        "description": "Include per-token frames. Off by default.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "types",
+                        "in": "query",
+                        "required": false,
+                        "description": "Narrow to these event types, comma-separated.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "an event stream; see the event table in the wire spec"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/turns/{turnId}/stop": {
+            "post": {
+                "summary": "Cooperatively stop a turn this API started.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "turnId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "no cancel handle — a channel or schedule started it"
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/approvals": {
+            "get": {
+                "summary": "Questions waiting on a person, oldest first.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/approvals/{approvalId}": {
+            "post": {
+                "summary": "Answer one blocked tool call.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "approvalId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                },
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "type": "object",
+                                "properties": {
+                                    "granted": {
+                                        "type": "boolean",
+                                        "code": "approval_decision_required",
+                                        "hint": "Send { \"granted\": true } or { \"granted\": false }. There is no default: one direction would deny a call over a typo and the other would grant one, and neither is a decision anybody made.",
+                                        "description": "Whether the blocked tool call may proceed."
+                                    }
+                                },
+                                "required": [
+                                    "granted"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/keys": {
+            "post": {
+                "summary": "Mint an operator key. The secret is returned once and never again.",
+                "responses": {
+                    "201": {
+                        "description": "minted"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                },
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "type": "object",
+                                "properties": {
+                                    "label": {
+                                        "type": "string",
+                                        "code": "key_label_required",
+                                        "hint": "Send { \"label\": \"my browser\" }. A label is required rather than defaulted because it is the only thing distinguishing two credentials in a listing, and \"key 2\" is a name nobody can act on when deciding which to revoke.",
+                                        "description": "How this credential is shown in a listing. Required; see `keyLabelProblem`."
+                                    },
+                                    "scope": {
+                                        "code": "key_scope_invalid",
+                                        "hint": "Send { \"scope\": { \"agents\": [\"milo\"], \"can\": [\"chat\"] } }, or omit it entirely for a key that reaches everything — which is what every key minted before scopes existed does.",
+                                        "description": "Opt-in narrowing. Absent is an unscoped key.",
+                                        "type": "object",
+                                        "properties": {
+                                            "agents": {
+                                                "code": "key_scope_agents_invalid",
+                                                "hint": "Send { \"agents\": [\"milo\"] } — a list of agent ids. Omit it for a key that reaches every agent. An id naming no agent on this server is reported rather than silently matching nothing.",
+                                                "description": "Agent ids this key may reach. Absent means all of them.",
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "string",
+                                                    "minLength": 1
+                                                }
+                                            },
+                                            "sessions": {
+                                                "code": "key_scope_sessions_invalid",
+                                                "hint": "Send { \"sessions\": \"team_42:\" } — a session-key prefix, with an optional trailing \"*\". A prefix rather than a list, because the conversations this key will cover do not exist yet when it is minted.",
+                                                "description": "Session-key prefix. Absent means every session.",
+                                                "type": "string",
+                                                "minLength": 1
+                                            },
+                                            "can": {
+                                                "code": "key_scope_can_invalid",
+                                                "hint": "Send { \"can\": [\"chat\", \"read\"] }. The four are read (every GET), chat (send a message, answer an approval, stop a turn), write (schedules, phase, clearing a session) and admin (keys, provisioning, start/stop/reload). Absent means all four; an empty array means none, and is honoured as written.",
+                                                "description": "Capabilities this key may exercise. Absent means all four.",
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "read",
+                                                        "chat",
+                                                        "write",
+                                                        "admin"
+                                                    ]
+                                                }
+                                            },
+                                            "expiresIn": {
+                                                "code": "key_scope_expires_invalid",
+                                                "hint": "Send { \"expiresIn\": 3600 } — whole seconds from now, as a number. Relative rather than an absolute instant, because that would need the caller and this server to agree about the clock; the response reports the absolute expiresAt this server computed.",
+                                                "description": "Seconds until this key stops authenticating. Absent means never.",
+                                                "type": "integer",
+                                                "exclusiveMinimum": 0,
+                                                "maximum": 9007199254740991
+                                            }
+                                        }
+                                    }
+                                },
+                                "required": [
+                                    "label"
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+            "get": {
+                "summary": "Every key, live and revoked. Never a secret.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/v1/keys/{keyId}": {
+            "delete": {
+                "summary": "Revoke a key. A soft delete; the row survives.",
+                "parameters": [
+                    {
+                        "name": "keyId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/v1/webhooks": {
+            "post": {
+                "summary": "Subscribe a URL to event types. The signing secret is returned once.",
+                "responses": {
+                    "201": {
+                        "description": "created; `secret` is in this response and no other"
+                    },
+                    "400": {
+                        "description": "a refused URL, an undeliverable type, or agents outside this key's reach"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                },
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "type": "object",
+                                "properties": {
+                                    "url": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "code": "webhook_url_invalid",
+                                        "hint": "Send an absolute https:// URL. A receiver on a private network needs the operator to allow it in WEBHOOK_ALLOW.",
+                                        "description": "Where deliveries are POSTed. Checked against every address it resolves to, at subscribe and at every send."
+                                    },
+                                    "types": {
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "code": "webhook_types_required",
+                                        "hint": "Send { \"types\": [\"turn.end\", \"approval.requested\"] }. Any event type except model.chunk; the wire spec lists them.",
+                                        "description": "The event types to deliver. `model.chunk` is not deliverable."
+                                    },
+                                    "agents": {
+                                        "code": "webhook_scope_invalid",
+                                        "hint": "Send agent ids this credential can reach, or leave agents out to hear every agent it can reach.",
+                                        "description": "Narrow the subscription to these agents. It can never hear more than the creating credential reaches.",
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        }
+                                    }
+                                },
+                                "required": [
+                                    "url",
+                                    "types"
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+            "get": {
+                "summary": "The subscriptions this credential can see, with their delivery health. Never a secret.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/v1/webhooks/{webhookId}": {
+            "delete": {
+                "summary": "Delete a subscription and anything it still owed.",
+                "parameters": [
+                    {
+                        "name": "webhookId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "no such subscription, or one outside this key's reach"
+                    }
+                }
+            }
+        },
+        "/v1/usage": {
+            "get": {
+                "summary": "What every agent in scope cost, per model call, grouped by agent, model, day or sender.",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "an unknown grouping or a date that does not parse"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/usage": {
+            "get": {
+                "summary": "What this agent cost, from the meter.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "an unknown grouping or a date that does not parse"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/turns": {
+            "get": {
+                "summary": "Every turn this agent has taken, newest first, across sessions, paged by `before`.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "`limit` or `before` is not a positive whole number"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/turns/{turnId}": {
+            "get": {
+                "summary": "One turn's stored row.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "turnId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/sessions": {
+            "get": {
+                "summary": "Conversations, most recently active first.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/sessions/{key}": {
+            "get": {
+                "summary": "One conversation's summary.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "key",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            },
+            "delete": {
+                "summary": "Drop a conversation's history, turns and derived index.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "key",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/sessions/{key}/messages": {
+            "get": {
+                "summary": "A page of a conversation's messages.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "key",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "limit",
+                        "in": "query",
+                        "required": false,
+                        "description": "How many to return.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "before",
+                        "in": "query",
+                        "required": false,
+                        "description": "Page backwards from this message id.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/sessions/{key}/phase": {
+            "post": {
+                "summary": "Move a session into a declared phase.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "key",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                },
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "type": "object",
+                                "properties": {
+                                    "phase": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "code": "phase_invalid",
+                                        "hint": "Send the name of a phase this agent's manifest declares. `GET /v1/agents/:id` lists them.",
+                                        "description": "The phase to move this session into."
+                                    }
+                                },
+                                "required": [
+                                    "phase"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/schedules": {
+            "get": {
+                "summary": "Every schedule, from the store.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            },
+            "post": {
+                "summary": "Create a schedule. Validated by the manifest's own schedule rules.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "created"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/schedules/{sid}": {
+            "get": {
+                "summary": "One schedule's row.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "sid",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            },
+            "patch": {
+                "summary": "Replace a schedule the API created.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "sid",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "the manifest declares it, so reconciliation would undo the write"
+                    }
+                }
+            },
+            "delete": {
+                "summary": "Delete a schedule the API created.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "sid",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "the manifest declares it, so the next boot would re-create it"
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/schedules/{sid}/run": {
+            "post": {
+                "summary": "Fire a schedule now, out of band.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "sid",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "429": {
+                        "description": "over a governor limit; nothing recorded"
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/config": {
+            "get": {
+                "summary": "Every manifest field this surface may set, what it does, and its current value.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            },
+            "patch": {
+                "summary": "Set one manifest field, then replace the agent so it takes effect.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "the path is not settable here, or the result would not validate"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "the agent came from an object, so there is no manifest to edit"
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/channels/{channelId}": {
+            "patch": {
+                "summary": "Connect or disconnect a channel, and set its credential.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "channelId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "neither `enabled` nor `credential` was sent, or the channel is unknown"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "the agent came from an object, so there is no manifest to edit"
+                    },
+                    "501": {
+                        "description": "the host supplied no channel actions"
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/channels/{channelId}/unpair": {
+            "post": {
+                "summary": "Forget a channel's stored pairing, so the next start offers a new code.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "channelId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "the channel stores no pairing — a typed credential is a PATCH"
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/tools": {
+            "get": {
+                "summary": "The resolved catalogue, with trust and phases.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/skills": {
+            "get": {
+                "summary": "What the skills index holds.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/context": {
+            "get": {
+                "summary": "The prompt the next turn would be given, without running one.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "sessionKey",
+                        "in": "query",
+                        "required": false,
+                        "description": "Which conversation to assemble for.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "input",
+                        "in": "query",
+                        "required": false,
+                        "description": "Pretend this is the next message.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/channels/{channelId}/webhook/{agentId}": {
+            "post": {
+                "summary": "A channel provider's webhook. Open by design; the provider authenticates itself.",
+                "parameters": [
+                    {
+                        "name": "channelId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "agentId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        },
+        "/v1/events": {
+            "get": {
+                "summary": "Every event this process emits, as SSE. The firehose.",
+                "parameters": [
+                    {
+                        "name": "agentId",
+                        "in": "query",
+                        "required": false,
+                        "description": "Narrow to one agent.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "sessionKey",
+                        "in": "query",
+                        "required": false,
+                        "description": "Narrow to one conversation.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "chunks",
+                        "in": "query",
+                        "required": false,
+                        "description": "Include per-token frames. Off by default.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "types",
+                        "in": "query",
+                        "required": false,
+                        "description": "Narrow to these event types, comma-separated.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "an event stream; see the event table in the wire spec"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    }
+                }
+            }
+        }
+    }
+}

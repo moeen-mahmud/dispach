@@ -94,7 +94,10 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         body: ProvisionBody,
         statuses: [
             { code: 201, when: "created; `adopted` is empty with an `error` if it is not running" },
-            { code: 403, when: "not a loopback bind" },
+            {
+                code: 403,
+                when: "neither a loopback bind nor an authenticated admin credential",
+            },
             { code: 501, when: "this server has no provisioner" },
         ],
     },

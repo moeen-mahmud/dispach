@@ -61,7 +61,7 @@ and WebSocket surfaces can return:
 | `unknown_event_type` | 400 | `?types=` named an event that does not exist. Carries the nearest real name. |
 | `agent_turn_in_flight` | 409 | A reload or stop was asked for while a turn is running. It names the count; retry when the turn ends, because aborting one to apply a setting is the worse trade. |
 | `agent_not_replaceable` | 400 | `reload` on a team member, which has no manifest of its own — replace its supervisor, which reloads the team as one unit. |
-| `provisioning_not_supported` | 501 | This server was built with no provisioner — an embedder over its own agent store. The container has one and is refused by the bind instead. |
+| `provisioning_not_supported` | 501 | This server was built with no provisioner — an embedder over its own agent store. The container has one. |
 | `provisioning_not_local` | 403 | `POST /v1/agents` with neither a loopback bind nor a credential carrying `admin`. What is refused is a filesystem write on a server that required **no** credential and is reachable from the network — the bind-only version of this refused the safer case, since a token-less loopback server was allowed while an authenticated public one was not. |
 | `request_body_invalid` | 400 | A body failed its schema and the failing field declared no code of its own. Carries the field. |
 | `agent_stop_invalid` | 400 | `stop` was sent a `reason` that is not a string. |

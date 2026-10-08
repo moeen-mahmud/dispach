@@ -1,0 +1,66 @@
+$schema: https://api.gitbook.com/gitbook-docs.yaml
+site:
+  title: Dispach Developer Documentation
+  structure:
+    - type: section
+      key: developer-runtime
+      title: Guides
+      path: guides
+      default: true
+      children:
+        - type: space
+          key: developer-runtime-guide
+          title: Build with Dispach
+          path: runtime
+          default: true
+          content:
+            directory: ./runtime
+            language: en
+
+    - type: section
+      key: developer-contributing
+      title: Contributing
+      path: contributing
+      children:
+        - type: space
+          key: developer-contributor-guide
+          title: Contributor Guide
+          path: guide
+          default: true
+          content:
+            directory: ./contributing
+            language: en
+
+    - type: section
+      key: developer-control
+      title: Control Plane
+      path: control-plane
+      children:
+        - type: space
+          key: developer-control-guide
+          title: Control Plane Guide
+          path: guide
+          default: true
+          content:
+            directory: ./control-plane
+            language: en
+
+    - type: section
+      key: developer-reference
+      title: API Reference
+      path: reference
+      children:
+        - type: space
+          key: developer-reference-index
+          title: Reference Index
+          path: index
+          default: true
+          content:
+            directory: ./reference
+            language: en
+        - type: space
+          key: developer-openapi
+          title: HTTP API
+          path: http
+          content:
+            directory: null

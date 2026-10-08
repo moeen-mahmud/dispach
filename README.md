@@ -601,6 +601,7 @@ A few house rules that bite first, all enforced by tests rather than review:
 `CLAUDE.md` is the standing brief — it is written for coding agents and is the fastest way to learn
 the hazards this codebase has already paid for. `docs/00-DECISIONS.md` has the rationale for every
 locked decision, including the negative ones, which are the ones most likely to look like mistakes.
+Public pull requests are welcome; [`CONTRIBUTING.md`](CONTRIBUTING.md) is the contributor entry point.
 
 ## Boot budget
 
@@ -758,6 +759,8 @@ hand-written, and was missing five commands at once. `dispach <command> --help` 
 | `docs/12-OPENCLAW-CUTOVER.md` | Moving off the runtime this one replaces |
 | `RELEASING.md` | How a release is cut: the changelog, `bun run release`, and what the tag publishes |
 | `CHANGELOG.md` | What changed in each release, in bullets |
+| `developer-docs/` | Public GitBook source for integrators and contributors |
+| `CONTRIBUTING.md` | Public contribution policy and workflow entry point |
 | `CLAUDE.md` | The standing brief: hard rules and the hazards already paid for |
 | `evals/` | Every performance claim, with the number and a script to reproduce it |
 

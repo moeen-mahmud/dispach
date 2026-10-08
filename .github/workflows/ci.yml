@@ -41,6 +41,9 @@ jobs:
       - name: build
         run: bun run build
 
+      - name: developer documentation
+        run: bun run docs:check
+
       - name: typecheck
         run: bun run typecheck
 

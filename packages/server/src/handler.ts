@@ -201,12 +201,9 @@ export interface HandlerOptions {
      * 2. An embedder over its own agent store passes none, and the route then says `501` rather
      *    than accepting a request and writing nothing.
      *
-     *    ⚠️ **The container is *not* covered by this**, and the plan's claim that it would be was
-     *    wrong: the CLI's `serve` injects a provisioner unconditionally, so the image has one. What
-     *    actually refuses provisioning there is the **loopback gate** — the image's `CMD` binds
-     *    `0.0.0.0`, so `provisioningIsLocal()` is false and the route answers `403`. Checked by
-     *    reading the Dockerfile rather than assumed, and it is the better of the two mechanisms:
-     *    it is a fact about what was bound rather than about what somebody remembered to omit.
+     *    The container is not covered by this: the CLI's `serve` injects a provisioner
+     *    unconditionally, and its authenticated admin caller passes the provisioning gate even
+     *    though the image binds `0.0.0.0`.
      * 3. `steps` comes *from the callback*, so a browser renders the same question set the terminal
      *    asks and the two cannot drift. A hard-coded list in the page would be the "two hand-kept
      *    lists" shape that has already cost this repo several rounds.
