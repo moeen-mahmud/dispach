@@ -23,8 +23,11 @@ bun run docs:check
 
 Do not edit `developer-docs/reference/openapi.json` by hand.
 
-## Stable and Next
+## Published branch
 
-GitBook's Stable variant tracks `main`. Next tracks `development`. Keep public pages accurate for the branch they ship from; describe planned behavior only when it is clearly marked as planned.
+The current GitBook site tracks `development`; it does not have separate Stable and Next variants.
+Pages may therefore describe pilot behavior, but must label it with the release line that provides
+it. Describe planned behavior only when it is clearly marked as planned.
 
-The repository stages this tree independently from the current site mapping. Maintainers switch the public site only after the staged navigation and links have been reviewed.
+If a stable variant is added later, map it to `main` and review both branches independently before
+making it the default.

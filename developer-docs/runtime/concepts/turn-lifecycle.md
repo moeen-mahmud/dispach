@@ -25,4 +25,11 @@ A caller should handle successful completion, explicit stop, model or tool error
 
 ## Delivery
 
-Channel delivery is routed through an outbox with idempotency. Persisting an outbound item before delivery lets the runtime recover from a crash without silently losing it or sending it twice.
+Channel delivery is routed through an outbox with derived idempotency keys. Persisting an outbound
+item before delivery prevents duplicate enqueue and lets the runtime recover unfinished work after a
+crash.
+
+Exactly-once delivery still depends on the channel provider. If a process dies after sending bytes
+but before receiving the provider acknowledgement, a recovered item is retried and marked
+`uncertain`. A provider with idempotent sends can deduplicate that retry; Telegram cannot, so that
+specific crash window can produce a duplicate rather than silently lose the reply.

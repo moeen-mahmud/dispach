@@ -1,6 +1,7 @@
 # Build with Dispach
 
 - [Overview](README.md)
+- [Stable and pilot releases](releases.md)
 - Quickstart
   - [Run with Docker](quickstart/run-with-docker.md)
   - [Create an agent](quickstart/create-an-agent.md)

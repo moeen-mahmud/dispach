@@ -1,42 +1,51 @@
-# GitBook staging and cutover
+# GitBook publishing runbook
 
-This file is the maintainer runbook for publishing `developer-docs/`. It is intentionally outside the public navigation.
+This file records the current GitBook setup and review gate. It is intentionally outside public
+navigation.
 
-## Stage without changing the current site
+## Current setup
 
-1. Create a separate staged GitBook site in the existing organization.
-2. Connect Git Sync to `moeen-mahmud/dispach` and set the content root to `/developer-docs`.
-3. Use `gitbook-docs.yaml` from that directory as the site configuration.
-4. Sync `development` first and confirm the four sections and their default spaces.
-5. In the externally managed `HTTP API` space, import `reference/openapi.json` and enable automatic refresh from the synced file.
+- Site: **Dispach Developer Documentation** (`site_kpc34`)
+- Git Sync: `moeen-mahmud/dispach`, branch `development`, directory `/developer-docs`
+- Sections: Guides, Contributing, Control Plane, and API Reference
+- External HTTP API space: generated from `reference/openapi.json`
+- Variants: none; the site currently documents `development`
+- Publication: keep unpublished until the review gate below passes
 
-The existing root `/gitbook-docs.yaml` remains the active site's mapping during review. Do not replace or edit it as part of staging.
+The root `/gitbook-docs.yaml` belongs to the previous site mapping. Do not replace or edit it as part
+of this site.
 
-## Variants
+## Refresh the API reference
 
-Create two site variants:
+The repository snapshot is generated from the server router and schemas:
 
-| Variant | Git branch | Purpose |
-| --- | --- | --- |
-| Stable | `main` | Released behavior and default public URL |
-| Next | `development` | Current integration and pilot documentation |
+```bash
+bun run docs:generate
+bun run docs:check
+```
 
-Keep Stable as the default. The control-plane guide can appear in Next before the same pages reach Stable, but a page must describe only behavior present on its branch.
+GitBook imports
+`https://raw.githubusercontent.com/moeen-mahmud/dispach/development/developer-docs/reference/openapi.json`
+and checks it for updates every six hours. After an API change, confirm the Git-synced commit is
+visible and refresh the generated HTTP API space if GitBook has not picked it up yet.
 
 ## Review gate
 
-Before switching the public site:
+Before publishing:
 
 - `bun run docs:check` passes on the synced commit.
-- All four section landing pages open from the header navigation.
+- All four header sections and every page in their sidebars open on desktop and mobile previews.
+- Tables, code blocks, callouts, headings, and previous/next links render without clipping or empty pages.
 - The Docker quickstart reaches readiness and creates an agent from a clean checkout.
-- The HTTP API space renders endpoints from the generated OpenAPI file.
-- Stable resolves from `main`; Next resolves from `development`.
-- Search returns the public guide before internal specifications for setup questions.
-- The existing site URL and custom domain still point to the old site.
+- The HTTP API space lists the generated operations, models, authentication, responses, examples, and source download.
+- Search returns public guides for setup questions and does not present internal design documents as the user path.
+- Release wording distinguishes stable `v0.1.x` from `v0.2.0-pilot.*` and identifies this site as `development` documentation.
+- The intended public URL and custom domain are checked before pressing Publish.
 
-## Cut over and roll back
+Publishing makes the site public. Keep that as a separate, explicit maintainer action after the final
+preview review.
 
-Move the public domain to the staged site only after the gate passes. Keep the previous site unpublished but intact until the new site has served correctly through a full review window.
+## Rollback
 
-If navigation, search, or the generated reference is wrong, move the domain back to the previous site. Repository content and the old root mapping remain available, so rollback does not require reverting documentation commits.
+If navigation, search, or the generated reference is wrong after publication, unpublish this site or
+move the custom domain back to the previous site. The previous site and root mapping remain intact.

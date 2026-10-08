@@ -9,5 +9,6 @@ Start with the [architecture](architecture.md), then follow the
 should read [deployment and operations](deployment-and-operations.md), especially the Docker socket
 trust boundary.
 
-Stable runtime releases may not include this package. Use the **Next** documentation variant for the
-current pilot contract.
+This guide documents the contract in the `v0.2.0-pilot.*` line and the `development` branch. The
+stable `v0.1.x` runtime does not include the control plane. Read [stable and pilot
+releases](../runtime/releases.md) before choosing an image or source revision.

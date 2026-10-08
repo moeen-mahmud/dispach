@@ -4,15 +4,15 @@
 
 | Area | Controls |
 | --- | --- |
-| `model` | Roles, model IDs, endpoints, key environment names, capabilities, and dialect |
+| `model` | Roles, model IDs, endpoints, key environment names, and capabilities |
 | `context` | Workspace tiers, budgets, soul selection, examples, knowledge, and prompt style |
-| `tools` | Pinned providers and tools, policy, untrusted-write behavior, and provider settings |
+| `tools` | Dialect, pinned providers and tools, policy, untrusted-write behavior, and provider settings |
 | `phases` | Per-phase instructions, transitions, and visible tools |
 | `limits` | Steps, duration, context thresholds, output reserve, and concurrency |
 | `memory` | Store and retrieval behavior |
 | `schedules` | Cron, interval, and one-shot inbound triggers |
 | `channels` | Transport configuration and inbound allowlists |
-| `delivery` | Outbound routing and retry behavior |
+| `delivery` | Default and named outbound routing targets |
 | `plugins` | Packages loaded at boot and their configuration |
 | `server` | HTTP binding and server behavior for the agent runtime |
 

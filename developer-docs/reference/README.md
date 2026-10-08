@@ -17,3 +17,8 @@ Use the guides to learn workflows and the references when implementing against a
 
 The generated HTTP reference describes requests, status codes, and the common error shape. Success
 response types live in the TypeScript client, where `tsc` checks them against actual usage.
+
+The generated document's `info.version` comes from the source tree's package version. On
+`development`, that value can remain at the latest stable version until a pilot release branch is
+prepared; use the exact Git tag or `GET /v1/health` from the deployed image when matching a contract
+to a running server.

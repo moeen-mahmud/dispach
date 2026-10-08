@@ -25,7 +25,7 @@ dispach config set milo model.main.id gpt-4.1-mini
 dispach config env milo MODEL_API_KEY
 ```
 
-The interactive editor and HTTP configuration endpoint use the same field catalogue. Validation happens before a file is replaced. An edit made during an active turn can be saved but may apply on the next start; clients should distinguish persistence from activation.
+The interactive editor and HTTP configuration endpoint use the same field catalogue. Validation happens before a file is replaced. The HTTP response reports persistence and activation separately: `applied: false` means the file was saved but the running agent could not be replaced, usually because a turn is active. Reload or restart that agent after the turn finishes.
 
 ## Model endpoint shape
 
@@ -33,11 +33,10 @@ The interactive editor and HTTP configuration endpoint use the same field catalo
 
 ```yaml
 model:
-  roles:
-    main:
-      id: gpt-4.1-mini
-      baseUrl: https://api.openai.com/v1
-      apiKeyEnv: MODEL_API_KEY
+  main:
+    id: gpt-4.1-mini
+    baseUrl: https://api.openai.com/v1
+    apiKeyEnv: MODEL_API_KEY
 ```
 
 Keep the secret in the named environment variable. A literal key in the manifest fails validation.
