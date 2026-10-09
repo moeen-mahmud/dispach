@@ -131,6 +131,27 @@ test("a path this surface does not set is refused by name, with the nearest one"
     expect(body.error.hint).toContain("limits.maxSteps")
 })
 
+test("a batch names every unknown path by its index and writes nothing (pilot.16)", async () => {
+    const { call, dir } = await harness({ manifest: EDITABLE })
+    const before = readFileSync(join(dir, "agent.yaml"), "utf8")
+    const body = (await (
+        await call("PATCH", "/v1/agents/assistant/config", {
+            body: {
+                changes: [
+                    { path: "limits.maxSteps", value: "30" },
+                    { path: "media.speach", value: "{}" },
+                    { path: "limits.maxStep", value: "40" },
+                ],
+            },
+        })
+    ).json()) as { error: { code: string; message: string; field: string } }
+    expect(body.error.code).toBe("config_path_unknown")
+    expect(body.error.message).toContain('"media.speach" (changes.1.path)')
+    expect(body.error.message).toContain('"limits.maxStep" (changes.2.path)')
+    expect(body.error.field).toBe("changes.1.path")
+    expect(readFileSync(join(dir, "agent.yaml"), "utf8")).toBe(before)
+})
+
 test("allowFrom names the action that sets it rather than denying it exists", async () => {
     // It is a real field in `SETTINGS` and a real thing to want to change. Answering "no such
     // setting" would send somebody looking for a typo in the one field whose absence is almost

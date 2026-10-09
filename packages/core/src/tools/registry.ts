@@ -198,7 +198,23 @@ export class ToolRegistry {
             }
         }
 
-        const missing = requested.filter((slug) => !found.has(normalise(slug)))
+        // Found and not loadable (pilot.16): named for what it is, and not reported as missing.
+        const refused = providers
+            .flatMap((provider) => provider.refused?.() ?? [])
+            .filter((entry) => !found.has(normalise(entry.slug)))
+        const refusedSlugs = new Set(refused.map((entry) => normalise(entry.slug)))
+        for (const entry of refused) {
+            const index = pinned.findIndex((slug) => normalise(slug) === normalise(entry.slug))
+            warnings.push({
+                code: "tool_schema_unsupported",
+                message: `${entry.slug} is pinned and was left out: ${entry.detail.message}`,
+                hint: `The rest of the agent loads without it. ${entry.detail.hint}`,
+                ...(index >= 0 ? { field: `tools.pinned[${index}]` } : {}),
+            })
+        }
+        const missing = requested.filter(
+            (slug) => !found.has(normalise(slug)) && !refusedSlugs.has(normalise(slug)),
+        )
         if (missing.length > 0) {
             /**
              * **Warned and omitted, never fatal.** A pinned slug nothing can resolve is almost
@@ -278,7 +294,17 @@ export class ToolRegistry {
             if (provider.available === undefined) continue
             offered.push(...(await provider.available()))
         }
-        const notEnabled = offered.filter((entry) => !found.has(normalise(entry.slug)))
+        const notEnabled = [
+            ...offered.filter(
+                (entry) =>
+                    !found.has(normalise(entry.slug)) && !refusedSlugs.has(normalise(entry.slug)),
+            ),
+            ...refused.map((entry) => ({
+                slug: entry.slug,
+                summary: "pinned, but it could not be loaded",
+                unavailable: true,
+            })),
+        ]
 
         const { kept, dropped } = applyBudget(all, budget)
         if (dropped.length > 0) {

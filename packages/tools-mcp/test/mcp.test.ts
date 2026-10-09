@@ -187,13 +187,26 @@ describe("mapping", () => {
         expect(spec.parameters.properties.title?.description).toBe("New title.")
         expect(spec.parameters.properties.due?.type).toBe("string")
         expect(spec.parameters.properties.due?.description).toBe("format date")
-        expect(() =>
+        // A union of plain values maps since pilot.16; one with an object in it is still refused.
+        expect(
             toSpec(
                 "work",
                 { name: "u", inputSchema: { properties: { x: { type: ["string", "number"] } } } },
                 undefined,
+            ).parameters.properties.x?.type,
+        ).toEqual(["string", "number"])
+        expect(() =>
+            toSpec(
+                "work",
+                {
+                    name: "u",
+                    inputSchema: {
+                        properties: { x: { anyOf: [{ type: "object" }, { type: "string" }] } },
+                    },
+                },
+                undefined,
             ),
-        ).toThrow(/type: \[\]/)
+        ).toThrow(/anyOf/)
     })
 
     test("a tool nobody pinned cannot refuse the agent by having a schema it cannot express", async () => {
@@ -202,11 +215,14 @@ describe("mapping", () => {
         const union: McpTool = {
             name: "search",
             description: "Search anything.",
-            inputSchema: { properties: { q: { type: ["string", "number"] } } },
+            inputSchema: { properties: { q: { anyOf: [{ type: "object" }, { type: "string" }] } } },
         }
         const { mcp } = provider(server({ tools: [...HULY, union] }).fetch)
         await mcp.refresh([])
         expect((await mcp.available()).map((entry) => entry.slug)).toContain("huly__search")
+        // Pinned, it costs that tool and is named, not the agent (pilot.16).
+        expect(await mcp.resolve(["huly__search"])).toEqual([])
+        expect(mcp.refused().map((entry) => entry.slug)).toEqual(["huly__search"])
     })
 
     test("a policy rule reaches the tool the proxy would call", () => {

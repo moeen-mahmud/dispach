@@ -31,8 +31,21 @@ import type { ToolAvailability } from "../types.ts"
 /** Heading and body, or empty when every offered tool was pinned. */
 export function renderNotEnabledText(notEnabled: readonly ToolAvailability[] | undefined): string {
     if (notEnabled === undefined || notEnabled.length === 0) return ""
-    const lines = notEnabled.map((entry) => `- ${entry.slug} — ${entry.summary}`).join("\n")
+    const offered = notEnabled.filter((entry) => entry.unavailable !== true)
+    const broken = notEnabled.filter((entry) => entry.unavailable === true)
+    // Pinned and not loadable (pilot.16): asking for it to be pinned is advice already followed.
+    const unavailable =
+        broken.length === 0
+            ? []
+            : [
+                  "## Unavailable right now",
+                  "",
+                  `Configured for you but could not be loaded: ${broken.map((entry) => entry.slug).join(", ")}. If a request needs one, say it is unavailable at the moment and that whoever runs this agent has been told; do not use another tool to work around it.`,
+              ]
+    if (offered.length === 0) return unavailable.join("\n")
+    const lines = offered.map((entry) => `- ${entry.slug} — ${entry.summary}`).join("\n")
     return [
+        ...(unavailable.length === 0 ? [] : [...unavailable, ""]),
         "## Not enabled for you",
         "",
         "These exist on this machine but this agent has not been given them:",

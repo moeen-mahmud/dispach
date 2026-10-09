@@ -183,6 +183,25 @@ test("the observation stays small enough to survive the budget", async () => {
     expect(observation.length).toBeLessThan(2000)
 })
 
+test("a tool this runtime could not load is marked unavailable, not offered to pin (pilot.16)", async () => {
+    const broken: ComposioTool = {
+        ...schema("GMAIL_CREATE_EMAIL_DRAFT", "Creates a draft.", []),
+        input_parameters: {
+            type: "object",
+            properties: { x: { anyOf: [{ type: "object", properties: {} }, { type: "string" }] } },
+        },
+    }
+    const { context } = stub(SEARCH_DATA, {
+        schemas: { ...SCHEMAS, GMAIL_CREATE_EMAIL_DRAFT: broken },
+    })
+    const observation = await searchTool(context).handler({ use_case: "send an email" }, CONTEXT)
+    expect(observation).toContain("n/a    GMAIL_CREATE_EMAIL_DRAFT")
+    expect(observation).toContain("unavailable — do not pin it")
+    expect(observation).toContain("anyOf")
+    // The loadable ones are offered as before.
+    expect(observation).toContain("write  GMAIL_SEND_EMAIL")
+})
+
 test("the observation states the next step, which no model can infer", async () => {
     // Pin, then restart, and connect first if the account is not linked. Leaving this out is what
     // the transcript that motivated the feature looked like: a model that had the facts and could

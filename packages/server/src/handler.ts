@@ -3752,6 +3752,29 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     )
                 }
 
+                // Every unknown path in one refusal (pilot.16, VelaCrew): a caller sending one batch to
+                // silos of several versions has to learn all the keys this one lacks, not the first.
+                const unknown = requested
+                    .map((change, index) => ({ change, index }))
+                    .filter(({ change }) => {
+                        const setting = personSetting(change.path) ?? settingByPath(change.path)
+                        return (
+                            setting?.via === undefined && personSetting(change.path) === undefined
+                        )
+                    })
+                if (!single && unknown.length > 0) {
+                    const first = unknown[0]
+                    return fail(
+                        {
+                            code: "config_path_unknown",
+                            message: `${unknown.map(({ change, index }) => `"${change.path}" (changes.${index}.path)`).join(", ")} ${unknown.length === 1 ? "is not a field" : "are not fields"} this surface sets. Nothing was written.`,
+                            hint: `GET /v1/agents/:id/config lists every one. Nearest to "${first?.change.path}": ${nearest(first?.change.path ?? "", PERSON_SETTABLE_PATHS) ?? PERSON_SETTABLE_PATHS.join(", ")}.`,
+                            field: `changes.${first?.index ?? 0}.path`,
+                        },
+                        400,
+                    )
+                }
+
                 const settings: Setting[] = []
                 for (const change of requested) {
                     const setting = personSetting(change.path) ?? settingByPath(change.path)

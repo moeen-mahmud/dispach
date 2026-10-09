@@ -25,6 +25,7 @@
 import type { ContextBlock } from "../../context/blocks.ts"
 import { SLOT } from "../../context/blocks.ts"
 import { estimateMessageTokens } from "../../context/tokens.ts"
+import { typeWords } from "../json-schema.ts"
 import { renderTrusted } from "../trust.ts"
 import type { FieldError, JsonSchemaNode, ToolIntent, ToolResult, ToolSpec } from "../types.ts"
 import type { ParsedOutput, StreamFilter, ToolDialect } from "./dialect.ts"
@@ -854,9 +855,9 @@ never guess a value for a required field you have not been given.`
 function typeLabel(node: JsonSchemaNode): string {
     if (node.type === "array") {
         const item = node.items?.type
-        return item === undefined ? "list" : `list of ${item}`
+        return item === undefined ? "list" : `list of ${typeWords(item)}`
     }
-    return node.type
+    return typeWords(node.type)
 }
 
 function fieldLine(name: string, node: JsonSchemaNode, required: boolean, pad: number): string {

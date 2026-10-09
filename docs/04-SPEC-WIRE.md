@@ -134,7 +134,7 @@ and WebSocket surfaces can return:
 | `provision_daemon_refused` | 400 | `daemon` over the wire. The host answering the request is already the daemon. |
 | `provision_skills_search_refused` | 400 | `skills: "find"`, which needs an interactive picker. Points at `skills install`. |
 | `schedule_manifest_owned` | 409 | `PATCH` or `DELETE` on a schedule the manifest declares. Reconciliation restores every field from the file at the next boot, so the write would be undone and reported as success. Change the manifest entry instead. |
-| `config_path_unknown` | 400 | `PATCH /config` named a field this surface does not set. Carries the nearest real path — or, for `channels[].allowFrom`, the action that does set it. |
+| `config_path_unknown` | 400 | `PATCH /config` named a field this surface does not set. Carries the nearest real path — or, for `channels[].allowFrom`, the action that does set it. In a `changes[]` batch, every unknown path is named with its index and `field` is `changes.<i>.path` of the first. |
 | `config_value_unreadable` | 400 | `value` is not a string, is text no parser can read, or is absent without `remove: true`. It is read exactly as a terminal reads it. |
 | `config_remove_invalid` | 400 | `remove` is anything but `true`, or was sent together with a `value`. |
 | `agent_not_running` | — | Not a refusal: the `pending` on a write to an agent that is not running (pilot.15). The file changed; `POST /start` puts it in force. |
@@ -1187,9 +1187,19 @@ PATCH /v1/agents/:id/config     → set one field, or several, then replace the 
 
 `model.<role>` (since 0.2.0-pilot.7) is the one path a person fills in: `{path: "model.fast", value:
 "{id: …, api: bedrock-converse, options: {region: eu-west-2}}"}` adds or replaces a whole named role,
-which a schedule (`role:`) or a message (`role`) then runs on. `model.main` is not replaced whole; its
-fields keep their own rows. Person-only, like every model setting: an agent choosing its own model is
-its owner's money.
+which a schedule (`role:`) or a message (`role`) then runs on. `model.main` (since 0.2.0-pilot.16) is
+replaced whole the same way, so a provider switch (transport, endpoint, key variable, capabilities) is
+one validated write and one reload; its fields keep their own rows too, and `GET` reports the whole
+role, `baseUrl` and the `apiKeyEnv` variable name included (never a key's value). Person-only, like
+every model setting: an agent choosing its own model is its owner's money. `PATCH /vars` accepts only
+a variable the saved manifest already reads, so a switch to a new key variable is three calls: PATCH
+`model.main` (written; the reload is refused for the unset variable and reported as `applied: false`),
+then `PATCH /vars` with the key, then `POST /reload`. A key variable the manifest already names can be
+set first and the switch is one call.
+
+A `changes[]` batch naming paths this surface does not set is refused once, naming every one with
+its index (`"media.speach" (changes.1.path)`), `field` set to the first, and nothing written
+(0.2.0-pilot.16).
 
 ### Channels (connect, disconnect, re-credential, unpair)
 

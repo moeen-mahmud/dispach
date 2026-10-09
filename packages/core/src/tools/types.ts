@@ -19,8 +19,16 @@ import type { Trust } from "./trust.ts"
 
 export type JsonType = "string" | "number" | "integer" | "boolean" | "array" | "object"
 
+/** The types a union may combine (pilot.16): plain values only, never a list or an object. */
+export type ScalarType = "string" | "number" | "integer" | "boolean"
+
 export interface JsonSchemaNode {
-    readonly type: JsonType
+    /**
+     * One type, or a list of scalar types any of which is valid (pilot.16): JSON Schema's own spelling,
+     * so the native dialect hands it to the endpoint unchanged. A union of lists or objects is refused
+     * where the schema is mapped, never represented here.
+     */
+    readonly type: JsonType | readonly ScalarType[]
     readonly description?: string
     /** Coercion matches case-insensitively against these, then reports the allowed set. */
     readonly enum?: readonly (string | number | boolean)[]
@@ -328,6 +336,17 @@ export interface Tool {
 export interface ToolAvailability {
     readonly slug: string
     readonly summary: string
+    /**
+     * Pinned, and its provider could not load it (pilot.16): rendered as unavailable rather than as
+     * a tool to ask for, because asking for it to be pinned is the advice that is already followed.
+     */
+    readonly unavailable?: boolean
+}
+
+/** A pinned tool its provider found and could not load, and why (pilot.16). */
+export interface RefusedTool {
+    readonly slug: string
+    readonly detail: ErrorDetail
 }
 
 export interface ToolProvider {
@@ -380,6 +399,13 @@ export interface ToolProvider {
      * sentence and the registry decides whether anyone needs to hear it.
      */
     explainUnresolved?(slugs: readonly string[]): ConfigError | undefined
+    /**
+     * Pinned tools the last `resolve` found and left out because they could not be loaded, such as a
+     * schema this runtime cannot represent (pilot.16). Read by the registry right after resolving, so
+     * one tool an upstream change broke costs that tool and not the agent: it is warned about by name
+     * and kept out of the "no provider resolved it" report, which would be untrue.
+     */
+    refused?(): readonly RefusedTool[]
     /**
      * Release anything this provider owns outside the process. Called once, from `Runtime.stop`.
      *

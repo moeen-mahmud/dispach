@@ -23,14 +23,16 @@
  * stays a direct client (decision 4.7).
  */
 
-import type {
-    ConfigError,
-    Tool,
-    ToolAvailability,
-    ToolContext,
-    ToolProvider,
-    ToolProviderContext,
-    ToolProviderRefresh,
+import {
+    type ConfigError,
+    isHarnessError,
+    type RefusedTool,
+    type Tool,
+    type ToolAvailability,
+    type ToolContext,
+    type ToolProvider,
+    type ToolProviderContext,
+    type ToolProviderRefresh,
 } from "@dispach/core"
 import { type CachedServer, cachePath, type McpCache, readCache, writeCache } from "./cache.ts"
 import { type FetchLike, type McpCallResult, McpClient, type McpTool } from "./client.ts"
@@ -259,14 +261,30 @@ export class McpProvider implements ToolProvider {
     /** Cache only: this runs inside boot, before any network call is allowed. */
     async resolve(slugs: readonly string[]): Promise<readonly Tool[]> {
         const out: Tool[] = []
+        const refused: RefusedTool[] = []
         for (const server of this.#servers.values()) {
             for (const tool of this.#cached(server) ?? []) {
-                if (!slugs.includes(slugOf(server.name, tool.name))) continue
-                out.push(this.#toTool(server, tool))
+                const slug = slugOf(server.name, tool.name)
+                if (!slugs.includes(slug)) continue
+                // A schema this runtime cannot represent costs that tool, not the agent (pilot.16).
+                try {
+                    out.push(this.#toTool(server, tool))
+                } catch (error) {
+                    if (!isHarnessError(error)) throw error
+                    refused.push({ slug, detail: error.toDetail() })
+                }
             }
         }
+        this.#refused = refused
         return out
     }
+
+    refused(): readonly RefusedTool[] {
+        return this.#refused
+    }
+
+    /** What the last `resolve` found and could not load (pilot.16). */
+    #refused: RefusedTool[] = []
 
     async list(): Promise<readonly string[]> {
         return [...this.#servers.values()].flatMap((server) =>

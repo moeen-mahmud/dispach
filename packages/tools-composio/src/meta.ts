@@ -31,9 +31,9 @@
  * schemas go to the cache, which is where resolution reads them from anyway.
  */
 
-import type { Tool, ToolContext, ToolSpec } from "@dispach/core"
+import { isHarnessError, type Tool, type ToolContext, type ToolSpec } from "@dispach/core"
 import { composioNoMatch } from "./errors.ts"
-import { type ComposioTool, isMutating, isUnannotated } from "./map.ts"
+import { type ComposioTool, isMutating, isUnannotated, mapTool } from "./map.ts"
 
 /** How many tools a single search reports. The cache keeps every schema it was given regardless. */
 const MAX_REPORTED = 8
@@ -145,6 +145,12 @@ interface SearchHit {
     readonly mutating: boolean
     /** True when `mutating` was assumed from silence rather than declared. */
     readonly assumed: boolean
+    /**
+     * Why this tool could not be loaded if it were pinned (pilot.16): the same refusal resolution
+     * would give, slug and keyword included. Shown so the model does not pin a tool that would only
+     * be left out with a warning.
+     */
+    readonly unavailable?: string
 }
 
 /** The slugs the router recommended, best first, deduplicated. */
@@ -176,7 +182,16 @@ function hitsFrom(
         // so offering it would hand the model a suggestion that breaks its own agent.
         if (tool === undefined) continue
         const description = tool.description ?? tool.human_description ?? ""
+        // The mapping resolution runs, run now: what it would refuse is marked here, not offered.
+        let unavailable: string | undefined
+        try {
+            mapTool(tool)
+        } catch (error) {
+            if (!isHarnessError(error)) throw error
+            unavailable = error.message
+        }
         out.push({
+            ...(unavailable === undefined ? {} : { unavailable }),
             slug,
             summary: description === "" ? "no description supplied" : firstLine(description),
             toolkit: tool.toolkit?.slug ?? "",
@@ -222,6 +237,11 @@ export function renderSearch(
         // OUTLOOK_GET_MAIL_TIPS, which reads — because an unannotated tool is assumed mutating and
         // 37 of 100 sampled tools carry no hint. A label present on everything says nothing, and a
         // label absent from some asks a small model to infer what the absence means.
+        if (hit.unavailable !== undefined) {
+            lines.push(`  n/a    ${hit.slug}`)
+            lines.push(`         unavailable — do not pin it: ${hit.unavailable}`)
+            continue
+        }
         lines.push(`  ${hit.mutating ? "write" : "read "}  ${hit.slug}`)
         lines.push(`         ${hit.summary}`)
     }
@@ -254,6 +274,11 @@ export function renderSearch(
             "config_set says which become usable in this conversation; the rest work from the " +
             "person's next message, with no restart. Pin only what the task needs.",
     )
+    if (hits.some((hit) => hit.unavailable !== undefined)) {
+        lines.push(
+            "Those marked n/a cannot be loaded by this runtime as Composio describes them today; a pinned one is left out with a warning. Choose another tool, or tell the person it is unavailable.",
+        )
+    }
     return lines.join("\n")
 }
 

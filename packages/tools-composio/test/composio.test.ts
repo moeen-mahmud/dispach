@@ -19,7 +19,7 @@ import { expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { BRAND } from "@dispach/core"
+import { BRAND, renderNotEnabledText, ToolRegistry } from "@dispach/core"
 import { cachePath, readCache, writeCache } from "../src/cache.ts"
 import { type ComposioTool, isMutating, isUnannotated, mapTool } from "../src/map.ts"
 import { ComposioProvider } from "../src/provider.ts"
@@ -173,15 +173,17 @@ test("an array's items map, including the empty properties object Composio emits
 })
 
 test("a structural keyword is refused, naming the tool, the field and the keyword", () => {
-    // Dropping anyOf would hand the model a schema the endpoint disagrees with. None appears in the
-    // live sample, so this costs nothing today and is the difference between a named failure and a 400.
+    // Dropping anyOf would hand the model a schema the endpoint disagrees with. An object in a union
+    // is still that case after pilot.16 accepted unions of plain values.
     let message = ""
     try {
         mapTool({
             slug: "WEIRD_TOOL",
             input_parameters: {
                 type: "object",
-                properties: { target: { anyOf: [{ type: "string" }, { type: "integer" }] } },
+                properties: {
+                    target: { anyOf: [{ type: "string" }, { type: "object", properties: {} }] },
+                },
             },
         })
     } catch (error) {
@@ -192,20 +194,82 @@ test("a structural keyword is refused, naming the tool, the field and the keywor
     expect(message.includes("target")).toBe(true)
 })
 
-test("a union type is refused rather than collapsed to its first member", () => {
-    let code = ""
-    try {
-        mapTool({
-            slug: "UNION_TOOL",
+test("a union of plain values maps as one (pilot.16), the way Composio types a Sheets cell", () => {
+    const spec = mapTool({
+        slug: "GOOGLESHEETS_BATCH_UPDATE",
+        input_parameters: {
+            type: "object",
+            properties: {
+                values: {
+                    type: "array",
+                    items: {
+                        type: "array",
+                        items: {
+                            anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }],
+                        },
+                    },
+                },
+                x: { type: ["string", "integer", "null"] },
+            },
+        },
+    })
+    expect(spec.parameters.properties.values?.items?.items?.type).toEqual([
+        "string",
+        "number",
+        "boolean",
+    ])
+    expect(spec.parameters.properties.x?.type).toEqual(["string", "integer"])
+})
+
+test("a union is still refused when a variant carries a constraint the union form would drop", () => {
+    for (const property of [
+        { anyOf: [{ type: "string", format: "date" }, { type: "number" }] },
+        { allOf: [{ type: "string" }] },
+    ]) {
+        let code = ""
+        try {
+            mapTool({
+                slug: "UNION_TOOL",
+                input_parameters: { type: "object", properties: { x: property } },
+            })
+        } catch (error) {
+            code = (error as { code?: string }).code ?? ""
+        }
+        expect(code).toBe("composio_schema_unsupported")
+    }
+})
+
+test("a pinned tool Composio broke costs that tool, not the agent (pilot.16)", async () => {
+    // Nine refused reloads in three hours on VelaCrew's pilot, from one schema change upstream.
+    const dir = tempDir()
+    seed(dir, [
+        GMAIL_SEND,
+        {
+            slug: "SHEETS_BROKEN",
             input_parameters: {
                 type: "object",
-                properties: { x: { type: ["string", "integer"] } },
+                properties: {
+                    x: { anyOf: [{ type: "object", properties: {} }, { type: "string" }] },
+                },
             },
-        })
-    } catch (error) {
-        code = (error as { code?: string }).code ?? ""
-    }
-    expect(code).toBe("composio_schema_unsupported")
+        },
+    ])
+    const registry = await ToolRegistry.create({
+        pinned: ["GMAIL_SEND_EMAIL", "SHEETS_BROKEN"],
+        providers: [provider(dir)],
+    })
+    const slugs = registry.specs().map((spec) => spec.slug)
+    expect(slugs).toContain("GMAIL_SEND_EMAIL")
+    expect(slugs).not.toContain("SHEETS_BROKEN")
+    const warning = registry.warnings.find((entry) => entry.code === "tool_schema_unsupported")
+    expect(warning?.message).toContain("SHEETS_BROKEN")
+    expect(warning?.message).toContain("anyOf")
+    expect(warning?.field).toBe("tools.pinned[1]")
+    // Not reported as missing as well, which would blame a slug that exists.
+    expect(registry.warnings.some((entry) => entry.code === "unknown_tool")).toBe(false)
+    // The model is told it is unavailable, not asked to pin what is pinned.
+    expect(renderNotEnabledText(registry.notEnabled)).toContain("Unavailable right now")
+    expect(renderNotEnabledText(registry.notEnabled)).toContain("SHEETS_BROKEN")
 })
 
 test("a nullable field is its type, which is not a union (pilot.3)", () => {

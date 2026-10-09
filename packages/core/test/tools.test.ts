@@ -15,7 +15,7 @@ import { EventBus } from "../src/events/bus.ts"
 import type { AnyEvent } from "../src/events/types.ts"
 import { coerceArgs } from "../src/tools/coerce.ts"
 import { nativeDialect } from "../src/tools/dialect/native.ts"
-import { nltDialect, parseNlt } from "../src/tools/dialect/nlt.ts"
+import { nltDialect, parseNlt, renderNltEntry } from "../src/tools/dialect/nlt.ts"
 import {
     type ApprovalRequest,
     batch,
@@ -634,6 +634,42 @@ async function runTools(
     })
     return { outcome, events }
 }
+
+describe("a union of plain values (pilot.16)", () => {
+    const CELLS = spec({
+        slug: "sheet_write",
+        mutating: true,
+        parameters: {
+            type: "object",
+            properties: {
+                cell: { type: ["string", "number", "boolean"] },
+                count: { type: ["integer", "boolean"] },
+            },
+        },
+    })
+
+    test("a value already of a listed type is kept as written", () => {
+        expect(coerceArgs(CELLS, { cell: 5 })).toEqual({ ok: true, args: { cell: 5 } })
+        expect(coerceArgs(CELLS, { cell: "5" })).toEqual({ ok: true, args: { cell: "5" } })
+        expect(coerceArgs(CELLS, { cell: true })).toEqual({ ok: true, args: { cell: true } })
+    })
+
+    test("text is converted when text is not one of the types, as NLT sends everything", () => {
+        expect(coerceArgs(CELLS, { count: "7" })).toEqual({ ok: true, args: { count: 7 } })
+        expect(coerceArgs(CELLS, { count: "yes" })).toEqual({ ok: true, args: { count: true } })
+        const refused = coerceArgs(CELLS, { count: "seven" })
+        expect(refused.ok).toBe(false)
+        expect(JSON.stringify(refused)).toContain("integer or boolean")
+    })
+
+    test("both dialects name every type, and native passes the schema through unchanged", () => {
+        expect(renderNltEntry(CELLS)).toContain("string, number or boolean")
+        const wire = nativeDialect.requestTools([CELLS])?.[0]?.parameters as
+            | { properties: { cell: { type: unknown } } }
+            | undefined
+        expect(wire?.properties.cell.type).toEqual(["string", "number", "boolean"])
+    })
+})
 
 describe("execution", () => {
     test("a tool's meter reaches the bus as tool.usage, with the participant it is billed to (pilot.9)", async () => {

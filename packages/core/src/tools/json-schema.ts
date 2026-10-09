@@ -22,7 +22,7 @@
  * lost. A union of two real types is still refused: it changes which documents are valid.
  */
 
-import type { JsonSchemaNode, JsonType, ToolParameters } from "./types.ts"
+import type { JsonSchemaNode, JsonType, ScalarType, ToolParameters } from "./types.ts"
 
 /** Changes which documents validate. Dropping one is lying to the model about the schema. */
 const STRUCTURAL = ["anyOf", "oneOf", "allOf", "not", "$ref"] as const
@@ -45,6 +45,42 @@ const CONSTRAINTS = [
 ] as const
 
 const TYPES = new Set<string>(["string", "number", "integer", "boolean", "array", "object"])
+const SCALARS = new Set<string>(["string", "number", "integer", "boolean"])
+
+/** `string`, or `string, number or boolean` for a union: how a type is named to a model or a person. */
+export function typeWords(type: JsonSchemaNode["type"]): string {
+    if (typeof type === "string") return type
+    return type.length === 1 ? (type[0] ?? "") : `${type.slice(0, -1).join(", ")} or ${type.at(-1)}`
+}
+
+/**
+ * The scalar types a union admits, or `undefined` when it is not a union of plain values (pilot.16).
+ *
+ * Composio typed a Sheets cell as `anyOf: [string, number, boolean]`, which the endpoint accepts as
+ * written, and refusing it refused the tool and with it the whole agent. A variant may carry a
+ * description or a title and nothing else: one with its own `enum` or `format` would be a constraint
+ * this form drops. `null` is left out, as for a nullable field.
+ */
+function scalarUnion(raw: Readonly<Record<string, unknown>>): readonly ScalarType[] | undefined {
+    const variants = raw.anyOf ?? raw.oneOf
+    const listed: unknown[] = Array.isArray(variants)
+        ? variants.map((variant) => {
+              const record = asRecord(variant)
+              if (record === undefined) return undefined
+              const extra = Object.keys(record).filter(
+                  (key) => key !== "type" && key !== "description" && key !== "title",
+              )
+              return extra.length === 0 ? record.type : undefined
+          })
+        : Array.isArray(raw.type)
+          ? raw.type
+          : []
+    if (variants !== undefined && !Array.isArray(variants)) return undefined
+    const types = listed.filter((type) => type !== "null")
+    if (types.length < 2) return undefined
+    if (!types.every((type) => typeof type === "string" && SCALARS.has(type))) return undefined
+    return [...new Set(types as ScalarType[])]
+}
 
 export interface SchemaConversion {
     /** The error for a structural keyword at `path`, naming the provider and tool. */
@@ -110,9 +146,23 @@ function node(
     path: string,
     conversion: SchemaConversion,
 ): JsonSchemaNode {
-    const raw = unwrapNullable(given)
+    const nullable = unwrapNullable(given)
+    const union = scalarUnion(nullable)
+    // A union of plain values is represented; its `anyOf` is what it was spelled with, not a constraint.
+    const raw =
+        union === undefined
+            ? nullable
+            : (({ anyOf: _anyOf, oneOf: _oneOf, ...rest }) => rest)(nullable)
     for (const keyword of STRUCTURAL) {
         if (raw[keyword] !== undefined) throw conversion.unsupported(path, keyword)
+    }
+    if (union !== undefined) {
+        const description = describe(raw)
+        return {
+            type: union,
+            ...(description === undefined ? {} : { description }),
+            ...(raw.default === undefined || raw.default === null ? {} : { default: raw.default }),
+        }
     }
 
     const declared = nonNullType(raw.type)

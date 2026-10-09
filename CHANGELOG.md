@@ -4,6 +4,13 @@
 
 A pre-release for the multiplayer runtime: one silo per user, run by a control plane.
 
+### Since 0.2.0-pilot.15
+
+- A pinned tool whose schema cannot be loaded no longer refuses the agent. That tool is left out, warned about as `tool_schema_unsupported` with its slug and the keyword, and the model is told it is unavailable; the rest of the agent loads. One upstream Composio change had refused every reload of every agent pinning it. A provider reports such tools through the new optional `ToolProvider.refused()`. `composio_search` marks such a tool `n/a` with the same reason, so the agent does not pin it.
+- Unions of plain values in a tool schema (`anyOf`/`oneOf` of string, number, integer and boolean, or a `type` list) are accepted: the native dialect sends `type: [...]`, NLT names every type, and a value already of a listed type is kept as written. A union with an object or a list in it, `allOf`, `not` and `$ref` are still refused.
+- `PATCH /config` sets `model.main` as a whole role (transport, id, endpoint, key variable, capabilities) in one write and one reload, person-only; `GET /config` reports it, `baseUrl` and the `apiKeyEnv` name included.
+- A `changes[]` batch with unknown paths names every one with its index (`changes.1.path`) and writes nothing.
+
 ### Since 0.2.0-pilot.14
 
 - `PATCH /v1/agents/:id/config` with a value already in the file writes nothing and does not reload the agent; the reply says `changed: false, reloaded: false`. A configuration applied in full on every sync no longer reloads the agent once per setting.

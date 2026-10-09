@@ -49,13 +49,50 @@ describe("a named role", () => {
         await runtime.stop()
     })
 
-    test("main is not replaced whole; its fields keep their own rows", async () => {
-        const { call, runtime } = await harness({ manifest: MANIFEST })
+    test("main is replaced whole by a person, in one write and one reload (pilot.16)", async () => {
+        // Revises 14.78 (VelaCrew's bring-your-own key): a provider switch changes the transport,
+        // endpoint and key variable together, and each step in between would not load.
+        const { models, fetch } = recording()
+        const { call, dir, runtime } = await harness({ manifest: MANIFEST, fetch })
         const response = await call("PATCH", "/v1/agents/assistant/config", {
-            body: { path: "model.main", value: "{id: other}" },
+            body: {
+                path: "model.main",
+                value: "{id: byo-model, baseUrl: https://byo.example.com/v1, apiKeyEnv: MODEL_API_KEY, maxTokens: 900}",
+            },
+        })
+        expect(response.status).toBe(200)
+        expect(await response.json()).toMatchObject({ changed: true, reloaded: true })
+        expect(readFileSync(join(dir, "agent.yaml"), "utf8")).toContain("byo.example.com")
+        expect(runtime.agent("assistant")?.roles.byName("main").config.id).toBe("byo-model")
+
+        // The read reports the endpoint and the key's variable name, never its value.
+        const listed = (await (await call("GET", "/v1/agents/assistant/config")).json()) as {
+            settings: { path: string; value?: unknown }[]
+        }
+        const main = listed.settings.find((setting) => setting.path === "model.main")?.value
+        expect(main).toMatchObject({
+            baseUrl: "https://byo.example.com/v1",
+            apiKeyEnv: "MODEL_API_KEY",
+        })
+
+        await call("POST", "/v1/agents/assistant/messages", {
+            body: { sessionKey: "api:byo", text: "hello" },
+        })
+        await settle()
+        expect(models).toEqual(["byo-model"])
+        // The agent itself cannot move onto another provider.
+        expect(AGENT_SETTABLE_PATHS).not.toContain("model.main")
+        await runtime.stop()
+    })
+
+    test("a whole main that does not validate is refused and the file is untouched", async () => {
+        const { call, dir, runtime } = await harness({ manifest: MANIFEST })
+        const before = readFileSync(join(dir, "agent.yaml"), "utf8")
+        const response = await call("PATCH", "/v1/agents/assistant/config", {
+            body: { path: "model.main", value: "{baseUrl: https://byo.example.com/v1}" },
         })
         expect(response.status).toBe(400)
-        expect(await errorCode(response)).toBe("config_path_unknown")
+        expect(readFileSync(join(dir, "agent.yaml"), "utf8")).toBe(before)
         await runtime.stop()
     })
 

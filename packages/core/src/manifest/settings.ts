@@ -146,6 +146,15 @@ export const SETTINGS: readonly Setting[] = [
         means: "none | minimal | low | medium | high | xhigh | max — how hard a reasoning model thinks",
         agentListed: false,
     },
+    // The main role whole (pilot.16, VelaCrew's bring-your-own key): a provider switch changes the
+    // transport, endpoint, key variable and capabilities together, and field by field the steps in
+    // between are configurations that do not load. A person's, like `model.<role>`: the agent's
+    // `config_set` cannot reach it, so an agent cannot move itself onto a different bill.
+    {
+        path: "model.main",
+        means: "the main model as a whole role, {api, id, baseUrl or options, apiKeyEnv, capabilities, ...}; replaces it in one write",
+        agentListed: false,
+    },
     // A whole named role, which a schedule (`role:`) or a message (`role`) runs on (pilot.7). A
     // person's, like every other cost decision: an agent choosing its own model is its owner's money.
     {
@@ -321,7 +330,7 @@ export function settingByPath(path: string): Setting | undefined {
     return SETTINGS.find((entry) => entry.path === path)
 }
 
-/** `model.fast` is the `model.<role>` row; `main` keeps its own field-by-field rows. */
+/** `model.fast` is the `model.<role>` row; `model.main` has its own exact row (pilot.16). */
 const ROLE_PATH = /^model\.([A-Za-z][\w-]*)$/
 
 /**

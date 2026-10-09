@@ -12,7 +12,8 @@
  */
 
 import { nearest } from "../nearest.ts"
-import type { FieldError, JsonSchemaNode, ToolSpec } from "./types.ts"
+import { typeWords } from "./json-schema.ts"
+import type { FieldError, JsonSchemaNode, ScalarType, ToolSpec } from "./types.ts"
 
 export interface CoercionSuccess {
     readonly ok: true
@@ -36,8 +37,41 @@ const FALSY = new Set(["false", "no", "n", "0", "off", "disabled"])
 const NUMERIC = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/
 
 function typeName(node: JsonSchemaNode): string {
-    if (node.type !== "array") return node.type
-    return node.items === undefined ? "list" : `list of ${node.items.type}`
+    if (node.type !== "array") return typeWords(node.type)
+    return node.items === undefined ? "list" : `list of ${typeWords(node.items.type)}`
+}
+
+/**
+ * A value for a union of plain types (pilot.16): kept as written when it already is one of them, so a
+ * Sheets cell sent as 5 stays a number and "5" stays text. Otherwise each non-text type is tried in
+ * order, which is what lets NLT, where every value arrives as text, still send a number or a yes/no.
+ */
+function convertUnion(
+    node: JsonSchemaNode,
+    types: readonly ScalarType[],
+    value: unknown,
+): Converted {
+    const own =
+        typeof value === "string"
+            ? "string"
+            : typeof value === "boolean"
+              ? "boolean"
+              : typeof value === "number"
+                ? Number.isInteger(value) && types.includes("integer")
+                    ? "integer"
+                    : "number"
+                : undefined
+    if (own !== undefined && types.includes(own)) return { ok: true, value }
+    for (const type of types) {
+        if (type === "string") continue
+        const converted = convertScalar({ ...node, type }, value)
+        if (converted.ok) return converted
+    }
+    if (types.includes("string")) return convertScalar({ ...node, type: "string" }, value)
+    return fail(
+        `expected ${typeWords(types)}, got ${JSON.stringify(shorten(String(value)))}.`,
+        `Write one of: ${typeWords(types)}.`,
+    )
 }
 
 interface Converted {
@@ -57,6 +91,8 @@ function shorten(value: string): string {
 }
 
 function convertScalar(node: JsonSchemaNode, value: unknown): Converted {
+    if (Array.isArray(node.type))
+        return convertUnion(node, node.type as readonly ScalarType[], value)
     switch (node.type) {
         case "string": {
             if (typeof value === "string") return { ok: true, value }

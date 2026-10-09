@@ -20,6 +20,8 @@
 
 import {
     ConfigError,
+    isHarnessError,
+    type RefusedTool,
     type Tool,
     type ToolAvailability,
     type ToolContext,
@@ -89,6 +91,8 @@ export class ComposioProvider implements ToolProvider {
     #fetchedAt: string
     /** Recorded at resolve, reported by `describe()`. Never inferred twice. */
     #assumedMutating: readonly string[] = []
+    /** What the last `resolve` found and could not load (pilot.16). */
+    #refused: RefusedTool[] = []
     /** Opened lazily, after readiness. Backed by a file so it survives a restart. */
     #sessionId: string | undefined
 
@@ -121,6 +125,7 @@ export class ComposioProvider implements ToolProvider {
     async resolve(slugs: readonly string[]): Promise<readonly Tool[]> {
         const out: Tool[] = []
         const assumed: string[] = []
+        const refused: RefusedTool[] = []
         const meta = metaTools(this.#metaContext())
         for (const slug of slugs) {
             // The meta tools are static: three fixed specs, resolved with no cache and no request, so
@@ -133,13 +138,28 @@ export class ComposioProvider implements ToolProvider {
             }
             const raw = this.#tools[slug]
             if (raw === undefined) continue
+            // One tool whose schema Composio changed into something unrepresentable costs that tool,
+            // never the agent (pilot.16): every reload of every agent pinning it was refused.
+            let mapped: ToolSpec
+            try {
+                mapped = mapTool(raw)
+            } catch (error) {
+                if (!isHarnessError(error)) throw error
+                refused.push({ slug, detail: error.toDetail() })
+                continue
+            }
             if (isUnannotated(raw)) assumed.push(slug)
-            out.push(this.#toTool(mapTool(raw)))
+            out.push(this.#toTool(mapped))
         }
         this.#assumedMutating = assumed
+        this.#refused = refused
         // Every Composio tool is the owner's (pilot.15): it acts on the account connected for this
         // agent's entity, meta tools included, since `composio_connect` would connect an app to it.
         return out.map((tool) => ({ ...tool, spec: { ...tool.spec, personal: true } }))
+    }
+
+    refused(): readonly RefusedTool[] {
+        return this.#refused
     }
 
     /**

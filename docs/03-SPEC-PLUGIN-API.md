@@ -370,6 +370,7 @@ interface ToolProvider {
   resolve(slugs: string[]): Promise<ToolSpec[]>       // omits what it does not own; never throws for that
   execute(call: ToolCall, signal: AbortSignal): Promise<ToolResult>
   explainUnresolved?(slugs: string[]): ConfigError | undefined
+  refused?(): RefusedTool[]                           // pilot.16: found by the last resolve, not loadable
   search?(query: string, k: number): Promise<ToolSpec[]>
 }
 
@@ -414,6 +415,18 @@ cache is cold, say, rather than that the slug is a typo. It is consulted **only*
 still missing after every provider has answered, and returning `undefined` falls through to the
 generic nearest-match failure. Return a reason only while it is the better explanation: a provider
 that blames its cache forever turns every future typo into a misleading message.
+
+`refused()` (0.2.0-pilot.16) is for a slug the provider **found** and could not load, most often a
+schema `parametersFromJsonSchema` cannot represent. `resolve()` leaves the tool out and lists it here
+with the error's detail; the registry warns `tool_schema_unsupported` by name and field, does not also
+report it as missing, and tells the model it is unavailable rather than asking for it to be pinned.
+One upstream schema change then costs one tool, not every reload of every agent that pins it.
+
+A field's `type` may be a list of scalar types (`["string", "number", "boolean"]`), JSON Schema's own
+spelling for a union of plain values, mapped from `anyOf`/`oneOf` of scalars or a `type` list (pilot.16).
+The native dialect sends it unchanged; NLT names every type; coercion keeps a value already of a listed
+type as written and otherwise tries the non-text types in order. A union with a list or an object in
+it, `allOf`, `not`, `$ref`, or a variant carrying its own constraint is still refused.
 
 `whenNotToUse` is not optional. If you have nothing to say, say what the adjacent tool is
 for instead.

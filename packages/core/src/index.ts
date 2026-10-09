@@ -690,6 +690,8 @@ export type {
     FieldError,
     JsonSchemaNode,
     JsonType,
+    RefusedTool,
+    ScalarType,
     ScriptRunner,
     ScriptRunRequest,
     ScriptRunResult,
