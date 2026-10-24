@@ -735,6 +735,17 @@ describe("sessions", () => {
         await runtime.stop()
     })
 
+    test("the phase route answers with sessionKey and phase", async () => {
+        const { call, runtime } = await withSession()
+        const response = await call("POST", "/v1/agents/assistant/sessions/api%3As/phase", {
+            body: { phase: "act" },
+        })
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as Record<string, unknown>
+        expect(body).toEqual({ sessionKey: "api:s", phase: "act" })
+        await runtime.stop()
+    })
+
     test("a non-string phase is refused", async () => {
         const { call, runtime } = await withSession()
         const response = await call("POST", "/v1/agents/assistant/sessions/api%3As/phase", {

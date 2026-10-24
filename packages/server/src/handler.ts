@@ -3481,7 +3481,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const key = context.params.key ?? ""
                 if (phase === null) await agent.store.sessions.setPhase(agent.id, key, undefined)
                 else await agent.setPhase(key, phase)
-                return json({ phase })
+                return json({ sessionKey: key, phase })
             }),
         { capability: "write" },
     )
