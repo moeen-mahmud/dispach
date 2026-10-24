@@ -27,7 +27,9 @@ describe("readManifestHeader", () => {
                 "name: Milo",
                 "model:",
                 "  main:",
+                // biome-ignore lint/suspicious/noTemplateCurlyInString: manifest env expansion syntax, not interpolation
                 "    id: ${MODEL_ID}",
+                // biome-ignore lint/suspicious/noTemplateCurlyInString: manifest env expansion syntax, not interpolation
                 "    baseUrl: ${MODEL_BASE_URL}",
                 "    apiKeyEnv: SOME_KEY_NOBODY_EXPORTED",
             ].join("\n"),
@@ -36,6 +38,7 @@ describe("readManifestHeader", () => {
         expect(header.id).toBe("milo")
         expect(header.name).toBe("Milo")
         // Raw, verbatim: expansion is the loader's business, not a listing's.
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: manifest env expansion syntax, not interpolation
         expect(header.modelId).toBe("${MODEL_ID}")
     })
 

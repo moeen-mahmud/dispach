@@ -63,6 +63,7 @@ describe("listAgents", () => {
         const env = sandbox({ milo: manifest("milo"), ada: manifest("ada") })
         const agents = listAgents(env)
         expect(agents.map((a) => a.ref)).toEqual(["ada", "milo"])
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: manifest env expansion syntax, not interpolation
         expect(agents[0]?.modelId).toBe("${MODEL_ID}")
         expect(agents[0]?.problem).toBe(undefined)
     })
