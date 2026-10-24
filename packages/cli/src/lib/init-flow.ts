@@ -1860,9 +1860,9 @@ function substitutionsFor(answers: InitAnswers): Record<string, string> {
 
 /**
  * The generated manifest, in the reference style: everything init configured is live, and
- * everything a later phase delivers is present but commented, labelled with its phase — so the
- * file teaches its own surface. A commented section is REFUSED AT LOAD if uncommented before its
- * phase ships; the runtime never silently ignores configuration.
+ * every optional subsystem the runtime knows is present but commented — so the file teaches
+ * its own surface. Uncommenting a section turns it on for real, and the runtime refuses
+ * configuration it does not recognise rather than silently ignoring it.
  *
  * Every mention of the binary interpolates `BRAND.slug` (hard rule 3), and the endpoint values
  * live in `.env` so switching providers never edits this file.
