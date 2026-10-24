@@ -5194,7 +5194,7 @@ async function readJson(
 
     try {
         return { kind: "ok", value: JSON.parse(raw) }
-    } catch (cause) {
+    } catch {
         return {
             kind: "error",
             error: {
