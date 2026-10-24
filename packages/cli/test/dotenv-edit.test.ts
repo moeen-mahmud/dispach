@@ -85,3 +85,23 @@ describe("renderEnvValue round-trips through parseDotEnv", () => {
         expect(renderEnvValue("sk-abc123")).toBe("sk-abc123")
     })
 })
+
+describe("parseDotEnv inline-comment and escape bugs (#29)", () => {
+    test("a quoted value keeps its comment out and its quotes off", () => {
+        expect(parseDotEnv('KEY="sk-abc" # prod key').KEY).toBe("sk-abc")
+        expect(parseDotEnv("KEY='sk-abc' # prod key").KEY).toBe("sk-abc")
+        expect(parseDotEnv('KEY="sk-abc"').KEY).toBe("sk-abc")
+    })
+
+    test("an escaped backslash stays a backslash: \\\\n is not a newline", () => {
+        expect(parseDotEnv('B="a\\\\nb"').B).toBe("a\\nb")
+        expect(
+            parseDotEnv("C:\\\\new dir".replace("\\\\", "\\\\") && 'DIR="C:\\\\new dir"').DIR,
+        ).toBe("C:\\new dir")
+    })
+
+    test("renderEnvValue and parseDotEnv round-trip a Windows path", () => {
+        const value = "C:\\new dir"
+        expect(parseDotEnv(`DIR=${renderEnvValue(value)}`).DIR).toBe(value)
+    })
+})

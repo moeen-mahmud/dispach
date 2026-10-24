@@ -37,21 +37,32 @@ export function parseDotEnv(text: string): Record<string, string> {
         let value = withoutExport.slice(eq + 1).trim()
 
         const quote = value.charAt(0)
-        if ((quote === '"' || quote === "'") && value.endsWith(quote) && value.length >= 2) {
-            value = value.slice(1, -1)
-            if (quote === '"') {
-                value = value
-                    .replace(/\\n/g, "\n")
-                    .replace(/\\r/g, "\r")
-                    .replace(/\\t/g, "\t")
-                    .replace(/\\"/g, '"')
-                    .replace(/\\\\/g, "\\")
+        if ((quote === '"' || quote === "'") && value.length >= 2) {
+            // A quoted value ends at its matching close quote, so an inline
+            // comment after it is not part of the value ("K="v" # note").
+            const close = value.lastIndexOf(quote)
+            if (close > 0) {
+                let inner = value.slice(1, close)
+                if (quote === '"') {
+                    // One left-to-right pass, so an escaped backslash followed
+                    // by n stays a backslash and an n, not a newline (the
+                    // writer escapes this way).
+                    inner = inner.replace(/\\\\|\\n|\\r|\\t|\\"/g, (m) => {
+                        if (m === "\\\\") return "\\"
+                        if (m === "\\n") return "\n"
+                        if (m === "\\r") return "\r"
+                        if (m === "\\t") return "\t"
+                        return '"'
+                    })
+                }
+                out[key] = inner
+                continue
             }
-        } else {
-            // Unquoted values end at an inline comment.
-            const comment = value.indexOf(" #")
-            if (comment !== -1) value = value.slice(0, comment).trimEnd()
         }
+
+        // Unquoted values end at an inline comment.
+        const comment = value.indexOf(" #")
+        if (comment !== -1) value = value.slice(0, comment).trimEnd()
 
         out[key] = value
     }
