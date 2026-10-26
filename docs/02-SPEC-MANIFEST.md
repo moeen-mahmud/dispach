@@ -478,6 +478,8 @@ put the security fields out of reach; and these edits are refused whatever the p
 | replacing `tools.policy.deny` | its only purpose is removing a restriction someone set deliberately |
 | `tools.untrusted.onMutate: allow` | it turns off the check on outside content driving a write |
 
+The floor is measured in a preprint, Hossain and Mahmud, 2026, [*What May an Agent Change About Itself? A Containment Floor for Self-Configuring Agent Runtimes*](https://arxiv.org/abs/2610.06274): with it in place, 0 of 167 protected writes were saved, though the models attempted one in 65 of those cases. The runs are the paper's, not committed here (`evals/CLAIMS.md`).
+
 A guard the agent can switch off on request is not a guard. Everything else, including `onMutate:
 confirm`, is settable.
 

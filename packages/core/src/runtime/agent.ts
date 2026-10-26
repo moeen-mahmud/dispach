@@ -1278,6 +1278,18 @@ export class Agent {
         return this.store.sessions.list(this.id)
     }
 
+    /**
+     * Move a conversation into a phase from outside a turn.
+     *
+     * The store and the in-memory phase are written together, as `phase_set` does inside a turn. The
+     * store alone is not enough: a session that has taken a turn reads its phase from memory first, so
+     * a write to the row only would answer success and change nothing until the process restarted.
+     */
+    async setPhase(sessionKey: string, phase: string): Promise<void> {
+        await this.store.sessions.setPhase(this.id, sessionKey, phase)
+        this.#phases.set(sessionKey, phase)
+    }
+
     turns(sessionKey = Agent.DEFAULT_SESSION, limit?: number): Promise<readonly TurnRecord[]> {
         return this.store.turns.list(this.id, sessionKey, limit === undefined ? {} : { limit })
     }

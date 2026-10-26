@@ -3478,12 +3478,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 }
                 const outside = outsideSession(context, context.params.key ?? "")
                 if (outside !== undefined) return outside
-                await agent.store.sessions.setPhase(
-                    agent.id,
-                    context.params.key ?? "",
-                    phase === null ? undefined : phase,
-                )
-                return json({ phase })
+                const key = context.params.key ?? ""
+                if (phase === null) await agent.store.sessions.setPhase(agent.id, key, undefined)
+                else await agent.setPhase(key, phase)
+                return json({ sessionKey: key, phase })
             }),
         { capability: "write" },
     )
@@ -5196,7 +5194,7 @@ async function readJson(
 
     try {
         return { kind: "ok", value: JSON.parse(raw) }
-    } catch (cause) {
+    } catch {
         return {
             kind: "error",
             error: {

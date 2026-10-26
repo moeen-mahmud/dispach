@@ -23,6 +23,7 @@ import {
     PINNED_MANIFEST,
     readSse,
     readUntil,
+    recordingFetch,
     replyFetch,
     TOKEN,
 } from "./harness.ts"
@@ -697,6 +698,51 @@ describe("sessions", () => {
             body: { recall: false },
         })
         expect(missing.status).toBe(404)
+        await runtime.stop()
+    })
+
+    test("a phase set over HTTP reaches the next turn of a session that has already run", async () => {
+        /**
+         * The store is not the thing to read here: it was always written. The bug was that a session
+         * which had taken a turn read its phase from the agent's memory first, so the route answered
+         * 200 and the next turn ran in the old phase. `triage` allows read tools only and `act`
+         * allows everything, so `memory_write` in the next request is the phase change arriving.
+         */
+        const model = recordingFetch(["one", "two"])
+        const { call, runtime } = await harness({ manifest: PHASED_MANIFEST, fetch: model.fetch })
+        const turn = async () => {
+            const { turnId } = (await (
+                await call("POST", "/v1/agents/assistant/messages", {
+                    body: { text: "hi", sessionKey: "api:s" },
+                })
+            ).json()) as { turnId: string }
+            for (let attempt = 0; attempt < 300; attempt += 1) {
+                const row = (await (
+                    await call("GET", `/v1/agents/assistant/turns/${turnId}`)
+                ).json()) as { status: string }
+                if (row.status !== "running") return
+                await new Promise((resolve) => setTimeout(resolve, 10))
+            }
+        }
+        await turn()
+        expect(JSON.stringify(model.bodies.at(-1)).includes("memory_write")).toBe(false)
+        const moved = await call("POST", "/v1/agents/assistant/sessions/api%3As/phase", {
+            body: { phase: "act" },
+        })
+        expect(moved.status).toBe(200)
+        await turn()
+        expect(JSON.stringify(model.bodies.at(-1)).includes("memory_write")).toBe(true)
+        await runtime.stop()
+    })
+
+    test("the phase route answers with sessionKey and phase", async () => {
+        const { call, runtime } = await withSession()
+        const response = await call("POST", "/v1/agents/assistant/sessions/api%3As/phase", {
+            body: { phase: "act" },
+        })
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as Record<string, unknown>
+        expect(body).toEqual({ sessionKey: "api:s", phase: "act" })
         await runtime.stop()
     })
 

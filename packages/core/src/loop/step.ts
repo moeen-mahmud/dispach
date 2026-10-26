@@ -1,10 +1,9 @@
 /**
- * One step: one model call plus the tool executions it triggers.
- *
- * Phase 1 has no tools, so a step is a single model call whose text is the reply. The shape is
- * already the shape the tool loop needs — parse, execute, observe slot into `runStep`'s caller
- * rather than into `runStep` itself — so Phase 3 adds a dialect and an executor without
- * reorganizing this.
+ * One step: one model call plus the tool executions it triggers. The model's text is parsed by
+ * the tool dialect, the calls execute, and the observations feed the next round; a step with no
+ * tool calls is the single-call case of the same shape. Parse, execute and observe slot into
+ * `runStep`'s caller rather than into `runStep` itself, which is what keeps new tools from
+ * reorganizing the loop.
  */
 
 import type { EventBus } from "../events/bus.ts"

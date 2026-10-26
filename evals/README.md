@@ -5,7 +5,7 @@
 Every number Dispach states in public has a row in [`CLAIMS.md`](CLAIMS.md) naming the file it
 comes from. Negative results are listed with the positive ones.
 
-**30 claims:** 23 verified, 1 cited from external research, 5 waiting on a run, 0 to fix, 1 removed.
+**31 claims:** 23 verified, 2 cited from external research, 5 waiting on a run, 0 to fix, 1 removed.
 
 | Eval | What it measures | Committed results | Last measured |
 | --- | --- | --- | --- |

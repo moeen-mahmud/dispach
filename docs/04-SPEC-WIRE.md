@@ -1120,7 +1120,7 @@ GET    /v1/agents/:id/sessions
 GET    /v1/agents/:id/sessions/:key
 GET    /v1/agents/:id/sessions/:key/messages?before=&limit=
 DELETE /v1/agents/:id/sessions/:key          → clears history; keeps memory files
-POST   /v1/agents/:id/sessions/:key/phase    → { phase }
+POST   /v1/agents/:id/sessions/:key/phase    → { sessionKey, phase }
 POST   /v1/agents/:id/sessions/:key/recall   { recall } → { sessionKey, recall }
 ```
 

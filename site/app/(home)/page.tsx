@@ -6,6 +6,8 @@ import { brand, repoUrl } from "@/lib/shared"
 import { pixels } from "@/lib/wordmark"
 
 const QUICKSTART = "/docs/runtime/quickstart/run-with-docker"
+/** The preprint that measures the settings floor. A preprint, not peer-reviewed: say so wherever it is cited. */
+const PAPER = "https://arxiv.org/abs/2610.06274"
 
 /** The job, before the proofs: what a product team no longer has to build around a model. */
 const BUILT_IN = [
@@ -16,7 +18,13 @@ const BUILT_IN = [
     ],
     [
         "Tools under a policy",
-        "Shell, files, web, MCP and Composio. A policy decides what runs; a floor no rule can lift.",
+        <>
+            Shell, files, web, MCP and Composio. A policy decides what runs;{" "}
+            <a href={PAPER} className="underline">
+                a floor no rule can lift
+            </a>
+            .
+        </>,
     ],
     [
         "Schedules",
@@ -219,6 +227,15 @@ export default function HomePage() {
                             </div>
                         ))}
                     </dl>
+                    <p className="mt-8 text-sm text-fd-muted-foreground">
+                        Research:{" "}
+                        <a href={PAPER} className="underline">
+                            What May an Agent Change About Itself?
+                        </a>{" "}
+                        (Hossain and Mahmud, 2026, preprint). With the settings floor in place, 0 of
+                        167 protected writes were saved, though the models attempted one in 65 of
+                        those cases.
+                    </p>
                 </div>
             </section>
 

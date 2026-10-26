@@ -179,12 +179,14 @@ describe("renderTemplate", () => {
 })
 
 describe("manifestEnvReferences", () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: manifest env expansion syntax, not interpolation
     test("finds *Env fields and ${VAR} expansions, with their paths, without expanding", () => {
         const refs = manifestEnvReferences(
             [
                 "model:",
                 "  main:",
                 "    apiKeyEnv: MODEL_API_KEY",
+                // biome-ignore lint/suspicious/noTemplateCurlyInString: manifest env expansion syntax, not interpolation
                 "    baseUrl: ${BASE_URL}/v1",
                 "channels:",
                 "  - id: tg",

@@ -4,6 +4,28 @@
 
 _Nothing yet._
 
+## 0.2.1 — 2026-10-26
+
+### Changed
+
+- `POST /v1/agents/:id/sessions/:key/phase` answers `{ sessionKey, phase }`, matching the typed client.
+
+### Fixes
+
+- `POST /v1/agents/:id/sessions/:key/phase` takes effect on the next turn of a session that has already run. It answered 200 and the session stayed in its old phase until a restart.
+- WhatsApp: an invalid `pairWith` or `deviceName` is refused with its own code (`whatsapp_pair_with_invalid`, `whatsapp_device_name_invalid`), a hint and the field, not a generic `channel_factory_failed`.
+- The workspace template's `context.thresholds` are in the current ladder order, so a copied manifest loads.
+- The npm and Homebrew pages link to the docs site.
+- A reply that ends "I'll …" after a save or send that succeeded is no longer nudged as a promise with no call. The note told the model nothing had run, right after something had.
+- The one-time nudge shows as "reply stopped short (…)" in the terminal, not as a tool that could not be used.
+
+### Documentation
+
+- The README opens with what Dispach is, a three-line install that ends in the terminal UI, recordings of the TUI and of the HTTP quickstart, and license, CI and npm badges. The HTTP quickstart runs on the published image, with no clone.
+- The README, the site and the docs cite the preprint that measures the settings floor: Hossain and Mahmud, 2026, [arXiv 2610.06274](https://arxiv.org/abs/2610.06274). With the floor, 0 of 167 protected writes were saved.
+
+Thanks to @LetMeSleep8h for #39, #40, #43, #44, #45 and #47.
+
 ## 0.2.0 — 2026-10-24
 
 - Ahead of OpenClaw on all 11 benchmarked models, level with or ahead of Hermes on 8, and the cheapest of the three on 10 ([benchmarks](https://github.com/moeen-mahmud/dispach/blob/main/developer-docs/runtime/benchmarks.md)).

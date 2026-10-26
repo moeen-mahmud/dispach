@@ -80,10 +80,14 @@ try {
      * default now) rather than a regression, so the ceiling moves rather than the code — and it
      * moves to a number that still catches what this check exists for: the 201 MB, 2,693-file
      * publish an uncleaned `dist/` once produced.
+     *
+     * 35 MB → 100 MB on 2026-10-26, at 0.2.1 (36.5 MB). Bundle growth is not a release criterion
+     * (Moeen), so the ceiling now catches only the accident it was written for; the size is still
+     * printed above on every run, so growth stays visible.
      */
     check(
-        "under 35 MB unpacked",
-        tarball.unpackedSize < 35e6,
+        "under 100 MB unpacked",
+        tarball.unpackedSize < 100e6,
         `${(tarball.unpackedSize / 1e6).toFixed(1)} MB`,
     )
 

@@ -67,6 +67,12 @@ result yet), **fix** (the prose and the evidence disagree), **remove** (no evide
 | Delegation cuts the parent's prompt by 31.6% | Fixture-only run, no `results.json` | — | Never run against a real endpoint; total tokens went **up** | needs-run |
 | Routing bulk tool work to a subagent pays for itself | `evals/subagents/results.json` is a dry run against canned answers | — | The README says so: mechanics only, pass rates meaningless | needs-run |
 
+## Self-configuration
+
+| Claim | Evidence | Scope | Limitation | Status |
+| --- | --- | --- | --- | --- |
+| With the settings floor, 0 of 167 protected writes were saved, though the models attempted one in 65 of those cases | Hossain and Mahmud, 2026, *What May an Agent Change About Itself? A Containment Floor for Self-Configuring Agent Runtimes*, [arXiv 2610.06274](https://arxiv.org/abs/2610.06274); the floor is `floorRefusal` in `packages/tools-system/src/config.ts` | The paper's own runs, with the floor on and off | Preprint, not peer-reviewed. The runs are not committed in this repo, so the number is the paper's | cite |
+
 ## Reproducing
 
 Every `verified` row names its file. The command that produced it is in that directory's

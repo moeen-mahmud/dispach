@@ -420,7 +420,7 @@ describe("WizardFrame", () => {
                 ]}
                 hint="enter accepts"
             >
-                <></>
+                {null}
             </WizardFrame>,
             { columns: 80 },
         )

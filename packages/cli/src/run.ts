@@ -1179,7 +1179,11 @@ async function runPlain(wired: Wired): Promise<RunOutcome> {
             case "tool.repair":
                 // Worth a line of its own: a silent repair looks like a slow turn.
                 if (showRows)
-                    row(`  · ${event.data.slugs.join(", ")} — could not be used, asking again`)
+                    row(
+                        event.data.slugs.length === 0
+                            ? `  · reply stopped short (${event.data.errors.join("; ")}), asking again`
+                            : `  · ${event.data.slugs.join(", ")} — could not be used, asking again`,
+                    )
                 return
 
             // Deliberately NOT gated on `showRows`. Every other row here is for a person watching,

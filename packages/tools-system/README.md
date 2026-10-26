@@ -152,6 +152,8 @@ being written:
 
 A guard the agent can switch off on request is not a guard. `onMutate: confirm` is settable.
 
+The floor is measured in a preprint, Hossain and Mahmud, 2026, [*What May an Agent Change About Itself? A Containment Floor for Self-Configuring Agent Runtimes*](https://arxiv.org/abs/2610.06274): with it in place, 0 of 167 protected writes were saved, though the models attempted one in 65 of those cases.
+
 ## Tools that were not enabled
 
 Whatever this provider offers and the manifest did not pin, the model is told about in one line — and

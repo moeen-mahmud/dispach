@@ -390,6 +390,19 @@ describe("silence after a tool result, or a promise with no call (14.123)", () =
         await runtime.stop()
     })
 
+    test("a promise after a real write is a reply about later turns", async () => {
+        // deepseek-v4-flash saved a preference and answered "Saved. I'll keep them short." The nudge
+        // said no call was made, right after one succeeded, and the model decided the runtime was lying.
+        const { result, events, runtime } = await run([
+            "ACTION: memory_write\ntext: prefers short answers\nEND",
+            "Saved. I'll keep them short.",
+        ])
+        expect(result.steps).toBe(2)
+        expect(result.text).toBe("Saved. I'll keep them short.")
+        expect(events.some((e) => e.type === "tool.repair")).toBe(false)
+        await runtime.stop()
+    })
+
     test("a closing like 'let me know' or a question is a reply, not a promise", async () => {
         const closing = await run(["It is nine. Let me know if you need anything else."])
         expect(closing.result.steps).toBe(1)

@@ -400,6 +400,25 @@ describe("tool rows", () => {
         expect(state.items[0]?.text).toContain("asking the model again")
     })
 
+    test("a nudge is a note saying the reply stopped short, not a tool that failed", () => {
+        // 14.123's nudge carries no slugs. Rendered as a repair it read "— could not be used", a failure
+        // with no tool in it, next to a call that had just succeeded.
+        const state = run([
+            START,
+            {
+                kind: "event",
+                event: ev("tool.repair", {
+                    slugs: [],
+                    errors: ["said it would act and made no call"],
+                }),
+            },
+        ])
+        expect(state.items[0]?.role).toBe("note")
+        expect(state.items[0]?.text).toBe(
+            "reply stopped short (said it would act and made no call), asking the model to finish",
+        )
+    })
+
     test("a blocked write is a visible note naming the policy that decided", () => {
         // Invisible would be the worst outcome here: the run did less than it was asked to, and the
         // person has to be able to see why without going looking.

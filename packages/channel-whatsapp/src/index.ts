@@ -37,11 +37,13 @@
  */
 
 import { isAbsolute, resolve } from "node:path"
-// **Types only, and that is a rule rather than a preference.** A runtime import from `@dispach/core`
-// would be *bundled into this plugin* — a second copy of core inside the host that already has one,
-// which is decision 11.238's `instanceof` failure waiting to happen and 1.6 MB of duplicate code
-// measured. A plugin needs none of it: `setup` is handed everything it can use.
-import type { ChannelFactory, Plugin } from "@dispach/core"
+// **Types only — with one exception.** A runtime import from `@dispach/core` would be *bundled
+// into this plugin* — a second copy of core inside the host that already has one, which is
+// decision 11.238's `instanceof` failure waiting to happen and 1.6 MB of duplicate code
+// measured. The exception is `ConfigError`: a config refusal must arrive as itself (code, hint,
+// field), not wrapped in `channel_factory_failed`, and Telegram already imports it the same way
+// (issue #28).
+import { type ChannelFactory, ConfigError, type Plugin } from "@dispach/core"
 import { type BaileysApi, numberOf, WhatsAppTransport } from "./transport.ts"
 
 export type {
@@ -92,9 +94,12 @@ export const whatsappChannel: ChannelFactory = (context) => {
     const written = stringField(context.config, "pairWith")
     const pairWith = written === undefined ? undefined : written.replace(/[^0-9]/g, "")
     if (written !== undefined && !/^[0-9]{6,20}$/.test(pairWith ?? ""))
-        throw new Error(
-            `channels.${context.id}.pairWith: "${written}" is not a WhatsApp number — the digits with the country code, with or without a +.`,
-        )
+        throw new ConfigError({
+            code: "whatsapp_pair_with_invalid",
+            message: `Channel "${context.id}" has a pairWith that is not a WhatsApp number: "${written}".`,
+            hint: "Write the digits with the country code, with or without a + (for example +8801711223344 or 8801711223344); spaces and dashes are normalised away. The agent still starts — a channel is optional, so this one is reported broken rather than blocking the load.",
+            field: `channels[${context.id}].pairWith`,
+        })
 
     /**
      * The bracket of the Linked-devices label. Printable ASCII and short, because it goes into a
@@ -104,9 +109,12 @@ export const whatsappChannel: ChannelFactory = (context) => {
      */
     const deviceName = stringField(context.config, "deviceName")
     if (deviceName !== undefined && !/^[\x20-\x7e]{1,32}$/.test(deviceName))
-        throw new Error(
-            `channels.${context.id}.deviceName: "${deviceName}" must be 1-32 printable ASCII characters — it is the bracket of the phone's Linked-devices label.`,
-        )
+        throw new ConfigError({
+            code: "whatsapp_device_name_invalid",
+            message: `Channel "${context.id}" has a deviceName outside 1-32 printable ASCII characters: "${deviceName}".`,
+            hint: "The deviceName is the bracket of the phone's Linked-devices label, so WhatsApp validates it: keep it 1-32 printable ASCII characters (letters, digits, spaces, punctuation). The agent still starts — a channel is optional, so this one is reported broken rather than blocking the load.",
+            field: `channels[${context.id}].deviceName`,
+        })
 
     const pairingDelayMs = context.config.pairingDelayMs
     return new WhatsAppTransport({

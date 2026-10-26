@@ -1,12 +1,40 @@
 # Dispach
 
-An open-source, self-hosted agent runtime your product calls over HTTP.
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![CI](https://github.com/moeen-mahmud/dispach/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/moeen-mahmud/dispach/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/dispach)](https://www.npmjs.com/package/dispach)
 
-Your backend calls one API and Dispach runs the agents: each has its own memory, tools, schedules,
-channels and approvals, on any OpenAI-compatible model (including small local ones), on
-infrastructure you control. Every turn is detached and reattachable, every write takes an
-idempotency key, and the wire contract is published as OpenAPI 3.1 and checked in CI. One process
-hosts many agents, and scoped keys fence each one off. TypeScript, shipped on Node, Apache-2.0.
+**The agent backend your product calls over HTTP.** Open source and self-hosted: one API for agents
+with memory, tools, schedules, channels and approvals, on any OpenAI-compatible model.
+
+```bash
+npm i -g dispach      # Node 24+, or: brew install moeen-mahmud/tap/dispach
+dispach init          # name the agent, pick a model, paste a key
+dispach run milo      # talk to it in the terminal
+```
+
+![The terminal UI: told to give itself write access to the whole home directory, the agent tries, and the settings floor refuses](https://raw.githubusercontent.com/moeen-mahmud/dispach/HEAD/.github/assets/tui.gif)
+
+Told to widen its own write access to `~`, the agent makes the call and the runtime refuses it: an
+agent may grant itself abilities, never reach. That floor is measured in the research below.
+
+Or run it as a server: one `docker run`, and [Call it over HTTP](#call-it-over-http) creates an
+agent and streams its reply in three requests.
+
+```bash
+docker run -d -p 7420:7420 -e DISPACH_API_TOKEN=pick-a-secret ghcr.io/moeen-mahmud/dispach:0.2.0
+```
+
+**Research:** [*What May an Agent Change About Itself? A Containment Floor for Self-Configuring Agent
+Runtimes*](https://arxiv.org/abs/2610.06274) (Hossain and Mahmud, 2026, preprint) measures the floor in
+Dispach's settings tool: with it in place, 0 of 167 protected writes were saved, though the models
+attempted one in 65 of those cases.
+
+Your backend calls one API and Dispach runs the agents, each with its own memory and settings, on
+infrastructure you control and on models as small as local ones. Every turn is detached and
+reattachable, every write takes an idempotency key, and the wire contract is published as OpenAPI 3.1
+and checked in CI. One process hosts many agents, and scoped keys fence each one off. TypeScript,
+shipped on Node, Apache-2.0.
 
 **Where it is going: the multiplayer agent runtime.** 0.2.0 gives every user and every team in your
 product their own isolated runtime of agents. Those agents share rooms and memory with the people
@@ -18,28 +46,39 @@ Everything else described in this README is stable.
 **New in 0.2.0:** [what changed and how to upgrade](developer-docs/runtime/whats-new-0-2-0.md) ·
 **Limits:** [what is measured, and what it does not do](developer-docs/runtime/limits-and-evidence.md)
 
+**Contributing:** start with a [good first issue](https://github.com/moeen-mahmud/dispach/labels/good%20first%20issue)
+or the [larger pieces that need an owner](https://github.com/moeen-mahmud/dispach/labels/help%20wanted), and
+[Start here](https://github.com/moeen-mahmud/dispach/discussions/38) for how a change gets in. The
+[roadmap](https://github.com/moeen-mahmud/dispach/discussions/56) says what is planned and where Dispach is behind.
+
 > To dispatch is to send a thing on its way with the authority to see it done — to decide
 > what handles it, hand it over, and answer for the result.
 
 ## Call it over HTTP
 
-```bash
-git clone https://github.com/moeen-mahmud/dispach && cd dispach
-cp .env.example .env                    # set DISPACH_API_TOKEN; no model key needed to start
-docker compose up -d --build --wait
-export TOKEN=$(grep DISPACH_API_TOKEN .env | cut -d= -f2-)
+![Starting the server, creating an agent over HTTP, and streaming its reply](https://raw.githubusercontent.com/moeen-mahmud/dispach/HEAD/.github/assets/quickstart.gif)
 
-curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"answers":{"user":"you","name":"milo","apiKey":"sk-…"}}' localhost:7420/v1/agents
+```bash
+export TOKEN=pick-a-secret
+docker run -d -p 7420:7420 -v dispach-home:/home/dispach -e DISPACH_API_TOKEN=$TOKEN \
+  ghcr.io/moeen-mahmud/dispach:0.2.0
+
+curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/agents \
+  -d '{"answers":{"user":"you","name":"milo","apiKey":"sk-…"}}'
 # → 201 {"id":"milo",…,"adopted":["milo"]}: live now, no restart
 
-curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"text":"what can you do?"}' localhost:7420/v1/agents/milo/messages
-# → 202 {"turnId":"t_…","sessionKey":"api:default"}: the turn runs whether or not you stay
+T=$(curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/agents/milo/messages \
+  -d '{"text":"what can you do?","chunks":true}' | jq -r .turnId)
+# → the turn runs whether or not you stay
+
+curl -sN -H "Authorization: Bearer $TOKEN" "localhost:7420/v1/agents/milo/turns/$T/stream?chunks=true"
+# → server-sent events: the turn as it happens, then turn.end with the final text
 ```
 
-The defaults are OpenAI's. For another endpoint, add `"model"` and `"baseUrl"` to the answers;
-`GET /v1/provision` lists every question with its default and choices.
+The defaults are OpenAI's. For another endpoint, add `"model"` and `"baseUrl"` to the answers, as the
+recording above does with `deepseek-v4-flash`; `GET /v1/provision` lists every question with its
+default and choices. To run it from a checkout instead, [Hosting with Compose](#hosting-with-compose)
+has the `docker compose` version.
 
 **[`docs/09-API-GUIDE.md`](docs/09-API-GUIDE.md) is the walkthrough**: provisioning over the wire,
 streaming, reattaching after a dropped connection, approvals and keys. The reference is served at

@@ -463,7 +463,9 @@ describe("planFiles", () => {
         // capabilities, and a validate that checked whichever agent the environment described.
         expect(manifest).toContain("\n    id: deepseek-v4-pro")
         expect(manifest).toContain("\n    baseUrl: https://api.deepseek.com/v1")
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: manifest env expansion syntax, not interpolation
         expect(manifest.includes("${MODEL_ID}")).toBe(false)
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: manifest env expansion syntax, not interpolation
         expect(manifest.includes("${MODEL_BASE_URL}")).toBe(false)
 
         // Hard rule 10 is untouched: the manifest names the key's variable and never holds it.

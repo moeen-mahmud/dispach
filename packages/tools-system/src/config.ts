@@ -33,14 +33,16 @@
  * - It is `mutating`, so the write gate applies: a turn that has read untrusted content cannot call it
  *   without a rule or an approval.
  * - A `deny` rule can put the security fields out of reach entirely.
- * - **The floor below.** Two edits are refused whatever the policy says, because their only purpose is
- *   to disable a guard: removing entries from `tools.policy.deny`, and setting
- *   `tools.untrusted.onMutate` to `allow`. A guard the agent can switch off on request is not a guard.
- *   Adding tools and adding allow rules — the things a person actually asks for — are unaffected.
+ * - **The floor below.** Some edits are refused whatever the policy says (`floorRefusal`): the ones that
+ *   disable a guard (replacing `tools.policy.deny`, setting `tools.untrusted.onMutate` to `allow`) and the
+ *   ones that set the agent's reach (any `writeRoots`, `allowFrom`, `server.host` and `server.tokenEnv`, a
+ *   provider's `baseUrl`, `confineReads`, `personal` or `env`, `skills.trusted`). A guard the agent can
+ *   switch off on request is not a guard. Adding tools and adding allow rules — the things a person
+ *   actually asks for — are unaffected.
  *
- * That floor is a judgement call rather than a requirement anyone stated, and it is narrow on purpose:
- * everything in the direction of "help me enable this" works, and only the two edits in the direction
- * of "stop checking" do not.
+ * It is narrow on purpose: everything in the direction of "help me enable this" works, and only edits in
+ * the direction of "stop checking" or "reach further" do not. Hossain and Mahmud (2026, preprint,
+ * arXiv 2610.06274) measure it: with the floor, 0 of 167 protected writes were saved.
  */
 
 import { readFile } from "node:fs/promises"

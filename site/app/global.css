@@ -31,6 +31,8 @@ html {
 }
 
 html > body[data-scroll-locked] {
+    /* biome-ignore lint/complexity/noImportantStyles: overrides the scroll-lock library's inline style */
     margin-right: 0px !important;
+    /* biome-ignore lint/complexity/noImportantStyles: overrides the scroll-lock library's inline style */
     --removed-body-scroll-bar-size: 0px !important;
 }

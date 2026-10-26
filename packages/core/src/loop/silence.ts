@@ -31,6 +31,10 @@ const CLAIM =
 /**
  * Why this step needs a nudge, or `undefined` when it is a reply. `acted` is whether a mutating tool
  * succeeded this turn: a claimed save with no save behind it is the one shape here that misleads the person.
+ *
+ * A promise is only a promise when nothing has acted. After a real save, "I'll keep them short" is a
+ * commitment about later turns, and nudging it told the model no call was made right after one
+ * succeeded, so it concluded the runtime was lying to it.
  */
 export function silenceOf(
     text: string,
@@ -46,7 +50,7 @@ export function silenceOf(
     const sentences = visible.split(/(?<=[.!?])\s+/)
     const last = (sentences.at(-1) ?? "").trim()
     if (last.endsWith("?")) return undefined
-    return PROMISE.test(last) ? "promise" : undefined
+    return !acted && PROMISE.test(last) ? "promise" : undefined
 }
 
 /** The note the loop sends, framed as the runtime's so it cannot read as the person's words. */

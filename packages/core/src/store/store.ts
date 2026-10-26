@@ -8,10 +8,10 @@
  * interface would mean rewriting every call site to add it. The interface arrives in this phase
  * precisely so that later addition is a new file rather than a refactor.
  *
- * **Sub-stores arrive with their subsystems.** `toolCalls` lands in Phase 3, `schedules` in
- * Phase 8, and `artifacts` with compaction in Phase 7. They are absent here rather than stubbed:
- * an empty interface that nothing implements is indistinguishable from a working one at the type
- * level, and would let a later phase quietly ship a no-op. `outbox` arrived in Phase 4.
+ * **Sub-stores arrive with their subsystems.** `toolCalls`, `schedules`, `artifacts` and
+ * `outbox` each ship inside the subsystem that uses them, never as stubs: an empty interface
+ * that nothing implements is indistinguishable from a working one at the type level, and would
+ * let a change quietly ship a no-op.
  */
 
 import type { TurnEndReason } from "../events/types.ts"

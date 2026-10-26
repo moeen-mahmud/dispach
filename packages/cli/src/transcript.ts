@@ -329,11 +329,14 @@ function reduceEvent(state: TranscriptState, event: AnyEvent): TranscriptState {
             return append(state, "note", `${event.data.slug} — blocked: ${event.data.reason}`)
 
         case "tool.repair":
-            // A silent repair is indistinguishable from a slow turn, and it costs a whole step.
+            // A silent repair is indistinguishable from a slow turn, and it costs a whole step. With no
+            // slugs it is the runtime's nudge (14.123), not a tool that failed, and says so.
             return append(
                 state,
                 "note",
-                `${event.data.slugs.join(", ")} — could not be used, asking the model again`,
+                event.data.slugs.length === 0
+                    ? `reply stopped short (${event.data.errors.join("; ")}), asking the model to finish`
+                    : `${event.data.slugs.join(", ")} — could not be used, asking the model again`,
             )
 
         case "model.retry": {

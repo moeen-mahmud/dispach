@@ -1,0 +1,56 @@
+name: Bug report
+description: Something behaves differently from the docs or the spec.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go through [private reporting](https://github.com/moeen-mahmud/dispach/security/advisories/new), never an issue.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `dispach --version`, or the image tag.
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed through
+      options:
+        - npm
+        - Homebrew
+        - Container image
+        - A repository checkout
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The command or request, and the output or error, pasted in full.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: And where the docs or spec say so, if they do.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest `agent.yaml` and steps that show it. Leave out keys and tokens.
+    validations:
+      required: false
+  - type: input
+    id: model
+    attributes:
+      label: Model and endpoint
+      description: For model or tool-call behaviour, for example `deepseek-v4-pro via api.deepseek.com`.
+    validations:
+      required: false
