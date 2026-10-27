@@ -755,6 +755,20 @@ describe("sessions", () => {
         await runtime.stop()
     })
 
+    test("a null phase is refused with the schema's error, no clearing", async () => {
+        // The spec refuses null; the deleted dead branch described a clearing
+        // behaviour the route never had.
+        const { call, runtime } = await withSession()
+        const response = await call("POST", "/v1/agents/assistant/sessions/api%3As/phase", {
+            body: { phase: null },
+        })
+        expect(response.status).toBe(400)
+        const body = (await response.json()) as { error: { code: string; hint?: string } }
+        expect(body.error.code).toBe("phase_invalid")
+        expect(body.error.hint ?? "").not.toContain("Phase 7")
+        await runtime.stop()
+    })
+
     test("an unknown session is 404", async () => {
         const { call, runtime } = await harness()
         expect((await call("GET", "/v1/agents/assistant/sessions/api%3Anope")).status).toBe(404)
