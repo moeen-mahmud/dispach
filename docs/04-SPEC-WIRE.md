@@ -387,7 +387,7 @@ GET    /v1/webhooks            → { webhooks: [{ subscriptionId, url, types, sc
 DELETE /v1/webhooks/:webhookId → { id, deleted: true }
 
 POST   /v1/participants { id, name?, role?, title?, timezone?, channelIds? }
-                                                     → 201 { id, kind: "human", name?, role, title?, timezone?, createdAt }
+                                                     → 201 { id, kind: "human", name?, role, title?, timezone?, channelIds?, createdAt }
 GET    /v1/participants                              → { participants: [...] }
 DELETE /v1/participants/:participantId               → { id, deleted: true }
 POST   /v1/conversations { kind, members[], title? } → 201 { id, kind, title?, members, createdAt }

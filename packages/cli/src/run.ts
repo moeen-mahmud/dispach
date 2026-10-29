@@ -713,13 +713,9 @@ async function pickSession(sessions: readonly SourceSession[]): Promise<string |
     markTerminalDirty()
     const instance = render(
         createElement(SessionPicker, {
-            sessions: sessions.map((row) => ({
-                sessionKey: row.sessionKey,
-                messages: row.messages,
-                turns: row.turns,
-                lastActivityAt: row.lastActivityAt,
-                phase: row.phase,
-            })),
+            // The rows themselves, never a copy: a field-by-field literal dropped `head`, so a
+            // conversation `/new` left behind read "You" beside the current one.
+            sessions,
             now: Date.now(),
             columns: screenColumns(process.stdout.columns, FALLBACK_COLUMNS),
             maxRows: SESSION_PICKER_ROWS,
@@ -1036,14 +1032,7 @@ async function runRich(wired: Wired): Promise<RunOutcome> {
                 // rather than whatever a local store happens to hold. That is the whole reason an
                 // attached run opens no database: two readings of "which conversations exist" can
                 // disagree while both look correct, and only one of them is being written to.
-                const stored = await conversations(wired.source)
-                return [...stored].sort(byRecency).map((row) => ({
-                    sessionKey: row.sessionKey,
-                    messages: row.messages,
-                    turns: row.turns,
-                    lastActivityAt: row.lastActivityAt,
-                    phase: row.phase,
-                }))
+                return [...(await conversations(wired.source))].sort(byRecency)
             },
             onRestart: (draft: string) => {
                 restart = true

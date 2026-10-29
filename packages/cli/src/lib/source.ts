@@ -127,7 +127,9 @@ export interface AgentSource {
     /**
      * The person's own conversation, when the agent keeps one across surfaces
      * (`docs/23-SPEC-SESSIONS.md`): what a run with no key opens, so the terminal shows what was said
-     * on Telegram. `undefined` under `channel-peer`, or before anybody has spoken.
+     * on Telegram. `undefined` when the agent keeps none (`channel-peer`, or an owner or peer scope
+     * nobody is assigned to). Attached, also `undefined` until the host lists one, since it reads the
+     * session list; the key a run then sends resolves to the same conversation on the host.
      */
     ownConversation(): Promise<string | undefined>
     /** `/new` under an owner or peer scope: the rotated key, or `undefined` when nothing rotates. */

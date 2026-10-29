@@ -418,17 +418,6 @@ export function unknownToolAtRuntime(slug: string, known: readonly string[]): To
 }
 
 /**
- * A pinned tool that this configuration allows exactly once per turn.
- *
- * A tool that both changes things and returns text from outside the conversation taints the turn with
- * its own first call — after which the write gate requires the explicit authorisation nobody wrote.
- * The gate is behaving correctly; the configuration is what makes the second call fail, and only its
- * author can decide whether that is what they meant.
- *
- * A warning rather than a failure, because "run one command, then report back" is a legitimate shape
- * for an agent and nothing here can tell it apart from an oversight.
- */
-/**
  * An owner or peer session scope with nobody assigned (decision 15.14). Not a load failure: the agent
  * still answers, one conversation per surface, and this says why that is.
  */
@@ -441,6 +430,17 @@ export function sessionsScopeUnassigned(agentId: string, scope: string): ErrorDe
     }
 }
 
+/**
+ * A pinned tool that this configuration allows exactly once per turn.
+ *
+ * A tool that both changes things and returns text from outside the conversation taints the turn with
+ * its own first call — after which the write gate requires the explicit authorisation nobody wrote.
+ * The gate is behaving correctly; the configuration is what makes the second call fail, and only its
+ * author can decide whether that is what they meant.
+ *
+ * A warning rather than a failure, because "run one command, then report back" is a legitimate shape
+ * for an agent and nothing here can tell it apart from an oversight.
+ */
 export function toolGatedAfterFirstUse(slugs: readonly string[]): ErrorDetail {
     const list = slugs.join(", ")
     return {

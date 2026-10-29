@@ -46,7 +46,7 @@ generates. `owner` or `peer` on an agent with no assignment loads, behaves as `c
 puts `sessions_scope_unassigned` on `agent.warnings` naming `owner adopt`.
 
 `memory.shared: false` opts this agent out of the pool in both directions: it neither reads
-`agents:<P>` nor writes to it, and `memory_write` stays private as before.
+`agents:<P>` nor leaves copies in it; `memory_write` still saves to its own files, as it always does.
 
 ## Resolving a turn's key
 
@@ -88,7 +88,8 @@ which is only its dedupe group and event context.
   participant's channel type and `x` matches the sender's id **or handle** under `allowFrom`'s
   normalisation (`normaliseSender`: case folded, one `@` optional, a phone number folded to digits).
   Telegram stamps a numeric id while `allowFrom` holds `@handle`, and WhatsApp a JID while it holds
-  `+880…`, so `ActingParticipant` gains `handles` — the handle and peer id the channel saw.
+  `+880…`, so `ActingParticipant` gains `handles` — the sender's handle the channel saw. Never the
+  peer id: in a group that is the group, and matching it would make every member the owner.
 
 `resolveParticipant(participants, participant)` is the same match against every participant's own
 `channelIds`, for `peer` scope.
@@ -136,12 +137,14 @@ on itself.
   owner's DM, the operator, schedules. Never by a stand-in, a room or another member's peer ask —
   `memory_write` landed in private memory before this, and a stand-in could not read it then
   either (15.13).
-- **Write**: `memory_write` from a turn that reads private memory goes to the pool when
-  `memory.shared` is on and the agent is assigned; the space writer still wins (14.41). Written by
-  `agent:<id>`, indexed at the next read like any shared scope.
-- **API**: P (a bound key) and P's agents write it; an admin does not — it is the person's agents'
-  memory, the 14.41 rule with no admin exception (15.8). Reads through the API follow the same
-  rule.
+- **Write**: `memory_write` from a turn that reads private memory saves to the agent's own files
+  as before and then leaves a copy in the pool, when `memory.shared` is on and the agent is
+  assigned; the space writer still wins (14.41). The copy is written by `agent:<id>`, indexed at the
+  next read like any shared scope, and never recalled by the agent that wrote it.
+- **API**: P (a bound key) and P's agents write it; a key bound to anybody else, an admin
+  included, gets `403 memory_scope_forbidden` — the 14.41 rule with no admin exception (15.8).
+  Reads through the API follow the same rule. The unbound operator token is not a participant and
+  passes, exactly as it does for `owner:<P>`.
 - **Forget**: `memory_forget` on private memory lists and deletes pool notes too.
 - No audit row: nothing reads the pool for somebody else.
 

@@ -215,6 +215,8 @@ async function runInit(options: InitOptions): Promise<InitResult> {
         }
     }
 
+    await claimForOwner(manifestPath, targetDir, defaults.agentDirBase)
+
     /**
      * The host first, then the channel — because the host is what pairs it.
      *
@@ -230,8 +232,6 @@ async function runInit(options: InitOptions): Promise<InitResult> {
      * every branch reports and returns. And pairing is skipped without a terminal, because a
      * scripted run has nobody to read a code.
      */
-    await claimForOwner(manifestPath, targetDir, defaults.agentDirBase)
-
     let hostUrl: string | undefined
     if (answers.daemon === "service") {
         process.stdout.write("\n")
