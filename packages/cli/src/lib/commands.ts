@@ -154,7 +154,7 @@ export const COMMANDS: readonly CommandSpec[] = [
                 name: "whatsapp",
                 kind: "string",
                 placeholder: "level",
-                help: "reachable on WhatsApp: none | connected — unofficial, and an opt-in plugin",
+                help: "reachable on WhatsApp: none | connected — unofficial, bundled with the binary",
                 defaultHelp: "none",
             },
             {
@@ -164,7 +164,7 @@ export const COMMANDS: readonly CommandSpec[] = [
                 name: "whatsapp-number",
                 kind: "string",
                 placeholder: "digits",
-                help: "whose number may message it — digits with no +, empty permits nobody",
+                help: "the account's own number to pair with (pairWith) — digits with no +; empty pairs by QR",
             },
             {
                 name: "server",

@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-_Nothing yet._
+### Fixed
+
+- README: every `docker run` names the `dispach-home` volume and passes `--init`, so an upgrade keeps the store and backgrounded `exec` children are reaped; the image tag is 0.2.1; the `.env` step copies `examples/minimal/.env.example` (only the example is tracked); compose text matches `docker-compose.yml` (plain `up` pulls, `DISPACH_VERSION` pins); the image's shell is dash, not busybox; package count and provider list corrected; load average 3.3.
+- `evals/CLAIMS.md` carries rows for the Ink import cost, compose startup time, image size breakdown and the 91 ms boot aside, marked `needs-run`.
+- `dispach` on npm declares `engines.node >= 24`, so an install on an older Node warns instead of failing at runtime.
+- `docs/06-VELAOPS-INTEGRATION.md`: schedule routes, boot figure and the MCP row corrected.
+- `init --whatsapp` help no longer calls WhatsApp an opt-in plugin; `--whatsapp-number` says it sets `pairWith`.
 
 ## 0.2.1 — 2026-10-26
 

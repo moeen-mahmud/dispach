@@ -22,8 +22,13 @@ Or run it as a server: one `docker run`, and [Call it over HTTP](#call-it-over-h
 agent and streams its reply in three requests.
 
 ```bash
-docker run -d -p 7420:7420 -e DISPACH_API_TOKEN=pick-a-secret ghcr.io/moeen-mahmud/dispach:0.2.0
+docker run -d --init -p 7420:7420 -v dispach-home:/home/dispach \
+  -e DISPACH_API_TOKEN=pick-a-secret ghcr.io/moeen-mahmud/dispach:0.2.1
 ```
+
+The named volume is where the store, every agent and every key live; without it a `docker rm` for
+an upgrade starts empty. `--init` is there because `exec` backgrounds children and a child whose
+parent is PID 1 has nothing to reap it.
 
 **Research:** [*What May an Agent Change About Itself? A Containment Floor for Self-Configuring Agent
 Runtimes*](https://arxiv.org/abs/2610.06274) (Hossain and Mahmud, 2026, preprint) measures the floor in
@@ -60,8 +65,8 @@ or the [larger pieces that need an owner](https://github.com/moeen-mahmud/dispac
 
 ```bash
 export TOKEN=pick-a-secret
-docker run -d -p 7420:7420 -v dispach-home:/home/dispach -e DISPACH_API_TOKEN=$TOKEN \
-  ghcr.io/moeen-mahmud/dispach:0.2.0
+docker run -d --init -p 7420:7420 -v dispach-home:/home/dispach -e DISPACH_API_TOKEN=$TOKEN \
+  ghcr.io/moeen-mahmud/dispach:0.2.1
 
 curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/agents \
   -d '{"answers":{"user":"you","name":"milo","apiKey":"sk-…"}}'
@@ -114,7 +119,7 @@ gap of a few runs is noise. Hermes leads on Gemini 4 Argon and the two small ope
 
 ## Status
 
-**0.2.0**, from npm, Homebrew or the container image. Every install runs
+**0.2.1**, from npm, Homebrew or the container image. Every install runs
 under Node. [`CHANGELOG.md`](CHANGELOG.md) has what landed in each release.
 
 Built and in use:
@@ -189,7 +194,7 @@ Full rationale for every decision, including the negative ones, is in `docs/00-D
 
 ```bash
 npm i -g dispach          # the `dispach` command
-dispach --version         # 0.2.0
+dispach --version         # 0.2.1
 ```
 
 and in an application that talks to a running server:
@@ -203,7 +208,7 @@ import { createClient } from "dispach/client"
 import type { AnyEvent } from "dispach/wire"
 ```
 
-There is no `@dispach/*` scope, deliberately: the runtime is nine workspace packages and one name,
+There is no `@dispach/*` scope, deliberately: the runtime is sixteen workspace packages (and a separately licensed control plane) under one name,
 so there is one thing to install, one thing to version and one thing to trust. `dispach/client`
 pulls in no terminal UI — asserted by the package's own tests, because an HTTP client has no
 business paying the ~170-210 ms that importing Ink and React costs.
@@ -228,7 +233,7 @@ until `brew trust moeen-mahmud/tap` is run, because a bare name carries no such 
 ### Or the container
 
 ```bash
-docker pull ghcr.io/moeen-mahmud/dispach:0.2.0
+docker pull ghcr.io/moeen-mahmud/dispach:0.2.1
 ```
 
 The [Docker](#docker) and [Compose](#hosting-with-compose) sections below have the run lines and
@@ -247,7 +252,7 @@ bun run build                       # builds every package the binary imports
 cd packages/cli && bun link         # puts `dispach` on your PATH
 cd ../..
 
-dispach --version                   # 0.2.0
+dispach --version                   # 0.2.1
 dispach --help
 ```
 
@@ -258,8 +263,8 @@ Four things that are not obvious:
   command picks it up; you never re-link. If `dispach: command not found`, `~/.bun/bin` is not on
   your `PATH` — Bun's installer adds it, and a shell opened before you installed Bun will not have it.
 - **`bun run build` builds every workspace package, and you need all of them.** The CLI imports
-  `tools-system`, `tools-web`, `tools-composio` and `channel-telegram` from their `dist`, so building
-  only `core` and `cli` leaves the binary running yesterday's provider code — and the symptom is the
+  every provider package — tools, channels, the Bedrock transport, media — from their `dist`
+  (`packages/cli/src/lib/providers.ts` is the list), so building only `core` and `cli` leaves the binary running yesterday's provider code — and the symptom is the
   worst kind: your change is correct, a test fails, and the stack trace points into a stale `dist`.
 - **Node 24+ must be on your `PATH`.** The built entry's shebang is `#!/usr/bin/env node`; Bun builds
   it and Node runs it — the same runtime every install ships.
@@ -443,7 +448,7 @@ token.
 
 ```bash
 cp .env.example .env               # then DISPACH_API_TOKEN
-docker compose up -d --build --wait
+docker compose up -d --wait        # pulls ghcr.io/moeen-mahmud/dispach, DISPACH_VERSION pins a tag
 curl localhost:7420/v1/ready       # {"status":"ready","agents":0}
 docker compose logs server         # the claim link — open it once to get a browser key
 ```
@@ -476,9 +481,13 @@ conversation with one, and — since 0.1.1 — changes its settings and schedule
 key panels remain reports. Reading the container's own output is what confers
 first ownership, which grants nothing new to anyone who could already run `docker compose logs`.
 
-**`--build` is not optional after the first run.** `image: dispach:local` names a tag, and compose
-builds only when that tag is *absent* — so a second `up` reuses whatever was built before, reports
-healthy, and serves it. Measured while writing this: a two-day-old image came up green and answered
+**A plain `up` pulls the published image once and never again.** `image:` names
+`ghcr.io/moeen-mahmud/dispach:${DISPACH_VERSION:-latest}` with `pull_policy: missing`, so a machine
+that pulled `latest` last month keeps serving it until `docker compose pull`; pin `DISPACH_VERSION`
+in `.env` to make an upgrade a visible edit. Working from a checkout, `up -d --build --wait` builds
+this tree under the same tag — and then **`--build` is not optional after the first run**, because
+compose builds only when the tag is *absent*, so a second `up` reuses whatever was built before,
+reports healthy, and serves it. Measured while writing this: a two-day-old image came up green and answered
 every request from a binary that predated two whole phases. The recorded stale-`dist` hazard with a
 container around it, and the same tell — everything works, nothing is current.
 
@@ -537,7 +546,7 @@ the shape.
 The container is the honest place to exercise an agent that has a shell, and not only for
 containment. Every `exec` test in this repo otherwise runs on macOS, where the shell is a real
 bash and `realpath` resolves `/var` through a symlink — the exact conditions the recorded
-`$PWD`-comparison bug lived in. In the image it is busybox `sh` on Linux, with a different PATH
+`$PWD`-comparison bug lived in. In the image it is Debian's `dash` as `/bin/sh` on Linux, with a different PATH
 and different `realpath` semantics. Those have never been exercised until now.
 
 ```bash
@@ -566,7 +575,7 @@ fenced as untrusted. What the agent's shell can reach is `sh`, `bash`, `git`, `p
 and `curl` — `git` because the skills catalogue is fetched with it and its absence *deletes* that
 feature rather than degrading it, `python3` and `uv` because a skill shipping scripts needs them.
 
-What is **absent on purpose**, and asserted as such: no Bun — the application is the published npm
+What is **absent on purpose** (CI asserts Bun and the editors are missing): no Bun — the application is the published npm
 package running under Node, exactly what a laptop runs; no `wget`, so there is one obvious HTTP client rather than two; and no pager
 and no editor, because `exec` hands a child a file descriptor and never a TTY — anything that pages
 or prompts blocks until its deadline and reads as a hung agent. The CI `docker` job asserts both
@@ -594,13 +603,14 @@ consequence: run it on a laptop and the policy is the only boundary there is.
 ## Docker
 
 ```bash
-docker pull ghcr.io/moeen-mahmud/dispach:0.2.0          # or build it: docker build -f docker/Dockerfile -t dispach .
-docker run --rm -p 7420:7420 \
+docker pull ghcr.io/moeen-mahmud/dispach:0.2.1          # or build it: docker build -f docker/Dockerfile -t dispach .
+cp examples/minimal/.env.example examples/minimal/.env  # then MODEL_API_KEY; only the example is tracked
+docker run --rm --init -p 7420:7420 \
   --env-file examples/minimal/.env \
   -e DISPACH_API_TOKEN=pick-something \
   -v "$PWD/examples/minimal:/agent" \
   -v dispach-home:/home/dispach \
-  ghcr.io/moeen-mahmud/dispach:0.2.0
+  ghcr.io/moeen-mahmud/dispach:0.2.1
 ```
 
 The token is not optional and is not boilerplate. The image binds `0.0.0.0`, because a process
@@ -684,8 +694,8 @@ Public pull requests are welcome; [`CONTRIBUTING.md`](CONTRIBUTING.md) is the co
 
 ## Boot budget
 
-Process start → `runtime.ready` in under **1000 ms**, enforced in CI at 1200 ms. Every number in this
-README has a row in [`evals/CLAIMS.md`](evals/CLAIMS.md) naming the file it comes from.
+Process start → `runtime.ready` in under **1000 ms**, enforced in CI at 1200 ms. Every performance
+number in this README has a row in [`evals/CLAIMS.md`](evals/CLAIMS.md) naming the file it comes from.
 
 Measured at **~65 ms** at 0.2.0 — 45 ms of interpreter and imports, 21 ms inside `Runtime.create` —
 and checked on every phase rather than at the end (it was ~53 ms at 0.1.3; the 0.2.0 packages
@@ -697,7 +707,7 @@ bun run bench:boot
 
 Reported with the machine state it was taken on, because without that a boot number is a number
 about somebody's afternoon: the figure above is a 7-run median on an Apple M4 Pro at a load
-average of ~3.4, and an earlier run of the same tree at a load average of ~5 measured 91 ms. The budget has
+average of ~3.3, and an earlier run of the same tree at a load average of ~5 measured 91 ms. The budget has
 three orders of magnitude of headroom, so the reason to say this is not the arithmetic — it is that
 a regression is only visible against a figure you can reproduce.
 

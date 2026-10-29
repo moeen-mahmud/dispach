@@ -15,7 +15,7 @@ Choose the path that matches what you are building:
   multi-tenant integration.
 - Read [security and trust](concepts/security-and-trust.md) before enabling system or web tools.
 
-This site documents the 0.2.0 runtime. Experimental surfaces say so where they are described; the
+This site documents the 0.2.1 runtime. Experimental surfaces say so where they are described; the
 [release guide](releases.md) explains the release lines.
 The server exposes its exact version at `GET /v1/health` and its generated reference at `/docs`.
 
