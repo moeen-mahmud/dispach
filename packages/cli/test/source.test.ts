@@ -65,6 +65,10 @@ function fakeClient(): {
                 calls.push("clear")
                 return {}
             },
+            rotateSession: async () => {
+                calls.push("rotate")
+                return { sessionKey: "owner:me:k7m2xp~ab12cd" }
+            },
             reload: async () => {
                 calls.push("reload")
                 return { adopted: ["milo", "researcher"] }
@@ -164,6 +168,8 @@ describe("a source knows which kind it is", () => {
             history: async () => [],
             sessions: async () => [],
             clearSession: async () => {},
+            ownConversation: async () => undefined,
+            rotateSession: async () => undefined,
             context: async () => {
                 throw new Error("unused")
             },
@@ -356,6 +362,64 @@ describe("what the host is asked for", () => {
         // reloaded" leaves somebody guessing which.
         expect(await source.reload?.()).toEqual(["milo", "researcher"])
         expect(fake.calls).toContain("reload")
+        await source.close()
+    })
+})
+
+describe("the person's own conversation, attached", () => {
+    test("the current owner conversation is the one opened, never one a rotation left behind", async () => {
+        const fake = fakeClient()
+        const base = fake.client.agent("milo")
+        const session = (sessionKey: string, head: boolean) => ({
+            sessionKey,
+            channel: "owner",
+            turns: 1,
+            messages: 2,
+            lastActivityAt: "2026-10-29T10:00:00.000Z",
+            head,
+        })
+        const client: ApiClient = {
+            ...fake.client,
+            agent: () => ({
+                ...base,
+                sessions: async () => [
+                    session("tg:5550123", true),
+                    session("owner:me:k7m2xp", false),
+                    session("owner:me:k7m2xp~ab12cd", true),
+                ],
+            }),
+        }
+        const source = remoteSource({
+            client,
+            agentId: "milo",
+            description: DESCRIPTION,
+            host: { baseUrl: "http://127.0.0.1:7420", pid: 4711 },
+        })
+        expect(await source.ownConversation()).toBe("owner:me:k7m2xp~ab12cd")
+        expect(await source.rotateSession()).toBe("owner:me:k7m2xp~ab12cd")
+        await source.close()
+    })
+
+    test("a channel-peer host refuses rotation, and /new falls back to a key of the terminal's own", async () => {
+        const fake = fakeClient()
+        const base = fake.client.agent("milo")
+        const client: ApiClient = {
+            ...fake.client,
+            agent: () => ({
+                ...base,
+                rotateSession: async () => {
+                    throw new Error("session_not_rotatable")
+                },
+            }),
+        }
+        const source = remoteSource({
+            client,
+            agentId: "milo",
+            description: DESCRIPTION,
+            host: { baseUrl: "http://127.0.0.1:7420", pid: 4711 },
+        })
+        expect(await source.rotateSession()).toBeUndefined()
+        expect(await source.ownConversation()).toBeUndefined()
         await source.close()
     })
 })

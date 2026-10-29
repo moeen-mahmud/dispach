@@ -173,6 +173,8 @@ export type {
     PhaseConfig,
     ScheduleConfig,
     ServerConfig,
+    SessionScope,
+    SessionsConfig,
     SkillsConfig,
     TeamConfig,
     TeamMemberConfig,
@@ -185,6 +187,7 @@ export {
     DEFAULT_MODEL_API,
     isReservedRole,
     MODEL_ROLES,
+    SESSION_SCOPES,
 } from "./manifest/schema.ts"
 export {
     AGENT_SETTABLE_PATHS,
@@ -495,7 +498,11 @@ export {
 } from "./store/buffer.ts"
 export {
     formatSessionKey,
+    isConversationOf,
+    isHead,
     isSessionKey,
+    KEY_SYMBOLS,
+    keySymbols,
     parseSessionKey,
     type SessionParts,
 } from "./store/session-key.ts"

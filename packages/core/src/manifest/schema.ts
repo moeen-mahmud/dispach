@@ -498,6 +498,29 @@ export const MemorySchema = z
          * not say.
          */
         includeHistory: z.boolean().default(true),
+        /**
+         * Read and write `agents:<owner>`, the memory this agent's owner's agents share (decision 15.8).
+         * Only matters when the agent is assigned. `false` opts out both ways: `memory_write` stays
+         * private and the pool is never read. `docs/23-SPEC-SESSIONS.md`.
+         */
+        shared: z.boolean().default(true),
+    })
+    .strict()
+
+/**
+ * How a turn's session key is chosen (decision 15.6, `docs/23-SPEC-SESSIONS.md`).
+ *
+ * `channel-peer` is the default and is what every surface did before: the key sent is the key used.
+ * `owner` puts every turn from the assigned owner — any channel, the web, the terminal — in one
+ * conversation; `peer` does the same for each registered participant. The default does not move:
+ * embedders choose and parse their own keys, and `init` writes `owner` into what it generates.
+ */
+export const SESSION_SCOPES = ["owner", "peer", "channel-peer"] as const
+export type SessionScope = (typeof SESSION_SCOPES)[number]
+
+export const SessionsSchema = z
+    .object({
+        scope: z.enum(SESSION_SCOPES).default("channel-peer"),
     })
     .strict()
 
@@ -952,6 +975,7 @@ export const AgentManifestSchema = z
         skills: SkillsSchema.optional(),
         knowledge: KnowledgeSchema.optional(),
         memory: MemorySchema.optional(),
+        sessions: SessionsSchema.optional(),
         channels: z.array(ChannelSchema).default([]),
         delivery: DeliverySchema.optional(),
         schedules: z.array(ScheduleSchema).default([]),
@@ -979,6 +1003,7 @@ export type SkillsConfig = z.infer<typeof SkillsSchema>
 export type KnowledgeConfig = z.infer<typeof KnowledgeSchema>
 export type SoulConfig = z.infer<typeof SoulSchema>
 export type MemoryConfig = z.infer<typeof MemorySchema>
+export type SessionsConfig = z.infer<typeof SessionsSchema>
 export type ChannelConfig = z.infer<typeof ChannelSchema>
 export type DeliveryConfig = z.infer<typeof DeliverySchema>
 export type ScheduleConfig = z.infer<typeof ScheduleSchema>

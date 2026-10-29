@@ -16,7 +16,7 @@
  */
 
 import { basename, dirname, join, resolve } from "node:path"
-import { BRAND, HarnessError, isHarnessError, VERSION } from "@dispach/core"
+import { BRAND, HarnessError, isHarnessError, SqliteStore, VERSION } from "@dispach/core"
 import { installRefs } from "#browse"
 import { announce } from "#lib/bootstrap"
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
@@ -40,8 +40,9 @@ import { type PairOutcome, pairLater, pairWhatsApp } from "#lib/init-whatsapp"
 import { negotiateKeyboard } from "#lib/keyboard"
 import { measuredWindow } from "#lib/measure-window"
 import { resolveModeFromProcess } from "#lib/output"
+import { claimManifest } from "#lib/owner"
 import { checkAgentLoads, complete, FLAG_FOR, fillDefaults, writeAgentFiles } from "#lib/provision"
-import { agentsDir, outsideSandboxNote } from "#lib/sandbox"
+import { agentsDir, insideSandbox, outsideSandboxNote, storePath } from "#lib/sandbox"
 import type { InitOptions } from "#lib/schema"
 import { webUrl } from "#lib/web-url"
 
@@ -214,6 +215,8 @@ async function runInit(options: InitOptions): Promise<InitResult> {
         }
     }
 
+    await claimForOwner(manifestPath, targetDir, defaults.agentDirBase)
+
     /**
      * The host first, then the channel — because the host is what pairs it.
      *
@@ -268,6 +271,41 @@ async function runInit(options: InitOptions): Promise<InitResult> {
         process.stdout.write(`\n${pairLater(slugify(answers.name))}`)
     process.stdout.write(nextSteps(answers, targetDir, distilled, hostUrl))
     return { kind: "ok", manifestPath: join(targetDir, "agent.yaml") }
+}
+
+/**
+ * Make the person running `init` this agent's owner (decision 15.7), before any host adopts it, so it
+ * boots owned: the manifest just written says `sessions.scope: owner`, and an owner scope with nobody
+ * assigned is one conversation per surface plus a warning.
+ *
+ * Only inside the sandbox, whose store is the one the sandbox's agents run on and whose path a test
+ * redirects. An agent written elsewhere is told the command that does it, and never fails the init:
+ * every agent on disk is a complete agent, owned or not.
+ */
+async function claimForOwner(
+    manifestPath: string,
+    targetDir: string,
+    agentsBase: string,
+): Promise<void> {
+    const id = basename(targetDir)
+    if (!insideSandbox(targetDir)) {
+        process.stdout.write(
+            `\nTo make it yours across every surface: ${BRAND.slug} owner adopt ${manifestPath}\n`,
+        )
+        return
+    }
+    let store: SqliteStore | undefined
+    try {
+        store = await SqliteStore.open({ path: storePath() })
+        await claimManifest(store, manifestPath, agentsBase)
+    } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        process.stderr.write(
+            `could not record you as ${id}'s owner: ${detail}\n  hint: run \`${BRAND.slug} owner adopt ${id}\` once the store is reachable.\n`,
+        )
+    } finally {
+        await store?.close()
+    }
 }
 
 /**

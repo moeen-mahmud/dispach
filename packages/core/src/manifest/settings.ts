@@ -313,6 +313,19 @@ export const SETTINGS: readonly Setting[] = [
         means: 'the other members\' agents this one may ask, by id, or "*" for every agent that offers. A peer ask is one hop: the asked agent answers, and cannot ask onward',
         agentListed: false,
     },
+    // Whose conversations merge, and whose memory an agent shares, are the person's to decide
+    // (decisions 15.6, 15.8): an agent able to change them could be talked into merging a stranger's
+    // chat into its owner's, or into reading its owner's other agents' notes.
+    {
+        path: "sessions.scope",
+        means: "how a turn's conversation is chosen: channel-peer (one per surface, the default), owner (the owner's turns from every surface share one), or peer (owner, and every registered participant gets one too)",
+        agentListed: false,
+    },
+    {
+        path: "memory.shared",
+        means: "read and write the memory this agent's owner's agents share (agents:<owner>). Default true; false keeps memory_write private",
+        agentListed: false,
+    },
     // Person- or engine-only (pilot.15), written as a whole list. A child narrows its parent's
     // tools by construction, but which work leaves the parent's context is the operator's design, and
     // an agent able to route its own calls could route a gated write through a child it wrote.

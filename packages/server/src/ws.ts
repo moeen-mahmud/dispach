@@ -18,7 +18,13 @@
 import type { AnyEvent, Runtime, TurnAdmission } from "@dispach/core"
 import { newTurnId } from "@dispach/core"
 import { bearerFromProtocols, PROTOCOL, withBearerHeader } from "./auth.ts"
-import { type Principal, reachesAgent, reachesEventSession, senderFor } from "./principal.ts"
+import {
+    type Principal,
+    reachesAgent,
+    reachesEventSession,
+    senderFor,
+    sessionFor,
+} from "./principal.ts"
 
 /** Per-connection state, handed to the socket by `Bun.serve`'s upgrade. */
 export interface WsSession {
@@ -375,22 +381,22 @@ export function attachWebSocket(
                 // Asked before `ws.accepted`, which is a promise that the turn will run. Synchronous
                 // unless the agent has a token budget to read, so `ws.accepted` still arrives in the
                 // same tick as the frame for every agent that had no limits before they existed.
-                const proceed = (admission: TurnAdmission): void => {
-                    if (!admission.ok) {
-                        ws.send(JSON.stringify({ type: "ws.error", ...admission.error.toDetail() }))
-                        return
-                    }
+                const requested = frame.sessionKey ?? "api:default"
+                const run = (admission: TurnAdmission & { ok: true }, sessionKey: string): void => {
                     const turnId = newTurnId()
                     const controller = new AbortController()
                     running.set(turnId, controller)
-                    ws.send(JSON.stringify({ type: "ws.accepted", turnId }))
+                    // The key the turn runs in, which `sessions.scope` may have moved into the person's
+                    // conversation (`docs/23-SPEC-SESSIONS.md`): a client adopts it.
+                    ws.send(JSON.stringify({ type: "ws.accepted", turnId, sessionKey }))
 
                     // Detached, like the HTTP path. Closing the socket does not cancel the turn —
                     // only an explicit `stop` frame does.
                     void agent
                         .send(text, {
                             admission,
-                            sessionKey: frame.sessionKey ?? "api:default",
+                            sessionKey,
+                            sessionResolved: true,
                             turnId,
                             source: "ws",
                             // The socket carries no `from`; a key bound to a participant supplies one.
@@ -399,6 +405,35 @@ export function attachWebSocket(
                         })
                         .catch(() => {})
                         .finally(() => running.delete(turnId))
+                }
+                // An agent that keeps one conversation per surface answers in the same tick, as it always
+                // has; one whose scope may move the key reads the store first, and says so in the frame.
+                const scoped = (agent.manifest.sessions?.scope ?? "channel-peer") !== "channel-peer"
+                const proceed = (admission: TurnAdmission): void => {
+                    if (!admission.ok) {
+                        ws.send(JSON.stringify({ type: "ws.error", ...admission.error.toDetail() }))
+                        return
+                    }
+                    if (!scoped) {
+                        run(admission, requested)
+                        return
+                    }
+                    sessionFor(agent, ws.data.principal, requested, sender).then(
+                        (sessionKey) => run(admission, sessionKey),
+                        (error: unknown) => {
+                            admission.release()
+                            process.stderr.write(
+                                `internal: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+                            )
+                            ws.send(
+                                JSON.stringify({
+                                    type: "ws.error",
+                                    code: "internal_error",
+                                    message: "The conversation for this message could not be read.",
+                                }),
+                            )
+                        },
+                    )
                 }
                 const now = agent.admitNow()
                 if (now !== undefined) {

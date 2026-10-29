@@ -88,3 +88,44 @@ export function isSessionKey(key: string): boolean {
         return false
     }
 }
+
+/**
+ * Base-32 without `i`, `l`, `o` and `u`: a key is read off a screen and typed back (`cli` has the
+ * longer argument). Exactly 32, so a byte's low five bits pick a symbol with no modulo bias.
+ */
+export const KEY_SYMBOLS = "0123456789abcdefghjkmnpqrstvwxyz"
+
+/** `length` symbols from as many random bytes. Pure: the randomness arrives as an argument. */
+export function keySymbols(bytes: Uint8Array, length = 6): string {
+    let out = ""
+    for (let at = 0; at < length; at += 1) out += KEY_SYMBOLS[(bytes[at] ?? 0) & 0x1f] ?? "0"
+    return out
+}
+
+/** The six symbols after `~` that make `<base>~<symbols>` a rotation (`docs/23-SPEC-SESSIONS.md`). */
+const ROTATION = /^[0-9a-hjkmnp-tv-z]{6}$/
+
+/**
+ * Whether `key` is the conversation `base` names or one of its rotations. Participant ids are opaque,
+ * so this never decodes a key: it anchors on the base and the fixed suffix.
+ */
+export function isConversationOf(key: string, base: string): boolean {
+    if (key === base) return true
+    return key.startsWith(`${base}~`) && ROTATION.test(key.slice(base.length + 1))
+}
+
+const ROTATED = /~[0-9a-hjkmnp-tv-z]{6}$/
+
+/**
+ * Whether a session is the conversation its base currently means. A rotated-away base or an older
+ * rotation is not; a base nobody rotated is its own head; any other key is its own conversation.
+ * Never decodes a key (participant ids are opaque): it asks the head table.
+ */
+export function isHead(sessionKey: string, heads: ReadonlyMap<string, string>): boolean {
+    const head = heads.get(sessionKey)
+    if (head !== undefined) return head === sessionKey
+    if (ROTATED.test(sessionKey)) {
+        return [...heads.values()].includes(sessionKey)
+    }
+    return true
+}

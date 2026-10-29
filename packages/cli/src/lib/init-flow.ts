@@ -2239,6 +2239,17 @@ function manifestFor(answers: InitAnswers, window: MeasuredWindow | undefined): 
         `  includeHistory: true   # index clean prose, not only what was deliberately saved.`,
         `  #                      # Tool output and replies derived from it are never indexed: text a`,
         `  #                      # stranger wrote must not outlive the write gate`,
+        `  shared: true           # a saved note is also recalled by your other agents (agents:<you>).`,
+        `  #                      # A stand-in or a room never reads it`,
+        ``,
+        // Written live, because `init` makes the person this agent's owner: one conversation with
+        // them across the web, the terminal and every channel is what they would expect, and the
+        // per-surface default is what an embedder choosing its own keys needs (decision 15.6).
+        `# Sessions — how a conversation is chosen. owner: your turns from the web, the terminal and`,
+        `# every channel share one, and a stranger keeps their own. channel-peer: one per surface.`,
+        `# "New conversation" in the web or the terminal starts afresh everywhere at once.`,
+        `sessions:`,
+        `  scope: owner`,
         ``,
         // Named and switched on for the reason skills above is: `knowledge.dir` naming a path that
         // does not exist is a load failure, so the directory is scaffolded and an empty one is a

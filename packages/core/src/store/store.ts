@@ -150,6 +150,16 @@ export interface SessionStore {
     clear(agentId: string, sessionKey: string): Promise<void>
     /** Deletes the session and its derived session-memory source. Canonical files are untouched. */
     delete(agentId: string, sessionKey: string): Promise<void>
+    /** The conversation a person's base key (`owner:<P>`) means now: the base itself until rotated. */
+    head(agentId: string, baseKey: string): Promise<string>
+    /** Point `baseKey` at `headKey`, returning what it pointed at before. */
+    rotate(
+        agentId: string,
+        baseKey: string,
+        headKey: string,
+    ): Promise<{ readonly previous: string }>
+    /** Every rotated base and its head, for a listing that marks the current conversation. */
+    heads(agentId: string): Promise<ReadonlyMap<string, string>>
 }
 
 export interface MessageStore {
@@ -711,6 +721,11 @@ export interface ParticipantRecord {
     readonly role: "admin" | "member"
     /** A job title, as the team knows the person (pilot.9). Not a permission. */
     readonly title?: string
+    /**
+     * The person's own channel senders, `<type>:<id or handle>` (`telegram:@ada`): how `peer` session
+     * scope recognises them on a channel (`docs/23-SPEC-SESSIONS.md`). Matched like `allowFrom`.
+     */
+    readonly channelIds?: readonly string[]
     /** An IANA zone, `Europe/London`: what "tomorrow at nine" means for this person (pilot.9). */
     readonly timezone?: string
     readonly createdAt: string

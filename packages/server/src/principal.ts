@@ -24,9 +24,11 @@
  */
 
 import {
+    type Agent,
     CAPABILITIES,
     type Capability,
     type ErrorDetail,
+    isConversationOf,
     type KeyScope,
     type TurnSender,
 } from "@dispach/core"
@@ -100,7 +102,16 @@ export function reachesSession(principal: Principal, sessionKey: string): boolea
     if (principal.kind !== "key") return principal.kind !== "claim"
     const prefix = principal.scope?.sessions
     if (prefix === undefined) return true
-    return sessionKey.startsWith(prefix.endsWith("*") ? prefix.slice(0, -1) : prefix)
+    if (sessionKey.startsWith(prefix.endsWith("*") ? prefix.slice(0, -1) : prefix)) return true
+    // A key bound to a person also reaches that person's own conversation (`docs/23-SPEC-SESSIONS.md`),
+    // which `sessions.scope` puts their turns in whatever prefix the key was minted with — and only
+    // theirs: the base and its rotations, never a key that merely starts the same way.
+    const bound = principal.scope?.participant
+    return (
+        bound !== undefined &&
+        (isConversationOf(sessionKey, `owner:${bound}`) ||
+            isConversationOf(sessionKey, `peer:${bound}`))
+    )
 }
 
 /**
@@ -183,4 +194,24 @@ export function senderFor(
             field: "from",
         },
     }
+}
+
+/**
+ * The key a message from this caller runs in (`docs/23-SPEC-SESSIONS.md`), decided before the `202`
+ * so the client is told it. `sessions.scope` may move a person's turn into their conversation; when
+ * that conversation is outside the caller's own reach — a key minted for `team_42:` and used with no
+ * `from`, which reads as the operator — the requested key stands, because a turn must never land
+ * somewhere its caller could not read back. The WebSocket bridge calls this too.
+ */
+export async function sessionFor(
+    agent: Agent,
+    principal: Principal,
+    requested: string,
+    from: TurnSender | undefined,
+): Promise<string> {
+    const resolved = await agent.resolveSessionKey(requested, {
+        source: "api",
+        ...(from === undefined ? {} : { from }),
+    })
+    return reachesSession(principal, resolved) ? resolved : requested
 }

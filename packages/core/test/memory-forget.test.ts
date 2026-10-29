@@ -248,11 +248,13 @@ describe("memory_forget", () => {
         // The index is brought up to date by the delete itself, not by whichever turn reads it next.
         expect(await runtime.store.memory.candidates("adabot", ["rahman"], 10)).toEqual([])
         expect(observations.at(-1)).toContain("Deleted")
+        // Two notes: the saved one and its copy in Ada's agents' shared pool (decision 15.8), both gone.
         expect(events.find((event) => event.type === "memory.forgotten")?.data).toEqual({
             scope: "private",
-            count: 1,
+            count: 2,
             messages: 1,
         })
+        expect(await runtime.store.conversations.notes("agents:user:ada")).toEqual([])
 
         // Nothing Ada said about it survives anywhere a later session could read it, the request
         // to forget included; Bob's conversation is untouched.

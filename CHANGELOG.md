@@ -11,6 +11,20 @@
 - `GET /v1/agents/:id/workspace` lists the files the agent's prompt is built from, and `GET /v1/agents/:id/workspace/:file` returns one file's text — the read half of the existing `PUT`, from the same declaration.
 - `@dispach/client`: `previewSchedule`, `refreshTools`, `assignment`, `workspaceFiles`, `workspaceFile`, `putWorkspaceFile`; `KeyScopeLike.can` includes `peer`; `registerParticipant` takes `title` and `timezone`; `AgentDescriptionLike.team` typed.
 - The provider preset table moved to `packages/cli/src/lib/presets.ts`, a pure module the console and `init` both read.
+- `sessions.scope: owner | peer | channel-peer` (#65, `docs/23-SPEC-SESSIONS.md`). Under `owner` the assigned owner's turns from Telegram, WhatsApp, the web, the terminal and an unscoped API key share one conversation, `owner:<participantId>`; each reply still goes where it was asked. `peer` does the same for registered participants. Default `channel-peer`, unchanged.
+- "New conversation" rotates the owner's conversation on every surface: `POST /v1/agents/:id/sessions/rotate`, the web's "+ new conversation" (on first send) and the terminal's `/new`. Sessions carry `head`; the agent carries `sessionScope`.
+- The `202` of `POST /messages` and `ws.accepted` carry the key the turn runs in; clients adopt it.
+- `agents:<participantId>`: the memory one person's agents share. `memory.shared` (default true).
+- `init` mints the sandbox owner (`me:<6 symbols>`), assigns the agents it creates with `channelIds` from `allowFrom`, and writes `sessions.scope: owner`. `dispach owner adopt <agent>` does it for an existing agent; `owner show` prints the id. `POST /v1/agents` claims the same way.
+- `POST /v1/participants` takes `channelIds`. `channelIds` (on participants and assignments) match like `allowFrom`: `telegram:@handle` recognises the numeric-id sender.
+- Web and terminal pickers name the person's conversation "You" and an older one "You · earlier"; a fresh tab or `run` opens the current one.
+- `@dispach/client`: `rotateSession`, `SessionSummary.head`, `AgentDescriptionLike.sessionScope`, `ParticipantLike.channelIds`.
+
+### Changed
+
+- An assigned agent's `memory_write` also leaves a copy in `agents:<owner>`. The private file is written as before. `memory.shared: false` restores the old behaviour exactly.
+- Turns on one session key run one at a time on every surface. Two HTTP or WebSocket turns on the same key used to run concurrently over the same history.
+- A channel sender is recognised as the owner by the handle written in `channelIds`, not only by an exact id (the personal-tools fence, the owner-scope audit, `memory_forget`).
 
 ### Fixed
 

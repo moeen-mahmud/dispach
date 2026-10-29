@@ -418,6 +418,19 @@ export function unknownToolAtRuntime(slug: string, known: readonly string[]): To
 }
 
 /**
+ * An owner or peer session scope with nobody assigned (decision 15.14). Not a load failure: the agent
+ * still answers, one conversation per surface, and this says why that is.
+ */
+export function sessionsScopeUnassigned(agentId: string, scope: string): ErrorDetail {
+    return {
+        code: "sessions_scope_unassigned",
+        message: `sessions.scope is "${scope}", and nobody is assigned to agent "${agentId}", so each surface keeps its own conversation.`,
+        hint: `The scope merges a person's conversations, and an agent with no owner has nobody to merge them for. Run \`${BRAND.slug} owner adopt ${agentId}\` to make you its owner, or assign one with PUT /v1/agents/${agentId}/assignee. Set sessions.scope to "channel-peer" to make the manifest say what happens.`,
+        field: "sessions.scope",
+    }
+}
+
+/**
  * A pinned tool that this configuration allows exactly once per turn.
  *
  * A tool that both changes things and returns text from outside the conversation taints the turn with

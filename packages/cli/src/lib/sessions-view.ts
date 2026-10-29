@@ -23,6 +23,8 @@ export interface SessionRowSource {
     readonly turns: number
     readonly lastActivityAt: string
     readonly phase?: string | undefined
+    /** False for a conversation a `/new` left behind under an owner or peer scope. */
+    readonly head?: boolean | undefined
 }
 
 export interface SessionRow {
@@ -39,7 +41,7 @@ export function sessionRows(
     sessions: readonly SessionRowSource[],
     options: { readonly now: number; readonly columns: number },
 ): readonly SessionRow[] {
-    const longest = sessions.reduce((widest, row) => Math.max(widest, row.sessionKey.length), 0)
+    const longest = sessions.reduce((widest, row) => Math.max(widest, shown(row).length), 0)
     const keyColumn = Math.max(KEY_MIN, Math.min(KEY_MAX, longest))
     // The gutter the list draws, the key column, and two of gap.
     const room = Math.max(12, options.columns - (2 + keyColumn + 2))
@@ -55,11 +57,30 @@ export function sessionRows(
         if (row.phase !== undefined && row.phase !== "") parts.push(row.phase)
         // A key the person chose is worth marking, because it is the one they will recognise — everything
         // else in this list is six characters they have never read before.
-        if (!isGeneratedSessionKey(row.sessionKey)) parts.push("named")
+        if (!isGeneratedSessionKey(row.sessionKey) && !isPersonal(row.sessionKey))
+            parts.push("named")
         return {
             key: row.sessionKey,
-            label: clip(row.sessionKey, keyColumn).padEnd(keyColumn),
+            label: clip(shown(row), keyColumn).padEnd(keyColumn),
             hint: clip(parts.join(" · "), room),
         }
     })
+}
+
+/** A person's conversation across surfaces (`docs/23-SPEC-SESSIONS.md`), named for them, not by key. */
+function isPersonal(key: string): boolean {
+    return key.startsWith("owner:") || key.startsWith("peer:")
+}
+
+/**
+ * The owner's conversation is "You", the one before a `/new` "You · earlier"; a participant's is their
+ * id. The key stays what `onDone` returns, so choosing a row still names the exact conversation.
+ */
+function shown(row: SessionRowSource): string {
+    const earlier = row.head === false ? " · earlier" : ""
+    if (row.sessionKey.startsWith("owner:")) return `You${earlier}`
+    if (row.sessionKey.startsWith("peer:")) {
+        return `${row.sessionKey.slice("peer:".length).replace(/~[0-9a-hjkmnp-tv-z]{6}$/, "")}${earlier}`
+    }
+    return row.sessionKey
 }

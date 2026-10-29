@@ -700,6 +700,7 @@ Text under 12 characters is not looked for elsewhere. A turn whose `memory_write
 | `threshold` | 0.20 | Score floor after original-query coverage and recency. `memory search` exposes all three terms. |
 | `budget` | 2000 | Total tokens across injected passages. Outside the workspace cap — this tier is retrieved, not carried. |
 | `includeHistory` | true | Index the person's messages and clean agent replies as well as the notes, under `session:<key>`. Never tool observations, runtime-authored messages, or tainted assistant prose. |
+| `shared` | true | For an assigned agent, a `memory_write` also leaves a copy in `agents:<owner>`, the memory its owner's agents share, and recall reads that pool (decisions 15.8, 15.13). Read only where private memory is read — never by a stand-in, a room or another member's ask — and the writer never recalls its own copies. `false` opts out both ways. Since 0.3; `23-SPEC-SESSIONS.md`. |
 
 **Shared scopes (Phase 29) need no field.** **Status: experimental in 0.2.0.** Multiplayer; it may
 change within 0.2.x. Beside its own memory — everything above, which is the
@@ -775,6 +776,24 @@ threshold and does not exclude the carried file, because the question it exists 
 "why was that *not* recalled". `dispach memory rebuild <agent>` forgets the index and re-reads every
 file — staleness is detected from mtime **and** size, and an edit preserving both is a real blind
 spot rather than a hypothetical one.
+
+### `sessions`
+
+How a turn's conversation is chosen. Since 0.3; the full rules are `23-SPEC-SESSIONS.md`.
+
+```yaml
+sessions:
+  scope: owner    # owner | peer | channel-peer (default)
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `scope` | `channel-peer` | `channel-peer`: the key a surface sent is the key used, one conversation per surface — what every agent did before. `owner`: every turn from the assigned owner — any channel, the web, the terminal, an unscoped API key with no `from` — lands in the owner's conversation, `owner:<participantId>`; the reply still goes to the surface it was asked on. `peer`: `owner`, and each registered participant whose `channelIds` match gets one too. A room, a schedule, a child turn, a peer ask and an agent sender always keep their own key. |
+
+The default does not move: an embedder that chooses and parses its own keys keeps them. `init` writes
+`owner`. `owner` or `peer` on an agent nobody is assigned to loads, behaves as `channel-peer`, and
+warns `sessions_scope_unassigned` naming `owner adopt`. Person-settable only (`config set`); an agent's
+`config_set` cannot change whose conversations merge.
 
 ### `channels`
 

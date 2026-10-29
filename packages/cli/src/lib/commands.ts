@@ -486,6 +486,32 @@ export const COMMANDS: readonly CommandSpec[] = [
         ],
     },
     {
+        // Who owns the agents on this machine (decisions 15.7, 15.14). `init` makes you the owner of
+        // what it creates; `adopt` does it for an agent that already existed. `hidden` for the reason
+        // `stop` is: adopting reloads the agent, which would be the one a session is attached to.
+        name: "owner",
+
+        inSession: "hidden",
+        needsServer: false,
+        summary: "show who owns this machine's agents, or make an existing agent yours",
+        args: [
+            {
+                name: "action",
+                required: true,
+                help: "what to do",
+                choices: [
+                    { value: "show", help: "print the owner id init minted for this sandbox" },
+                    {
+                        value: "adopt",
+                        help: "make an agent yours: assign it, recognise you on its channels, one conversation everywhere",
+                    },
+                ],
+            },
+            { ...MANIFEST, required: false },
+        ],
+        flags: [STORE, JSON_FLAG],
+    },
+    {
         name: "validate",
 
         inSession: "output",

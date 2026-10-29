@@ -46,10 +46,12 @@ import { afterUserScroll } from "./lib/follow.ts"
 import { type LiveStream, liveStream } from "./lib/live.ts"
 import { initialAnswers, missingAnswers, payloadFor } from "./lib/provision-form.ts"
 import {
+    conversationLabel,
     newConversationKey,
     OPEN_SESSION,
     rememberedSession,
     rememberSession,
+    sharesConversations,
 } from "./lib/session.ts"
 import { EMPTY, emptyFor, reduce, type Transcript, withUser } from "./lib/transcript.ts"
 import { type ModelChange, ModelsPanel, type SecretRow } from "./models.tsx"
@@ -316,6 +318,12 @@ function Workspace(props: {
 
     const [sessions, setSessions] = useState<readonly SessionSummary[]>([])
     const [sessionKey, setSessionKey] = useState<string>()
+    /**
+     * "+ new conversation" was clicked and nothing has been sent yet. Under an owner or peer scope the
+     * rotation waits for the first message (decision 15.12): a click alone must not move where the
+     * person's next Telegram message lands.
+     */
+    const [fresh, setFresh] = useState(false)
     // Seeded from the address, so a bookmark of a panel opens on it. `useState`'s initialiser
     // semantics are what make this a seed rather than a prop that would fight a later navigation.
     // A bare address — no agent, no panel — lands on the overview: with several agents on a server
@@ -487,6 +495,9 @@ function Workspace(props: {
         [sessions],
     )
 
+    const scopeOf = (id: string | undefined): string | undefined =>
+        agents.find((entry) => entry.id === id)?.sessionScope
+
     const refreshSessions = useCallback(async () => {
         if (agent === undefined) return
         try {
@@ -575,11 +586,20 @@ function Workspace(props: {
         } catch {}
         // A reload reopens the conversation this tab had open (QA C1), and its history lands before
         // the reattached stream does — the other order would replace rows the stream had written.
-        const key = agentId === undefined ? undefined : rememberedSession(stored, agentId)
+        const remembered = agentId === undefined ? undefined : rememberedSession(stored, agentId)
         const parked = sessionStorage.getItem(LIVE_TURN)
         let cancelled = false
         void (async () => {
-            if (key !== undefined) {
+            // A tab with nothing remembered opens the person's own conversation when the agent keeps
+            // one across surfaces, so what was said on Telegram this morning is on the screen.
+            const key = remembered ?? (await currentConversation(agent))
+            if (key !== undefined && !cancelled) {
+                // Written here rather than through `remember`, a fresh closure every render that
+                // would re-run this effect — and re-follow a parked turn — on each one.
+                try {
+                    if (agentId !== undefined)
+                        sessionStorage.setItem(OPEN_SESSION, rememberSession(agentId, key))
+                } catch {}
                 setSessionKey(key)
                 try {
                     const messages = await history(props.baseUrl, props.token, agentId ?? "", key)
@@ -642,11 +662,18 @@ function Workspace(props: {
                     : `${text}\n[${sent.length} image${sent.length === 1 ? "" : "s"}]`,
             ),
         )
-        // A new conversation gets its own key rather than the server's `api:default` (QA C1).
-        const key =
-            sessionKey ??
-            newConversationKey((count) => crypto.getRandomValues(new Uint8Array(count)))
         try {
+            // A new conversation gets its own key rather than the server's `api:default` (QA C1) — and
+            // where the agent keeps one per person, "new" is a rotation, made now that it is used.
+            const rotated =
+                sessionKey === undefined && fresh && sharesConversations(scopeOf(agentId))
+                    ? await agent.rotateSession()
+                    : undefined
+            if (fresh) setFresh(false)
+            const key =
+                sessionKey ??
+                rotated?.sessionKey ??
+                newConversationKey((count) => crypto.getRandomValues(new Uint8Array(count)))
             // `chunks` at the send, not only at the attach: a reply streamed before the stream
             // attached was otherwise missing from the replay, and the page showed no reply at all.
             const handle = await agent.send(text, {
@@ -662,9 +689,12 @@ function Workspace(props: {
                           })),
                       }),
             })
-            if (sessionKey === undefined) {
+            // The server answers the key the turn runs in, which `sessions.scope` may have moved into
+            // the person's conversation: adopted whenever it differs, not only for a new one.
+            if (handle.sessionKey !== sessionKey) {
                 setSessionKey(handle.sessionKey)
                 remember(handle.sessionKey)
+                void refreshSessions()
             }
             await follow(handle.turnId, agent)
         } catch (caught) {
@@ -701,6 +731,7 @@ function Workspace(props: {
         // transcript was reset, the stream was not, and nothing connected the two.
         liveRef.current.abort()
         setPanel("chat")
+        setFresh(false)
         setSessionKey(key)
         remember(key)
         setState(EMPTY)
@@ -1450,7 +1481,10 @@ function Workspace(props: {
                                 type="button"
                                 className="row-button"
                                 aria-current={panel === "chat" && sessionKey === undefined}
-                                onClick={() => void openSession(undefined)}
+                                onClick={() => {
+                                    void openSession(undefined)
+                                    setFresh(true)
+                                }}
                             >
                                 + new conversation
                             </button>
@@ -1463,8 +1497,9 @@ function Workspace(props: {
                                         panel === "chat" && sessionKey === session.sessionKey
                                     }
                                     onClick={() => void openSession(session.sessionKey)}
+                                    title={session.sessionKey}
                                 >
-                                    {session.sessionKey}
+                                    {conversationLabel(session)}
                                 </button>
                             ))}
                         </>
@@ -2386,4 +2421,20 @@ function stringList(value: unknown): readonly string[] {
 function describe(error: unknown): string {
     if (error instanceof DispachError) return error.message
     return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The conversation a fresh tab opens: the operator's own — the owner's — when the agent keeps one per
+ * person across surfaces (`docs/23-SPEC-SESSIONS.md`), so the page shows what was said elsewhere.
+ * `undefined` for a `channel-peer` agent, or before anybody has spoken, which opens a new one as ever.
+ */
+async function currentConversation(agent: AgentClient): Promise<string | undefined> {
+    try {
+        if (!sharesConversations((await agent.describe()).sessionScope)) return undefined
+        return (await agent.sessions()).find(
+            (row) => row.head !== false && row.sessionKey.startsWith("owner:"),
+        )?.sessionKey
+    } catch {
+        return undefined
+    }
 }

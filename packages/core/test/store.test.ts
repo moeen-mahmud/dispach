@@ -979,7 +979,8 @@ describe("kv removal", () => {
             old.close()
 
             const store = await SqliteStore.open({ path })
-            expect(store.migrations.applied).toEqual(["32_drop_kv"])
+            // The first one applied; later migrations follow it and are not this test's subject.
+            expect(store.migrations.applied[0]).toBe("32_drop_kv")
             await store.close()
             expect(await kvTables(path)).toEqual([])
         } finally {

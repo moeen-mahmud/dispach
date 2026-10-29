@@ -897,6 +897,19 @@ describe("conversations", () => {
         expect(report.reload).toBe("none")
         await runtime.stop()
     })
+
+    test("rotation on a channel-peer agent is a typed refusal, and a session says whether it is current", async () => {
+        const { client, runtime } = await harness()
+        const agentId = (await client.agents())[0]?.id ?? ""
+        const agent = client.agent(agentId)
+        expect((await agent.describe()).sessionScope).toBe("channel-peer")
+        const caught = await agent.rotateSession().catch((error: unknown) => error)
+        expect(caught).toBeInstanceOf(DispachError)
+        expect((caught as DispachError).code).toBe("session_not_rotatable")
+        await runtime.agent(agentId).store.sessions.ensure(agentId, "api:a")
+        expect((await agent.sessions()).map((s) => s.head)).toEqual([true])
+        await runtime.stop()
+    })
 })
 
 describe("usage and turns", () => {

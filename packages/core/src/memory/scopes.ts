@@ -1,12 +1,14 @@
 /**
  * Team memory scopes (Phase 29): which memory a turn may read, and how a shared scope is keyed.
  *
- * Four scopes, a fixed vocabulary:
+ * Five scopes, a fixed vocabulary:
  * - **private**: everything an agent has today — its workspace memory files, its archive, its indexed
  *   conversations. Keyed by the agent's id, untouched by this module.
  * - **`owner:<participant>`**: notes a person shares with the agents working for them.
  * - **`space`**: the team's notes. Read by everyone; written by admins and one designated writer.
  * - **`project:<id>`**: notes shared by the agents an embedder put in that project.
+ * - **`agents:<participant>`**: what a person's agents remember, shared among them (decision 15.8).
+ *   Read exactly where private memory is (15.13): it is private memory that spans one person's agents.
  *
  * A shared scope is indexed under its own corpus key rather than under a source prefix inside an
  * agent's corpus. That is what keeps it out of the reconcile trap: `syncFiles` and `syncSessions` drop
@@ -15,7 +17,7 @@
  */
 
 /** A shared memory scope. `private` is not one: it is the agent's own corpus. */
-export type SharedScope = "space" | `owner:${string}` | `project:${string}`
+export type SharedScope = "space" | `owner:${string}` | `project:${string}` | `agents:${string}`
 
 export const SCOPE_SOURCE_PREFIX = "scope:"
 
@@ -27,6 +29,7 @@ export function parseScope(value: string): SharedScope | undefined {
     if (id === "") return undefined
     if (kind === "owner") return `owner:${id}`
     if (kind === "project") return `project:${id}`
+    if (kind === "agents") return `agents:${id}`
     return undefined
 }
 
@@ -59,6 +62,8 @@ export function describeScope(scope: string): string {
     if (scope === "space") return "the team's shared memory"
     if (scope.startsWith("owner:")) return `the notes ${scope.slice(6)} shares with their agents`
     if (scope.startsWith("project:")) return `project ${scope.slice(8)}'s shared memory`
+    if (scope.startsWith("agents:"))
+        return `what ${scope.slice(7)}'s agents remember, shared among them`
     return scope
 }
 
@@ -69,6 +74,8 @@ export interface ReadPlan {
     readonly scopes: readonly SharedScope[]
     /** Who the agent works for, when anyone: what the audit compares a reader against. */
     readonly owner?: string
+    /** `agents:<owner>`, when this turn reads and writes it: private-eligible, assigned, shared on. */
+    readonly pool?: `agents:${string}`
 }
 
 /**
@@ -95,6 +102,8 @@ export function readPlan(input: {
     /** Who the agent is assigned to. */
     readonly owner?: string
     readonly projects: readonly string[]
+    /** `memory.shared`: whether this agent takes part in its owner's pool. */
+    readonly shared?: boolean
 }): ReadPlan {
     // Another member's agent asked, for somebody who is not this agent's owner: the answer goes back
     // to them, so it is written from what the owner shares and never from what they keep private.
@@ -128,9 +137,17 @@ export function readPlan(input: {
         conversation?.kind === "dm" &&
         input.owner !== undefined &&
         conversation.authorId === input.owner
+    const isPrivate = conversation === undefined || ownDm
+    // Only where private memory is read (15.13): the pool is what these agents saved privately, and
+    // a stand-in or a room could not read that before it was shared among them either.
+    const pool =
+        isPrivate && input.owner !== undefined && input.shared !== false
+            ? (`agents:${input.owner}` as const)
+            : undefined
     return {
-        private: conversation === undefined || ownDm,
-        scopes: shared,
+        private: isPrivate,
+        scopes: pool === undefined ? shared : [...shared, pool],
         ...(input.owner === undefined ? {} : { owner: input.owner }),
+        ...(pool === undefined ? {} : { pool }),
     }
 }

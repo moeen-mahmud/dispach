@@ -241,6 +241,11 @@ export interface ToolContext {
      */
     readonly writeNote?: (text: string) => Promise<string>
     /**
+     * A copy of a private `memory_write` into the pool the agent's owner's agents share (decision
+     * 15.8), made after the private save succeeds. Returns a sentence the observation appends.
+     */
+    readonly shareNote?: (text: string) => Promise<string>
+    /**
      * `memory_forget` (pilot.15): list the notes a query matches, or delete the ones named. Resolved
      * per turn by the agent, because which memory a turn may change is the memory `memory_write` would
      * write there: private on a private turn, the space for the space writer, refused otherwise.
