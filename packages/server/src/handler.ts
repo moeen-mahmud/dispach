@@ -12,7 +12,7 @@
  * why `TurnStreams` exists — a client that comes back has to be able to find out what it missed.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, relative, resolve as resolvePath, sep } from "node:path"
@@ -36,6 +36,7 @@ import {
     importBundle,
     isHarnessError,
     isPhased,
+    jitterFor,
     keyFingerprint,
     keyLabelProblem,
     MAX_KEY_LABEL,
@@ -48,8 +49,10 @@ import {
     newRunId,
     newTurnId,
     newWebhookSecret,
+    nextCron,
     PERSON_SETTABLE_PATHS,
     type PluginCaller,
+    parseSchedule,
     parseSettingValue,
     personSetting,
     phasesFor,
@@ -1169,6 +1172,58 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * and the reason returned. An agent that is not running gets the file and a diagnosis, so a repair
      * can take several writes before `POST /start`. `admin`: it changes the agent's instructions.
      */
+    /**
+     * The files the agent's prompt is built from, and one file's text — the read half of the
+     * `PUT` below, so an editor can show what it is about to replace. Same declaration logic, so
+     * the two cannot disagree about which files exist.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/workspace",
+        (context) =>
+            withTarget(runtime, options, context, async (target) => {
+                const manifest = target.file
+                if (manifest === undefined) return json({ id: target.id, files: [] })
+                const named = await declaredWorkspace(target.id, manifest)
+                if (named instanceof Response) return named
+                return json({
+                    id: target.id,
+                    files: named.declared.map((ref) => ({
+                        name: basename(ref.path),
+                        tier: ref.tier,
+                        field: ref.field,
+                        exists: existsSync(ref.path),
+                        bytes: existsSync(ref.path) ? statSync(ref.path).size : 0,
+                    })),
+                })
+            }),
+        { capability: "admin" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/agents/:id/workspace/:file",
+        (context) =>
+            withTarget(runtime, options, context, async (target) => {
+                const manifest = target.file
+                const name = context.params.file ?? ""
+                if (manifest === undefined) return unknownWorkspaceFile(target.id, name, [])
+                const named = await declaredWorkspace(target.id, manifest)
+                if (named instanceof Response) return named
+                const path = findDeclared(named.declared, named.workspaceDir, name)
+                if (path === undefined) return unknownWorkspaceFile(target.id, name, named.declared)
+                const ref = named.declared.find((entry) => entry.path === path)
+                return json({
+                    id: target.id,
+                    file: basename(path),
+                    ...(ref === undefined ? {} : { tier: ref.tier, field: ref.field }),
+                    exists: existsSync(path),
+                    content: existsSync(path) ? readFileSync(path, "utf8") : "",
+                })
+            }),
+        { capability: "admin" },
+    )
+
     router.add(
         "PUT",
         "/v1/agents/:id/workspace/:file",
@@ -1189,46 +1244,12 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         409,
                     )
                 }
-                const read = AgentManifestSchema.safeParse(
-                    manifestDocument(await readFile(manifest, "utf8")),
-                )
-                if (!read.success) {
-                    return fail(
-                        {
-                            code: "workspace_manifest_invalid",
-                            message: `${target.id}'s manifest does not parse, so its workspace files cannot be named.`,
-                            hint: "Fix the manifest first: PATCH /v1/agents/:id/config, and GET /v1/agents/:id for what is wrong.",
-                        },
-                        409,
-                    )
-                }
-                const dir = dirname(manifest)
-                const contextConfig = read.data.context
-                const workspaceDir = resolvePath(dir, contextConfig.workspace)
-                const soul = contextConfig.soul
-                const declared = [
-                    ...planWorkspace(contextConfig, dir).refs.map((ref) => ref.path),
-                    ...[soul?.file, soul?.distilled]
-                        .filter((name): name is string => name !== undefined)
-                        .map((name) => resolvePath(workspaceDir, name)),
-                ]
+                const named = await declaredWorkspace(target.id, manifest)
+                if (named instanceof Response) return named
+                const { workspaceDir, declared } = named
                 const name = context.params.file ?? ""
-                const path = declared.find(
-                    (candidate) =>
-                        candidate === resolvePath(workspaceDir, name) ||
-                        basename(candidate) === name,
-                )
-                if (path === undefined) {
-                    return fail(
-                        {
-                            code: "workspace_file_unknown",
-                            message: `${name} is not one of ${target.id}'s workspace files.`,
-                            hint: `Declared: ${declared.map((candidate) => basename(candidate)).join(", ") || "none"}. A new file is added to context.static or context.volatile with PATCH /config first.`,
-                            field: "file",
-                        },
-                        404,
-                    )
-                }
+                const path = findDeclared(declared, workspaceDir, name)
+                if (path === undefined) return unknownWorkspaceFile(target.id, name, declared)
                 const before = existsSync(path) ? readFileSync(path, "utf8") : undefined
                 mkdirSync(dirname(path), { recursive: true })
                 writeFileSync(path, parsed.value.content, "utf8")
@@ -3542,6 +3563,81 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         { capability: "write" },
     )
 
+    /**
+     * What a schedule expression means, before it is written: the next few instants, the zone in
+     * force and the jitter it would carry. The parser is core's own `parseSchedule`, so a form that
+     * previews here cannot disagree with the write that follows — a second cron parser in the
+     * browser would be a second opinion about what a valid expression is. Registered before `:sid`,
+     * because the router is first-match and "preview" would otherwise be a schedule id.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/schedules/preview",
+        (context) =>
+            withAgent(runtime, context, async () => {
+                const query = context.url.searchParams
+                const kind = query.get("kind") ?? ""
+                const expr = query.get("expr") ?? ""
+                const timezone = query.get("timezone") ?? undefined
+                const count = Math.min(10, Math.max(1, Number(query.get("count") ?? "3") || 3))
+                if (kind !== "cron" && kind !== "every" && kind !== "at") {
+                    return fail(
+                        {
+                            code: "schedule_invalid",
+                            message: `kind must be cron, every or at; got ${JSON.stringify(kind)}.`,
+                            hint: "Send ?kind=cron&expr=0 8 * * *&timezone=Asia/Dhaka, or kind=every&expr=15m, or kind=at&expr=<ISO instant>.",
+                            field: "kind",
+                        },
+                        400,
+                    )
+                }
+                const now = Date.now()
+                let parsed: ReturnType<typeof parseSchedule>
+                try {
+                    parsed = parseSchedule({
+                        id: "preview",
+                        kind,
+                        expr,
+                        timezone,
+                        now,
+                        field: "expr",
+                    })
+                } catch (caught) {
+                    if (isHarnessError(caught)) return fail(caught.toDetail(), 400)
+                    throw caught
+                }
+                const next: number[] = []
+                if (parsed.kind === "at") next.push(parsed.at)
+                else if (parsed.kind === "every") {
+                    for (let step = 1; step <= count; step += 1)
+                        next.push(now + step * parsed.every.ms)
+                } else {
+                    let cursor = now
+                    for (let step = 0; step < count; step += 1) {
+                        const occurrence = nextCron(parsed.spec, cursor, parsed.zone)
+                        if (occurrence === undefined) break
+                        next.push(occurrence)
+                        cursor = occurrence
+                    }
+                }
+                const interval =
+                    parsed.kind === "every"
+                        ? parsed.every.ms
+                        : parsed.kind === "cron" && next.length > 1
+                          ? (next[1] ?? 0) - (next[0] ?? 0)
+                          : undefined
+                return json({
+                    kind: parsed.kind,
+                    zone: parsed.zone,
+                    next: next.map((instant) => new Date(instant).toISOString()),
+                    // The displacement every fire of this schedule would carry, for the id "preview".
+                    // Indicative: the real jitter is keyed on the schedule's own id.
+                    jitterMs: interval === undefined ? 0 : jitterFor("preview", interval),
+                })
+            }),
+        { capability: "read" },
+    )
+
     router.add(
         "GET",
         "/v1/agents/:id/schedules/:sid",
@@ -5120,6 +5216,94 @@ function declaredRoles(
     return Object.entries(model as Record<string, unknown>)
         .filter(([name]) => name !== "main")
         .map(([name, value]) => ({ path: `model.${name}`, means, value }))
+}
+
+/** One declared workspace file, with where it came from. The soul files carry their own tier. */
+interface DeclaredFile {
+    readonly path: string
+    readonly tier: string
+    readonly field: string
+}
+
+/**
+ * The files an agent's manifest declares, read from the file on disk. Shared by the workspace
+ * routes so a listing, a read and a write agree about what exists; a manifest that does not parse
+ * is the same `409` on all three.
+ */
+async function declaredWorkspace(
+    agentId: string,
+    manifest: string,
+): Promise<
+    { readonly workspaceDir: string; readonly declared: readonly DeclaredFile[] } | Response
+> {
+    const read = AgentManifestSchema.safeParse(manifestDocument(await readFile(manifest, "utf8")))
+    if (!read.success) {
+        return fail(
+            {
+                code: "workspace_manifest_invalid",
+                message: `${agentId}'s manifest does not parse, so its workspace files cannot be named.`,
+                hint: "Fix the manifest first: PATCH /v1/agents/:id/config, and GET /v1/agents/:id for what is wrong.",
+            },
+            409,
+        )
+    }
+    const dir = dirname(manifest)
+    const contextConfig = read.data.context
+    const workspaceDir = resolvePath(dir, contextConfig.workspace)
+    const soul = contextConfig.soul
+    const declared: DeclaredFile[] = [
+        ...planWorkspace(contextConfig, dir).refs.map((ref) => ({
+            path: ref.path,
+            tier: ref.tier,
+            field: ref.field,
+        })),
+        ...(soul?.file === undefined
+            ? []
+            : [
+                  {
+                      path: resolvePath(workspaceDir, soul.file),
+                      tier: "soul",
+                      field: "context.soul.file",
+                  },
+              ]),
+        ...(soul?.distilled === undefined
+            ? []
+            : [
+                  {
+                      path: resolvePath(workspaceDir, soul.distilled),
+                      tier: "soul",
+                      field: "context.soul.distilled",
+                  },
+              ]),
+    ]
+    return { workspaceDir, declared }
+}
+
+function findDeclared(
+    declared: readonly DeclaredFile[],
+    workspaceDir: string,
+    name: string,
+): string | undefined {
+    return declared.find(
+        (candidate) =>
+            candidate.path === resolvePath(workspaceDir, name) || basename(candidate.path) === name,
+    )?.path
+}
+
+function unknownWorkspaceFile(
+    agentId: string,
+    name: string,
+    declared: readonly DeclaredFile[],
+): Response {
+    return fail(
+        {
+            code: "workspace_file_unknown",
+            message: `${name} is not one of ${agentId}'s workspace files.`,
+            hint: `Declared: ${declared.map((candidate) => basename(candidate.path)).join(", ") || "none"}. A new file is added to context.static or context.volatile with PATCH /config first.`,
+            field: "file",
+        },
+        404,
+    )
 }
 
 function summary(runtime: Runtime, agent: Agent) {

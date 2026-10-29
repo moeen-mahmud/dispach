@@ -114,8 +114,9 @@ async function runInit(options: InitOptions): Promise<InitResult> {
         completed.apiKey ??
         (completed.apiKeyEnv === undefined ? undefined : process.env[completed.apiKeyEnv])
     // Only when someone is at the keyboard or asked for it: `init --yes` and a pipe reach no network.
+    // Not probed for Bedrock: the probe speaks chat-completions, and there is no URL to ask.
     const window =
-        interactive || options.measureWindow === true
+        (interactive || options.measureWindow === true) && completed.baseUrl !== ""
             ? await measuredWindow(completed.baseUrl, completed.model, {
                   ...(keyForProbe === undefined || keyForProbe === ""
                       ? {}
@@ -296,6 +297,7 @@ function fromFlags(options: InitOptions): Partial<Record<InitStep, string>> {
         ["preset", options.preset],
         ["model", options.model],
         ["baseUrl", options.baseUrl],
+        ["region", options.region],
         ["apiKeyEnv", options.apiKeyEnv],
         ["system", options.system],
         ["web", options.web],

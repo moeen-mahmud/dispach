@@ -14,6 +14,7 @@ export type PresetId =
     | "nvidia"
     | "ollama"
     | "ollama-cloud"
+    | "bedrock"
     | "custom"
 
 export interface Preset {
@@ -24,6 +25,13 @@ export interface Preset {
     readonly baseUrl: string
     /** Absent means the manifest omits `apiKeyEnv` entirely — a keyless local endpoint. */
     readonly apiKeyEnv?: string
+    /**
+     * The transport, when it is not `chat-completions`. `bedrock-converse` takes no `baseUrl` and no
+     * key variable: the AWS SDK's default credential chain supplies credentials, and `options.region`
+     * says where. The wizard asks for the region instead of a URL.
+     */
+    readonly api?: "bedrock-converse"
+    readonly region?: string
 }
 
 /**
@@ -101,6 +109,18 @@ export const PRESETS: readonly Preset[] = [
         modelId: "gpt-oss:120b",
         baseUrl: "https://ollama.com/v1",
         apiKeyEnv: "MODEL_API_KEY",
+    },
+    {
+        // Not an OpenAI-compatible endpoint, and the one row that is not three strings: Bedrock
+        // Converse has no URL and no key variable, so the wizard asks for a region instead and the
+        // manifest carries `api` and `options`. Credentials come from the AWS default chain
+        // (environment, a profile, the container or instance role), never from the manifest.
+        id: "bedrock",
+        label: "AWS Bedrock (Converse; credentials from the AWS chain)",
+        modelId: "eu.anthropic.claude-sonnet-4-6",
+        baseUrl: "",
+        api: "bedrock-converse",
+        region: "eu-west-1",
     },
     {
         id: "custom",

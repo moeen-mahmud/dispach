@@ -63,7 +63,10 @@ export interface InitAnswers {
     readonly purpose: string
     readonly preset: PresetId
     readonly model: string
+    /** Empty for a transport that addresses its endpoint another way (Bedrock). */
     readonly baseUrl: string
+    /** The AWS region, asked only for the `bedrock` preset; becomes `options.region`. */
+    readonly region?: string
     /**
      * The env var the manifest names. Absent = the manifest omits the field entirely (a keyless
      * endpoint). Set from `--api-key-env` or the preset, never asked: which *variable* holds the
@@ -660,6 +663,7 @@ export const STEP_ORDER: readonly InitStep[] = [
     "preset",
     "model",
     "baseUrl",
+    "region",
     "apiKey",
     "system",
     "web",
@@ -781,6 +785,9 @@ export function nextQuestion(
         if (step === "apiKey" && preset !== undefined && preset.apiKeyEnv === undefined) {
             continue
         }
+        // Bedrock has no URL and is asked for a region instead; every other transport the reverse.
+        if (step === "baseUrl" && preset?.api === "bedrock-converse") continue
+        if (step === "region" && preset?.api !== "bedrock-converse") continue
         // The backend and its key are only questions for someone who asked for search. Skipped
         // rather than asked-and-ignored: an answer the flow discards is a question that lies.
         if ((step === "webBackend" || step === "webKey") && partial.web !== "search") continue
@@ -837,6 +844,8 @@ export function nextQuestion(
                 return { step, prompt: "Model id", fallback: preset?.modelId ?? "" }
             case "baseUrl":
                 return { step, prompt: "Base URL", fallback: preset?.baseUrl ?? "" }
+            case "region":
+                return { step, prompt: "AWS region", fallback: preset?.region ?? "us-east-1" }
             case "apiKey":
                 return {
                     step,
@@ -1229,6 +1238,14 @@ export function validateAnswer(step: InitStep, raw: string): Answered {
                   }
                 : { ok: true, value: chosen.value }
         }
+
+        case "region":
+            return /^[a-z]{2}(-[a-z]+)+-\d$/.test(value)
+                ? { ok: true, value }
+                : {
+                      ok: false,
+                      reason: "is not an AWS region name, such as eu-west-1 or us-east-1.",
+                  }
 
         case "baseUrl": {
             let url: URL
@@ -2038,11 +2055,24 @@ function manifestFor(answers: InitAnswers, window: MeasuredWindow | undefined): 
         // \${VAR} still expands everywhere. It is simply not what a generated file should reach for
         // when the value is a fact about this agent.
         `    id: ${answers.model}`,
-        `    # Must end at the version segment; the runtime appends /chat/completions itself.`,
-        `    baseUrl: ${answers.baseUrl}`,
-        `    # Both take \${VAR} if you would rather set them from the environment — a container, say.`,
-        `    # The KEY never goes here in either form; the manifest names its variable, below.`,
     ]
+    if (answers.region !== undefined) {
+        lines.push(
+            `    # AWS Bedrock over the Converse API. No URL and no key variable: credentials come from`,
+            `    # the AWS default chain — environment, a named profile, the container or instance role.`,
+            `    api: bedrock-converse`,
+            `    options:`,
+            `      region: ${answers.region}`,
+            `      # profile: my-aws-profile`,
+        )
+    } else {
+        lines.push(
+            `    # Must end at the version segment; the runtime appends /chat/completions itself.`,
+            `    baseUrl: ${answers.baseUrl}`,
+            `    # Both take \${VAR} if you would rather set them from the environment — a container, say.`,
+            `    # The KEY never goes here in either form; the manifest names its variable, below.`,
+        )
+    }
     if (answers.apiKeyEnv !== undefined) {
         lines.push(
             `    # The *name* of an env var, never a value — a literal key fails validation.`,
@@ -2069,7 +2099,9 @@ function manifestFor(answers: InitAnswers, window: MeasuredWindow | undefined): 
         `  # A cheap model for tool selection and summarisation. \`$ref\` reuses a role.`,
         `  # selector:`,
         `  #   id: a-cheaper-model`,
-        `  #   baseUrl: ${answers.baseUrl}`,
+        ...(answers.region === undefined
+            ? [`  #   baseUrl: ${answers.baseUrl}`]
+            : [`  #   api: bedrock-converse`, `  #   options: { region: ${answers.region} }`]),
         `  # compactor: { $ref: model.selector }`,
         ``,
         rule("context"),

@@ -46,13 +46,59 @@ function providerOf(baseUrl: string): Preset | undefined {
 }
 
 /** A role's whole value, with `fields` laid over what was there — so a switch keeps its tuning. */
-function merged(previous: Role, fields: Readonly<Record<string, string | undefined>>): string {
+function merged(previous: Role, fields: Readonly<Record<string, unknown>>): string {
     const next: Record<string, unknown> = { ...previous }
     for (const [key, value] of Object.entries(fields)) {
         if (value === undefined || value === "") delete next[key]
         else next[key] = value
     }
     return JSON.stringify(next)
+}
+
+/** What a transport is called on a pill: the preset's short label, or the endpoint, or Bedrock + region. */
+function transportLabel(role: Role): string {
+    if (text(role.api) === "bedrock-converse") {
+        const options = asRole(role.options)
+        return `Bedrock · ${text(options.region) || "no region"}`
+    }
+    const baseUrl = text(role.baseUrl)
+    return providerOf(baseUrl)?.label.split(" (")[0] ?? (baseUrl || "default endpoint")
+}
+
+/** The role's connection fields as the form holds them. */
+function fieldsOf(role: Role): ModelFields {
+    const options = asRole(role.options)
+    return {
+        id: text(role.id),
+        api: text(role.api) === "bedrock-converse" ? "bedrock-converse" : "chat-completions",
+        baseUrl: text(role.baseUrl),
+        apiKeyEnv: text(role.apiKeyEnv),
+        region: text(options.region),
+        profile: text(options.profile),
+    }
+}
+
+/** The manifest fields a `ModelFields` writes: one transport's fields set, the other's cleared. */
+function connection(fields: ModelFields): Record<string, unknown> {
+    if (fields.api === "bedrock-converse") {
+        return {
+            id: fields.id,
+            api: "bedrock-converse",
+            options: {
+                region: fields.region,
+                ...(fields.profile === "" ? {} : { profile: fields.profile }),
+            },
+            baseUrl: undefined,
+            apiKeyEnv: undefined,
+        }
+    }
+    return {
+        id: fields.id,
+        api: undefined,
+        options: undefined,
+        baseUrl: fields.baseUrl,
+        apiKeyEnv: fields.apiKeyEnv,
+    }
 }
 
 export function ModelsPanel(props: {
@@ -137,8 +183,9 @@ function RoleCard(props: {
     const maxTokens = typeof role.maxTokens === "number" ? String(role.maxTokens) : ""
     const baseUrl = text(role.baseUrl)
     const keyEnv = text(role.apiKeyEnv)
-    const provider = providerOf(baseUrl)
+    const fallbacks = Array.isArray(role.fallbacks) ? role.fallbacks.map(asRole) : []
     const [editing, setEditing] = useState(false)
+    const [addingFallback, setAddingFallback] = useState(false)
     const [temp, setTemp] = useState<number | undefined>(temperature)
     const [tokens, setTokens] = useState(maxTokens)
 
@@ -157,9 +204,7 @@ function RoleCard(props: {
                     <div className="model-id">{text(role.id) || "no model set"}</div>
                 </div>
                 <div className="stats" style={{ marginLeft: "auto" }}>
-                    <span className="pill">
-                        {provider?.label.split(" (")[0] ?? (baseUrl || "default endpoint")}
-                    </span>
+                    <span className="pill">{transportLabel(role)}</span>
                     {keyEnv === "" ? (
                         <span className="pill">no key</span>
                     ) : (
@@ -292,9 +337,82 @@ function RoleCard(props: {
                 </div>
             </div>
 
+            <div className="control">
+                <div className="control-label">
+                    Fallbacks
+                    <span className="sub">
+                        Tried in order when this model is unreachable or answers 5xx/429 before the
+                        first token. Each is a whole role, so a fallback can be another provider.
+                    </span>
+                </div>
+                {fallbacks.length === 0 ? null : (
+                    <ol className="fallbacks">
+                        {fallbacks.map((fallback, index) => (
+                            <li key={JSON.stringify(fallback)}>
+                                <code>{text(fallback.id) || "?"}</code>
+                                <span className="sub" style={{ margin: 0 }}>
+                                    {transportLabel(fallback)}
+                                </span>
+                                <button
+                                    type="button"
+                                    className="link"
+                                    disabled={props.busy}
+                                    onClick={() =>
+                                        props.onChange([
+                                            {
+                                                path,
+                                                value: merged(role, {
+                                                    fallbacks: fallbacks.filter(
+                                                        (_, at) => at !== index,
+                                                    ),
+                                                }),
+                                            },
+                                        ])
+                                    }
+                                >
+                                    remove
+                                </button>
+                            </li>
+                        ))}
+                    </ol>
+                )}
+                {addingFallback ? (
+                    <ModelForm
+                        initial={{ ...fieldsOf({}), apiKeyEnv: "MODEL_API_KEY" }}
+                        busy={props.busy}
+                        submitLabel="add fallback"
+                        onSubmit={(fields, key) => {
+                            const entry = Object.fromEntries(
+                                Object.entries(connection(fields)).filter(
+                                    ([, v]) => v !== undefined,
+                                ),
+                            )
+                            props.onChange([
+                                { path, value: merged(role, { fallbacks: [...fallbacks, entry] }) },
+                            ])
+                            if (key !== "" && fields.apiKeyEnv !== "")
+                                props.onSecret(fields.apiKeyEnv, key)
+                            setAddingFallback(false)
+                        }}
+                    />
+                ) : (
+                    <button
+                        type="button"
+                        disabled={props.busy}
+                        onClick={() => setAddingFallback(true)}
+                    >
+                        + add a fallback
+                    </button>
+                )}
+            </div>
+
             <div className="model-foot">
                 <span className="sub" style={{ margin: 0 }}>
-                    {baseUrl === "" ? "transport default" : baseUrl}
+                    {text(role.api) === "bedrock-converse"
+                        ? `AWS Bedrock Converse${text(asRole(role.options).profile) === "" ? "" : ` · profile ${text(asRole(role.options).profile)}`} · credentials from the AWS chain`
+                        : baseUrl === ""
+                          ? "transport default"
+                          : baseUrl}
                 </span>
                 <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                     {props.primary === true ? null : (
@@ -314,11 +432,11 @@ function RoleCard(props: {
             </div>
             {editing ? (
                 <ModelForm
-                    initial={{ id: text(role.id), baseUrl, apiKeyEnv: keyEnv }}
+                    initial={fieldsOf(role)}
                     busy={props.busy}
                     submitLabel="save model"
                     onSubmit={(fields, key) => {
-                        props.onChange([{ path, value: merged(role, fields) }])
+                        props.onChange([{ path, value: merged(role, connection(fields)) }])
                         if (key !== "" && fields.apiKeyEnv !== "")
                             props.onSecret(fields.apiKeyEnv, key)
                         setEditing(false)
@@ -331,8 +449,12 @@ function RoleCard(props: {
 
 type ModelFields = {
     readonly id: string
+    readonly api: "chat-completions" | "bedrock-converse"
     readonly baseUrl: string
     readonly apiKeyEnv: string
+    /** Bedrock only. */
+    readonly region: string
+    readonly profile: string
 }
 
 /** Provider, model, endpoint and key. A preset fills the three strings; every one stays editable. */
@@ -345,20 +467,27 @@ function ModelForm(props: {
 }): React.ReactElement {
     const [fields, setFields] = useState<ModelFields>(props.initial)
     const [key, setKey] = useState("")
-    const preset = providerOf(fields.baseUrl)?.id ?? "custom"
+    const bedrock = fields.api === "bedrock-converse"
+    const preset = bedrock ? "bedrock" : (providerOf(fields.baseUrl)?.id ?? "custom")
     const field = (name: keyof ModelFields) => (event: React.ChangeEvent<HTMLInputElement>) =>
         setFields({ ...fields, [name]: event.target.value })
+    const ready =
+        fields.id.trim() !== "" &&
+        (!bedrock || /^[a-z]{2}(-[a-z]+)+-\d$/.test(fields.region.trim()))
     return (
         <form
             className="model-form"
             onSubmit={(event) => {
                 event.preventDefault()
-                if (fields.id.trim() === "") return
+                if (!ready) return
                 props.onSubmit(
                     {
                         id: fields.id.trim(),
-                        baseUrl: fields.baseUrl.trim(),
-                        apiKeyEnv: fields.apiKeyEnv.trim(),
+                        api: fields.api,
+                        baseUrl: bedrock ? "" : fields.baseUrl.trim(),
+                        apiKeyEnv: bedrock ? "" : fields.apiKeyEnv.trim(),
+                        region: bedrock ? fields.region.trim() : "",
+                        profile: bedrock ? fields.profile.trim() : "",
                     },
                     key,
                 )
@@ -375,8 +504,11 @@ function ModelForm(props: {
                         if (chosen === undefined || chosen.id === "custom") return
                         setFields({
                             id: chosen.modelId,
+                            api: chosen.api ?? "chat-completions",
                             baseUrl: chosen.baseUrl,
                             apiKeyEnv: chosen.apiKeyEnv ?? "",
+                            region: chosen.region ?? "",
+                            profile: "",
                         })
                     }}
                 >
@@ -391,46 +523,70 @@ function ModelForm(props: {
                 Model id
                 <input value={fields.id} placeholder="deepseek-v4-pro" onChange={field("id")} />
             </label>
-            <label>
-                Endpoint
-                <input
-                    value={fields.baseUrl}
-                    placeholder="https://api.example.com/v1"
-                    onChange={field("baseUrl")}
-                />
-            </label>
-            <label>
-                Key variable
-                <input
-                    value={fields.apiKeyEnv}
-                    placeholder="MODEL_API_KEY (blank for a keyless local model)"
-                    onChange={field("apiKeyEnv")}
-                />
-            </label>
-            <label>
-                API key{" "}
-                <span className="sub">
-                    optional — written to the agent's .env, never shown again
-                </span>
-                <input
-                    type="password"
-                    autoComplete="new-password"
-                    value={key}
-                    placeholder={
-                        fields.apiKeyEnv === ""
-                            ? "no key variable"
-                            : "leave blank to keep the current key"
-                    }
-                    disabled={fields.apiKeyEnv === ""}
-                    onChange={(event) => setKey(event.target.value)}
-                />
-            </label>
+            {bedrock ? (
+                <>
+                    <label>
+                        AWS region
+                        <input
+                            value={fields.region}
+                            placeholder="eu-west-1"
+                            onChange={field("region")}
+                        />
+                    </label>
+                    <label>
+                        AWS profile{" "}
+                        <span className="sub">
+                            optional — otherwise the environment, container or instance role
+                        </span>
+                        <input
+                            value={fields.profile}
+                            placeholder="default chain"
+                            onChange={field("profile")}
+                        />
+                    </label>
+                </>
+            ) : (
+                <>
+                    <label>
+                        Endpoint
+                        <input
+                            value={fields.baseUrl}
+                            placeholder="https://api.example.com/v1"
+                            onChange={field("baseUrl")}
+                        />
+                    </label>
+                    <label>
+                        Key variable
+                        <input
+                            value={fields.apiKeyEnv}
+                            placeholder="MODEL_API_KEY (blank for a keyless local model)"
+                            onChange={field("apiKeyEnv")}
+                        />
+                    </label>
+                </>
+            )}
+            {bedrock ? null : (
+                <label>
+                    API key{" "}
+                    <span className="sub">
+                        optional — written to the agent's .env, never shown again
+                    </span>
+                    <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={key}
+                        placeholder={
+                            fields.apiKeyEnv === ""
+                                ? "no key variable"
+                                : "leave blank to keep the current key"
+                        }
+                        disabled={fields.apiKeyEnv === ""}
+                        onChange={(event) => setKey(event.target.value)}
+                    />
+                </label>
+            )}
             <div>
-                <button
-                    type="submit"
-                    className="primary"
-                    disabled={props.busy || fields.id.trim() === ""}
-                >
+                <button type="submit" className="primary" disabled={props.busy || !ready}>
                     {props.submitLabel}
                 </button>
             </div>
@@ -471,8 +627,11 @@ function AddRole(props: {
             <ModelForm
                 initial={{
                     id: first?.modelId ?? "",
+                    api: first?.api ?? "chat-completions",
                     baseUrl: first?.baseUrl ?? "",
                     apiKeyEnv: first?.apiKeyEnv ?? "",
+                    region: first?.region ?? "",
+                    profile: "",
                 }}
                 busy={props.busy || name === "" || problem !== undefined}
                 submitLabel="add role"
@@ -506,7 +665,10 @@ function AddRole(props: {
                     </>
                 }
                 onSubmit={(fields) => {
-                    props.onAdd(name, merged({}, { ...fields, reasoningEffort: effort }))
+                    props.onAdd(
+                        name,
+                        merged({}, { ...connection(fields), reasoningEffort: effort }),
+                    )
                     setOpen(false)
                     setName("")
                 }}

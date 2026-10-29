@@ -8,8 +8,11 @@
  * argued about from the imports.
  *
  * Measured at the time of writing: 220 KB of JS, 4.9 KB of CSS, 1.3 KB of HTML — 69.4 KB gzipped,
- * most of it `react-dom`. The ceiling is roughly half again, which catches a second framework or an
- * accidentally-bundled `@dispach/core` and does not catch a real feature.
+ * most of it `react-dom`. The ceiling was roughly half again, and the console grew past it on
+ * 2026-10-29 (markdown, models, overview: 341 KB). Moeen's call: the figure is no longer a target,
+ * so the ceiling is now a loose guard against an accident — a second framework, a bundled
+ * `@dispach/core`, a YAML parser — and not against a feature. Zod and YAML fingerprints below are
+ * what actually catch those; the number is the backstop.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -20,9 +23,9 @@ import { gzipSync } from "node:zlib"
 const DIST = join(dirname(import.meta.dir), "dist")
 
 /** Raw bytes of every emitted file. The figure a cache-cold loopback request actually pays. */
-const RAW_CEILING = 340_000
+const RAW_CEILING = 600_000
 /** Gzipped, which is what crosses a network. */
-const GZIP_CEILING = 110_000
+const GZIP_CEILING = 180_000
 
 function files(dir: string): string[] {
     return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>

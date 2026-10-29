@@ -2,8 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- Web console: replies render as Markdown (headings, lists, tables, fenced code with a copy button; no HTML, links only `http(s)`/`mailto`), the transcript follows the newest row by a scroll-owned pin, a role picker on the composer, image attachments by paste or drop, and on the Models page an AWS Bedrock preset (region, optional profile) and a fallback-chain editor per role.
+- `init --preset bedrock --region <aws-region>` and `POST /v1/agents {answers: {preset: "bedrock", region}}` write `api: bedrock-converse` with `options.region`, no URL and no key variable. The region is a wizard step asked only for that preset.
+- Web console, new pages (#67): **Schedules** as cards with a sentence for the expression, the next run as a distance, and a form with role, tools, limits, timezone, shared session and a live preview of the next instants; **Tools** grouped by provider with the catalogue's token cost, search, pin/unpin, allow/deny policy rules and a catalogue refresh; **Usage** (calls, prompt/cached/output tokens, a tokens-by-day chart, by model and by sender, 7/30/90 days); **Turns** (every turn, how it ended, expandable asked/reply); **People** (participants, presence, assigned agents), **Rooms** (rooms and DMs, mentions, stand-in and hop labels, polled log), **Actions** (the stand-in queue, approve/decline), **Memory** (shared scopes, notes, projects, space writer, read audit); **Webhooks**, **Backup** (server tar.gz, agent bundle export/import), **Files** (the declared workspace files, read and edited in place); creating an agent **from a template**; key scopes (agents, capabilities, session prefix, participant, expiry) on the Keys page; an **add a channel** form (Telegram, WhatsApp, Slack, Teams, A2A); and **clear history** on a conversation.
+- `GET /v1/agents/:id/schedules/preview?kind=&expr=&timezone=&count=` answers the next instants an expression would fire at, the zone in force and the jitter, parsed by the same core function the write uses.
+- `GET /v1/agents/:id/workspace` lists the files the agent's prompt is built from, and `GET /v1/agents/:id/workspace/:file` returns one file's text — the read half of the existing `PUT`, from the same declaration.
+- `@dispach/client`: `previewSchedule`, `refreshTools`, `assignment`, `workspaceFiles`, `workspaceFile`, `putWorkspaceFile`; `KeyScopeLike.can` includes `peer`; `registerParticipant` takes `title` and `timezone`; `AgentDescriptionLike.team` typed.
+- The provider preset table moved to `packages/cli/src/lib/presets.ts`, a pure module the console and `init` both read.
+
 ### Fixed
 
+- A container recreated with `--init` (as the README now says) after one that ran without it was refused for 45 minutes with `agent_already_serving … pid 1`: the old lease named pid 1, and under `--init` pid 1 is `docker-init`, alive and not the runtime. A lease naming pid 1 is now dead when `/proc/1/exe` is not node or bun (decision 15.11).
 - README: every `docker run` names the `dispach-home` volume and passes `--init`, so an upgrade keeps the store and backgrounded `exec` children are reaped; the image tag is 0.2.1; the `.env` step copies `examples/minimal/.env.example` (only the example is tracked); compose text matches `docker-compose.yml` (plain `up` pulls, `DISPACH_VERSION` pins); the image's shell is dash, not busybox; package count and provider list corrected; load average 3.3.
 - `evals/CLAIMS.md` carries rows for the Ink import cost, compose startup time, image size breakdown and the 91 ms boot aside, marked `needs-run`.
 - `dispach` on npm declares `engines.node >= 24`, so an install on an older Node warns instead of failing at runtime.

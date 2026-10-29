@@ -103,6 +103,12 @@ export const COMMANDS: readonly CommandSpec[] = [
             { name: "model", kind: "string", placeholder: "id", help: "model id" },
             { name: "base-url", kind: "string", placeholder: "url", help: "endpoint base URL" },
             {
+                name: "region",
+                kind: "string",
+                placeholder: "aws-region",
+                help: "AWS region, with --preset bedrock (credentials come from the AWS chain)",
+            },
+            {
                 name: "api-key-env",
                 kind: "string",
                 placeholder: "VAR",

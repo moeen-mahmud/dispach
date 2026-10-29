@@ -433,7 +433,71 @@
                 }
             }
         },
+        "/v1/agents/{id}/workspace": {
+            "get": {
+                "summary": "The files the agent's prompt is built from: name, tier, field, whether it exists, size.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "the manifest does not parse, so its files cannot be named"
+                    }
+                }
+            }
+        },
         "/v1/agents/{id}/workspace/{file}": {
+            "get": {
+                "summary": "One declared workspace file's text, for an editor to show before it replaces it.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "file",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "the manifest does not parse"
+                    }
+                }
+            },
             "put": {
                 "summary": "Replace one of the agent's declared workspace files; reload it, or diagnose it when it is not running.",
                 "parameters": [
@@ -2619,6 +2683,35 @@
                 "responses": {
                     "201": {
                         "description": "created"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/schedules/preview": {
+            "get": {
+                "summary": "What an expression means before it is written: the next instants, zone and jitter.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "an expression core's own parser refuses, with its hint"
                     },
                     "401": {
                         "description": "No credential, or one this server does not accept."

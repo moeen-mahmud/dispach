@@ -485,9 +485,15 @@ describe("planFiles", () => {
 })
 
 describe("PRESETS", () => {
-    test("exactly one preset is keyless, and it is the local one", () => {
+    test("two presets are keyless: local Ollama, and Bedrock, which takes its credentials from AWS", () => {
         const keyless = PRESETS.filter((preset) => preset.apiKeyEnv === undefined)
-        expect(keyless.map((preset) => preset.id)).toEqual(["ollama"])
+        expect(keyless.map((preset) => preset.id)).toEqual(["ollama", "bedrock"])
+        // And Bedrock is the one preset with no URL: it is asked for a region instead.
+        expect(
+            PRESETS.filter((preset) => preset.baseUrl === "" && preset.id !== "custom").map(
+                (p) => p.id,
+            ),
+        ).toEqual(["bedrock"])
     })
 })
 

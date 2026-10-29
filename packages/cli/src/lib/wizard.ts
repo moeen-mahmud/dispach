@@ -244,7 +244,7 @@ export function summaryRows(
 ): readonly { readonly label: string; readonly value: string }[] {
     const partial = partialOf(state)
     const preset = partial.preset === undefined ? undefined : presetById(partial.preset)
-    const endpoint = `${partial.model ?? ""} at ${partial.baseUrl ?? ""}`
+    const endpoint = `${partial.model ?? ""} at ${partial.region === undefined ? (partial.baseUrl ?? "") : `Bedrock ${partial.region}`}`
     const keyVar = partial.apiKeyEnv ?? preset?.apiKeyEnv
     const key =
         keyVar === undefined
@@ -276,6 +276,7 @@ export function answeredRows(
         preset: "Endpoint",
         model: "Model",
         baseUrl: "Base URL",
+        region: "AWS region",
         apiKeyEnv: "Key env var",
         apiKey: "API key",
         web: "Internet",

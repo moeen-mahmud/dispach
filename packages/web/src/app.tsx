@@ -1,5 +1,6 @@
 /**
- * The shell: a credential gate, a session list, the chat, and the keys panel.
+ * The shell: a credential gate, the sidebar over every agent and server panel, the chat, and the
+ * data each panel is handed — every panel itself is props-only and lives in its own module.
  *
  * ## Why the turn is streamed here and not in a hook per component
  *
@@ -28,9 +29,9 @@ import type {
     ToolSummary,
 } from "@dispach/client"
 import { DispachError } from "@dispach/client"
-import { DEFAULT_BRAND, isChildSession } from "@dispach/core/wire"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Composer, Rows } from "./chat.tsx"
+import { DEFAULT_BRAND, EVENT_TYPES, isChildSession } from "@dispach/core/wire"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { type Attachment, Composer, Rows } from "./chat.tsx"
 import { Keys } from "./keys.tsx"
 import {
     type Credential,
@@ -41,6 +42,7 @@ import {
     resolveCredential,
 } from "./lib/auth.ts"
 import { hrefFor, type PanelName, placeFrom } from "./lib/deep-link.ts"
+import { afterUserScroll } from "./lib/follow.ts"
 import { type LiveStream, liveStream } from "./lib/live.ts"
 import { initialAnswers, missingAnswers, payloadFor } from "./lib/provision-form.ts"
 import {
@@ -52,6 +54,17 @@ import {
 import { EMPTY, emptyFor, reduce, type Transcript, withUser } from "./lib/transcript.ts"
 import { type ModelChange, ModelsPanel, type SecretRow } from "./models.tsx"
 import { Onboarding } from "./onboarding.tsx"
+import {
+    AddChannel,
+    BackupPanel,
+    FilesPanel,
+    type ImportReport,
+    type Template,
+    TemplateForm,
+    type Webhook,
+    WebhooksPanel,
+    type WorkspaceEntry,
+} from "./ops.tsx"
 import { ApiPanel, HomePanel, type TeamMember, TeamPanel, ThemeToggle } from "./overview.tsx"
 import {
     AGENT_PANELS,
@@ -66,6 +79,21 @@ import {
     WarningsPanel,
     type WireError,
 } from "./panels.tsx"
+import {
+    type Action,
+    ActionsPanel,
+    MemoryPanel,
+    type Note,
+    PeoplePanel,
+    type Person,
+    type Project,
+    type Room,
+    type RoomMessage,
+    RoomsPanel,
+} from "./people.tsx"
+import type { RefreshReport } from "./tools.tsx"
+import { type TurnRow, TurnsPanel } from "./turns.tsx"
+import { RANGES, type RangeKey, UsagePanel, type UsageReport } from "./usage.tsx"
 import { Wordmark } from "./wordmark.tsx"
 
 /** Where a live turn id is parked so a refresh can reattach. Per tab, not per browser. */
@@ -228,6 +256,8 @@ const TITLES: Readonly<Record<Exclude<Panel, "chat">, string>> = {
     home: "Overview",
     team: "Team",
     models: "Models",
+    turns: "Turns",
+    usage: "Usage",
     api: "API",
     new: "New agent",
     tools: "Tools",
@@ -235,6 +265,13 @@ const TITLES: Readonly<Record<Exclude<Panel, "chat">, string>> = {
     channels: "Channels",
     config: "Settings",
     keys: "Operator keys",
+    people: "People",
+    rooms: "Rooms",
+    actions: "Actions",
+    memory: "Memory",
+    webhooks: "Webhooks",
+    backup: "Backup",
+    files: "Files",
 }
 
 function Workspace(props: {
@@ -290,6 +327,9 @@ function Workspace(props: {
     })
     const [state, setState] = useState<Transcript>(EMPTY)
     const [draft, setDraft] = useState("")
+    const [images, setImages] = useState<readonly Attachment[]>([])
+    /** The role the next message runs on; `undefined` is `main`. Per agent, reset on switch. */
+    const [role, setRole] = useState<string>()
     const [error, setError] = useState<string>()
     const stopRef = useRef<(() => Promise<void>) | undefined>(undefined)
     /**
@@ -387,6 +427,64 @@ function Workspace(props: {
     const agent: AgentClient | undefined = useMemo(
         () => (agentId === undefined ? undefined : clientRef.current.agent(agentId)),
         [agentId],
+    )
+
+    /**
+     * The roles a message may run on, from `GET /config`'s rows — `model.main` plus every declared
+     * `model.<name>`. Read once per agent; a key without `admin` cannot see config and simply gets
+     * no picker, which is the honest degradation.
+     */
+    const [roles, setRoles] = useState<readonly string[]>([])
+    useEffect(() => {
+        setRoles([])
+        setRole(undefined)
+        if (agent === undefined) return
+        let cancelled = false
+        agent
+            .config()
+            .then((config) => {
+                if (cancelled) return
+                setRoles(
+                    config.settings
+                        .filter(
+                            (row) => /^model\.[^.<]+$/.test(row.path) && row.value !== undefined,
+                        )
+                        .map((row) => row.path.slice("model.".length)),
+                )
+            })
+            .catch(() => undefined)
+        return () => {
+            cancelled = true
+        }
+    }, [agent])
+
+    /**
+     * Addresses a schedule may deliver to: every channel peer a message has arrived from. The one
+     * trustworthy source — a bot cannot ask Telegram for the id behind a handle, and a handle copied
+     * from `allowFrom` fires perfectly and reaches nobody.
+     */
+    const recipients = useMemo(
+        () =>
+            sessions
+                .filter(
+                    (row) =>
+                        ![
+                            "web",
+                            "local",
+                            "api",
+                            "schedule",
+                            "room",
+                            "owner",
+                            "peer",
+                            "shared",
+                        ].includes(row.channel),
+                )
+                .map((row) => ({
+                    channel: row.channel,
+                    to: row.peerId,
+                    label: `${row.channel} → ${row.peerId}`,
+                })),
+        [sessions],
     )
 
     const refreshSessions = useCallback(async () => {
@@ -530,11 +628,20 @@ function Workspace(props: {
     }, [agent, agentGone])
 
     const send = async () => {
-        const text = draft.trim()
+        const sent = images
+        const text = draft.trim() === "" && sent.length > 0 ? "(image)" : draft.trim()
         if (text === "" || agent === undefined) return
         setDraft("")
+        setImages([])
         setError(undefined)
-        setState((previous) => withUser(previous, text))
+        setState((previous) =>
+            withUser(
+                previous,
+                sent.length === 0
+                    ? text
+                    : `${text}\n[${sent.length} image${sent.length === 1 ? "" : "s"}]`,
+            ),
+        )
         // A new conversation gets its own key rather than the server's `api:default` (QA C1).
         const key =
             sessionKey ??
@@ -542,7 +649,19 @@ function Workspace(props: {
         try {
             // `chunks` at the send, not only at the attach: a reply streamed before the stream
             // attached was otherwise missing from the replay, and the page showed no reply at all.
-            const handle = await agent.send(text, { sessionKey: key, chunks: true })
+            const handle = await agent.send(text, {
+                sessionKey: key,
+                chunks: true,
+                ...(role === undefined ? {} : { role }),
+                ...(sent.length === 0
+                    ? {}
+                    : {
+                          images: sent.map((image) => ({
+                              data: image.data,
+                              mediaType: image.mediaType,
+                          })),
+                      }),
+            })
             if (sessionKey === undefined) {
                 setSessionKey(handle.sessionKey)
                 remember(handle.sessionKey)
@@ -614,6 +733,7 @@ function Workspace(props: {
         readonly warnings: readonly WireError[]
         readonly team?: readonly TeamMember[]
         readonly secrets: readonly SecretRow[]
+        readonly catalogueTokens?: number
         readonly config?: AgentConfig
     }>({ tools: [], schedules: [], channels: [], warnings: [], secrets: [] })
 
@@ -648,6 +768,9 @@ function Workspace(props: {
             warnings: described.warnings ?? [],
             ...(described.team === undefined ? {} : { team: described.team }),
             secrets,
+            ...(described.catalogueTokens === undefined
+                ? {}
+                : { catalogueTokens: described.catalogueTokens }),
             config,
         })
     }, [])
@@ -795,6 +918,320 @@ function Workspace(props: {
             }),
         [write],
     )
+
+    /**
+     * The meter and the turn log, read when their panels open and re-read on each open — a figure
+     * that is a day old is a figure about yesterday. Three groupings in one request each, because
+     * `by` is a list and one call with all three would multiply the buckets.
+     */
+    const [usage, setUsage] = useState<UsageReport>()
+    const [usageRange, setUsageRange] = useState<RangeKey>("30d")
+    const [usageLoading, setUsageLoading] = useState(false)
+    useEffect(() => {
+        if (panel !== "usage" || agent === undefined) return
+        let cancelled = false
+        setUsageLoading(true)
+        const days = RANGES.find((range) => range.key === usageRange)?.days ?? 30
+        const from = new Date(Date.now() - days * 86_400_000).toISOString()
+        Promise.all([
+            agent.usage({ by: ["day"], from }),
+            agent.usage({ by: ["model"], from }),
+            agent.usage({ by: ["sender"], from }),
+        ])
+            .then(([byDay, byModel, bySender]) => {
+                if (cancelled) return
+                setUsage({
+                    byDay: byDay.buckets,
+                    byModel: byModel.buckets,
+                    bySender: bySender.buckets,
+                    ...(byDay.meteredSince === undefined
+                        ? {}
+                        : { meteredSince: byDay.meteredSince }),
+                })
+            })
+            .catch((caught: unknown) => {
+                if (cancelled) return
+                if (isGone(caught)) void agentGone()
+                else setError(describe(caught))
+            })
+            .finally(() => {
+                if (!cancelled) setUsageLoading(false)
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [panel, agent, usageRange, agentGone])
+
+    const [turnRows, setTurnRows] = useState<readonly TurnRow[]>([])
+    const [turnsBefore, setTurnsBefore] = useState<number>()
+    const [turnsLoading, setTurnsLoading] = useState(false)
+    const loadTurns = useCallback(
+        async (before?: number) => {
+            if (agent === undefined) return
+            setTurnsLoading(true)
+            try {
+                const page = await agent.turns({
+                    limit: 50,
+                    ...(before === undefined ? {} : { before }),
+                })
+                setTurnRows((previous) =>
+                    before === undefined
+                        ? (page.turns as readonly TurnRow[])
+                        : [...previous, ...(page.turns as readonly TurnRow[])],
+                )
+                setTurnsBefore(page.nextBefore)
+            } catch (caught) {
+                if (isGone(caught)) void agentGone()
+                else setError(describe(caught))
+            } finally {
+                setTurnsLoading(false)
+            }
+        },
+        [agent, agentGone],
+    )
+    useEffect(() => {
+        if (panel !== "turns") return
+        setTurnRows([])
+        setTurnsBefore(undefined)
+        void loadTurns()
+    }, [panel, loadTurns])
+
+    /**
+     * The multiplayer surfaces' data, read when their panel opens. Server-level, so none of it is
+     * keyed on the selected agent. One `serverWrite` for every write here: re-read after, report the
+     * server's own words on refusal — the same three obligations `write` carries for agent panels.
+     */
+    const [people, setPeople] = useState<readonly Person[]>([])
+    const [assignments, setAssignments] = useState<Readonly<Record<string, string>>>({})
+    const [rooms, setRooms] = useState<readonly Room[]>([])
+    const [roomId, setRoomId] = useState<string>()
+    const [roomMessages, setRoomMessages] = useState<readonly RoomMessage[]>([])
+    const [actions, setActions] = useState<readonly Action[]>([])
+    const [memoryScope, setMemoryScope] = useState("space")
+    const [notes, setNotes] = useState<readonly Note[]>()
+    const [projects, setProjects] = useState<readonly Project[]>([])
+    const [serverBusy, setServerBusy] = useState<string>()
+    const [serverNote, setServerNote] = useState<string>()
+    const agentRefs = useMemo(
+        () =>
+            agents
+                .filter((entry) => entry.status !== "disabled")
+                .map((entry) => ({ id: entry.id, name: entry.name })),
+        [agents],
+    )
+
+    const loadPeople = useCallback(async () => {
+        const client = clientRef.current
+        const [list, pairs] = await Promise.all([
+            client.participants(),
+            Promise.all(
+                agents
+                    .filter((entry) => entry.status !== "disabled")
+                    .map(async (entry) => {
+                        try {
+                            const answer = await client.agent(entry.id).assignment()
+                            return [entry.id, answer.assignment?.participantId] as const
+                        } catch {
+                            return [entry.id, undefined] as const
+                        }
+                    }),
+            ),
+        ])
+        setPeople(list)
+        setAssignments(
+            Object.fromEntries(
+                pairs.filter(([, owner]) => owner !== undefined) as [string, string][],
+            ),
+        )
+    }, [agents])
+    const loadRooms = useCallback(async () => setRooms(await clientRef.current.conversations()), [])
+    const loadActions = useCallback(async () => setActions(await clientRef.current.actions()), [])
+    const loadMemory = useCallback(async () => {
+        const client = clientRef.current
+        const [list, projectList, participants] = await Promise.all([
+            client.notes(memoryScope),
+            client.projects(),
+            client.participants(),
+        ])
+        setNotes(list)
+        setProjects(projectList)
+        setPeople(participants)
+    }, [memoryScope])
+
+    useEffect(() => {
+        const loader =
+            panel === "people"
+                ? loadPeople
+                : panel === "rooms"
+                  ? loadRooms
+                  : panel === "actions"
+                    ? loadActions
+                    : panel === "memory"
+                      ? loadMemory
+                      : undefined
+        if (loader === undefined) return
+        let cancelled = false
+        if (panel === "memory") setNotes(undefined)
+        loader().catch((caught: unknown) => {
+            if (!cancelled) setError(describe(caught))
+        })
+        return () => {
+            cancelled = true
+        }
+    }, [panel, loadPeople, loadRooms, loadActions, loadMemory])
+
+    // A room's log is polled while it is open: an agent's reply arrives as a conversation.message
+    // on the event stream, and a poll every three seconds is the cheap way to show it here.
+    useEffect(() => {
+        if (panel !== "rooms" || roomId === undefined) return
+        let cancelled = false
+        let after: number | undefined
+        setRoomMessages([])
+        const tick = async () => {
+            try {
+                const page = await clientRef.current.conversationMessages(roomId, {
+                    ...(after === undefined ? {} : { after }),
+                })
+                if (cancelled) return
+                if (page.messages.length > 0)
+                    setRoomMessages((previous) => [...previous, ...page.messages])
+                if (page.nextAfter !== undefined) after = page.nextAfter
+            } catch (caught) {
+                if (!cancelled) setError(describe(caught))
+            }
+        }
+        void tick()
+        const timer = setInterval(() => void tick(), 3000)
+        return () => {
+            cancelled = true
+            clearInterval(timer)
+        }
+    }, [panel, roomId])
+
+    /** Webhooks, backups and templates: server-level like the multiplayer surfaces, same `serverWrite`. */
+    const [webhooks, setWebhooks] = useState<readonly Webhook[]>([])
+    const [webhookSecret, setWebhookSecret] = useState<string>()
+    const [templates, setTemplates] = useState<readonly Template[]>()
+    const [newMode, setNewMode] = useState<"answers" | "template">("answers")
+    const [lastImport, setLastImport] = useState<ImportReport>()
+    const loadWebhooks = useCallback(
+        async () => setWebhooks(await clientRef.current.webhooks()),
+        [],
+    )
+    useEffect(() => {
+        if (panel !== "webhooks") return
+        loadWebhooks().catch((caught: unknown) => setError(describe(caught)))
+    }, [panel, loadWebhooks])
+    useEffect(() => {
+        if (panel !== "new" || newMode !== "template" || templates !== undefined) return
+        clientRef.current
+            .templates()
+            .then(setTemplates)
+            .catch((caught: unknown) => setError(describe(caught)))
+    }, [panel, newMode, templates])
+
+    /** Save bytes the browser fetched as a file. A download is the only honest shape for a tarball. */
+    const download = useCallback((name: string, blob: Blob) => {
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement("a")
+        link.href = url
+        link.download = name
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        URL.revokeObjectURL(url)
+    }, [])
+
+    /** The workspace editor's data: the declared files on open, one file's text on select. */
+    const [files, setFiles] = useState<readonly WorkspaceEntry[]>()
+    const [fileName, setFileName] = useState<string>()
+    const [fileContent, setFileContent] = useState<string>()
+    useEffect(() => {
+        if (panel !== "files" || agent === undefined) return
+        let cancelled = false
+        setFiles(undefined)
+        setFileName(undefined)
+        setFileContent(undefined)
+        agent
+            .workspaceFiles()
+            .then((listing) => {
+                if (!cancelled) setFiles(listing.files)
+            })
+            .catch((caught: unknown) => {
+                if (cancelled) return
+                if (isGone(caught)) void agentGone()
+                else setError(describe(caught))
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [panel, agent, agentGone])
+    useEffect(() => {
+        if (panel !== "files" || agent === undefined || fileName === undefined) return
+        let cancelled = false
+        setFileContent(undefined)
+        agent
+            .workspaceFile(fileName)
+            .then((file) => {
+                if (!cancelled) setFileContent(file.content)
+            })
+            .catch((caught: unknown) => {
+                if (!cancelled) setError(describe(caught))
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [panel, agent, fileName])
+
+    const serverWrite = useCallback(
+        async (
+            key: string,
+            work: () => Promise<string | undefined>,
+            reload: () => Promise<void>,
+        ) => {
+            setServerBusy(key)
+            setServerNote(undefined)
+            try {
+                setServerNote(await work())
+                await reload()
+            } catch (caught) {
+                setServerNote(describe(caught))
+            } finally {
+                setServerBusy(undefined)
+            }
+        },
+        [],
+    )
+
+    /** A settable row's current value, by path, off the config the report panels already fetched. */
+    const settingValue = useCallback(
+        (path: string): unknown => report.config?.settings.find((row) => row.path === path)?.value,
+        [report.config],
+    )
+    const [lastRefresh, setLastRefresh] = useState<RefreshReport>()
+    /** Providers named under `tools.providers`, with their key variable's set state from `/secrets`. */
+    const providerRows = useMemo(() => {
+        const providers = settingValue("tools.providers")
+        if (providers === null || typeof providers !== "object" || Array.isArray(providers))
+            return []
+        return Object.entries(providers as Record<string, unknown>).map(([id, value]) => {
+            const keyEnv =
+                value !== null &&
+                typeof value === "object" &&
+                typeof (value as { apiKeyEnv?: unknown }).apiKeyEnv === "string"
+                    ? ((value as { apiKeyEnv: string }).apiKeyEnv as string)
+                    : undefined
+            return {
+                id,
+                ...(keyEnv === undefined
+                    ? {}
+                    : {
+                          keyEnv,
+                          keySet: report.secrets.find((row) => row.name === keyEnv)?.set ?? false,
+                      }),
+            }
+        })
+    }, [settingValue, report.secrets])
 
     /**
      * The models panel's writes: several fields, one request and one reload (`setConfigs`), so a
@@ -1085,6 +1522,28 @@ function Workspace(props: {
             <main className="main">
                 <div className="bar">
                     <strong>{panel === "chat" ? (agentName ?? "") : TITLES[panel]}</strong>
+                    {panel === "chat" && sessionKey !== undefined && agent !== undefined ? (
+                        <button
+                            type="button"
+                            className="ghost hide-narrow"
+                            disabled={state.running}
+                            onClick={() => {
+                                if (
+                                    !window.confirm(
+                                        "Clear this conversation's history? The agent's memory files are kept.",
+                                    )
+                                )
+                                    return
+                                void write(`clear:${sessionKey}`, async (target) => {
+                                    await target.clearSession(sessionKey)
+                                    setState(EMPTY)
+                                    return "History cleared."
+                                })
+                            }}
+                        >
+                            clear history
+                        </button>
+                    ) : null}
                     {panel === "chat" ? (
                         <span className="crumb hide-narrow">
                             {sessionKey ?? "new conversation"}
@@ -1158,6 +1617,76 @@ function Workspace(props: {
                              * rather than a report.
                              */}
                             {panel === "new" ? (
+                                <>
+                                    <div className="page-head">
+                                        <h1>New agent</h1>
+                                        <p>
+                                            Answer the wizard's questions, or start from a template
+                                            this server holds.
+                                        </p>
+                                    </div>
+                                    <fieldset className="segmented" style={{ marginBottom: 18 }}>
+                                        <button
+                                            type="button"
+                                            aria-pressed={newMode === "answers"}
+                                            onClick={() => setNewMode("answers")}
+                                        >
+                                            from answers
+                                        </button>
+                                        <button
+                                            type="button"
+                                            aria-pressed={newMode === "template"}
+                                            onClick={() => setNewMode("template")}
+                                        >
+                                            from a template
+                                        </button>
+                                    </fieldset>
+                                </>
+                            ) : null}
+                            {panel === "new" && newMode === "template" ? (
+                                templates === undefined ? (
+                                    <p className="empty">reading this server's templates…</p>
+                                ) : created !== undefined && offer !== undefined ? (
+                                    <Onboarding
+                                        offer={offer}
+                                        answers={{}}
+                                        busy={false}
+                                        touched={false}
+                                        result={created}
+                                        onAnswer={() => undefined}
+                                        onSubmit={() => undefined}
+                                        onOpen={(id) => {
+                                            setCreated(undefined)
+                                            goTo({ agentId: id, panel: "chat" })
+                                        }}
+                                    />
+                                ) : (
+                                    <TemplateForm
+                                        templates={templates}
+                                        busy={creating}
+                                        {...(error === undefined ? {} : { error })}
+                                        onCreate={(input) =>
+                                            void (async () => {
+                                                setCreating(true)
+                                                setError(undefined)
+                                                try {
+                                                    setCreated(
+                                                        await clientRef.current.createAgentFromTemplate(
+                                                            input,
+                                                        ),
+                                                    )
+                                                    setAgents(await clientRef.current.agents())
+                                                } catch (caught) {
+                                                    setError(describe(caught))
+                                                } finally {
+                                                    setCreating(false)
+                                                }
+                                            })()
+                                        }
+                                    />
+                                )
+                            ) : null}
+                            {panel === "new" && newMode === "answers" ? (
                                 offer === undefined ? (
                                     <p className="empty">reading this server's questions…</p>
                                 ) : (
@@ -1196,12 +1725,432 @@ function Workspace(props: {
                                     client={clientRef.current}
                                     baseUrl={props.baseUrl}
                                     token={props.token}
+                                    agents={agentRefs}
                                 />
                             ) : null}
-                            {panel === "tools" ? <ToolsPanel tools={report.tools} /> : null}
+                            {panel === "people" ? (
+                                <PeoplePanel
+                                    people={people}
+                                    assignments={assignments}
+                                    agents={agentRefs}
+                                    {...(serverBusy === undefined ? {} : { busy: serverBusy })}
+                                    {...(serverNote === undefined ? {} : { note: serverNote })}
+                                    onRegister={(input) =>
+                                        void serverWrite(
+                                            "register",
+                                            async () => {
+                                                await clientRef.current.registerParticipant(input)
+                                                return undefined
+                                            },
+                                            loadPeople,
+                                        )
+                                    }
+                                    onRemove={(id) =>
+                                        void serverWrite(
+                                            `remove:${id}`,
+                                            async () => {
+                                                await fetch(
+                                                    `${props.baseUrl}/v1/participants/${encodeURIComponent(id)}`,
+                                                    {
+                                                        method: "DELETE",
+                                                        headers:
+                                                            props.token === undefined
+                                                                ? {}
+                                                                : {
+                                                                      authorization: `Bearer ${props.token}`,
+                                                                  },
+                                                    },
+                                                ).then((response) => {
+                                                    if (!response.ok)
+                                                        throw new Error(
+                                                            `remove failed: ${response.status}`,
+                                                        )
+                                                })
+                                                return undefined
+                                            },
+                                            loadPeople,
+                                        )
+                                    }
+                                    onPresence={(id, presence) =>
+                                        void serverWrite(
+                                            `presence:${id}`,
+                                            async () => {
+                                                await clientRef.current.setPresence(id, presence)
+                                                return undefined
+                                            },
+                                            loadPeople,
+                                        )
+                                    }
+                                    onAssign={(agentId, participantId) =>
+                                        void serverWrite(
+                                            `assign:${agentId}`,
+                                            async () => {
+                                                if (participantId === undefined)
+                                                    await clientRef.current
+                                                        .agent(agentId)
+                                                        .unassign()
+                                                else
+                                                    await clientRef.current
+                                                        .agent(agentId)
+                                                        .assign(participantId)
+                                                return undefined
+                                            },
+                                            loadPeople,
+                                        )
+                                    }
+                                />
+                            ) : null}
+                            {panel === "rooms" ? (
+                                <RoomsPanel
+                                    rooms={rooms}
+                                    people={people}
+                                    agents={agentRefs}
+                                    {...(roomId === undefined ? {} : { selected: roomId })}
+                                    messages={roomMessages}
+                                    {...(serverBusy === undefined ? {} : { busy: serverBusy })}
+                                    {...(serverNote === undefined ? {} : { note: serverNote })}
+                                    onSelect={setRoomId}
+                                    onCreate={(input) =>
+                                        void serverWrite(
+                                            "room",
+                                            async () => {
+                                                const made =
+                                                    await clientRef.current.createConversation(
+                                                        input,
+                                                    )
+                                                setRoomId(made.id)
+                                                return undefined
+                                            },
+                                            loadRooms,
+                                        )
+                                    }
+                                    onPost={(id, text, authorId, mentions) =>
+                                        void serverWrite(
+                                            `post:${id}`,
+                                            async () => {
+                                                await clientRef.current.postMessage(id, {
+                                                    text,
+                                                    authorId,
+                                                    ...(mentions.length === 0 ? {} : { mentions }),
+                                                })
+                                                return undefined
+                                            },
+                                            async () => undefined,
+                                        )
+                                    }
+                                    onMembers={(id, change) =>
+                                        void serverWrite(
+                                            `members:${id}`,
+                                            async () => {
+                                                await clientRef.current.setMembers(id, change)
+                                                return undefined
+                                            },
+                                            loadRooms,
+                                        )
+                                    }
+                                />
+                            ) : null}
+                            {panel === "actions" ? (
+                                <ActionsPanel
+                                    actions={actions}
+                                    {...(serverBusy === undefined ? {} : { busy: serverBusy })}
+                                    onDecide={(id, approve) =>
+                                        void serverWrite(
+                                            id,
+                                            async () => {
+                                                const decided =
+                                                    await clientRef.current.decideAction(
+                                                        id,
+                                                        approve,
+                                                    )
+                                                return decided.status === "done"
+                                                    ? "Ran as the owner's agent; the outcome is in the DM."
+                                                    : undefined
+                                            },
+                                            loadActions,
+                                        )
+                                    }
+                                />
+                            ) : null}
+                            {panel === "memory" ? (
+                                <MemoryPanel
+                                    scope={memoryScope}
+                                    scopes={[
+                                        "space",
+                                        ...people.map((person) => `owner:${person.id}`),
+                                        ...projects.map((project) => `project:${project.id}`),
+                                        ...(memoryScope.startsWith("owner:") ||
+                                        memoryScope.startsWith("project:") ||
+                                        memoryScope === "space"
+                                            ? []
+                                            : [memoryScope]),
+                                    ].filter((scope, index, all) => all.indexOf(scope) === index)}
+                                    notes={notes}
+                                    projects={projects}
+                                    agents={agentRefs}
+                                    {...(serverBusy === undefined ? {} : { busy: serverBusy })}
+                                    {...(serverNote === undefined ? {} : { note: serverNote })}
+                                    onScope={setMemoryScope}
+                                    onAdd={(scope, text) =>
+                                        void serverWrite(
+                                            "add",
+                                            async () => {
+                                                await clientRef.current.addNote({ scope, text })
+                                                return undefined
+                                            },
+                                            loadMemory,
+                                        )
+                                    }
+                                    onDelete={(noteId) =>
+                                        void serverWrite(
+                                            noteId,
+                                            async () => {
+                                                await clientRef.current.deleteNote(noteId)
+                                                return undefined
+                                            },
+                                            loadMemory,
+                                        )
+                                    }
+                                    onProject={(projectId, input) =>
+                                        void serverWrite(
+                                            `project:${projectId}`,
+                                            async () => {
+                                                await clientRef.current.putProject(projectId, input)
+                                                return undefined
+                                            },
+                                            loadMemory,
+                                        )
+                                    }
+                                    onDeleteProject={(projectId) =>
+                                        void serverWrite(
+                                            `project:${projectId}`,
+                                            async () => {
+                                                await clientRef.current.deleteProject(projectId)
+                                                return undefined
+                                            },
+                                            loadMemory,
+                                        )
+                                    }
+                                    onSpaceWriter={(writer) =>
+                                        void serverWrite(
+                                            "space-writer",
+                                            async () => {
+                                                await clientRef.current.setSpaceWriter(writer)
+                                                return `${writer} may write the space.`
+                                            },
+                                            loadMemory,
+                                        )
+                                    }
+                                />
+                            ) : null}
+                            {panel === "webhooks" ? (
+                                <WebhooksPanel
+                                    webhooks={webhooks}
+                                    eventTypes={EVENT_TYPES}
+                                    agents={agentRefs}
+                                    {...(webhookSecret === undefined
+                                        ? {}
+                                        : { secret: webhookSecret })}
+                                    {...(serverBusy === undefined ? {} : { busy: serverBusy })}
+                                    {...(serverNote === undefined ? {} : { note: serverNote })}
+                                    onCreate={(input) =>
+                                        void serverWrite(
+                                            "webhook",
+                                            async () => {
+                                                const made =
+                                                    await clientRef.current.createWebhook(input)
+                                                setWebhookSecret(made.secret)
+                                                return undefined
+                                            },
+                                            loadWebhooks,
+                                        )
+                                    }
+                                    onDelete={(id) =>
+                                        void serverWrite(
+                                            id,
+                                            async () => {
+                                                await clientRef.current.deleteWebhook(id)
+                                                return undefined
+                                            },
+                                            loadWebhooks,
+                                        )
+                                    }
+                                    onDismissSecret={() => setWebhookSecret(undefined)}
+                                />
+                            ) : null}
+                            {panel === "backup" ? (
+                                <BackupPanel
+                                    agents={agentRefs}
+                                    {...(serverBusy === undefined ? {} : { busy: serverBusy })}
+                                    {...(serverNote === undefined ? {} : { note: serverNote })}
+                                    {...(lastImport === undefined ? {} : { lastImport })}
+                                    onBackup={(include) =>
+                                        void serverWrite(
+                                            "backup",
+                                            async () => {
+                                                const query =
+                                                    include.length === 0
+                                                        ? ""
+                                                        : `?include=${include.join(",")}`
+                                                const response = await fetch(
+                                                    `${props.baseUrl}/v1/backup${query}`,
+                                                    {
+                                                        headers:
+                                                            props.token === undefined
+                                                                ? {}
+                                                                : {
+                                                                      authorization: `Bearer ${props.token}`,
+                                                                  },
+                                                    },
+                                                )
+                                                if (!response.ok) {
+                                                    const body = (await response
+                                                        .json()
+                                                        .catch(() => ({}))) as {
+                                                        error?: { message?: string; hint?: string }
+                                                    }
+                                                    throw new Error(
+                                                        `${body.error?.message ?? `HTTP ${response.status}`}${body.error?.hint === undefined ? "" : `\nhint: ${body.error.hint}`}`,
+                                                    )
+                                                }
+                                                download(
+                                                    `${DEFAULT_BRAND.slug}-backup-${new Date().toISOString().slice(0, 10)}.tar.gz`,
+                                                    await response.blob(),
+                                                )
+                                                return "Backup downloaded."
+                                            },
+                                            async () => undefined,
+                                        )
+                                    }
+                                    onExport={(id) =>
+                                        void serverWrite(
+                                            `export:${id}`,
+                                            async () => {
+                                                const bundle = await clientRef.current
+                                                    .agent(id)
+                                                    .exportBundle()
+                                                download(
+                                                    `${id}-bundle.json`,
+                                                    new Blob([JSON.stringify(bundle, null, 2)], {
+                                                        type: "application/json",
+                                                    }),
+                                                )
+                                                return `${id}'s bundle downloaded: ${bundle.files.length} files.`
+                                            },
+                                            async () => undefined,
+                                        )
+                                    }
+                                    onImport={(id, file, mode) =>
+                                        void serverWrite(
+                                            `import:${id}`,
+                                            async () => {
+                                                const bundle = JSON.parse(
+                                                    await file.text(),
+                                                ) as Parameters<AgentClient["importBundle"]>[0]
+                                                setLastImport(
+                                                    await clientRef.current
+                                                        .agent(id)
+                                                        .importBundle(bundle, mode),
+                                                )
+                                                return undefined
+                                            },
+                                            async () => undefined,
+                                        )
+                                    }
+                                />
+                            ) : null}
+                            {panel === "files" ? (
+                                <FilesPanel
+                                    files={files}
+                                    {...(fileName === undefined ? {} : { selected: fileName })}
+                                    {...(fileContent === undefined ? {} : { content: fileContent })}
+                                    {...(writing === undefined ? {} : { busy: writing })}
+                                    {...(writeNote === undefined ? {} : { note: writeNote })}
+                                    onSelect={setFileName}
+                                    onSave={(name, content) =>
+                                        void write(name, async (target) => {
+                                            const result = await target.putWorkspaceFile(
+                                                name,
+                                                content,
+                                            )
+                                            setFileContent(content)
+                                            setFiles(
+                                                await target
+                                                    .workspaceFiles()
+                                                    .then((listing) => listing.files),
+                                            )
+                                            if (!result.loads)
+                                                return `${name} written, but the agent would not load with it: ${result.error?.message ?? ""}`
+                                            return result.applied
+                                                ? `${name} saved and in force.`
+                                                : `${name} written; not in force yet: ${result.pending?.message ?? ""}`
+                                        })
+                                    }
+                                />
+                            ) : null}
+                            {panel === "usage" ? (
+                                <UsagePanel
+                                    report={usage}
+                                    range={usageRange}
+                                    onRange={setUsageRange}
+                                    loading={usageLoading}
+                                    {...(agentName === undefined ? {} : { agentName })}
+                                />
+                            ) : null}
+                            {panel === "turns" ? (
+                                <TurnsPanel
+                                    turns={turnRows}
+                                    hasMore={turnsBefore !== undefined}
+                                    loading={turnsLoading}
+                                    onMore={() => void loadTurns(turnsBefore)}
+                                    onOpenSession={(key) => void openSession(key)}
+                                />
+                            ) : null}
+                            {panel === "tools" ? (
+                                <ToolsPanel
+                                    tools={report.tools}
+                                    {...(report.catalogueTokens === undefined
+                                        ? {}
+                                        : { catalogueTokens: report.catalogueTokens })}
+                                    pinned={stringList(settingValue("tools.pinned"))}
+                                    allow={stringList(settingValue("tools.policy.allow"))}
+                                    deny={stringList(settingValue("tools.policy.deny"))}
+                                    providers={providerRows}
+                                    {...(writing === undefined ? {} : { busy: writing })}
+                                    {...(writeNote === undefined ? {} : { note: writeNote })}
+                                    {...(lastRefresh === undefined ? {} : { lastRefresh })}
+                                    onPin={(pinned) =>
+                                        saveSetting("tools.pinned", JSON.stringify(pinned), {
+                                            confirm: false,
+                                        })
+                                    }
+                                    onRules={(kind, rules) =>
+                                        saveSetting(`tools.policy.${kind}`, JSON.stringify(rules), {
+                                            confirm: false,
+                                        })
+                                    }
+                                    onRefresh={() =>
+                                        void write("tools.refresh", async (target) => {
+                                            const result = await target.refreshTools()
+                                            setLastRefresh(result)
+                                            return result.reload === "pending"
+                                                ? "Catalogue fetched; the reload lands when the running turn ends."
+                                                : undefined
+                                        })
+                                    }
+                                />
+                            ) : null}
                             {panel === "schedules" ? (
                                 <SchedulesPanel
                                     schedules={report.schedules}
+                                    now={Date.now()}
+                                    roles={roles}
+                                    recipients={recipients}
+                                    onPreview={(input) =>
+                                        agent === undefined
+                                            ? Promise.reject(new Error("no agent"))
+                                            : agent.previewSchedule(input)
+                                    }
                                     {...(writing === undefined ? {} : { busy: writing })}
                                     onCreate={(schedule) =>
                                         void write(String(schedule.id), (target) =>
@@ -1276,6 +2225,19 @@ function Workspace(props: {
                                     }}
                                 />
                             ) : null}
+                            {panel === "channels" ? (
+                                <AddChannel
+                                    existing={report.channels.map((channel) => channel.id)}
+                                    busy={writing === "channels"}
+                                    onAdd={(entry) => {
+                                        const current = settingValue("channels")
+                                        const list = Array.isArray(current) ? current : []
+                                        saveSetting("channels", JSON.stringify([...list, entry]), {
+                                            confirm: false,
+                                        })
+                                    }}
+                                />
+                            ) : null}
                         </div>
                     </div>
                 ) : (
@@ -1295,6 +2257,11 @@ function Workspace(props: {
                             onChange={setDraft}
                             onSend={() => void send()}
                             onStop={() => void stopRef.current?.()}
+                            roles={roles}
+                            {...(role === undefined ? {} : { role })}
+                            onRole={setRole}
+                            images={images}
+                            onImages={setImages}
                         />
                     </>
                 )}
@@ -1312,22 +2279,39 @@ function Workspace(props: {
  */
 function Tail(props: { readonly state: Transcript }): React.ReactElement {
     const anchor = useRef<HTMLDivElement>(null)
-    // Depends on the row count and the live text, named rather than left to an un-keyed effect: the
-    // lint rule offers to delete an unused dependency array, and taking that offer would scroll on
-    // every render of the whole tree instead of when the transcript actually grew — the recorded
-    // `trim` trigger mistake, one component over.
-    const depth = props.state.rows.length + props.state.live.length
-    // A transcript that grew from nothing is a conversation just opened: it starts at its newest
-    // reply, not at the top (QA C1). Only growth after that respects a reader who scrolled up.
-    const previous = useRef(0)
+    /**
+     * Whether to follow, owned by the reader's scrolling and nothing else (`lib/follow.ts`).
+     *
+     * The previous version measured "at the bottom?" *after* the new content had been laid out, so
+     * the first reply long enough to push the anchor below the fold read as "scrolled away" and
+     * the view stopped following for the rest of the turn. A flag set only by scroll events cannot
+     * be flipped by growth; `useLayoutEffect` then scrolls before the paint, so there is no frame
+     * where the newest row is off screen.
+     */
+    const pinned = useRef(true)
     useEffect(() => {
+        const box = anchor.current?.closest(".scroll")
+        if (box === null || box === undefined) return
+        const onScroll = () => {
+            pinned.current = afterUserScroll(box)
+        }
+        box.addEventListener("scroll", onScroll, { passive: true })
+        return () => box.removeEventListener("scroll", onScroll)
+    }, [])
+    // Named trigger dependencies: the lint rule offers to drop them, and without them the effect
+    // runs on every render of the whole tree rather than when the transcript grew.
+    const depth =
+        props.state.rows.length + props.state.live.length + props.state.liveReasoning.length
+    const previous = useRef(0)
+    useLayoutEffect(() => {
         const node = anchor.current
-        const box = node?.closest(".scroll")
+        // A transcript that grew from nothing is a conversation just opened: it starts at its newest
+        // reply (QA C1), and re-pins, whatever the reader did on the last conversation.
         const opened = previous.current === 0
         previous.current = depth
-        if (node === null || box === null || box === undefined) return
-        const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40
-        if (opened || atBottom) node.scrollIntoView({ block: "end" })
+        if (node === null) return
+        if (opened) pinned.current = true
+        if (pinned.current) node.scrollIntoView({ block: "end" })
     }, [depth])
     return <div ref={anchor} />
 }
@@ -1392,6 +2376,13 @@ async function history(
  * paragraph, which is how the sessions banner came to read `hint: Check the base URL … — Check the
  * base URL …`. `message` is the whole readable error; `detail` is the part before the hint.
  */
+/** A config value that should be a list of strings, as one; anything else is empty. */
+function stringList(value: unknown): readonly string[] {
+    return Array.isArray(value)
+        ? value.filter((entry): entry is string => typeof entry === "string")
+        : []
+}
+
 function describe(error: unknown): string {
     if (error instanceof DispachError) return error.message
     return error instanceof Error ? error.message : String(error)

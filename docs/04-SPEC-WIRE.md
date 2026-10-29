@@ -249,7 +249,8 @@ actions (`/v1/participants`, `/v1/conversations`, `/v1/actions`), team memory an
 (`/v1/memory/*`, `/v1/projects`), export and import, the assignee routes, plugin-mounted routes and
 the `peer` capability, participant-bound keys (`scope.participant`), `limits.maxHops`, personal
 tools (`tool_personal`), per-message model roles (`POST /messages {role}`), media and its events,
-and the Slack and Teams channels, threading included. Each is marked where it appears. They are complete and tested, have no TUI or web screens yet, and may change
+and the Slack and Teams channels, threading included. Each is marked where it appears. They are complete and tested; the browser console has screens for participants, conversations,
+actions, memory and projects since the 0.3 line (no TUI screens yet), and they may change
 within 0.2.x. Everything else here is stable.
 
 ### Health and readiness
@@ -356,6 +357,8 @@ GET  /v1/templates       → { templates: [{ name, description?, vars[], problem
 PATCH /v1/agents/:id/vars  { vars: {var: value, …} }   (admin, gated like POST /v1/agents; since 0.2.0-pilot.5)
                          → 200 | 202 { id, rendered[], skipped: [{ file, reason: "edited" | "memory" | "removed" }],
                                        reload: "none" | "loaded" | "pending" }
+GET  /v1/agents/:id/workspace        → { id, files: [{ name, tier, field, exists, bytes }] }   (admin; 0.3)
+GET  /v1/agents/:id/workspace/:file  → { id, file, tier?, field?, exists, content }             (admin; 0.3)
 PUT  /v1/agents/:id/workspace/:file  { content }     (admin; since 0.2.0-pilot.15)
                          → 200 { id, file, written, loads, error?, applied, pending? }
 
@@ -1005,6 +1008,7 @@ here that the server does not register, or a registered route missing from here,
 | `GET /v1/agents/:id/context` | `read` |
 | `GET /v1/agents/:id/schedules` | `read` |
 | `GET /v1/agents/:id/schedules/:sid` | `read` |
+| `GET /v1/agents/:id/schedules/preview` | `read` |
 | `GET /v1/agents/:id/sessions` | `read` |
 | `GET /v1/agents/:id/sessions/:key` | `read` |
 | `GET /v1/agents/:id/sessions/:key/messages` | `read` |
@@ -1033,6 +1037,8 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/tools/refresh` | `admin` |
 | `PATCH /v1/agents/:id/vars` | `admin` |
+| `GET /v1/agents/:id/workspace` | `admin` |
+| `GET /v1/agents/:id/workspace/:file` | `admin` |
 | `PUT /v1/agents/:id/workspace/:file` | `admin` |
 | `GET /v1/backup` | `admin` |
 | `GET /v1/agents/:id/export` | `admin` |
@@ -1169,7 +1175,14 @@ GET    /v1/agents/:id/schedules/:sid
 PATCH  /v1/agents/:id/schedules/:sid
 DELETE /v1/agents/:id/schedules/:sid
 POST   /v1/agents/:id/schedules/:sid/run     → fire now, out of band
+GET    /v1/agents/:id/schedules/preview      → ?kind=&expr=&timezone=&count= — the next instants an
+                                               expression would fire at, the zone in force and the
+                                               jitter it would carry; parsed by the same core function
+                                               the write uses, so a preview cannot disagree with a save
 ```
+
+A preview answers `{ kind, zone, next: [<ISO>, …], jitterMs }`; a refused expression is the same
+`400` the write would give, hint included.
 
 ```json
 {

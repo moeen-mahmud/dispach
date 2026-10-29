@@ -60,6 +60,7 @@ export const FLAG_FOR: Record<InitStep, string> = {
     preset: "--preset",
     model: "--model",
     baseUrl: "--base-url",
+    region: "--region",
     apiKeyEnv: "--api-key-env",
     // No flag, on purpose: a key on the command line lands in shell history. With --yes the .env
     // is written with an empty value and the next steps say where to put it.
@@ -166,6 +167,8 @@ export function complete(
             | "server"
             | "dir"
             | "dirChoice"
+            | "region"
+            | "baseUrl"
         >,
         string
     > & {
@@ -194,6 +197,9 @@ export function complete(
         /** Both stay undefined unless the Telegram answer was `connected`. */
         telegramToken?: string
         telegramAllow?: string
+        /** Asked only for the `bedrock` preset; every other transport asks for `baseUrl`. */
+        region?: string
+        baseUrl?: string
         /** Undefined unless `dirChoice` was `custom`; derived below otherwise. */
         dir?: string
         /** Undefined when `--dir` answered the question, which is what skips it. */
@@ -235,7 +241,10 @@ export function complete(
         purpose: answers.purpose,
         preset: answers.preset as InitAnswers["preset"],
         model: answers.model,
-        baseUrl: answers.baseUrl,
+        // Bedrock has no URL; `fillDefaults` never asked for one, so the field is empty rather than
+        // the preset's "" by accident — and the renderer branches on `region`, not on it.
+        baseUrl: answers.baseUrl ?? "",
+        ...(answers.region === undefined ? {} : { region: answers.region }),
         system: answers.system,
         web: answers.web,
         ...(answers.webBackend === undefined ? {} : { webBackend: answers.webBackend }),

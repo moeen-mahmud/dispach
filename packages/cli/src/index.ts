@@ -153,6 +153,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
             const preset = flags.str("preset")
             const model = flags.str("model")
             const baseUrl = flags.str("base-url")
+            const region = flags.str("region")
             const apiKeyEnv = flags.str("api-key-env")
             const system = flags.str("system")
             const web = flags.str("web")
@@ -174,6 +175,7 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 ...(preset === undefined ? {} : { preset }),
                 ...(model === undefined ? {} : { model }),
                 ...(baseUrl === undefined ? {} : { baseUrl }),
+                ...(region === undefined ? {} : { region }),
                 ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
                 ...(system === undefined ? {} : { system }),
                 ...(web === undefined ? {} : { web }),
