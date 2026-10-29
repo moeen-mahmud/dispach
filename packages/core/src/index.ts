@@ -538,7 +538,6 @@ export type {
     HandoffRecord,
     HandoffStore,
     KeyScope,
-    KVStore,
     // Exported so the CLI can read a lease's address without re-declaring the row's shape —
     // the `stop` path needs `baseUrl`, and a second definition of it is the drift this repo
     // keeps paying for.

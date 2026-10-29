@@ -938,26 +938,53 @@ describe("a lease records where its holder can be reached", () => {
     })
 })
 
-describe("kv", () => {
-    test("set, get, upsert, delete", async () => {
-        const store = await openMemoryStore()
-        expect(await store.kv.get("scope", "missing")).toBeUndefined()
-        await store.kv.set("scope", "k", "one")
-        expect(await store.kv.get("scope", "k")).toBe("one")
-        await store.kv.set("scope", "k", "two")
-        expect(await store.kv.get("scope", "k")).toBe("two")
-        await store.kv.delete("scope", "k")
-        expect(await store.kv.get("scope", "k")).toBeUndefined()
-        await store.close()
+describe("kv removal", () => {
+    async function kvTables(path: string): Promise<readonly string[]> {
+        const db = await openDatabase({ path })
+        try {
+            return db
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'kv'")
+                .all<{ name: string }>()
+                .map((row) => row.name)
+        } finally {
+            db.close()
+        }
+    }
+
+    test("a fresh store never has a kv table", async () => {
+        const { path, cleanup } = tempDb()
+        try {
+            const store = await SqliteStore.open({ path })
+            await store.close()
+            expect(await kvTables(path)).toEqual([])
+        } finally {
+            cleanup()
+        }
     })
 
-    test("scopes do not collide", async () => {
-        const store = await openMemoryStore()
-        await store.kv.set("a", "k", "1")
-        await store.kv.set("b", "k", "2")
-        expect(await store.kv.all("a")).toEqual({ k: "1" })
-        expect(await store.kv.all("b")).toEqual({ k: "2" })
-        await store.close()
+    test("a store created before the removal opens cleanly and loses the table", async () => {
+        const { path, cleanup } = tempDb()
+        try {
+            // A database stopped at version 31: migration 1 created the table, and a row
+            // in it proves the drop removes content, not just an empty schema entry.
+            const old = await openDatabase({ path })
+            for (const migration of MIGRATIONS.slice(0, 31)) old.exec(migration.sql)
+            old.exec("PRAGMA user_version = 31")
+            old.prepare("INSERT INTO kv (scope, key, value, updated_at) VALUES (?, ?, ?, ?)").run(
+                "scope",
+                "k",
+                "one",
+                "2026-10-27T00:00:00Z",
+            )
+            old.close()
+
+            const store = await SqliteStore.open({ path })
+            expect(store.migrations.applied).toEqual(["32_drop_kv"])
+            await store.close()
+            expect(await kvTables(path)).toEqual([])
+        } finally {
+            cleanup()
+        }
     })
 })
 

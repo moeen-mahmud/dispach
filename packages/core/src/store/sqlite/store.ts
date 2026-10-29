@@ -29,7 +29,6 @@ import type {
     HandoffStore,
     InboundKeyClaim,
     KeyScope,
-    KVStore,
     LeaseClaim,
     LeaseRecord,
     LeaseStore,
@@ -788,7 +787,6 @@ export class SqliteStore implements Store {
     readonly leases: LeaseStore
     readonly agentState: AgentStateStore
     readonly conversations: ConversationStore
-    readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
@@ -1238,14 +1236,6 @@ export class SqliteStore implements Store {
                   ORDER BY id DESC
                   LIMIT ?`,
             ),
-
-            kvGet: db.prepare("SELECT value FROM kv WHERE scope = ? AND key = ?"),
-            kvSet: db.prepare(
-                `INSERT INTO kv (scope, key, value, updated_at) VALUES (?, ?, ?, ?)
-                 ON CONFLICT (scope, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-            ),
-            kvDelete: db.prepare("DELETE FROM kv WHERE scope = ? AND key = ?"),
-            kvAll: db.prepare("SELECT key, value FROM kv WHERE scope = ? ORDER BY key"),
 
             // ── one agent's footprint, and its removal ──
             //
@@ -1978,23 +1968,6 @@ export class SqliteStore implements Store {
             },
         }
 
-        this.kv = {
-            get: async (scope, key) => q.kvGet.get<{ value: string }>(scope, key)?.value,
-            set: async (scope, key, value) => {
-                q.kvSet.run(scope, key, value, nowIso())
-            },
-            delete: async (scope, key) => {
-                q.kvDelete.run(scope, key)
-            },
-            all: async (scope) => {
-                const out: Record<string, string> = {}
-                for (const row of q.kvAll.all<{ key: string; value: string }>(scope)) {
-                    out[row.key] = row.value
-                }
-                return out
-            },
-        }
-
         this.artifacts = {
             put: async (agentId, sessionKey, artifacts, now) => {
                 if (artifacts.length === 0) return
@@ -2614,8 +2587,8 @@ export class SqliteStore implements Store {
                 q.memorySourceDeleteAll.run(agentId)
                 q.leaseDeleteAll.run(agentId)
                 // Not in the footprint and still deleted — see `AgentFootprint`. Omitting it would
-                // leave rows keyed to an agent that no longer exists, which is the `kv` table's
-                // recorded failure with a column available to avoid it.
+                // leave rows keyed to an agent that no longer exists, which is the failure the
+                // removed `kv` table recorded, with a column available to avoid it.
                 q.inboundKeyDeleteAll.run(agentId)
                 // Also not in the footprint: a handoff envelope is a fact about a turn, and turns
                 // are already counted. Deleted for the reason inbound keys are — rows keyed to an
@@ -2627,9 +2600,9 @@ export class SqliteStore implements Store {
                 // Its pending webhook deliveries too; the subscriptions are server-wide and stay.
                 q.webhookDeleteForAgent.run(agentId)
                 // Also not in the footprint, and deleted for the reason migration 15 gives: this
-                // is the table `kv` should have been, so the delete that `kv` could never have is
-                // the whole argument for the column. A state row surviving its agent would make a
-                // re-provisioned agent of the same name silently arrive switched off.
+                // is the table the removed `kv` should have been, so the delete that `kv` could
+                // never have is the whole argument for the column. A state row surviving its agent
+                // would make a re-provisioned agent of the same name silently arrive switched off.
                 q.agentStateDeleteAll.run(agentId)
                 // Its room memberships and who it was assigned to: an agent removed from the silo is no
                 // longer in any conversation, and a re-provisioned one of the same name starts unassigned.

@@ -1105,23 +1105,6 @@ export interface WebhookStore {
 }
 
 /**
- * A namespaced string map.
- *
- * **Nothing consumes this yet, and it is the one table with no `agent_id`.** Recorded rather than
- * quietly carried: `scope` is a free string, so an agent-scoped caller has to compose the key itself,
- * and `purgeAgent` therefore cannot clean up after one — there is no column to match on. The first
- * caller either passes an agent-derived scope and this grows an agent-aware delete, or the table is
- * dropped. Declared vocabulary with no consumer is how `includeHistory` sat unimplemented for three
- * phases while looking finished.
- */
-export interface KVStore {
-    get(scope: string, key: string): Promise<string | undefined>
-    set(scope: string, key: string, value: string): Promise<void>
-    delete(scope: string, key: string): Promise<void>
-    all(scope: string): Promise<Readonly<Record<string, string>>>
-}
-
-/**
  * Everything one agent owns that a person might weigh before deleting it, by table.
  *
  * One shape for two questions — what would go, and what went — so a listing shown before a deletion
@@ -1676,7 +1659,6 @@ export interface Store {
     readonly agentState: AgentStateStore
     /** Participants, rooms and DMs, their messages, and agent assignments (Phase 27). Server-wide. */
     readonly conversations: ConversationStore
-    readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
@@ -1718,7 +1700,7 @@ export interface Store {
      * **One store is shared by every agent in a sandbox root**, so this is a `DELETE … WHERE
      * agent_id = ?` rather than dropping a file — which makes the isolation a property of these
      * queries rather than of the filesystem, and makes "another agent's rows are untouched" a thing to
-     * assert rather than assume. `kv` is not cleaned: it has no `agent_id` column, and no consumer.
+     * assert rather than assume.
      */
     purgeAgent(agentId: string): Promise<AgentFootprint>
     /**

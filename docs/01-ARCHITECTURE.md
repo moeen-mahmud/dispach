@@ -677,7 +677,6 @@ interface Store {               // store/store.ts, trimmed
   leases: LeaseStore
   agentState: AgentStateStore    // the durable per-agent on/off switch
   conversations: ConversationStore   // participants, rooms, DMs (Phase 27); server-wide
-  kv: KVStore
   artifacts: ArtifactStore
   memory: MemoryStore
   schedules: ScheduleStore
@@ -727,7 +726,7 @@ a manifest field — one process hosts N agents from N manifests but has exactly
 **Canonicality split:**
 
 - **Files**: manifest, context markdown, skills, memory markdown
-- **SQLite**: sessions, messages (tool calls included), turns, artifacts, schedules, phase state, kv,
+- **SQLite**: sessions, messages (tool calls included), turns, artifacts, schedules, phase state,
   outbox, the memory index and shared-scope notes
 
 **Turn durability.** The turn row is written `running` *before* the first model call, so a
