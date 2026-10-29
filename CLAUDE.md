@@ -1739,9 +1739,10 @@ Never claim a performance property without a number in `evals/` and a script to 
   thing to *assert*: a `DELETE` missing its `WHERE agent_id = ?` passes every test that only ever puts
   one agent in the store, which is every test anybody writes by default. `store-purge.test.ts` populates
   two. Two consequences already load-bearing elsewhere: `memory_fts*` shadow tables are shared, which is
-  why ranking is computed in `rank/bm25.ts` rather than through FTS5's `bm25()`; and `kv` is the one
-  table with no `agent_id` **and no consumer anywhere**, so `purgeAgent` cannot clean up after it — dead
-  vocabulary, the `includeHistory` shape again, and now documented as such on the interface.
+  why ranking is computed in `rank/bm25.ts` rather than through FTS5's `bm25()`; and the `kv` table
+  was the one table with no `agent_id` **and no consumer anywhere**, so `purgeAgent` could never clean
+  up after it — dead vocabulary, the `includeHistory` shape again, removed by migration 32 rather
+  than carried.
 - **The store, the logs and the launchd label are keyed by the manifest `id`; the directory is keyed by
   its own name.** They are usually equal and need not be. Two directories with one id share one
   conversation history — `listAgents` already warned about it, and it is why `remove` *refuses* rather

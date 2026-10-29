@@ -1199,6 +1199,19 @@ ALTER TABLE agent_assignments ADD COLUMN channel_ids TEXT;
 ALTER TABLE turns ADD COLUMN participant_id TEXT;
 `,
     },
+    {
+        version: 32,
+        name: "drop_kv",
+        /**
+         * The `kv` table had no consumer anywhere and no `agent_id` column, so `purgeAgent`
+         * could never clean up after it. Nothing in the source tree read or wrote it, so
+         * dropping it loses no reachable data; `IF EXISTS` keeps the step safe for a
+         * database whose first migration never ran it.
+         */
+        sql: `
+DROP TABLE IF EXISTS kv;
+`,
+    },
 ]
 
 export interface MigrationReport {
