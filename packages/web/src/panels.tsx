@@ -40,6 +40,8 @@ export interface AgentRow {
     readonly model?: string
     readonly disabledAt?: string
     readonly reason?: string
+    /** `owner`, `peer` or `channel-peer`: whether "new conversation" rotates (since 0.3). */
+    readonly sessionScope?: string
 }
 
 /**

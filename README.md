@@ -310,6 +310,14 @@ strings: `--preset bedrock --region eu-west-1` writes `api: bedrock-converse` an
 no URL and no key variable, because credentials come from the AWS default chain (environment, a
 named profile, the container or instance role). The web console's Models page offers the same list.
 
+**You talk to an agent in one conversation, wherever you reach it.** `init` makes you the owner of
+the agents it creates and writes `sessions.scope: owner`, so what you said on Telegram this morning
+is in the web console's chat and the terminal's this afternoon, and each reply goes back to wherever
+you asked. "New conversation" starts afresh on all of them at once. Strangers on a channel keep their
+own conversations, and anything one of your agents saves about you is recalled by your others.
+`dispach owner adopt <agent>` does the same for an agent made before 0.3
+(`docs/23-SPEC-SESSIONS.md`).
+
 Local Ollama and Ollama Cloud are **two presets on purpose.** Local needs no key, and the absent
 `apiKeyEnv` is what makes the manifest omit the field and the provider send no `authorization`
 header at all. The hosted endpoint needs one. With a single preset, choosing it and then editing the
@@ -816,6 +824,7 @@ hand-written, and was missing five commands at once. `dispach <command> --help` 
 | `sessions` | list stored sessions, or inspect one |
 | `memory` | search what the agent remembers, or rebuild the index from the files |
 | `config` | read and change an agent's settings, and fill in its secrets |
+| `owner` | show who owns this machine's agents, or make an existing agent yours |
 | `validate` | load and validate a manifest, then exit |
 | `workspace` | check the workspace files against the authoring rules |
 | `soul` | scaffold a hand-edited compact identity from a long-form document |

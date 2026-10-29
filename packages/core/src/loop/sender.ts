@@ -123,6 +123,12 @@ export interface ActingParticipant {
     /** Which surface vouched for `id`. */
     readonly via: "api" | "channel"
     /**
+     * The `@handle` the channel saw the sender by, so a person who wrote a handle into `channelIds` is
+     * recognised by it (`owner.ts`). Channel turns only; never the chat's peer id, which in a group is
+     * the group.
+     */
+    readonly handles?: readonly string[]
+    /**
      * Whose agent is answering, when it is standing in for its owner (Phase 28). `id` stays the real
      * sender; this names the absent owner the reply is on behalf of. A tool authorises the sender and
      * reads the owner's scope.

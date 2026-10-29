@@ -71,6 +71,7 @@ interface ParticipantRow {
     presence_at: string | null
     title: string | null
     timezone: string | null
+    channel_ids: string | null
 }
 
 interface ActionRow {
@@ -123,6 +124,9 @@ const participantOf = (row: ParticipantRow): ParticipantRecord => ({
     role: row.role === "admin" ? "admin" : "member",
     ...(row.title === null ? {} : { title: row.title }),
     ...(row.timezone === null ? {} : { timezone: row.timezone }),
+    ...(row.channel_ids === null
+        ? {}
+        : { channelIds: JSON.parse(row.channel_ids) as readonly string[] }),
     createdAt: row.created_at,
     ...(row.presence === "online" || row.presence === "offline" ? { presence: row.presence } : {}),
     ...(row.presence_at === null ? {} : { presenceAt: row.presence_at }),
@@ -172,10 +176,11 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
 } {
     const q = {
         participantUpsert: db.prepare(
-            `INSERT INTO participants (id, kind, name, role, title, timezone, created_at)
-             VALUES (?, 'human', ?, ?, ?, ?, ?)
+            `INSERT INTO participants (id, kind, name, role, title, timezone, channel_ids, created_at)
+             VALUES (?, 'human', ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO UPDATE SET name = excluded.name, role = excluded.role,
-                 title = excluded.title, timezone = excluded.timezone`,
+                 title = excluded.title, timezone = excluded.timezone,
+                 channel_ids = excluded.channel_ids`,
         ),
         participantGet: db.prepare("SELECT * FROM participants WHERE id = ?"),
         participantList: db.prepare("SELECT * FROM participants ORDER BY id"),
@@ -314,6 +319,7 @@ export function sqliteConversations(db: SqlDatabase): ConversationStore & {
                 record.role,
                 record.title ?? null,
                 record.timezone ?? null,
+                record.channelIds === undefined ? null : JSON.stringify(record.channelIds),
                 record.createdAt,
             )
             const row = q.participantGet.get<ParticipantRow>(record.id)

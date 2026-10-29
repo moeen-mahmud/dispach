@@ -53,6 +53,7 @@ import {
     ProjectBody,
     ProvisionBody,
     RecallBody,
+    RotateBody,
     SecretsBody,
     SpaceWriterBody,
     StopBody,
@@ -457,6 +458,11 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     "POST /v1/agents/:id/sessions/:key/recall": {
         summary: "Keep a conversation out of history recall, or put it back; its messages stay.",
         body: RecallBody,
+    },
+    "POST /v1/agents/:id/sessions/rotate": {
+        summary:
+            "Start the caller's conversation afresh on every surface (sessions.scope owner or peer).",
+        body: RotateBody,
     },
     "GET /v1/agents/:id/config": {
         summary: "Every manifest field this surface may set, what it does, and its current value.",

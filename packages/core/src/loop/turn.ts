@@ -270,6 +270,8 @@ export interface TurnInput {
     readonly deferMutations?: ExecuteInput["defer"]
     /** Forwarded to `ToolContext.writeNote`: set when this agent is the space writer (Phase 29). */
     readonly writeNote?: (text: string) => Promise<string>
+    /** Forwarded to `ToolContext.shareNote`: the owner's pool, beside a private save (15.8). */
+    readonly shareNote?: (text: string) => Promise<string>
     /** Forwarded to `ToolContext.forgetMemory` (pilot.15). */
     readonly forgetMemory?: ToolContext["forgetMemory"]
     /**
@@ -329,6 +331,11 @@ export interface TurnCompaction {
 
 export interface TurnResult {
     readonly turnId: string
+    /**
+     * The session the turn ran in, set by `Agent.send`: the requested key unless the agent's
+     * `sessions.scope` put it in a person's conversation (`docs/23-SPEC-SESSIONS.md`).
+     */
+    readonly sessionKey?: string
     readonly text: string
     /**
      * The last step's prose alone (pilot.14). `text` joins every step's prose, so a model
@@ -1385,6 +1392,9 @@ async function runTurnCore(input: TurnInput): Promise<TurnResult> {
                               ...(input.writeNote === undefined
                                   ? {}
                                   : { writeNote: input.writeNote }),
+                              ...(input.shareNote === undefined
+                                  ? {}
+                                  : { shareNote: input.shareNote }),
                               ...(input.forgetMemory === undefined
                                   ? {}
                                   : { forgetMemory: input.forgetMemory }),

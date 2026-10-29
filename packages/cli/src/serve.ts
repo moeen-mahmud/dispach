@@ -43,6 +43,7 @@ import { setChannelCredential, setChannelEnabled, unpairChannel } from "#lib/cha
 import { EXIT_FAILURE, EXIT_OK } from "#lib/const"
 import { claimSignals, onExit } from "#lib/exit"
 import { claimHostLease, HOST_LEASE, hostableAgents, manifestForId } from "#lib/lifecycle"
+import { claimManifest } from "#lib/owner"
 import {
     BUILT_IN_PLUGINS,
     CHANNELS,
@@ -533,6 +534,10 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                     steps: () => provisionSteps({ agentDirBase: agentsDir(env) }),
                     create: (answers) =>
                         provisionAgent({ answers, defaults: { agentDirBase: agentsDir(env) } }),
+                    // Over this runtime's own store, so the agent is adopted already owned.
+                    claim: async (manifestPath) => {
+                        await claimManifest(runtime.store, manifestPath, agentsDir(env))
+                    },
                     templates: () => listTemplates(templatesDir(env)),
                     createFromTemplate: (input) =>
                         provisionFromTemplate({

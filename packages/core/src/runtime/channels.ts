@@ -597,6 +597,12 @@ export class ChannelHub {
                                   ? {}
                                   : { name: message.senderName }),
                               via: "channel" as const,
+                              // The handle only, never the peer id: in a group the peer is the group,
+                              // and a group id written into `allowFrom` must not make every member the
+                              // owner. The person's own id is already `id`.
+                              ...(message.senderHandle === undefined || message.senderHandle === ""
+                                  ? {}
+                                  : { handles: [message.senderHandle] }),
                           },
                       }),
             })
@@ -625,7 +631,9 @@ export class ChannelHub {
 
             await bound.outbox.enqueue({
                 agentId,
-                sessionKey: message.sessionKey,
+                // The key the turn ran in, which `sessions.scope` may have moved into the person's
+                // conversation. Only the dedupe group and the event context; the target is below.
+                sessionKey: result.sessionKey ?? message.sessionKey,
                 channelId: transport.id,
                 recipient: message.peerId,
                 turnId: result.turnId,
@@ -635,7 +643,14 @@ export class ChannelHub {
             })
             await bound.outbox.drain(agentId)
             if (message.audio !== undefined && reply.trim() !== "") {
-                await this.#speak(bound, transport, message, reply, result.turnId)
+                await this.#speak(
+                    bound,
+                    transport,
+                    message,
+                    reply,
+                    result.turnId,
+                    result.sessionKey ?? message.sessionKey,
+                )
             }
         } catch (cause) {
             stopTyping()
@@ -688,17 +703,15 @@ export class ChannelHub {
         message: InboundMessage,
         reply: string,
         turnId: string,
+        sessionKey: string,
     ): Promise<void> {
         if (!bound.agent.canSpeak || transport.limits.voiceNotes !== true) return
         try {
-            const files = await bound.agent.speak(reply, {
-                sessionKey: message.sessionKey,
-                turnId,
-            })
+            const files = await bound.agent.speak(reply, { sessionKey, turnId })
             if (files.length === 0) return
             await bound.outbox.enqueue({
                 agentId: bound.agent.id,
-                sessionKey: message.sessionKey,
+                sessionKey,
                 channelId: transport.id,
                 recipient: message.peerId,
                 key: `voice:${turnId}`,

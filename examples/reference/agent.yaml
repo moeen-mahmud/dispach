@@ -478,6 +478,20 @@ memory:
   # stopped applying. Conversations are indexed at turn end and reconciled separately from the
   # files — `memory rebuild` restores both, because clearing the index clears both.
   includeHistory: true
+  # 0.3: for an assigned agent, a memory_write also leaves a copy in agents:<owner>, the memory the
+  # owner's agents share, so the next agent the person talks to already knows. Read only where
+  # private memory is — never by a stand-in, a room or another member's ask — and never recalled by
+  # the agent that wrote it, whose original is in its own file. false opts out both ways.
+  shared: true
+
+# ── 0.3: one conversation per person across surfaces (docs/23-SPEC-SESSIONS.md) ──────────────
+# owner: every turn from the assigned owner — Telegram, WhatsApp, the web, the terminal — shares one
+# conversation, and each reply still goes back to the surface it was asked on. A stranger keeps their
+# own, as do rooms, schedules and peer agents. peer: the same for every registered participant.
+# channel-peer (the default) is one conversation per surface. "New conversation" rotates the owner's
+# conversation on every surface at once. Needs an owner: `dispach owner adopt <agent>`.
+sessions:
+  scope: owner
 
 # ── Phase 4: channels, delivery, and the HTTP server ──────────────────────────────────────
 # `allowFrom` is **inbound-only**, and omitting it permits nobody. It confers nothing on outbound

@@ -41,6 +41,7 @@ import { loadSecretFiles } from "#lib/secret-files"
 import { quietAcceptedWarnings } from "#lib/warnings"
 import { memoryCommand } from "#memory"
 import { modelCommand } from "#model"
+import { ownerCommand } from "#owner"
 import { pluginsCommand } from "#plugins"
 import { removeCommand } from "#remove"
 import { restartCommand } from "#restart"
@@ -246,6 +247,19 @@ async function dispatch(argv: readonly string[]): Promise<number> {
                 json: flags.bool("json"),
                 clear: flags.bool("clear"),
                 turns: flags.bool("turns"),
+            })
+        }
+
+        case "owner": {
+            const store = flags.str("store")
+            return await ownerCommand({
+                // Positional 0 is the action, as for `memory`; the agent is positional 1.
+                action: manifestPath,
+                ...(positionals[1] === undefined
+                    ? {}
+                    : { manifestPath: resolveAgentRef(positionals[1]) }),
+                ...(store === undefined ? {} : { store }),
+                json: flags.bool("json"),
             })
         }
 

@@ -352,6 +352,14 @@ export interface AgentClient {
         sessionKey: string,
         recall: boolean,
     ): Promise<{ readonly sessionKey: string; readonly recall: boolean }>
+    /**
+     * Start the caller's conversation afresh on every surface, for an agent whose `sessionScope` is
+     * `owner` or `peer` (`docs/23-SPEC-SESSIONS.md`). `409 session_not_rotatable` for `channel-peer`,
+     * where a new conversation is simply a new `sessionKey` on the next message.
+     */
+    rotateSession(options?: {
+        readonly from?: TurnSender
+    }): Promise<{ readonly sessionKey: string; readonly previous: string }>
     context(options?: { readonly sessionKey?: string; readonly input?: string }): Promise<unknown>
     /**
      * What is waiting on a person right now, oldest first.
@@ -493,6 +501,8 @@ export interface AgentDescriptionLike {
     readonly schedules?: number
     readonly entryPhase?: string | null
     readonly phases?: readonly string[]
+    /** How a turn's conversation is chosen: `owner`, `peer` or `channel-peer` (since 0.3). */
+    readonly sessionScope?: "owner" | "peer" | "channel-peer"
     /**
      * Each channel's last reported state. `unknown[]` until 16.6, which is why the web UI cast.
      *
@@ -715,6 +725,11 @@ export interface SessionSummary {
     readonly thread?: string
     /** Phase-scoped tool visibility, persisted per session. Absent on an unphased agent. */
     readonly phase?: string
+    /**
+     * Whether this is the conversation its person's base key currently means: false for one a
+     * rotation left behind. True for every key under `channel-peer`. Absent from a server before 0.3.
+     */
+    readonly head?: boolean
 }
 
 export interface MessagesOptions {
@@ -868,6 +883,7 @@ export interface ParticipantLike {
     /** Pushed by the embedder; absent reads as online. */
     readonly presence?: "online" | "offline"
     readonly presenceAt?: string
+    readonly channelIds?: readonly string[]
 }
 
 /** A slice of one agent: the carried memory file, the memory archive and knowledge (R11). */
@@ -1070,6 +1086,8 @@ export interface DispachClient {
         readonly role?: "admin" | "member"
         readonly title?: string
         readonly timezone?: string
+        /** `<channel type>:<id or handle>`: what `peer` session scope recognises them by. */
+        readonly channelIds?: readonly string[]
     }): Promise<ParticipantLike>
     /** The rooms and DMs this credential can see. */
     conversations(): Promise<readonly ConversationLike[]>
@@ -1546,6 +1564,11 @@ export function createClient(options: ClientOptions): DispachClient {
                     at(`/sessions/${encodeURIComponent(sessionKey)}/recall`),
                     { body: { recall } },
                 ),
+
+            rotateSession: (options) =>
+                json<{ sessionKey: string; previous: string }>("POST", at("/sessions/rotate"), {
+                    body: options?.from === undefined ? {} : { from: options.from },
+                }),
 
             approve: async (approvalId, granted) => {
                 await json<unknown>("POST", at(`/approvals/${encodeURIComponent(approvalId)}`), {

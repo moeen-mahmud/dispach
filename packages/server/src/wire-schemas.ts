@@ -502,6 +502,12 @@ export const ParticipantBody = z.object({
         z.string().trim().min(1).optional(),
         'An IANA timezone, such as "Europe/London". Told to an agent answering another member\'s agent, so "tomorrow at nine" means the right hour. Refused when the runtime does not know it.',
     ),
+    channelIds: refuse(z.array(z.string().min(1)).optional(), {
+        code: "participant_channel_ids_invalid",
+        hint: 'A list of the person\'s own channel senders as `<channel type>:<id or handle>`, e.g. ["telegram:@ada", "whatsapp:+44 7700 900123"].',
+        description:
+            "The person's own channel senders, matched like allowFrom. Under sessions.scope peer, their turns from these channels and from the API share one conversation. Absent, a channel turn from them keeps its own.",
+    }),
 })
 
 export const ConversationBody = z.object({
@@ -552,13 +558,18 @@ export const ConversationMessageBody = z.object({
     }),
 })
 
+/** `POST /v1/agents/:id/sessions/rotate`. Empty is the caller themselves (or the operator). */
+export const RotateBody = z.object({
+    from: SenderSchema.optional(),
+})
+
 export const AssigneeBody = z.object({
     participantId: participantId("assignee"),
     channelIds: refuse(z.array(z.string().min(1)).optional(), {
         code: "assignee_channel_ids_invalid",
-        hint: 'A list of the owner\'s own channel senders as a channel turn names them, e.g. ["whatsapp:8801711223344", "slack:U0123ABC"].',
+        hint: 'A list of the owner\'s own channel senders as `<channel type>:<id or handle>`, e.g. ["telegram:@moeen", "whatsapp:+880 1711-223344", "slack:U0123ABC"].',
         description:
-            "The owner's own channel senders (pilot.15). A turn from one of these acts as the owner and keeps the owner's personal tools (Composio, MCP servers marked personal). Absent, no channel turn does.",
+            "The owner's own channel senders (pilot.15), matched like allowFrom: case folded, `@` optional, a phone number by its digits. A turn from one of these acts as the owner: it keeps the owner's personal tools (Composio, MCP servers marked personal) and, under sessions.scope owner, lands in the owner's conversation. Absent, no channel turn does.",
     }),
 })
 

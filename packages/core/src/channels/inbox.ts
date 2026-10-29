@@ -164,7 +164,7 @@ export function isAllowed(raw: RawInbound, allowFrom: readonly string[] | undefi
  * containing a `+` does not exist, and `abc-def` is left alone because stripping separators from
  * a name would fold two different handles into one.
  */
-function normaliseSender(value: string): string {
+export function normaliseSender(value: string): string {
     const trimmed = value.trim()
     const bare = (trimmed.startsWith("@") ? trimmed.slice(1) : trimmed).toLowerCase()
     return /^\+?[0-9][0-9 .()-]*$/.test(bare) ? bare.replace(/[^0-9]/g, "") : bare

@@ -59,6 +59,8 @@ export interface SourceSession {
     readonly messages: number
     readonly lastActivityAt: string
     readonly phase?: string
+    /** False for a conversation a "new conversation" left behind (`docs/23-SPEC-SESSIONS.md`). */
+    readonly head?: boolean
 }
 
 export interface SendOptions {
@@ -122,6 +124,14 @@ export interface AgentSource {
     history(sessionKey: string): Promise<readonly PriorMessage[]>
     sessions(): Promise<readonly SourceSession[]>
     clearSession(sessionKey: string): Promise<void>
+    /**
+     * The person's own conversation, when the agent keeps one across surfaces
+     * (`docs/23-SPEC-SESSIONS.md`): what a run with no key opens, so the terminal shows what was said
+     * on Telegram. `undefined` under `channel-peer`, or before anybody has spoken.
+     */
+    ownConversation(): Promise<string | undefined>
+    /** `/new` under an owner or peer scope: the rotated key, or `undefined` when nothing rotates. */
+    rotateSession(): Promise<string | undefined>
     tools(): Promise<ToolsView>
     context(sessionKey: string): Promise<ContextView>
     /**
@@ -181,6 +191,8 @@ export function embeddedSource(input: {
     readonly history: (sessionKey: string) => Promise<readonly PriorMessage[]>
     readonly sessions: () => Promise<readonly SourceSession[]>
     readonly clearSession: (sessionKey: string) => Promise<void>
+    readonly ownConversation: () => Promise<string | undefined>
+    readonly rotateSession: () => Promise<string | undefined>
     readonly context: (sessionKey: string) => Promise<ContextView>
     readonly streamFilter: () => StreamFilter
     readonly description: SourceDescription
@@ -198,6 +210,8 @@ export function embeddedSource(input: {
         history: input.history,
         sessions: input.sessions,
         clearSession: input.clearSession,
+        ownConversation: input.ownConversation,
+        rotateSession: input.rotateSession,
         // Built from the live registry rather than fetched, and `toolsView` takes the structural
         // source rather than an `Agent`, which is why this is a projection and not a copy.
         tools: async () => toolsView(input.agent),
@@ -250,6 +264,7 @@ export interface ApiClient {
             }[]
         }>
         clearSession(sessionKey: string): Promise<unknown>
+        rotateSession(): Promise<{ readonly sessionKey: string }>
         reload(): Promise<{ readonly adopted: readonly string[] }>
         tools(): Promise<
             readonly {
@@ -401,6 +416,20 @@ export function remoteSource(input: {
         sessions: () => agent.sessions(),
         clearSession: async (sessionKey) => {
             await agent.clearSession(sessionKey)
+        },
+        // The operator's conversation is the owner's (14.42), and the host's listing says which is
+        // current; a channel-peer agent has none, so nothing matches.
+        ownConversation: async () =>
+            (await agent.sessions()).find(
+                (session) => session.head !== false && session.sessionKey.startsWith("owner:"),
+            )?.sessionKey,
+        // `409 session_not_rotatable` is the channel-peer answer: a fresh key of the terminal's own.
+        rotateSession: async () => {
+            try {
+                return (await agent.rotateSession()).sessionKey
+            } catch {
+                return undefined
+            }
         },
         tools: async () => {
             const tools = await agent.tools()

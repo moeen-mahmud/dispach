@@ -28,6 +28,7 @@ import {
     endNote,
     HarnessError,
     isChildSession,
+    isHead,
     processAlive,
     Runtime as RuntimeClass,
     VERSION,
@@ -336,6 +337,16 @@ export async function runCommand(options: RunOptions): Promise<number> {
             }
             session.current = resolved.sessionKey
             freshSession.current = resolved.fresh
+            // A run that asked for no conversation opens the person's own, where the agent keeps one
+            // across surfaces — the point of `sessions.scope: owner` is that the terminal shows it.
+            if (resolved.fresh)
+                session.current = (await ownConversationOf(agent)) ?? resolved.sessionKey
+        }
+        // `/new` under an owner or peer scope moves every surface to a fresh conversation, which a
+        // `local:` key of the terminal's own could not do: the agent would resolve it straight back.
+        if (reopened === "new") {
+            const rotated = await agent.rotateSession({ source: "repl" })
+            if (rotated !== undefined) session.current = rotated.sessionKey
         }
         const sessionKey = session.current
 
@@ -382,10 +393,18 @@ export async function runCommand(options: RunOptions): Promise<number> {
             send: (text, sendOptions) => agent.send(text, sendOptions),
             history: async (key) =>
                 priorMessages(await agent.history(key), agent.describe().dialect),
-            sessions: async () => await agent.store.sessions.list(agent.id),
+            sessions: async () => {
+                const heads = await agent.store.sessions.heads(agent.id)
+                return (await agent.store.sessions.list(agent.id)).map((session) => ({
+                    ...session,
+                    head: isHead(session.sessionKey, heads),
+                }))
+            },
             clearSession: async (key) => {
                 await agent.clearSession(key)
             },
+            ownConversation: () => ownConversationOf(agent),
+            rotateSession: async () => (await agent.rotateSession({ source: "repl" }))?.sessionKey,
             context: async (key) => contextViewOf(agent, key),
             streamFilter: () => agent.streamFilter(),
             description: {
@@ -586,6 +605,17 @@ export interface ResolvedSession {
      * front of a new conversation and keeps it away from a resumed one.
      */
     readonly fresh: boolean
+}
+
+/**
+ * The conversation a terminal with no key should open: the person's own when `sessions.scope` keeps
+ * one (`docs/23-SPEC-SESSIONS.md`). Asked of the agent with a throwaway key, since resolving is
+ * exactly the question "where would a turn from the terminal land" — and the terminal is the operator.
+ */
+async function ownConversationOf(agent: Agent): Promise<string | undefined> {
+    const probe = "local:-"
+    const resolved = await agent.resolveSessionKey(probe, { source: "repl" })
+    return resolved === probe ? undefined : resolved
 }
 
 async function resolveSession(input: {
@@ -828,6 +858,13 @@ async function runAttached(
             if (typeof resolved === "number") return resolved
             input.session.current = resolved.sessionKey
             freshSession.current = resolved.fresh
+            if (resolved.fresh) {
+                input.session.current = (await source.ownConversation()) ?? resolved.sessionKey
+            }
+        }
+        if (reopened === "new") {
+            const rotated = await source.rotateSession()
+            if (rotated !== undefined) input.session.current = rotated
         }
         const sessionKey = input.session.current ?? ""
 

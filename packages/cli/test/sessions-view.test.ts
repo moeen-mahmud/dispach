@@ -62,3 +62,41 @@ describe("sessionRows", () => {
         expect(rows[0]?.label.trimEnd().endsWith("…")).toBe(true)
     })
 })
+
+describe("a person's conversation across surfaces", () => {
+    test("is named You, the one before /new is earlier, and neither is marked named", () => {
+        const at = new Date("2026-10-29T10:00:00.000Z").getTime()
+        const rows = sessionRows(
+            [
+                {
+                    sessionKey: "owner:me:k7m2xp~ab12cd",
+                    messages: 2,
+                    turns: 1,
+                    lastActivityAt: "2026-10-29T09:59:00.000Z",
+                    head: true,
+                },
+                {
+                    sessionKey: "owner:me:k7m2xp",
+                    messages: 8,
+                    turns: 4,
+                    lastActivityAt: "2026-10-28T09:00:00.000Z",
+                    head: false,
+                },
+                {
+                    sessionKey: "peer:user:ada",
+                    messages: 1,
+                    turns: 1,
+                    lastActivityAt: "2026-10-29T09:00:00.000Z",
+                },
+            ],
+            { now: at, columns: 80 },
+        )
+        expect(rows.map((row) => row.label.trim())).toEqual(["You", "You · earlier", "user:ada"])
+        expect(rows.map((row) => row.key)).toEqual([
+            "owner:me:k7m2xp~ab12cd",
+            "owner:me:k7m2xp",
+            "peer:user:ada",
+        ])
+        expect(rows.some((row) => row.hint.includes("named"))).toBe(false)
+    })
+})

@@ -1307,6 +1307,16 @@ export class SqliteStore implements Store {
                 "SELECT COUNT(*) AS c FROM operator_keys WHERE revoked_at IS NULL",
             ),
             inboundKeyDeleteAll: db.prepare("DELETE FROM inbound_keys WHERE agent_id = ?"),
+            headGet: db.prepare(
+                "SELECT head_key FROM session_heads WHERE agent_id = ? AND base_key = ?",
+            ),
+            headSet: db.prepare(
+                `INSERT INTO session_heads (agent_id, base_key, head_key, rotated_at) VALUES (?, ?, ?, ?)
+                 ON CONFLICT (agent_id, base_key) DO UPDATE SET
+                     head_key = excluded.head_key, rotated_at = excluded.rotated_at`,
+            ),
+            headList: db.prepare("SELECT base_key, head_key FROM session_heads WHERE agent_id = ?"),
+            headDeleteAll: db.prepare("DELETE FROM session_heads WHERE agent_id = ?"),
             outboxDeleteAll: db.prepare("DELETE FROM outbox WHERE agent_id = ?"),
             leaseDeleteAll: db.prepare("DELETE FROM runtime_leases WHERE agent_id = ?"),
             // A union rather than a join: an agent can own rows in any one of these and none of the
@@ -1393,6 +1403,21 @@ export class SqliteStore implements Store {
                     q.memorySourceDelete.run(agentId, sessionSource(sessionKey))
                 })
             },
+            head: async (agentId, baseKey) =>
+                q.headGet.get<{ head_key: string }>(agentId, baseKey)?.head_key ?? baseKey,
+            rotate: async (agentId, baseKey, headKey) =>
+                db.transaction(() => {
+                    const previous =
+                        q.headGet.get<{ head_key: string }>(agentId, baseKey)?.head_key ?? baseKey
+                    q.headSet.run(agentId, baseKey, headKey, nowIso())
+                    return { previous }
+                }),
+            heads: async (agentId) =>
+                new Map(
+                    q.headList
+                        .all<{ base_key: string; head_key: string }>(agentId)
+                        .map((row) => [row.base_key, row.head_key] as const),
+                ),
         }
 
         this.messages = {
@@ -2590,6 +2615,8 @@ export class SqliteStore implements Store {
                 // leave rows keyed to an agent that no longer exists, which is the failure the
                 // removed `kv` table recorded, with a column available to avoid it.
                 q.inboundKeyDeleteAll.run(agentId)
+                // Which conversation a person's base key means: meaningless once the sessions are gone.
+                q.headDeleteAll.run(agentId)
                 // Also not in the footprint: a handoff envelope is a fact about a turn, and turns
                 // are already counted. Deleted for the reason inbound keys are — rows keyed to an
                 // agent that no longer exists.

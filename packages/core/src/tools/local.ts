@@ -155,72 +155,86 @@ const memoryWrite: Tool = {
             )
         }
 
-        const target = context.writeTarget
-
-        // A workspace that declares a memory file and makes it read-only is refused out loud. The
-        // tempting alternative — quietly falling back to the default file — would put the note
-        // somewhere the agent's own context never reads from, so the model would be told it saved
-        // something it will never see again. `editable` is enforced, not advisory.
-        if (target?.mode === "refused") {
-            throw workspaceNotEditable(target.name, target.reason ?? "none")
-        }
-
-        if (target?.path !== undefined) {
-            // Eviction needs both a ceiling and somewhere to put what it displaces. With either
-            // missing this degrades to a plain append — the pre-Phase-6 behaviour, which is honest
-            // about what it does rather than dropping notes because nowhere was configured to keep
-            // them.
-            // `eviction: oldest` is the author's declaration that this file accumulates notes and may
-            // be trimmed. Without it the append still happens and the shortfall is still reported — the
-            // agent is simply not allowed to delete lines out of a file nobody said that about.
-            if (
-                target.budget !== undefined &&
-                context.memoryDir !== undefined &&
-                target.eviction === "oldest"
-            ) {
-                const result = await appendNote({
-                    path: target.path,
-                    name: target.name,
-                    budget: target.budget,
-                    archiveDir: context.memoryDir,
-                    text,
-                    tags,
-                    now: context.now(),
-                })
-                // The shortfall is surfaced to the model, not swallowed. It means the *next load* will
-                // fail on this file, and the model is the only participant here who can stop writing
-                // to it — telling it "saved" and letting boot fail later is the silent-failure shape
-                // hard rule 8 forbids.
-                if (result.shortfall !== undefined) {
-                    return `Saved to ${result.file}, but it is still over budget: ${result.shortfall}. Ask the person to raise the budget or shorten the file — the agent will not load until they do.`
-                }
-                if (result.evicted === 0) return `Saved to ${result.file}.`
-                return `Saved to ${result.file}. Moved ${result.evicted} older ${result.evicted === 1 ? "note" : "notes"} into ${result.archives.join(", ")}, still searchable.`
-            }
-
-            await appendFile(target.path, line, "utf8")
-            // Over budget with no eviction declared is reported here, because the thing that fails is
-            // the *next load* — and by then nobody is looking at this observation. Hard rule 8: the
-            // agent is told now, while it can stop writing to the file.
-            if (target.budget !== undefined) {
-                const over = injectedTokens(await readFile(target.path, "utf8")) - target.budget
-                if (over > 0) {
-                    return `Saved to ${target.name}, which is now ${over} tokens over its ${target.budget}-token budget. The agent will not load until that is fixed: add \`eviction: oldest\` to its frontmatter so older notes move to the memory directory, or raise the budget.`
-                }
-            }
-            // Named rather than described, because the model sees this file's contents in slot 3 on
-            // the next turn and the two should be recognisably the same thing.
-            return `Saved to ${target.name}.`
-        }
-
-        // No workspace declared anywhere to write. The agent's own directory it is — the same place
-        // the memory subsystem will index when it lands.
-        const dir = join(context.dir, MEMORY_DIR)
-        await mkdir(dir, { recursive: true })
-        await appendFile(join(dir, MEMORY_FILE), line, "utf8")
-
-        return `Saved to ${MEMORY_DIR}/${MEMORY_FILE}.`
+        const saved = await savePrivately(text, tags, line, context)
+        // A copy for the agents that work for the same person (decision 15.8), after the private save
+        // and never instead of it: the carried file is in context every turn, the pool is recalled.
+        if (context.shareNote === undefined) return saved
+        return `${saved} ${await context.shareNote(tags.length === 0 ? text : `${text} (${tags.join(", ")})`)}`
     },
+}
+
+/** `memory_write`'s own file: the workspace's write target, or the agent's memory directory. */
+async function savePrivately(
+    text: string,
+    tags: readonly string[],
+    line: string,
+    context: ToolContext,
+): Promise<string> {
+    const target = context.writeTarget
+
+    // A workspace that declares a memory file and makes it read-only is refused out loud. The
+    // tempting alternative — quietly falling back to the default file — would put the note
+    // somewhere the agent's own context never reads from, so the model would be told it saved
+    // something it will never see again. `editable` is enforced, not advisory.
+    if (target?.mode === "refused") {
+        throw workspaceNotEditable(target.name, target.reason ?? "none")
+    }
+
+    if (target?.path !== undefined) {
+        // Eviction needs both a ceiling and somewhere to put what it displaces. With either
+        // missing this degrades to a plain append — the pre-Phase-6 behaviour, which is honest
+        // about what it does rather than dropping notes because nowhere was configured to keep
+        // them.
+        // `eviction: oldest` is the author's declaration that this file accumulates notes and may
+        // be trimmed. Without it the append still happens and the shortfall is still reported — the
+        // agent is simply not allowed to delete lines out of a file nobody said that about.
+        if (
+            target.budget !== undefined &&
+            context.memoryDir !== undefined &&
+            target.eviction === "oldest"
+        ) {
+            const result = await appendNote({
+                path: target.path,
+                name: target.name,
+                budget: target.budget,
+                archiveDir: context.memoryDir,
+                text,
+                tags,
+                now: context.now(),
+            })
+            // The shortfall is surfaced to the model, not swallowed. It means the *next load* will
+            // fail on this file, and the model is the only participant here who can stop writing
+            // to it — telling it "saved" and letting boot fail later is the silent-failure shape
+            // hard rule 8 forbids.
+            if (result.shortfall !== undefined) {
+                return `Saved to ${result.file}, but it is still over budget: ${result.shortfall}. Ask the person to raise the budget or shorten the file — the agent will not load until they do.`
+            }
+            if (result.evicted === 0) return `Saved to ${result.file}.`
+            return `Saved to ${result.file}. Moved ${result.evicted} older ${result.evicted === 1 ? "note" : "notes"} into ${result.archives.join(", ")}, still searchable.`
+        }
+
+        await appendFile(target.path, line, "utf8")
+        // Over budget with no eviction declared is reported here, because the thing that fails is
+        // the *next load* — and by then nobody is looking at this observation. Hard rule 8: the
+        // agent is told now, while it can stop writing to the file.
+        if (target.budget !== undefined) {
+            const over = injectedTokens(await readFile(target.path, "utf8")) - target.budget
+            if (over > 0) {
+                return `Saved to ${target.name}, which is now ${over} tokens over its ${target.budget}-token budget. The agent will not load until that is fixed: add \`eviction: oldest\` to its frontmatter so older notes move to the memory directory, or raise the budget.`
+            }
+        }
+        // Named rather than described, because the model sees this file's contents in slot 3 on
+        // the next turn and the two should be recognisably the same thing.
+        return `Saved to ${target.name}.`
+    }
+
+    // No workspace declared anywhere to write. The agent's own directory it is — the same place
+    // the memory subsystem will index when it lands.
+    const dir = join(context.dir, MEMORY_DIR)
+    await mkdir(dir, { recursive: true })
+    await appendFile(join(dir, MEMORY_FILE), line, "utf8")
+
+    return `Saved to ${MEMORY_DIR}/${MEMORY_FILE}.`
 }
 
 /**
@@ -503,6 +517,7 @@ export function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
         ...(overrides.setPhase === undefined ? {} : { setPhase: overrides.setPhase }),
         ...(overrides.memoryDir === undefined ? {} : { memoryDir: overrides.memoryDir }),
         ...(overrides.writeNote === undefined ? {} : { writeNote: overrides.writeNote }),
+        ...(overrides.shareNote === undefined ? {} : { shareNote: overrides.shareNote }),
         ...(overrides.forgetMemory === undefined ? {} : { forgetMemory: overrides.forgetMemory }),
         ...(overrides.meter === undefined ? {} : { meter: overrides.meter }),
         ...(overrides.pinTools === undefined ? {} : { pinTools: overrides.pinTools }),

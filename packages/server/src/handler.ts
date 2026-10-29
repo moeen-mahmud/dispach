@@ -35,6 +35,7 @@ import {
     type ImageInput,
     importBundle,
     isHarnessError,
+    isHead,
     isPhased,
     jitterFor,
     keyFingerprint,
@@ -96,6 +97,7 @@ import {
     reachesSession,
     scopeFilter,
     senderFor,
+    sessionFor,
 } from "./principal.ts"
 import { claimSpent, fail, forbidden } from "./respond.ts"
 import { Router } from "./router.ts"
@@ -123,6 +125,7 @@ import {
     ProvisionBody,
     parseBody,
     RecallBody,
+    RotateBody,
     SecretsBody,
     SpaceWriterBody,
     StopBody,
@@ -367,6 +370,13 @@ export interface Provisioner {
         readonly dir: string
         readonly files: readonly string[]
     }
+    /**
+     * Make the sandbox's owner the owner of an agent `create` just wrote, before it is adopted
+     * (decision 15.7): `create` writes `sessions.scope: owner`, which needs somebody to be the owner.
+     * Optional, so an embedder's provisioner without one still compiles; a template's agent is never
+     * claimed, since its manifest is the operator's.
+     */
+    claim?(manifestPath: string): Promise<void>
     /** Every template in this server's sandbox, with its variables. A broken one carries `problem`. */
     templates(): readonly TemplateWire[]
     /** Create an agent from a template. Throws a `HarnessError`, as `create` does. */
@@ -1593,6 +1603,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
              * answer — the thing they asked for exists, and it is not running yet.
              */
             try {
+                if (template === undefined) await provision.claim?.(created.manifestPath)
                 const admitted = await runtime.adopt(created.manifestPath)
                 return json(
                     {
@@ -1982,11 +1993,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const wantsChunks = input.chunks === true
                 const text = input.text
 
-                const sessionKey = input.sessionKey ?? "api:default"
+                const requested = input.sessionKey ?? "api:default"
                 // The one place a caller *names* a session they may never have seen. Without this,
                 // a key scoped to `team_42:` could write into `team_7:`'s conversation simply by
                 // asking — which is the difference between a filter and a boundary.
-                const outside = outsideSession(context, sessionKey)
+                const outside = outsideSession(context, requested)
                 if (outside !== undefined) return outside
                 const deliver = parseDeliver(input.deliver)
                 if (deliver.kind === "error") return fail(deliver.error, 400)
@@ -1995,6 +2006,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 if (parsedFrom.kind === "error") return fail(parsedFrom.error, 400)
                 const from = senderFor(context.principal, parsedFrom.from)
                 if (!from.ok) return fail(from.error, 403)
+                const sessionKey = await sessionFor(agent, context.principal, requested, from.from)
 
                 const idempotency = parseIdempotencyKey(context.request)
                 if (idempotency.kind === "error") return fail(idempotency.error, 400)
@@ -2116,6 +2128,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     .send(text, {
                         admission,
                         sessionKey,
+                        sessionResolved: true,
                         turnId,
                         source: "api",
                         ...(from.from === undefined ? {} : { from: from.from }),
@@ -2763,6 +2776,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         ...(input.role === undefined ? {} : { role: input.role }),
                         ...(input.title === undefined ? {} : { title: input.title }),
                         ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
+                        ...(input.channelIds === undefined ? {} : { channelIds: input.channelIds }),
                     }),
                     201,
                 )
@@ -3088,16 +3102,17 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     }
                 }
                 try {
-                    return json(
-                        await runtime.conversations.assign({
-                            agentId: agent.id,
-                            participantId: parsed.value.participantId,
-                            ...(bound === undefined ? {} : { assignedBy: bound }),
-                            ...(parsed.value.channelIds === undefined
-                                ? {}
-                                : { channelIds: parsed.value.channelIds }),
-                        }),
-                    )
+                    const assigned = await runtime.conversations.assign({
+                        agentId: agent.id,
+                        participantId: parsed.value.participantId,
+                        ...(bound === undefined ? {} : { assignedBy: bound }),
+                        ...(parsed.value.channelIds === undefined
+                            ? {}
+                            : { channelIds: parsed.value.channelIds }),
+                    })
+                    // An owner or peer session scope works from now on; its warning goes (15.14).
+                    await agent.checkSessionScope()
+                    return json(assigned)
                 } catch (error) {
                     return refusedBy(error)
                 }
@@ -3126,12 +3141,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "DELETE",
         "/v1/agents/:id/assignee",
         (context) =>
-            withAgent(runtime, context, async (agent) =>
-                json({
-                    id: agent.id,
-                    unassigned: await runtime.store.conversations.unassign(agent.id),
-                }),
-            ),
+            withAgent(runtime, context, async (agent) => {
+                const unassigned = await runtime.store.conversations.unassign(agent.id)
+                await agent.checkSessionScope()
+                return json({ id: agent.id, unassigned })
+            }),
         { capability: "admin" },
     )
 
@@ -3421,10 +3435,65 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "GET",
         "/v1/agents/:id/sessions",
         (context) =>
-            withAgent(runtime, context, async (agent) =>
-                json(visibleSessions(context.principal, await agent.store.sessions.list(agent.id))),
-            ),
+            withAgent(runtime, context, async (agent) => {
+                const sessions = await agent.store.sessions.list(agent.id)
+                const heads = await agent.store.sessions.heads(agent.id)
+                return json(
+                    visibleSessions(
+                        context.principal,
+                        sessions.map((session) => ({
+                            ...session,
+                            head: isHead(session.sessionKey, heads),
+                        })),
+                    ),
+                )
+            }),
         { capability: "read" },
+    )
+
+    /**
+     * "New conversation" for an owner or peer scope (decision 15.12): the caller's conversation now
+     * means a fresh key, on every surface, Telegram included. Registered before `:key` routes.
+     */
+    router.add(
+        "POST",
+        "/v1/agents/:id/sessions/rotate",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(RotateBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const parsedFrom = parseFrom(parsed.value.from)
+                if (parsedFrom.kind === "error") return fail(parsedFrom.error, 400)
+                const from = senderFor(context.principal, parsedFrom.from)
+                if (!from.ok) return fail(from.error, 403)
+                // Only a conversation the caller could read back, by the rule `POST /messages` applies:
+                // resolve where a turn from this sender would land, and refuse when that is outside the
+                // key's reach — a key minted for `team_42:` naming the owner as `from` included.
+                const sender = {
+                    source: "api",
+                    ...(from.from === undefined ? {} : { from: from.from }),
+                }
+                const probe = "api:-"
+                const current = await agent.resolveSessionKey(probe, sender)
+                const rotated =
+                    current === probe || !reachesSession(context.principal, current)
+                        ? undefined
+                        : await agent.rotateSession(sender)
+                if (rotated === undefined) {
+                    return fail(
+                        {
+                            code: "session_not_rotatable",
+                            message: `Agent "${agent.id}" has no conversation of yours to start afresh.`,
+                            hint: `Rotation is for sessions.scope owner or peer, for the owner or a registered participant, by a key that reaches that conversation; this agent's scope is "${agent.manifest.sessions?.scope ?? "channel-peer"}". Otherwise a new conversation is a new sessionKey of your own on the next message.`,
+                        },
+                        409,
+                    )
+                }
+                return json(rotated)
+            }),
+        { capability: "chat" },
     )
 
     router.add(
@@ -5191,20 +5260,6 @@ function outsideTurn(
     return !reachesSession(context.principal, record.sessionKey)
 }
 
-/**
- * The shared shape of an agent in the listing and at the head of its detail.
- *
- * **There is no current phase here, and the field is named to say so.** It was `phase: null` for
- * every agent — the spec's own listing promises `phase` — and filling that in with the phase the
- * agent is "in" would be decision 5.19's failure on an HTTP surface: a phase is per *session*, and
- * an agent hosting three conversations is in three phases at once. The agent-level facts are the
- * phase a new session **starts** in and the names that exist, so those are what it reports, under
- * a name a reader cannot mistake for the other thing.
- *
- * `phases` is present only when the manifest declares more than one, matching the question the
- * runtime itself asks before registering `phase_set`. An unphased agent has no entry phase to
- * name, so `entryPhase` is `null` there rather than inventing a name for the single implicit one.
- */
 /** `GET /config`'s rows for the named model roles the source declares, `main` excepted. */
 function declaredRoles(
     text: string | undefined,
@@ -5306,6 +5361,20 @@ function unknownWorkspaceFile(
     )
 }
 
+/**
+ * The shared shape of an agent in the listing and at the head of its detail.
+ *
+ * **There is no current phase here, and the field is named to say so.** It was `phase: null` for
+ * every agent — the spec's own listing promises `phase` — and filling that in with the phase the
+ * agent is "in" would be decision 5.19's failure on an HTTP surface: a phase is per *session*, and
+ * an agent hosting three conversations is in three phases at once. The agent-level facts are the
+ * phase a new session **starts** in and the names that exist, so those are what it reports, under
+ * a name a reader cannot mistake for the other thing.
+ *
+ * `phases` is present only when the manifest declares more than one, matching the question the
+ * runtime itself asks before registering `phase_set`. An unphased agent has no entry phase to
+ * name, so `entryPhase` is `null` there rather than inventing a name for the single implicit one.
+ */
 function summary(runtime: Runtime, agent: Agent) {
     const phases = agent.manifest.phases
     const phased = isPhased(phases)
@@ -5347,6 +5416,9 @@ function summary(runtime: Runtime, agent: Agent) {
         }),
         entryPhase: phased ? (entryPhase(phases) ?? null) : null,
         ...(phased ? { phases: Object.keys(phases) } : {}),
+        // How this agent chooses a turn's conversation, so a client knows whether "new conversation"
+        // is a rotation (`docs/23-SPEC-SESSIONS.md`) or a fresh key of its own.
+        sessionScope: agent.manifest.sessions?.scope ?? "channel-peer",
     }
 }
 

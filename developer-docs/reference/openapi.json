@@ -1546,6 +1546,16 @@
                                         "description": "An IANA timezone, such as \"Europe/London\". Told to an agent answering another member's agent, so \"tomorrow at nine\" means the right hour. Refused when the runtime does not know it.",
                                         "type": "string",
                                         "minLength": 1
+                                    },
+                                    "channelIds": {
+                                        "code": "participant_channel_ids_invalid",
+                                        "hint": "A list of the person's own channel senders as `<channel type>:<id or handle>`, e.g. [\"telegram:@ada\", \"whatsapp:+44 7700 900123\"].",
+                                        "description": "The person's own channel senders, matched like allowFrom. Under sessions.scope peer, their turns from these channels and from the API share one conversation. Absent, a channel turn from them keeps its own.",
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string",
+                                            "minLength": 1
+                                        }
                                     }
                                 },
                                 "required": [
@@ -1984,8 +1994,8 @@
                                     },
                                     "channelIds": {
                                         "code": "assignee_channel_ids_invalid",
-                                        "hint": "A list of the owner's own channel senders as a channel turn names them, e.g. [\"whatsapp:8801711223344\", \"slack:U0123ABC\"].",
-                                        "description": "The owner's own channel senders (pilot.15). A turn from one of these acts as the owner and keeps the owner's personal tools (Composio, MCP servers marked personal). Absent, no channel turn does.",
+                                        "hint": "A list of the owner's own channel senders as `<channel type>:<id or handle>`, e.g. [\"telegram:@moeen\", \"whatsapp:+880 1711-223344\", \"slack:U0123ABC\"].",
+                                        "description": "The owner's own channel senders (pilot.15), matched like allowFrom: case folded, `@` optional, a phone number by its digits. A turn from one of these acts as the owner: it keeps the owner's personal tools (Composio, MCP servers marked personal) and, under sessions.scope owner, lands in the owner's conversation. Absent, no channel turn does.",
                                         "type": "array",
                                         "items": {
                                             "type": "string",
@@ -2408,6 +2418,78 @@
                     },
                     "404": {
                         "description": "No such agent, or it is switched off."
+                    }
+                }
+            }
+        },
+        "/v1/agents/{id}/sessions/rotate": {
+            "post": {
+                "summary": "Start the caller's conversation afresh on every surface (sessions.scope owner or peer).",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    }
+                },
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "type": "object",
+                                "properties": {
+                                    "from": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {
+                                                "type": "string",
+                                                "minLength": 1,
+                                                "code": "sender_invalid",
+                                                "hint": "Send { \"from\": { \"id\": \"agent:ops-bot\", \"kind\": \"agent\" } }, or omit it entirely for a turn the token-holder is sending itself.",
+                                                "description": "Stable identifier for the sender. Appears on the turn row and in events."
+                                            },
+                                            "kind": {
+                                                "type": "string",
+                                                "enum": [
+                                                    "user",
+                                                    "agent"
+                                                ],
+                                                "code": "sender_invalid",
+                                                "hint": "This field decides the trust boundary — \"agent\" fences the message and blocks mutating tools for the turn, \"user\" does not — so there is no default and an unknown value is refused rather than guessed at. A turn the token-holder is sending itself omits \"from\".",
+                                                "description": "The trust boundary. \"agent\" fences the text as data and blocks mutating tools for the whole turn."
+                                            },
+                                            "name": {
+                                                "code": "sender_invalid",
+                                                "hint": "A display name, shown beside the sender id. Omit it rather than sending an empty string.",
+                                                "description": "Human-readable name for the sender.",
+                                                "type": "string"
+                                            }
+                                        },
+                                        "required": [
+                                            "id",
+                                            "kind"
+                                        ],
+                                        "description": "Attribution for a turn somebody other than the token-holder is sending. Omit for your own."
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

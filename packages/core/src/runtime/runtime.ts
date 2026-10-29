@@ -741,6 +741,8 @@ export class Runtime {
         for (const [id, team] of prepared.teams) runtime.#teams.set(id, team)
         for (const [id, off] of prepared.unwatch) runtime.#unwatch.set(id, off)
 
+        // Read from the store, so it cannot happen in the constructor; before `#admit`, which reports.
+        for (const agent of agents) await agent.checkSessionScope()
         for (const agent of agents) runtime.#admit(agent)
 
         const bootMs = Math.round((performance.now() - startedAt) * 100) / 100
@@ -1216,6 +1218,7 @@ export class Runtime {
         if (this.#baseUrl !== undefined && leases.owned.length > 0) {
             await this.store.leases.publish(this.runtimeId, this.#baseUrl)
         }
+        for (const agent of admitted) await agent.checkSessionScope()
         for (const agent of admitted) this.#admit(agent)
         // The root's source only. A member is reloaded by replacing its supervisor.
         const root = hosted[0]

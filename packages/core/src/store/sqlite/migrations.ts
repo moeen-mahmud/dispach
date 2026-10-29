@@ -1212,6 +1212,32 @@ ALTER TABLE turns ADD COLUMN participant_id TEXT;
 DROP TABLE IF EXISTS kv;
 `,
     },
+    {
+        version: 33,
+        name: "session_heads",
+        /**
+         * One conversation per person across surfaces (decisions 15.6, 15.12; `docs/23-SPEC-SESSIONS.md`).
+         *
+         * `session_heads` maps a person's base key (`owner:<P>`, `peer:<P>`) to the conversation it means
+         * now; "new conversation" rotates it, from every surface at once. No row means the base is its own
+         * head, which is every base that was never rotated. Keyed by agent, purged with it.
+         *
+         * `participants.channel_ids` is what `peer` scope recognises a channel sender by, the same shape as
+         * `agent_assignments.channel_ids` (migration 30). NULL before: nobody is matched until named.
+         *
+         * No `turns` column: `source` and `participant_id` already say which surface and which sender.
+         */
+        sql: `
+CREATE TABLE session_heads (
+    agent_id   TEXT NOT NULL,
+    base_key   TEXT NOT NULL,
+    head_key   TEXT NOT NULL,
+    rotated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, base_key)
+);
+ALTER TABLE participants ADD COLUMN channel_ids TEXT;
+`,
+    },
 ]
 
 export interface MigrationReport {

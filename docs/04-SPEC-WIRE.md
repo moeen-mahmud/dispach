@@ -188,12 +188,14 @@ and WebSocket surfaces can return:
 | `action_already_decided` | 409 | The action was approved or declined already. Nothing ran twice. |
 | `assignment_requires_admin` | 403 | A participant-bound key assigning an agent when its participant is not an `admin`. |
 | `participant_timezone_invalid` | 400 | `POST /v1/participants` with a `timezone` that is not an IANA zone the runtime knows. |
+| `participant_channel_ids_invalid` | 400 | `channelIds` on `POST /v1/participants` is not a list of `<channel type>:<id or handle>` strings. Nothing was written. |
+| `session_not_rotatable` | 409 | `POST /sessions/rotate` on an agent whose `sessions.scope` is `channel-peer`, by a sender with no conversation of their own, or with a key minted for a session prefix and speaking for nobody. Nothing changed. |
 | `backup_requires_unscoped_key` | 403 | `GET /v1/backup` with a key scoped to some agents: a backup holds every agent's data. |
 | `backup_include_invalid` | 400 | `GET /v1/backup?include=` names something other than `env`, `git` or `home`. |
 | `backup_home_unavailable` | 400 | `include=home` on a server that was not given its state directory (a handler embedded outside `serve`). |
-| `memory_scope_invalid` | 400 | A scope other than `space`, `owner:<participantId>` or `project:<projectId>`. An agent's private memory has no route: the agent writes it. |
+| `memory_scope_invalid` | 400 | A scope other than `space`, `owner:<participantId>`, `agents:<participantId>` or `project:<projectId>`. An agent's private memory has no route: the agent writes it. |
 | `memory_note_empty` | 400 | A note with no text. |
-| `memory_scope_forbidden` | 403 | This participant may not write — or, for an owner scope, read — that scope. `owner:<id>` is its owner's alone, admins included; the space takes an admin or the designated writer; a project, an admin. Also a non-admin participant defining a project or naming the space writer, and anyone but the person or an admin reading their audit. |
+| `memory_scope_forbidden` | 403 | This participant may not write — or, for an owner scope, read — that scope. `owner:<id>` and `agents:<id>` are their person's alone, admins included; the space takes an admin or the designated writer; a project, an admin. Also a non-admin participant defining a project or naming the space writer, and anyone but the person or an admin reading their audit. |
 | `memory_write_requires_admin` | 403 | An unbound key without `admin` writing a shared scope. A member writes through a participant-bound key. |
 | `memory_note_not_found` | 404 | No such note. |
 | `project_not_found` | 404 | A `project:<id>` scope naming a project nobody defined. |
@@ -384,7 +386,7 @@ GET    /v1/webhooks            → { webhooks: [{ subscriptionId, url, types, sc
                                                 consecutiveFailures, lastError?, pending, … }] }
 DELETE /v1/webhooks/:webhookId → { id, deleted: true }
 
-POST   /v1/participants { id, name?, role?, title?, timezone? }
+POST   /v1/participants { id, name?, role?, title?, timezone?, channelIds? }
                                                      → 201 { id, kind: "human", name?, role, title?, timezone?, createdAt }
 GET    /v1/participants                              → { participants: [...] }
 DELETE /v1/participants/:participantId               → { id, deleted: true }
@@ -403,6 +405,7 @@ GET    /v1/agents/:id/assignee                       → { id, assignment: { age
 PUT    /v1/agents/:id/assignee { participantId, channelIds? } → { agentId, participantId, channelIds?, assignedBy?, assignedAt }
 DELETE /v1/agents/:id/assignee                       → { id, unassigned }
 POST   /v1/memory/notes { scope, text }              → 201 { id, scope, text, writtenBy, createdAt }
+                                                       (scope: space | owner:<id> | agents:<id> | project:<id>)
 GET    /v1/memory/notes?scope                        → { notes: [...] }   (oldest first)
 DELETE /v1/memory/notes/:noteId                      → { id, deleted: true }
 GET    /v1/participants/:participantId/memory/reads  → { reads: [{ scope, reader, turnId, sessionKey,
@@ -703,6 +706,13 @@ POST /v1/agents/:id/messages
 
 Returns `202` with `{ turnId, sessionKey }` immediately, then streams SSE if `stream` is
 true. **The turn is not bound to this connection.** Disconnecting does not cancel it.
+
+**`sessionKey` in the body is a request; the one in the `202` is the key the turn runs in.** Under
+`sessions.scope: owner` or `peer` (`23-SPEC-SESSIONS.md`) a person's turn lands in their
+conversation (`owner:<participantId>`, `peer:<participantId>`, or its current rotation) whatever key
+was sent, and a client adopts the answered key. Under the default `channel-peer` the two are always
+equal. A key minted for a session prefix and used with no `from` keeps the key it sent, because a
+turn never lands where its caller could not read it back.
 
 #### `role` — run this turn on another model role (since 0.2.0-pilot.7)
 
@@ -1033,6 +1043,7 @@ here that the server does not register, or a registered route missing from here,
 | `DELETE /v1/agents/:id/sessions/:key` | `write` |
 | `POST /v1/agents/:id/sessions/:key/phase` | `write` |
 | `POST /v1/agents/:id/sessions/:key/recall` | `write` |
+| `POST /v1/agents/:id/sessions/rotate` | `chat` |
 | `POST /v1/agents` | `admin` |
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/tools/refresh` | `admin` |
@@ -1128,7 +1139,15 @@ GET    /v1/agents/:id/sessions/:key/messages?before=&limit=
 DELETE /v1/agents/:id/sessions/:key          → clears history; keeps memory files
 POST   /v1/agents/:id/sessions/:key/phase    → { sessionKey, phase }
 POST   /v1/agents/:id/sessions/:key/recall   { recall } → { sessionKey, recall }
+POST   /v1/agents/:id/sessions/rotate        { from? } → { sessionKey, previous }
 ```
+
+Each listed session carries `head`: whether it is the conversation its base currently means. Under
+`sessions.scope: owner` or `peer`, `rotate` starts the caller's conversation afresh on every surface
+at once (decision 15.12): `previous` stays listed and is continued by naming it. `409
+session_not_rotatable` for a `channel-peer` agent, a sender with no conversation of their own, or a
+key minted for a session prefix speaking for nobody. A key bound to participant P reaches
+`owner:P`, `peer:P` and their rotations (`<base>~` plus six symbols) beside its own prefix.
 
 `DELETE` clears conversation state only. Memory markdown is a file artifact and is never
 deleted by an API call.
@@ -1653,7 +1672,7 @@ Client frames:
 
 | Frame | Fields | Answer |
 | --- | --- | --- |
-| `message` | `text`, `sessionKey?` (default `api:default`) | `ws.accepted { turnId }`. Runs on the socket's current agent; the frame carries no `agentId` and no `from` (a participant-bound key supplies one). |
+| `message` | `text`, `sessionKey?` (default `api:default`) | `ws.accepted { turnId, sessionKey }` — the key the turn runs in, as in the `202` of `POST /messages`. Runs on the socket's current agent; the frame carries no `agentId` and no `from` (a participant-bound key supplies one). |
 | `stop` | `turnId` | `ws.stopping { turnId, found }` |
 | `subscribe` | `agentId`, `chunks?` | `ws.subscribed { agentId, chunks }` |
 | `ping` | — | `pong` |
