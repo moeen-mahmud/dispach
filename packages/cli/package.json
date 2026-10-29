@@ -10,6 +10,9 @@
         "directory": "packages/cli"
     },
     "type": "module",
+    "engines": {
+        "node": ">=24"
+    },
     "bin": {
         "dispach": "dist/index.js"
     },

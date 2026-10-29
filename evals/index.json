@@ -166,6 +166,46 @@
         },
         {
             "section": "Boot and runtime",
+            "claim": "Importing Ink and React costs ~170-210 ms under Node, so no shared CLI path imports them",
+            "evidence": "`packages/cli/test/boundaries.test.ts` (structural guard); measured in decision 11.5 prose",
+            "scope": "Node 24, Apple M4 Pro",
+            "limitation": "The guard is structural; the figure is from one machine and not re-measured by CI",
+            "status": "needs-run",
+            "files": [
+                "packages/cli/test/boundaries.test.ts"
+            ]
+        },
+        {
+            "section": "Boot and runtime",
+            "claim": "`docker compose up -d --wait` reaches healthy in about six seconds; 26 `model.chunk` frames in the first streamed turn",
+            "evidence": "README `## Docker` prose, measured by hand 2026-10-20",
+            "scope": "arm64 Docker Desktop, 0.2.0",
+            "limitation": "Dominated by the first healthcheck probe interval; the frame count is one DeepSeek reply",
+            "status": "needs-run",
+            "files": []
+        },
+        {
+            "section": "Boot and runtime",
+            "claim": "Image size breakdown: 110 MB Debian, 160 MB Node, 158 MB apt (git 92 MB), 47 MB uv, 58 MB package",
+            "evidence": "`docker history` by hand, 2026-10-20",
+            "scope": "arm64, 0.2.0",
+            "limitation": "Not re-measured by CI (only the total is)",
+            "status": "needs-run",
+            "files": []
+        },
+        {
+            "section": "Boot and runtime",
+            "claim": "An earlier run at load average ~5 measured 91 ms boot",
+            "evidence": "Hand-recorded beside `evals/boot/results.json`, superseded by the committed run",
+            "scope": "Same machine",
+            "limitation": "Illustrates load sensitivity only",
+            "status": "needs-run",
+            "files": [
+                "evals/boot/results.json"
+            ]
+        },
+        {
+            "section": "Boot and runtime",
             "claim": "A remote provider's post-ready refresh takes ~1.5 s, so awaiting it in boot would multiply boot",
             "evidence": "Decision 4.21 prose only (1,474 ms)",
             "scope": "Composio, one cold cache",
