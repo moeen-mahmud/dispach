@@ -278,6 +278,8 @@ export interface ValidateOptions {
 
 export interface InitOptions {
     readonly dir?: string
+    /** AWS region, for `--preset bedrock`. */
+    readonly region?: string
     readonly user?: string
     readonly name?: string
     readonly purpose?: string

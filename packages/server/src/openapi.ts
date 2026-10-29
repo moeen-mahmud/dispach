@@ -126,6 +126,20 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             },
         ],
     },
+    "GET /v1/agents/:id/workspace": {
+        summary:
+            "The files the agent's prompt is built from: name, tier, field, whether it exists, size.",
+        statuses: [
+            { code: 409, when: "the manifest does not parse, so its files cannot be named" },
+        ],
+    },
+    "GET /v1/agents/:id/workspace/:file": {
+        summary: "One declared workspace file's text, for an editor to show before it replaces it.",
+        statuses: [
+            { code: 404, when: "not a file the manifest declares" },
+            { code: 409, when: "the manifest does not parse" },
+        ],
+    },
     "PUT /v1/agents/:id/workspace/:file": {
         summary:
             "Replace one of the agent's declared workspace files; reload it, or diagnose it when it is not running.",
@@ -477,6 +491,11 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     "POST /v1/agents/:id/schedules": {
         summary: "Create a schedule. Validated by the manifest's own schedule rules.",
         statuses: [{ code: 201, when: "created" }],
+    },
+    "GET /v1/agents/:id/schedules/preview": {
+        summary:
+            "What an expression means before it is written: the next instants, zone and jitter.",
+        statuses: [{ code: 400, when: "an expression core's own parser refuses, with its hint" }],
     },
     "GET /v1/agents/:id/schedules/:sid": { summary: "One schedule's row." },
     "PATCH /v1/agents/:id/schedules/:sid": {

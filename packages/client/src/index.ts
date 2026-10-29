@@ -266,6 +266,22 @@ export interface AgentClient {
         patch: Readonly<Record<string, unknown>>,
     ): Promise<ScheduleRecord>
     deleteSchedule(scheduleId: string): Promise<void>
+    /**
+     * Fetch the tool providers' catalogues now and reload only if what the agent serves moved.
+     * `providers` narrows to some of them; omitted is all. 202 when a turn is running and the
+     * reload is pending.
+     */
+    refreshTools(options?: { readonly providers?: readonly string[] }): Promise<ToolsRefreshResult>
+    /**
+     * What an expression means before it is written: the next instants, the zone in force and the
+     * jitter it would carry. Parsed by the server with the same function the write uses.
+     */
+    previewSchedule(input: {
+        readonly kind: "cron" | "every" | "at"
+        readonly expr: string
+        readonly timezone?: string
+        readonly count?: number
+    }): Promise<SchedulePreview>
     /** Fire one now, out of band. Does **not** move its next scheduled run. */
     runSchedule(scheduleId: string): Promise<{
         readonly scheduleId: string
@@ -376,7 +392,46 @@ export interface AgentClient {
     start(): Promise<AgentLifecycleState>
     /** Record which member this agent works for. An admin participant's act (Phase 27). */
     assign(participantId: string): Promise<AssignmentLike>
+    /** Who the agent works for, or `null` when nobody. */
+    assignment(): Promise<{ readonly id: string; readonly assignment: AssignmentLike | null }>
     unassign(): Promise<{ readonly id: string; readonly unassigned: boolean }>
+    /** The files the agent's prompt is built from, as the manifest declares them. */
+    workspaceFiles(): Promise<{
+        readonly id: string
+        readonly files: readonly {
+            readonly name: string
+            readonly tier: string
+            readonly field: string
+            readonly exists: boolean
+            readonly bytes: number
+        }[]
+    }>
+    /** One declared workspace file's text. `exists: false` with empty content for one not yet written. */
+    workspaceFile(name: string): Promise<{
+        readonly id: string
+        readonly file: string
+        readonly tier?: string
+        readonly field?: string
+        readonly exists: boolean
+        readonly content: string
+    }>
+    /**
+     * Replace one declared workspace file, whole. On a running agent the reload is attempted and a
+     * text that would stop it loading is refused with the old text put back; `applied` says
+     * whether the new text is in force.
+     */
+    putWorkspaceFile(
+        name: string,
+        content: string,
+    ): Promise<{
+        readonly id: string
+        readonly file: string
+        readonly written: boolean
+        readonly loads: boolean
+        readonly error?: WireError
+        readonly applied: boolean
+        readonly pending?: WireError
+    }>
     /** A slice of this agent — its carried memory, archive and knowledge — as a bundle (R11). */
     exportBundle(
         paths?: readonly ("MEMORY.md" | "memory/" | "knowledge/")[],
@@ -625,6 +680,29 @@ export interface MessagePageLike {
  * conversation is, and the field is *there*, so the only way to find out is to read the server. The
  * same shape as `channels` being `readonly unknown[]` until 16.6.
  */
+/** `POST …/tools/refresh`. */
+export interface ToolsRefreshResult {
+    readonly id: string
+    readonly providers: readonly {
+        readonly provider: string
+        readonly ok: boolean
+        readonly fetched: number
+        readonly error?: string
+    }[]
+    readonly added: readonly string[]
+    readonly removed: readonly string[]
+    readonly changed: readonly string[]
+    readonly reload?: string
+}
+
+/** `GET …/schedules/preview`. */
+export interface SchedulePreview {
+    readonly kind: "cron" | "every" | "at"
+    readonly zone: string
+    readonly next: readonly string[]
+    readonly jitterMs: number
+}
+
 export interface SessionSummary {
     readonly sessionKey: string
     readonly channel: string
@@ -936,7 +1014,7 @@ export interface KeyScopeLike {
     readonly agents?: readonly string[]
     /** A session-key prefix; a trailing `*` is accepted and ignored. */
     readonly sessions?: string
-    readonly can?: readonly ("read" | "chat" | "write" | "admin")[]
+    readonly can?: readonly ("read" | "chat" | "write" | "admin" | "peer")[]
     /** The one participant this key speaks for: every turn it starts acts for them. */
     readonly participant?: string
 }
@@ -990,6 +1068,8 @@ export interface DispachClient {
         readonly id: string
         readonly name?: string
         readonly role?: "admin" | "member"
+        readonly title?: string
+        readonly timezone?: string
     }): Promise<ParticipantLike>
     /** The rooms and DMs this credential can see. */
     conversations(): Promise<readonly ConversationLike[]>
@@ -1393,6 +1473,16 @@ export function createClient(options: ClientOptions): DispachClient {
              * "pretend it fired" are different things, and a caller who believed the second would
              * find the real one firing a minute later.
              */
+            refreshTools: (options) =>
+                json<ToolsRefreshResult>("POST", at("/tools/refresh"), {
+                    body: options?.providers === undefined ? {} : { providers: options.providers },
+                }),
+            previewSchedule: (input) => {
+                const query = new URLSearchParams({ kind: input.kind, expr: input.expr })
+                if (input.timezone !== undefined) query.set("timezone", input.timezone)
+                if (input.count !== undefined) query.set("count", String(input.count))
+                return json<SchedulePreview>("GET", at(`/schedules/preview?${query.toString()}`))
+            },
             runSchedule: (scheduleId) =>
                 json<{ scheduleId: string; turnId: string; sessionKey: string }>(
                     "POST",
@@ -1475,6 +1565,12 @@ export function createClient(options: ClientOptions): DispachClient {
             assign: (participantId) =>
                 json<AssignmentLike>("PUT", at("/assignee"), { body: { participantId } }),
             unassign: () => json<{ id: string; unassigned: boolean }>("DELETE", at("/assignee")),
+            assignment: () =>
+                json<{ id: string; assignment: AssignmentLike | null }>("GET", at("/assignee")),
+            workspaceFiles: () => json("GET", at("/workspace")),
+            workspaceFile: (name) => json("GET", at(`/workspace/${encodeURIComponent(name)}`)),
+            putWorkspaceFile: (name, content) =>
+                json("PUT", at(`/workspace/${encodeURIComponent(name)}`), { body: { content } }),
             exportBundle: (paths) =>
                 json<AgentBundleLike>(
                     "GET",

@@ -44,7 +44,7 @@ shipped on Node, Apache-2.0.
 **Where it is going: the multiplayer agent runtime.** 0.2.0 gives every user and every team in your
 product their own isolated runtime of agents. Those agents share rooms and memory with the people
 they work for, and stand in for them, openly, when they are away. That half ships in 0.2.0 as
-**experimental**: on the HTTP API, with no TUI or web screens yet, and it may change within 0.2.x.
+**experimental**: on the HTTP API and the browser console (no TUI screens yet), and it may change within 0.2.x.
 Everything else described in this README is stable.
 
 **Docs:** [dispach.blivius.com/docs](https://dispach.blivius.com/docs) ·
@@ -140,8 +140,10 @@ Built and in use:
   services, the Docker image with a compose front door, Kubernetes, and `GET /v1/backup` for the
   whole sandbox.
 
-**Experimental in 0.2.0**, on the HTTP API only: rooms, stand-ins and team memory; the Slack,
-Microsoft Teams and A2A channels; and media (transcription, image generation, spoken replies).
+**Experimental in 0.2.0**: rooms, stand-ins and team memory; the Slack, Microsoft Teams and A2A
+channels; and media (transcription, image generation, spoken replies). The first three and the
+channels have screens in the browser console since the 0.3 line (People, Rooms, Actions, Memory,
+add a channel); media is still API-only.
 
 **MCP is a tool provider, never the substrate** (decision 4.7): remote servers over Streamable HTTP,
 their tools pinned by name like any other provider's. Composio is still called directly.
@@ -298,12 +300,15 @@ passed on the command line lands in shell history — so a scripted run
 it in.
 
 **`--preset` carries the endpoints worth not typing from memory** — OpenAI, Anthropic, DeepSeek,
-OpenRouter, Groq, NVIDIA NIM, and Ollama both local and hosted — and `custom` is a first-class
-answer for anything else. Any OpenAI-compatible `/chat/completions` endpoint works, because there is
-no provider branch in the transport: one POST, one body builder. What a preset actually buys is
-getting the base URL's *shape* right, which is the part that is easy to get wrong. It must end at
-the version segment; the runtime appends `/chat/completions` itself, so a URL copied from a
-provider's docs with the full path is refused.
+OpenRouter, Groq, NVIDIA NIM, Ollama both local and hosted, and AWS Bedrock — and `custom` is a
+first-class answer for anything else. Any OpenAI-compatible `/chat/completions` endpoint works,
+because there is no provider branch in the transport: one POST, one body builder. What a preset
+actually buys is getting the base URL's *shape* right, which is the part that is easy to get wrong.
+It must end at the version segment; the runtime appends `/chat/completions` itself, so a URL copied
+from a provider's docs with the full path is refused. Bedrock is the one preset that is not three
+strings: `--preset bedrock --region eu-west-1` writes `api: bedrock-converse` and `options.region`,
+no URL and no key variable, because credentials come from the AWS default chain (environment, a
+named profile, the container or instance role). The web console's Models page offers the same list.
 
 Local Ollama and Ollama Cloud are **two presets on purpose.** Local needs no key, and the absent
 `apiKeyEnv` is what makes the manifest omit the field and the provider send no `authorization`
@@ -477,8 +482,9 @@ fail because one of N agents is misconfigured.
 
 Then open `http://localhost:7420` and paste nothing: the claim link in the logs carries a one-time
 token the page exchanges for a key it keeps. From there the page creates agents, holds a streaming
-conversation with one, and — since 0.1.1 — changes its settings and schedules; the tool, channel and
-key panels remain reports. Reading the container's own output is what confers
+conversation with one, and changes its models, tools, schedules, channels, files and settings; it
+also shows usage and every turn, and manages people, rooms, the actions queue, shared memory,
+webhooks, backups and scoped keys. Reading the container's own output is what confers
 first ownership, which grants nothing new to anyone who could already run `docker compose logs`.
 
 **A plain `up` pulls the published image once and never again.** `image:` names

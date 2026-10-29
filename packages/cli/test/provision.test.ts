@@ -17,7 +17,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { HarnessError } from "@dispach/core"
+import { type HarnessError, loadManifest } from "@dispach/core"
 import { dirFor, SECRET_STEPS, STEP_ORDER } from "#lib/init-flow"
 import { FLAG_FOR, provisionAgent, provisionSteps, toProvisionStep } from "#lib/provision"
 
@@ -87,6 +87,37 @@ describe("every preset writes an endpoint that works", () => {
             expect(active.includes("apiKeyEnv:")).toBe(key)
         })
     }
+
+    test("bedrock writes api, options.region and no URL or key — read back through the loader", () => {
+        // The one preset that is not three strings. Read out of the generated file through
+        // `loadManifest`, because the transport field and its options are checked at load and a
+        // manifest the loader refuses is not an agent anybody can run.
+        const result = provisionAgent({
+            answers: { user: "Ada", name: "p-bedrock", preset: "bedrock", region: "eu-west-2" },
+            defaults: defaults(),
+        })
+        const manifest = readFileSync(join(result.dir, "agent.yaml"), "utf8")
+        const active = manifest
+            .split("\n")
+            .filter((line) => !line.trimStart().startsWith("#"))
+            .join("\n")
+        expect(active).toContain("api: bedrock-converse")
+        expect(active).toContain("region: eu-west-2")
+        expect(active.includes("baseUrl:")).toBe(false)
+        expect(active.includes("apiKeyEnv:")).toBe(false)
+        const loaded = loadManifest(join(result.dir, "agent.yaml"), { env: {} })
+        expect(loaded.manifest.model.main.api).toBe("bedrock-converse")
+        expect(loaded.manifest.model.main.options).toEqual({ region: "eu-west-2" })
+    })
+
+    test("a region that is not one is refused by name", () => {
+        expect(() =>
+            provisionAgent({
+                answers: { user: "Ada", name: "p-bad-region", preset: "bedrock", region: "europe" },
+                defaults: defaults(),
+            }),
+        ).toThrow(/region/)
+    })
 })
 
 describe("the server is on by default, and nobody is asked", () => {
@@ -277,6 +308,11 @@ describe("the branches a single walk cannot reach", () => {
         }
         expect(named("model")?.fallback).not.toBe("")
         expect(named("baseUrl")?.fallback).toMatch(/^https:\/\//)
+        // The Bedrock branch is served too, attributed to the preset that opens it: a form that
+        // could choose bedrock and then never ask for a region would write an agent that cannot load.
+        const region = named("region")
+        expect(region?.requires).toEqual({ step: "preset", value: "bedrock" })
+        expect(region?.fallback).toMatch(/^[a-z]{2}-/)
     })
 
     test("what the API cannot do is not offered", () => {
