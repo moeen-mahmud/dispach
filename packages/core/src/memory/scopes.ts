@@ -94,7 +94,8 @@ export function readPlan(input: {
     readonly standingInFor?: string
     /**
      * Whom the turn works for when another member's agent asked this one (a peer ask): set, even
-     * empty, only for such a turn. Anyone but this agent's own owner gets the stand-in's reading.
+     * empty, only for such a turn. Anyone but this agent's own owner gets the stand-in's reading
+     * (`owner:` and the space), except that a shared agent, which has no owner, also reads its projects.
      */
     readonly askedFor?: string
     /** Set when the turn came from a conversation. */
@@ -116,6 +117,11 @@ export function readPlan(input: {
             scopes: [
                 ...(input.owner === undefined ? [] : [`owner:${input.owner}` as const]),
                 "space",
+                // A shared agent (assigned to nobody) answers from its projects (`24-SPEC-PEER-ASK.md`):
+                // they are the team's, so nobody asking is reading somebody else's private notes.
+                ...(input.owner === undefined
+                    ? input.projects.map((id) => `project:${id}` as const)
+                    : []),
             ],
             ...(input.owner === undefined ? {} : { owner: input.owner }),
         }

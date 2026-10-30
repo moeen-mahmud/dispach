@@ -591,6 +591,7 @@ export {
     SUBMIT_ARTIFACT,
     submitArtifactTool,
 } from "./team/artifact.ts"
+export { ASK_AGENT, type AskPeer, askAgentTool } from "./team/ask.ts"
 export { isChildSession } from "./team/child-session.ts"
 export { type ExpandedTeams, expandTeams } from "./team/expand.ts"
 export {
@@ -599,6 +600,13 @@ export {
     type HandoffTarget,
     runHandoff,
 } from "./team/handoff.ts"
+export {
+    type AskPeerInfo,
+    askPeerSignature,
+    askPeersOf,
+    type RelayClient,
+    type RemotePeer,
+} from "./team/relay.ts"
 export {
     checkTeamGraph,
     HANDOFF,

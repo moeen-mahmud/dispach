@@ -45,8 +45,16 @@ import { TurnStreams, type TurnStreamsOptions } from "../store/buffer.ts"
 import { networkStoreRefusal } from "../store/filesystem.ts"
 import { SqliteStore } from "../store/sqlite/store.ts"
 import type { DeliveryBacklog, LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
+import { askAgentTool } from "../team/ask.ts"
 import { expandTeams } from "../team/expand.ts"
 import type { HandoffTarget } from "../team/handoff.ts"
+import {
+    type AskPeerInfo,
+    askPeerSignature,
+    askPeersOf,
+    type RelayClient,
+    type RemotePeer,
+} from "../team/relay.ts"
 import { handoffTool } from "../team/supervisor.ts"
 import type { ApprovalRequest } from "../tools/execute.ts"
 import { ToolRegistry } from "../tools/registry.ts"
@@ -62,6 +70,7 @@ import { Agent } from "./agent.ts"
 import { type ChannelFactory, ChannelHub } from "./channels.ts"
 import { ConversationHub } from "./conversations.ts"
 import { claimLeases, LEASE_BEAT_MS, markRuntimeLive } from "./lease.ts"
+import { isOwner } from "./owner.ts"
 import { reconcileSchedules, scheduleRunner, scheduleRunOfSession } from "./schedules.ts"
 
 export type AgentSource = string | Record<string, unknown>
@@ -137,6 +146,11 @@ export interface RuntimeOptions {
     /** Manifest paths, or already-parsed manifest objects. */
     readonly agents: readonly AgentSource[]
     readonly runtimeId?: string
+    /**
+     * The control plane's relay, for `ask_agent` to the person's agents in other silos (decision
+     * 15.10). Absent on a self-hosted install: no remote peers, and nothing else changes.
+     */
+    readonly relay?: RelayClient
     readonly env?: EnvSource
     readonly fetch?: FetchLike
     /** Bring your own bus, to subscribe before boot events fire. */
@@ -611,6 +625,15 @@ export class Runtime {
             ),
         )
 
+        // Who each agent is assigned to, for `ask_agent`'s peers: a store read, so before step 5,
+        // which is synchronous.
+        const owners = await ownersOf(
+            store,
+            prepared.loaded.map((loaded) => loaded.manifest.id),
+        )
+
+        const bootSignatures = new Map<string, string>()
+
         // 5. Agents: identity files, capability resolution, provider construction. Still no network
         //    — constructing a provider allocates no socket.
         const agents = mark("agents", () =>
@@ -618,6 +641,7 @@ export class Runtime {
                 instantiateAgent({
                     entry,
                     peers: peersAmong(
+                        owners,
                         prepared.loaded
                             .filter((loaded) => !prepared.memberIds.has(loaded.manifest.id))
                             .map((loaded) => loaded.manifest),
@@ -632,6 +656,7 @@ export class Runtime {
                     requestReload: () => {
                         runtime.reload(entry.manifest.id).catch(() => {})
                     },
+                    onAskPeers: (signature) => bootSignatures.set(entry.manifest.id, signature),
                     // Channels and plugins together: both are optional capabilities whose failure
                     // is a warning, and `agent.warnings` is the one array every surface reads.
                     warnings: [
@@ -727,6 +752,11 @@ export class Runtime {
 
         runtime.#providersByAgent = providersByAgent
         runtime.#sources = sources
+        runtime.#askSignatures = bootSignatures
+        // An assignment decides whose peers an agent is (`ask_agent`). One made through the hub (the
+        // API, `runtime.conversations`) is followed here; `init` and `owner adopt` write the store from
+        // another process and are picked up by the `adopt` or reload that follows them.
+        bus.on("agent.assigned", () => runtime.schedulePeerCheck())
 
         for (const [index] of hosted.entries()) {
             const agent = agents[index]
@@ -871,6 +901,14 @@ export class Runtime {
                 heal: (slugs) => runtime.#heal(agentId, slugs),
                 providerOf: (slug) => runtime.#agents.get(agentId)?.tools.providerOf(slug),
             })
+        }
+
+        // The person's agents in other silos, after readiness for the same reason, then every 15
+        // minutes. A list that moved reloads the agents it belongs to (`peersChanged`).
+        if (options.relay !== undefined) {
+            void runtime.refreshRemotePeers()
+            runtime.#peerTimer = setInterval(() => void runtime.refreshRemotePeers(), 15 * 60_000)
+            runtime.#peerTimer.unref?.()
         }
 
         return runtime
@@ -1166,6 +1204,10 @@ export class Runtime {
                 ? prepared.loaded.filter((entry) => leases.owned.includes(entry.manifest.id))
                 : prepared.loaded
 
+        const owners = await ownersOf(this.store, [
+            ...this.all().map((agent) => agent.id),
+            ...prepared.loaded.map((loaded) => loaded.manifest.id),
+        ])
         const admitted: Agent[] = []
         for (const entry of hosted) {
             const supply = prepared.supplyFor(entry.manifest.id)
@@ -1180,6 +1222,7 @@ export class Runtime {
             const agent = instantiateAgent({
                 entry,
                 peers: peersAmong(
+                    owners,
                     this.all().map((hosted) => hosted.manifest),
                     prepared.loaded
                         .filter((loaded) => !prepared.memberIds.has(loaded.manifest.id))
@@ -1188,6 +1231,7 @@ export class Runtime {
                 requestReload: () => {
                     this.reload(entry.manifest.id).catch(() => {})
                 },
+                onAskPeers: (signature) => this.#askSignatures.set(entry.manifest.id, signature),
                 warnings: [
                     ...(supply.failedPlugins ?? []),
                     ...built.warnings,
@@ -1276,6 +1320,17 @@ export class Runtime {
             agents: this.list().length,
         })
 
+        // A new agent, or a changed `description` or `delegation.ask`, may change other agents' peers.
+        // And a reload is how somebody asks for the remote list now rather than in 15 minutes, after
+        // linking a person in the control plane; a list that did not move ends the chain there.
+        if (
+            this.#options.relay !== undefined &&
+            admitted.some((agent) => agent.manifest.delegation?.ask === true)
+        ) {
+            void this.refreshRemotePeers(admitted.map((agent) => agent.id))
+        } else {
+            this.schedulePeerCheck()
+        }
         return admitted
     }
 
@@ -1333,11 +1388,6 @@ export class Runtime {
     }
 
     /**
-     * Everything `adopt` would check before hosting — manifest, plugins, the tool registry — run and
-     * thrown away. On a bus of its own, so a trial's `plugin.loaded` and warnings are not reported
-     * as if they happened, and with every provider it built stopped again.
-     */
-    /**
      * Why an agent on disk would not load, or `undefined` when it would (pilot.15). The reload trial,
      * run on its own and discarded: nothing is hosted, disposed or adopted. For an agent this runtime
      * is not hosting, so a surface can say what is wrong with it instead of answering 404.
@@ -1357,6 +1407,11 @@ export class Runtime {
         }
     }
 
+    /**
+     * Everything `adopt` would check before hosting — manifest, plugins, the tool registry — run and
+     * thrown away. On a bus of its own, so a trial's `plugin.loaded` and warnings are not reported
+     * as if they happened, and with every provider it built stopped again.
+     */
     async #trial(source: AgentSource): Promise<void> {
         const prepared = await prepareAgents({
             sources: [source],
@@ -1366,6 +1421,10 @@ export class Runtime {
             markAsync: async (_name, work) => await work(),
         })
         try {
+            const owners = await ownersOf(this.store, [
+                ...this.all().map((agent) => agent.id),
+                ...prepared.loaded.map((loaded) => loaded.manifest.id),
+            ])
             for (const entry of prepared.loaded) {
                 const supply = prepared.supplyFor(entry.manifest.id)
                 const built = await buildRegistry(entry, supply)
@@ -1377,6 +1436,7 @@ export class Runtime {
                 instantiateAgent({
                     entry,
                     peers: peersAmong(
+                        owners,
                         this.all().map((hosted) => hosted.manifest),
                         prepared.loaded
                             .filter((loaded) => !prepared.memberIds.has(loaded.manifest.id))
@@ -1396,17 +1456,6 @@ export class Runtime {
         }
     }
 
-    /**
-     * Apply an agent's manifest again without refusing a running turn (doc 16 R4, decision 14.23).
-     *
-     * Idle: the same as `replace`. Busy: the reload is **pending** — the running turns finish on the
-     * configuration they started with, and the swap happens the moment none is left. New turns keep
-     * running on the old configuration for `limits.reloadHoldMs`, then wait for the swap and start on
-     * the new one, so a constantly busy agent cannot postpone a reload forever. A held turn reaches
-     * the new instance through the admission it was given, whichever surface holds it.
-     *
-     * A second reload while one is pending joins it: the swap reads the manifest as it is then.
-     */
     /**
      * Fetch the providers' catalogues and schemas now, and reload the agent only if what it serves
      * changed (pilot.5).
@@ -1518,6 +1567,17 @@ export class Runtime {
         }
     }
 
+    /**
+     * Apply an agent's manifest again without refusing a running turn (doc 16 R4, decision 14.23).
+     *
+     * Idle: the same as `replace`. Busy: the reload is **pending** — the running turns finish on the
+     * configuration they started with, and the swap happens the moment none is left. New turns keep
+     * running on the old configuration for `limits.reloadHoldMs`, then wait for the swap and start on
+     * the new one, so a constantly busy agent cannot postpone a reload forever. A held turn reaches
+     * the new instance through the admission it was given, whichever surface holds it.
+     *
+     * A second reload while one is pending joins it: the swap reads the manifest as it is then.
+     */
     async reload(agentId: string): Promise<ReloadOutcome> {
         const source = this.#sources.get(agentId)
         if (source === undefined) return { status: "loaded", adopted: await this.replace(agentId) }
@@ -1664,6 +1724,11 @@ export class Runtime {
     }
 
     #reloads = new Map<string, PendingReload>()
+    /** Each agent's `ask_agent` peer list as it was built, for `peersChanged`. */
+    #askSignatures = new Map<string, string>()
+    #peerCheck: Promise<void> | undefined
+    #peerCheckAgain = false
+    #peerTimer: ReturnType<typeof setInterval> | undefined
 
     /**
      * A refresh has fetched pinned tools this agent loaded without — a server added through settings,
@@ -1812,12 +1877,151 @@ export class Runtime {
             this.#declined = this.#declined.filter((held) => held.agentId !== id)
 
             this.bus.emit("agent.disposed", { reason }, { agentId: id })
+            this.#askSignatures.delete(id)
         }
+        // An agent leaving is a peer leaving. A replacement is checked by the `adopt` that follows.
+        if (reason !== "replaced") this.schedulePeerCheck()
+    }
+
+    /**
+     * Reload every agent whose `ask_agent` peer list is no longer the one it was built with
+     * (`24-SPEC-PEER-ASK.md`, Hot reload). The list renders into slot 1 once, so an assignment
+     * change, a peer added or removed, or a sibling's new `description` takes a reload to reach the
+     * prompt. Agents whose list did not move are left alone, which is also what ends the chain: the
+     * reloads this starts call `adopt`, which asks again, and the second pass finds nothing to do.
+     *
+     * Run only through `schedulePeerCheck`, which serialises it: two checks reloading one agent at
+     * once would race two `replace` calls.
+     */
+    async #peersChanged(): Promise<readonly string[]> {
+        if (this.#stopped) return []
+        const lists = await this.#askPeerLists()
+        const changed = [...lists]
+            .filter(
+                ([id, peers]) =>
+                    askPeerSignature(peers) !==
+                    (this.#askSignatures.get(id) ?? askPeerSignature([])),
+            )
+            .map(([id]) => id)
+        // One at a time, not in parallel: an agent being replaced is briefly in no list, so two
+        // siblings rebuilt together each miss the other and the next check reloads them both again,
+        // forever. A refused reload reports itself on `agent.reloaded`; one agent's broken manifest
+        // must not stop its siblings picking up a new peer.
+        for (const id of changed) await this.reload(id).catch(() => {})
+        return changed
+    }
+
+    /** Each hosted agent's `ask_agent` peers as the current assignments and manifests decide them. */
+    async #askPeerLists(): Promise<ReadonlyMap<string, readonly AskPeerInfo[]>> {
+        const roots = this.all().filter((agent) => !this.#members.has(agent.id))
+        const owners = await ownersOf(
+            this.store,
+            roots.map((agent) => agent.id),
+        )
+        const candidates = peersAmong(
+            owners,
+            roots.map((agent) => agent.manifest),
+        )
+        const relay = this.#options.relay
+        return new Map(
+            roots.map((agent) => {
+                const owner = owners.get(agent.id)
+                return [
+                    agent.id,
+                    askPeersOf({
+                        manifest: agent.manifest,
+                        owner,
+                        candidates,
+                        remote: owner === undefined ? [] : (relay?.cachedPeers(agent.id) ?? []),
+                    }),
+                ]
+            }),
+        )
+    }
+
+    /**
+     * Whom an agent can ask with `ask_agent`, for a surface to show (`24-SPEC-PEER-ASK.md`). The same
+     * computation the reload check makes, so a page cannot disagree with what the agent was built with
+     * for longer than a pending reload.
+     */
+    async askPeers(agentId: string): Promise<readonly AskPeerInfo[]> {
+        return (await this.#askPeerLists()).get(agentId) ?? []
+    }
+
+    /**
+     * Check every agent's peer list soon (`#peersChanged`), coalesced: several triggers in one tick
+     * check once, and a check never overlaps another. An assignment made through the hub triggers it
+     * already; call it after changing one any other way.
+     */
+    schedulePeerCheck(): void {
+        if (this.#stopped) return
+        if (this.#peerCheck !== undefined) {
+            this.#peerCheckAgain = true
+            return
+        }
+        this.#peerCheck = (async () => {
+            do {
+                this.#peerCheckAgain = false
+                await new Promise((resolve) => setTimeout(resolve, 0))
+                await this.#peersChanged().catch(() => {})
+            } while (this.#peerCheckAgain && !this.#stopped)
+        })().finally(() => {
+            this.#peerCheck = undefined
+        })
+    }
+
+    /** Resolves once no peer check is running or queued: for a caller that needs the reloads done. */
+    async peersSettled(): Promise<void> {
+        while (this.#peerCheck !== undefined) await this.#peerCheck
+    }
+
+    /**
+     * Ask the control plane for each asking agent's remote peers and save them (decision 15.10), or
+     * only `only`'s. After readiness only — at boot it is called once the runtime is ready, and from
+     * `adopt`, which runs on a live runtime. A failure keeps the saved list and says so once per agent
+     * per refresh. Ends with a peer check either way.
+     */
+    async refreshRemotePeers(only?: readonly string[]): Promise<void> {
+        const relay = this.#options.relay
+        if (relay === undefined || this.#stopped) return
+        const roots = this.all().filter(
+            (agent) =>
+                !this.#members.has(agent.id) &&
+                agent.manifest.delegation?.ask === true &&
+                (only === undefined || only.includes(agent.id)),
+        )
+        const owners = await ownersOf(
+            this.store,
+            roots.map((agent) => agent.id),
+        )
+        await Promise.all(
+            roots.map(async (agent) => {
+                const owner = owners.get(agent.id)
+                if (owner === undefined) return
+                try {
+                    await relay.refreshPeers(agent.id, owner)
+                } catch (error) {
+                    this.bus.emit(
+                        "agent.warning",
+                        {
+                            code: "peer_list_stale",
+                            message: `Could not refresh ${agent.id}'s agents in other silos: ${
+                                error instanceof Error ? error.message : String(error)
+                            }`,
+                            hint: "It keeps the list it had. Check that the control plane is reachable at the URL in the silo's environment; the next refresh is in 15 minutes.",
+                        },
+                        { agentId: agent.id },
+                    )
+                }
+            }),
+        )
+        this.schedulePeerCheck()
     }
 
     async stop(reason = "requested"): Promise<void> {
         if (this.#stopped) return
         this.#stopped = true
+        if (this.#peerTimer !== undefined) clearInterval(this.#peerTimer)
         markRuntimeLive(this.runtimeId, false)
         this.bus.emit("runtime.stopping", { reason })
         for (const pending of [...this.#reloads.values()]) {
@@ -2228,6 +2432,60 @@ export async function buildRegistry(
     return { registry, providers, warnings }
 }
 
+/** What an agent knows of the others in its silo, for delegation (Phase 28). */
+export interface DelegationPeer {
+    readonly id: string
+    readonly offer?: NonNullable<AgentManifest["delegation"]>["offer"]
+    readonly to?: NonNullable<AgentManifest["delegation"]>["to"]
+    /** Its in-process team, for the cycle walk. */
+    readonly team?: readonly string[]
+    /** For `ask_agent` (decisions 15.9, 15.15). */
+    readonly name?: string
+    readonly description?: string
+    readonly ask: boolean
+    /** The participant it is assigned to. */
+    readonly owner?: string
+}
+
+/** Agent id → the participant it is assigned to. Read before agents are built, since that is sync. */
+async function ownersOf(store: Store, ids: Iterable<string>): Promise<ReadonlyMap<string, string>> {
+    const owners = new Map<string, string>()
+    await Promise.all(
+        [...new Set(ids)].map(async (id) => {
+            const assignment = await store.conversations.assignment(id)
+            if (assignment !== undefined) owners.set(id, assignment.participantId)
+        }),
+    )
+    return owners
+}
+
+function peerOf(manifest: AgentManifest, owners: ReadonlyMap<string, string>): DelegationPeer {
+    const owner = owners.get(manifest.id)
+    return {
+        id: manifest.id,
+        ask: manifest.delegation?.ask === true,
+        ...(manifest.name === undefined ? {} : { name: manifest.name }),
+        ...(manifest.description === undefined ? {} : { description: manifest.description }),
+        ...(owner === undefined ? {} : { owner }),
+        ...(manifest.delegation?.offer === undefined ? {} : { offer: manifest.delegation.offer }),
+        ...(manifest.delegation?.to === undefined ? {} : { to: manifest.delegation.to }),
+        ...(manifest.team === undefined
+            ? {}
+            : { team: manifest.team.members.map((member) => member.id) }),
+    }
+}
+
+/** Every agent this boot loaded or this runtime hosts, by id, the newer manifest winning. */
+function peersAmong(
+    owners: ReadonlyMap<string, string>,
+    ...lists: readonly (readonly AgentManifest[])[]
+): readonly DelegationPeer[] {
+    const byId = new Map<string, DelegationPeer>()
+    for (const list of lists)
+        for (const manifest of list) byId.set(manifest.id, peerOf(manifest, owners))
+    return [...byId.values()]
+}
+
 /**
  * Build one `Agent` from one loaded manifest.
  *
@@ -2242,33 +2500,6 @@ export async function buildRegistry(
  * turn time — see the comment on `teamTools`. Under `adopt` it reads the runtime, so a supervisor
  * adopted into a live process reaches members adopted in the same call.
  */
-/** What an agent knows of the others in its silo, for delegation (Phase 28). */
-export interface DelegationPeer {
-    readonly id: string
-    readonly offer?: NonNullable<AgentManifest["delegation"]>["offer"]
-    readonly to?: NonNullable<AgentManifest["delegation"]>["to"]
-    /** Its in-process team, for the cycle walk. */
-    readonly team?: readonly string[]
-}
-
-function peerOf(manifest: AgentManifest): DelegationPeer {
-    return {
-        id: manifest.id,
-        ...(manifest.delegation?.offer === undefined ? {} : { offer: manifest.delegation.offer }),
-        ...(manifest.delegation?.to === undefined ? {} : { to: manifest.delegation.to }),
-        ...(manifest.team === undefined
-            ? {}
-            : { team: manifest.team.members.map((member) => member.id) }),
-    }
-}
-
-/** Every agent this boot loaded or this runtime hosts, by id, the newer manifest winning. */
-function peersAmong(...lists: readonly (readonly AgentManifest[])[]): readonly DelegationPeer[] {
-    const byId = new Map<string, DelegationPeer>()
-    for (const list of lists) for (const manifest of list) byId.set(manifest.id, peerOf(manifest))
-    return [...byId.values()]
-}
-
 function instantiateAgent(input: {
     /** Other agents in the silo, for `delegation.to`. */
     readonly peers: readonly DelegationPeer[]
@@ -2281,6 +2512,8 @@ function instantiateAgent(input: {
     readonly resolveMember: (id: string) => HandoffTarget
     /** Queue a reload of this agent once its turns end (a tool pinned mid-turn, pilot.14). */
     readonly requestReload?: () => void
+    /** The agent's `ask_agent` peer list, as a signature, so a later change can be detected. */
+    readonly onAskPeers?: (signature: string) => void
     readonly options: RuntimeOptions
     readonly bus: EventBus
     readonly store: Store
@@ -2354,10 +2587,100 @@ function instantiateAgent(input: {
                       ],
                   }),
               ]
+    // `ask_agent` (decision 15.9): the same person's agents here, and theirs in other silos from
+    // the relay's cached list — no network, this is still before readiness. Fixed at load like the
+    // team; `Runtime.peersChanged` reloads an agent whose list moves.
+    const self = input.peers.find((peer) => peer.id === entry.manifest.id)
+    const relay = input.options.relay
+    const askPeers = askPeersOf({
+        manifest: entry.manifest,
+        owner: self?.owner,
+        candidates: input.peers,
+        remote: self?.owner === undefined ? [] : (relay?.cachedPeers(entry.manifest.id) ?? []),
+    })
+    const remoteById = new Map<string, RemotePeer>(
+        (self?.owner === undefined ? [] : (relay?.cachedPeers(entry.manifest.id) ?? [])).map(
+            (peer) => [`${peer.silo}/${peer.agent}`, peer],
+        ),
+    )
+    const askTools: readonly Tool[] =
+        askPeers.length === 0
+            ? []
+            : [
+                  askAgentTool({
+                      bus,
+                      store: store.handoffs,
+                      actsForOwner: async (participant) => {
+                          if (participant === null) return false
+                          const assignment = await store.conversations.assignment(entry.manifest.id)
+                          return assignment !== undefined && isOwner(assignment, participant)
+                      },
+                      peers: askPeers.map((peer) => {
+                          const remote = remoteById.get(peer.id)
+                          const target: HandoffTarget =
+                              remote === undefined || relay === undefined
+                                  ? {
+                                        id: peer.id,
+                                        // Resolved per call, like a team member: the peer may have
+                                        // been reloaded since this agent was built. The owner on a
+                                        // channel arrives as `telegram:<id>`; the peer compares
+                                        // participant ids, so it is told the owner's id, the same
+                                        // one a remote ask sends.
+                                        send: async (question, options) => {
+                                            const asking = options.participant
+                                            const assignment =
+                                                asking === undefined
+                                                    ? undefined
+                                                    : await store.conversations.assignment(
+                                                          entry.manifest.id,
+                                                      )
+                                            const asOwner =
+                                                asking !== undefined &&
+                                                assignment !== undefined &&
+                                                asking.id !== assignment.participantId &&
+                                                isOwner(assignment, asking)
+                                            return resolveMember(peer.id).send(
+                                                question,
+                                                asOwner
+                                                    ? {
+                                                          ...options,
+                                                          participant: {
+                                                              ...asking,
+                                                              id: assignment.participantId,
+                                                          },
+                                                      }
+                                                    : options,
+                                            )
+                                        },
+                                    }
+                                  : {
+                                        id: peer.id,
+                                        send: (question, options) =>
+                                            relay.ask({
+                                                fromAgent: entry.manifest.id,
+                                                // The owner's id, not the sender's: a channel
+                                                // sender who is the owner carries a channel id,
+                                                // and `ask_agent` has already checked it is them.
+                                                participantId: self?.owner ?? "",
+                                                silo: remote.silo,
+                                                agent: remote.agent,
+                                                question,
+                                                sessionKey: options.sessionKey ?? "",
+                                                ...(options.signal === undefined
+                                                    ? {}
+                                                    : { signal: options.signal }),
+                                            }),
+                                    }
+                          return { ...peer, target }
+                      }),
+                  }),
+              ]
+    input.onAskPeers?.(askPeerSignature(askPeers))
+    const extra = [...teamTools, ...askTools]
     const withTeam: ToolRegistry | undefined =
-        input.registry === undefined || teamTools.length === 0
+        input.registry === undefined || extra.length === 0
             ? input.registry
-            : input.registry.withTools(teamTools)
+            : input.registry.withTools(extra)
 
     return Agent.create(entry, bus, store, {
         // Conditionally spread, like every other optional here — and this field is exactly the

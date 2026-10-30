@@ -146,6 +146,7 @@ server:
 | `apiVersion` | `"dispach/v1"` | yes | Refused if unknown. Never silently upgraded. |
 | `id` | string | yes | Slug. Unique within a runtime. Used in session keys and API paths. May not start with `~`, which keys a shared memory scope (Phase 29). |
 | `name` | string | no | Display only. |
+| `description` | string | no | What the agent is for, one line, at most 200 characters (since 0.3.0). Shown beside it to the agents that may ask it (`ask_agent`), in `GET /v1/agents` and in the console. `init` writes the "what is it for" answer; `config_set` may change it. |
 | `extends` | string | no | Path to a base manifest. Shallow merge, arrays replace. |
 
 ### `model`
@@ -1145,6 +1146,7 @@ delegation:
       properties: { finding: { type: string } }
       required: [finding]
   to: "*"                 # or [agent ids]: whom I may delegate to (only agents that offer)
+  ask: true               # ask_agent: my owner's other agents, and shared ones (since 0.3.0)
 ```
 
 **`standIn`** applies only in a DM between two people, and only to the agent assigned to the absent
@@ -1166,6 +1168,16 @@ stand-in: its owner's shared notes and the space, never private memory, unless t
 for is its own owner. Targets are fixed when the coordinator loads; an agent adopted later is
 reachable after the coordinator reloads. A person sets both fields with `PATCH /config`
 (`delegation.offer`, `delegation.to`); an agent's `config_set` cannot.
+
+**`delegation.ask`** (since 0.3.0, `24-SPEC-PEER-ASK.md`) gives the agent `ask_agent(peer, question)`:
+a free-form question to another agent working for the same person, answered as text. Default
+`false`; `init` writes `true`. Both sides opt in: an agent is offered another that also declares it
+and is assigned to the same person, or to nobody — a **shared** agent, which is asked and never asks,
+and answers from its projects' memory rather than anybody's private notes. Across silos the control
+plane's relay adds the person's agents in their other silos, on a turn acting for the owner only. The
+asked turn is one hop (no `handoff`, no `ask_agent`). A change to an assignment, to this field or to a
+peer's `description` reloads the agents whose peer list it changes; nothing waits for a restart.
+Person-only, like the rest of `delegation`.
 
 ### `subagents` (since 0.2.0-pilot.6)
 

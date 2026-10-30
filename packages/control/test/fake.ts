@@ -31,6 +31,20 @@ export interface FakeSilo {
     readonly seen: { path: string; auth: string }[]
     /** Resolve to end a held stream. */
     release?: () => void
+    /** The environment the placer was handed for it: the relay URL and token. */
+    env: Readonly<Record<string, string>>
+    /** What `GET /v1/agents` lists. */
+    agents: {
+        id: string
+        name?: string
+        description?: string
+        ask: boolean
+        assignee: string | null
+    }[]
+    /** Every `POST /v1/agents/:id/messages` body, with the credential it came with. */
+    readonly messages: { agent: string; auth: string; body: Record<string, unknown> }[]
+    /** Keys minted in it, by id, with the scope asked for; `revoked` once deleted. */
+    readonly minted: { keyId: string; secret: string; scope: unknown; revoked: boolean }[]
 }
 
 export class FakePlacer implements Placer {
@@ -39,9 +53,17 @@ export class FakePlacer implements Placer {
     /** When set, `/v1/ready` never answers 200, to exercise the not-ready path. */
     neverReady = false
 
-    async create(subject: string, token: string): Promise<PlacedSilo> {
+    async create(
+        subject: string,
+        token: string,
+        env: Readonly<Record<string, string>> = {},
+    ): Promise<PlacedSilo> {
         const name = `silo-${subject}`
         const silo: FakeSilo = {
+            env,
+            agents: [],
+            messages: [],
+            minted: [],
             name,
             keys: new Set([token]),
             data: `data of ${subject}`,
@@ -97,10 +119,54 @@ export class FakePlacer implements Placer {
                     })
                     return
                 }
+                const body = (handle: (body: Record<string, unknown>) => void) => {
+                    let raw = ""
+                    req.on("data", (chunk: Buffer) => {
+                        raw += chunk.toString()
+                    })
+                    req.on("end", () => handle(raw === "" ? {} : JSON.parse(raw)))
+                }
                 if (path === "/v1/keys" && req.method === "POST") {
-                    const secret = `k_${randomBytes(8).toString("hex")}`
-                    silo.keys.add(secret)
-                    return json(201, { keyId: "key_1", secret })
+                    return body((sent) => {
+                        const secret = `k_${randomBytes(8).toString("hex")}`
+                        const keyId = `key_${silo.minted.length + 1}`
+                        silo.keys.add(secret)
+                        silo.minted.push({ keyId, secret, scope: sent.scope, revoked: false })
+                        json(201, { keyId, secret })
+                    })
+                }
+                if (path.startsWith("/v1/keys/") && req.method === "DELETE") {
+                    const minted = silo.minted.find((key) => path.endsWith(key.keyId))
+                    if (minted !== undefined) {
+                        minted.revoked = true
+                        silo.keys.delete(minted.secret)
+                    }
+                    return json(200, { revoked: true })
+                }
+                if (path === "/v1/agents" && req.method === "GET") {
+                    return json(200, silo.agents)
+                }
+                const asked = /^\/v1\/agents\/([^/]+)\/messages$/.exec(path)
+                if (asked !== null && req.method === "POST") {
+                    const agent = decodeURIComponent(asked[1] ?? "")
+                    return body((sent) => {
+                        silo.messages.push({ agent, auth, body: sent })
+                        if (!silo.agents.some((known) => known.id === agent)) {
+                            return json(404, { error: { code: "agent_not_found" } })
+                        }
+                        res.writeHead(202, { "content-type": "text/event-stream" })
+                        const frame = (type: string, data: unknown) =>
+                            `event: ${type}\ndata: ${JSON.stringify({ type, data })}\n\n`
+                        res.write(frame("turn.accepted", { sessionKey: sent.sessionKey }))
+                        res.end(
+                            frame("turn.end", {
+                                reason: "final",
+                                steps: 1,
+                                tokens: { prompt: 5, output: 3 },
+                                finalText: `${agent} answers: ${String(sent.text)}`,
+                            }),
+                        )
+                    })
                 }
                 if (path.startsWith("/v1/usage")) {
                     return json(200, { buckets: [{ calls: 3 }], query: path })
@@ -121,9 +187,14 @@ export class FakePlacer implements Placer {
     }
 
     /** Same volume (keys, data), new container: a new server on a new port. */
-    async recreate(subject: string, _token: string): Promise<PlacedSilo> {
+    async recreate(
+        subject: string,
+        _token: string,
+        env: Readonly<Record<string, string>> = {},
+    ): Promise<PlacedSilo> {
         const name = `silo-${subject}`
         const silo = this.#get(name)
+        silo.env = env
         const handler = silo.server.listeners("request")[0] as RequestListener
         silo.server.closeAllConnections()
         await new Promise((resolve) => silo.server.close(resolve))

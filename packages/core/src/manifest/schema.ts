@@ -793,6 +793,13 @@ export const DelegationSchema = z
             .optional(),
         /** The agents this one may delegate to, by id, or "*" for every agent that offers. */
         to: z.union([z.literal("*"), z.array(slug).min(1)]).optional(),
+        /**
+         * Free-form asks between one person's agents (`ask_agent`, decisions 15.9 and 15.15;
+         * `docs/24-SPEC-PEER-ASK.md`). Both sides opt in: an agent is offered another that declares it
+         * too and is assigned to the same person, or to nobody (a shared agent). Off unless declared;
+         * `init` writes it on.
+         */
+        ask: z.boolean().default(false),
     })
     .strict()
 
@@ -965,6 +972,22 @@ export const AgentManifestSchema = z
                 "An agent id may not start with `~`; that prefix is reserved for shared memory scopes.",
         }),
         name: z.string().min(1).optional(),
+        /**
+         * What this agent is for, in one line (decision 15.15). Shown beside its id to the agents that
+         * may ask it (`ask_agent`), in `GET /v1/agents` and in the console. One line because it is
+         * rendered into a tool description, where a line break splits a listing.
+         */
+        description: z
+            .string()
+            .min(1)
+            .max(200, {
+                message:
+                    "A description is one line of at most 200 characters; it is rendered into every peer's ask_agent description.",
+            })
+            .refine((value) => !/[\r\n]/.test(value), {
+                message: "A description is one line; put the detail in AGENTS.md.",
+            })
+            .optional(),
         /** Path to a base manifest. Shallow merge; arrays replace. */
         extends: z.string().min(1).optional(),
 

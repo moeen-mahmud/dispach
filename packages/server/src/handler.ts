@@ -789,7 +789,16 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "GET",
         "/v1/agents",
         async (context) => {
-            const hosted = runtime.list().map((agent) => summary(runtime, agent))
+            // Who each agent is assigned to, so the control plane's relay can list a person's peers
+            // without a request per agent (`24-SPEC-PEER-ASK.md`). `null` is a shared agent.
+            const hosted = await Promise.all(
+                runtime.list().map(async (agent) => ({
+                    ...summary(runtime, agent),
+                    assignee:
+                        (await runtime.store.conversations.assignment(agent.id))?.participantId ??
+                        null,
+                })),
+            )
             const live = new Set(hosted.map((entry) => entry.id))
             const stopped = (await runtime.store.agentState.list())
                 .filter((state) => !state.enabled && !live.has(state.agentId))
@@ -848,6 +857,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 // Who it works for, when an admin recorded it (Phase 27): the person accountable for
                 // what it is asked to do.
                 const assignment = await runtime.store.conversations.assignment(agent.id)
+                const peers = await runtime.askPeers(agent.id)
                 return json({
                     ...summary(runtime, agent),
                     ...(assignment === undefined
@@ -870,6 +880,9 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     catalogueTokens: agent.describe().catalogueTokens,
                     skills: agent.skills?.skills.length ?? 0,
                     schedules: schedules.length,
+                    // Whom `ask_agent` can ask (`24-SPEC-PEER-ASK.md`). Absent when nobody, like
+                    // `team`.
+                    ...(peers.length === 0 ? {} : { peers }),
                     /**
                      * Who this agent delegates to.
                      *
@@ -2006,7 +2019,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 if (parsedFrom.kind === "error") return fail(parsedFrom.error, 400)
                 const from = senderFor(context.principal, parsedFrom.from)
                 if (!from.ok) return fail(from.error, 403)
-                const sessionKey = await sessionFor(agent, context.principal, requested, from.from)
+                const sessionKey = await sessionFor(
+                    agent,
+                    context.principal,
+                    requested,
+                    from.from,
+                    input.peerAsk,
+                )
 
                 const idempotency = parseIdempotencyKey(context.request)
                 if (idempotency.kind === "error") return fail(idempotency.error, 400)
@@ -2135,6 +2154,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         ...(images.length === 0 ? {} : { images }),
                         ...(input.runtimeNote === undefined ? {} : { turnNote: input.runtimeNote }),
                         ...(input.role === undefined ? {} : { role: input.role }),
+                        ...(input.peerAsk === undefined ? {} : { peerAsk: input.peerAsk }),
                         signal: controller.signal,
                     })
                     .then(async (result) => {
@@ -3143,6 +3163,8 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         (context) =>
             withAgent(runtime, context, async (agent) => {
                 const unassigned = await runtime.store.conversations.unassign(agent.id)
+                // Its peers, and its former siblings', change with it (`ask_agent`, hot reload).
+                if (unassigned) runtime.schedulePeerCheck()
                 await agent.checkSessionScope()
                 return json({ id: agent.id, unassigned })
             }),
@@ -5381,6 +5403,11 @@ function summary(runtime: Runtime, agent: Agent) {
     return {
         id: agent.id,
         name: agent.manifest.name ?? agent.id,
+        ...(agent.manifest.description === undefined
+            ? {}
+            : { description: agent.manifest.description }),
+        // Whether it takes part in `ask_agent` (`24-SPEC-PEER-ASK.md`).
+        ask: agent.manifest.delegation?.ask === true,
         status: "loaded",
         model: agent.manifest.model.main.id,
         // Runtime status **layered over the manifest**, because a panel that offers "connect" needs

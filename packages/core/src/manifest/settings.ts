@@ -127,6 +127,13 @@ export const SETTINGS: readonly Setting[] = [
         means: "nlt | native — how tool calls are written",
         agentListed: true,
     },
+    // What the agent is for, in one line: a fact about it rather than a "who", so the agent may keep
+    // it current. Its siblings reload to show the new line (decision 15.15).
+    {
+        path: "description",
+        means: "what this agent is for, in one line of at most 200 characters. The person's other agents see it beside this one in ask_agent",
+        agentListed: true,
+    },
     { path: "model.main.id", means: "the model this agent runs on", agentListed: true },
     { path: "model.main.temperature", means: "0 to 2", agentListed: true },
     // Cost decisions, so a person's (pilot.4): the agent raising its own output or thinking budget is
@@ -311,6 +318,12 @@ export const SETTINGS: readonly Setting[] = [
     {
         path: "delegation.to",
         means: 'the other members\' agents this one may ask, by id, or "*" for every agent that offers. A peer ask is one hop: the asked agent answers, and cannot ask onward',
+        agentListed: false,
+    },
+    // Whom an agent may ask and be asked by is a "who" (14.80), so the person's.
+    {
+        path: "delegation.ask",
+        means: "true or false: this agent asks the person's other agents (ask_agent) and they may ask it. Both have to say yes; an agent assigned to nobody that says yes is a shared agent anyone's agent may ask",
         agentListed: false,
     },
     // Whose conversations merge, and whose memory an agent shares, are the person's to decide

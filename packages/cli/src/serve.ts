@@ -16,7 +16,7 @@
  */
 
 import { rmSync } from "node:fs"
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
 import {
     AgentManifestSchema,
     BRAND,
@@ -53,6 +53,7 @@ import {
     TOOL_PROVIDERS,
 } from "#lib/providers"
 import { provisionAgent, provisionSteps } from "#lib/provision"
+import { relayClient } from "#lib/relay-client"
 import {
     agentsDir,
     insideSandbox,
@@ -377,8 +378,21 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
      */
     const approvals = createApprovalRegistry()
 
+    // The control plane's peer-ask relay (decision 15.10): present only in a silo it placed, which it
+    // gives both variables. Built once, so a host reload keeps the cached peer list in memory.
+    const relayUrl = env[`${BRAND.envPrefix}RELAY_URL`]
+    const relayToken = env[`${BRAND.envPrefix}RELAY_TOKEN`]
+    const relay =
+        relayUrl === undefined || relayUrl === "" || relayToken === undefined || relayToken === ""
+            ? undefined
+            : relayClient({
+                  url: relayUrl,
+                  token: relayToken,
+                  cacheFile: join(dirname(storeFile), "relay-peers.json"),
+              })
     const createOptions = (paths: readonly string[]): Parameters<typeof Runtime.create>[0] => ({
         agents: paths,
+        ...(relay === undefined ? {} : { relay }),
         // The seam `ToolContext.approve` declared in Phase 3 and nothing ever filled. A blocked
         // call now emits `approval.requested` and waits for a POST; an unanswered one ends with the
         // turn, because core races the approver against the turn's own signal rather than starting

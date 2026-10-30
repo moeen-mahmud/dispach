@@ -327,6 +327,7 @@ interface HandoffRow {
     member_id: string
     member_session: string
     task: string
+    kind: string
     outcome: string
     artifact: string | null
     error_code: string | null
@@ -544,6 +545,7 @@ function toHandoff(row: HandoffRow): HandoffRecord {
         memberId: row.member_id,
         memberSession: row.member_session,
         task: row.task,
+        kind: row.kind === "ask" ? "ask" : "handoff",
         outcome: row.outcome as HandoffRecord["outcome"],
         ...(row.artifact === null ? {} : { artifact: row.artifact }),
         ...(row.error_code === null ? {} : { errorCode: row.error_code }),
@@ -1260,8 +1262,8 @@ export class SqliteStore implements Store {
             handoffInsert: db.prepare(
                 `INSERT INTO handoffs
                      (handoff_id, agent_id, session_key, turn_id, member_id, member_session,
-                      task, outcome, started_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
+                      task, outcome, started_at, kind)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
             ),
             handoffFinish: db.prepare(
                 `UPDATE handoffs
@@ -2185,6 +2187,7 @@ export class SqliteStore implements Store {
                     record.memberSession,
                     record.task,
                     record.startedAt,
+                    record.kind ?? "handoff",
                 )
             },
             finish: async (handoffId, outcome) => {

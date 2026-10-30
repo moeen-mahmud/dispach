@@ -54,6 +54,12 @@ export { PRESETS, type Preset, type PresetId, presetById } from "#lib/presets"
 
 import { PRESETS, type PresetId, presetById } from "#lib/presets"
 
+/** A purpose as the manifest's `description`: one line, inside the schema's 200 characters. */
+export function oneLineDescription(purpose: string): string {
+    const line = purpose.replace(/\s+/g, " ").trim()
+    return line.length <= 200 ? line : `${line.slice(0, 199)}…`
+}
+
 export interface InitAnswers {
     /** The person's name. */
     readonly user: string
@@ -2041,6 +2047,12 @@ function manifestFor(answers: InitAnswers, window: MeasuredWindow | undefined): 
         `apiVersion: ${BRAND.apiVersion}`,
         `id: ${slug}`,
         `name: ${answers.name}`,
+        // The "what is it for" answer, so this person's other agents know when to ask this one
+        // (decision 15.9). Quoted, because a purpose is free text and a colon in it is YAML.
+        // Left out when empty: the schema refuses an empty description, and a blank is not one.
+        ...(oneLineDescription(answers.purpose) === ""
+            ? []
+            : [`description: ${JSON.stringify(oneLineDescription(answers.purpose))}`]),
         ``,
         rule("model"),
         `model:`,
@@ -2250,6 +2262,14 @@ function manifestFor(answers: InitAnswers, window: MeasuredWindow | undefined): 
         `# "New conversation" in the web or the terminal starts afresh everywhere at once.`,
         `sessions:`,
         `  scope: owner`,
+        ``,
+        // On, for the reason `sessions.scope` is: `init` makes the person this agent's owner, and
+        // their agents asking each other is what they would expect. The schema default stays off so
+        // an embedder's agents change nothing on upgrade (decision 15.15).
+        `# Delegation — ask: your other agents can ask this one a question (ask_agent), and it can`,
+        `# ask them. Both have to say yes. Off is "keep me out of it".`,
+        `delegation:`,
+        `  ask: true`,
         ``,
         // Named and switched on for the reason skills above is: `knowledge.dir` naming a path that
         // does not exist is a load failure, so the directory is scaffolded and an empty one is a

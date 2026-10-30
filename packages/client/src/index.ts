@@ -534,6 +534,20 @@ export interface AgentDescriptionLike {
         /** The field names the member hands back. */
         readonly artifact: readonly string[]
     }[]
+    /** What the agent is for, in one line (`description` in its manifest). */
+    readonly description?: string
+    /** Whether it takes part in `ask_agent` (`delegation.ask`). */
+    readonly ask?: boolean
+    /** Its assignee's participant id, or `null` for a shared agent. On the listing only. */
+    readonly assignee?: string | null
+    /** Whom `ask_agent` can ask, on `GET /v1/agents/:id` only. Absent when nobody. */
+    readonly peers?: readonly {
+        readonly id: string
+        readonly name?: string
+        readonly description?: string
+        readonly shared: boolean
+        readonly remote: boolean
+    }[]
     /** Set on a `disabled` row: when it was switched off, and why if anybody said. */
     readonly disabledAt?: string
     readonly reason?: string

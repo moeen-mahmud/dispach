@@ -18,13 +18,24 @@ export interface PlacedSilo {
 }
 
 export interface Placer {
-    /** Start a silo whose runtime authenticates `token`. Returns once the container exists. */
-    create(subject: string, token: string): Promise<PlacedSilo>
+    /**
+     * Start a silo whose runtime authenticates `token`. Returns once the container exists. `env` is
+     * this silo's own, beside the shared `SILO_ENV`: the relay URL and token.
+     */
+    create(
+        subject: string,
+        token: string,
+        env?: Readonly<Record<string, string>>,
+    ): Promise<PlacedSilo>
     /**
      * Replace the container and keep the volume: the current image, the current environment. How an
      * image upgrade or a changed `SILO_ENV` reaches a silo that already exists.
      */
-    recreate(subject: string, token: string): Promise<PlacedSilo>
+    recreate(
+        subject: string,
+        token: string,
+        env?: Readonly<Record<string, string>>,
+    ): Promise<PlacedSilo>
     pause(name: string): Promise<void>
     wake(name: string): Promise<void>
     /** Remove the silo **and its data**. Irreversible: the volume holds the silo's only store. */
@@ -44,12 +55,21 @@ export class ControlError extends Error {
     readonly code: string
     readonly hint: string
     readonly status: number
+    /** Seconds, for a `Retry-After` header: a rate limit says when to come back. */
+    readonly retryAfter?: number
 
-    constructor(init: { code: string; message: string; hint: string; status?: number }) {
+    constructor(init: {
+        code: string
+        message: string
+        hint: string
+        status?: number
+        retryAfter?: number
+    }) {
         super(init.message)
         this.code = init.code
         this.hint = init.hint
         this.status = init.status ?? 500
+        if (init.retryAfter !== undefined) this.retryAfter = init.retryAfter
     }
 }
 
@@ -132,13 +152,21 @@ export class DockerPlacer implements Placer {
         this.#docker = options.docker ?? "docker"
     }
 
-    async create(subject: string, token: string): Promise<PlacedSilo> {
+    async create(
+        subject: string,
+        token: string,
+        env: Readonly<Record<string, string>> = {},
+    ): Promise<PlacedSilo> {
         const name = `${BRAND.siloPrefix}${subject}`
-        await this.#runSilo(name, subject, token)
+        await this.#runSilo(name, subject, token, env)
         return { name, baseUrl: await this.address(name) }
     }
 
-    async recreate(subject: string, token: string): Promise<PlacedSilo> {
+    async recreate(
+        subject: string,
+        token: string,
+        env: Readonly<Record<string, string>> = {},
+    ): Promise<PlacedSilo> {
         const name = `${BRAND.siloPrefix}${subject}`
         // The container only; the volume, and everything in the silo, stays. Stopped first so the
         // runtime exits on SIGTERM: it releases its leases and flushes the delivery in flight, where
@@ -149,7 +177,7 @@ export class DockerPlacer implements Placer {
             "silo_recreate_failed",
             `Could not replace ${name}.`,
         )
-        await this.#runSilo(name, subject, token)
+        await this.#runSilo(name, subject, token, env)
         return { name, baseUrl: await this.address(name) }
     }
 
@@ -313,10 +341,15 @@ export class DockerPlacer implements Placer {
         return BRAND.runtime.templates.slice(BRAND.runtime.home.length + 1)
     }
 
-    async #runSilo(name: string, subject: string, token: string): Promise<void> {
+    async #runSilo(
+        name: string,
+        subject: string,
+        token: string,
+        own: Readonly<Record<string, string>> = {},
+    ): Promise<void> {
         // Every value goes through the child's environment and `--env NAME`, never argv: a
         // `docker run` command line is readable in `ps` by every local user while it runs.
-        const env = { ...this.#siloEnv, [BRAND.runtime.tokenEnv]: token }
+        const env = { ...this.#siloEnv, ...own, [BRAND.runtime.tokenEnv]: token }
         const args = [
             "run",
             "--detach",
