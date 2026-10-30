@@ -9,6 +9,7 @@
  */
 
 import { execFile, spawn } from "node:child_process"
+import { createServer } from "node:net"
 import type { Readable } from "node:stream"
 import { BRAND } from "./brand.ts"
 
@@ -28,8 +29,8 @@ export interface Placer {
         env?: Readonly<Record<string, string>>,
     ): Promise<PlacedSilo>
     /**
-     * Replace the container and keep the volume: the current image, the current environment. How an
-     * image upgrade or a changed `SILO_ENV` reaches a silo that already exists.
+     * Replace the container and keep the volume and the address: the current image, the current
+     * environment. How an image upgrade or a changed `SILO_ENV` reaches a silo that already exists.
      */
     recreate(
         subject: string,
@@ -40,8 +41,13 @@ export interface Placer {
     wake(name: string): Promise<void>
     /** Remove the silo **and its data**. Irreversible: the volume holds the silo's only store. */
     remove(name: string): Promise<void>
-    /** Where it answers now. A daemon restart can move a published port. */
+    /** Where it answers now. */
     address(name: string): Promise<string>
+    /**
+     * Whether the address survives the container restarting. False only for a silo placed before
+     * ports were fixed, which the control plane then recreates (`ControlPlane.sweep`).
+     */
+    pinned(name: string): Promise<boolean>
     /** The silo's data as a tar.gz stream, templates excluded. Call on a paused silo. */
     exportData(name: string): Promise<Readable>
     /** Replace the silo's data with a tar.gz from `exportData`. Leaves it stopped. */
@@ -123,7 +129,7 @@ export interface DockerOptions {
     /**
      * A Docker network to attach silos to. Set when the control plane itself runs in a container on
      * that network: silos are then reached by container name and publish no port. Unset, each silo
-     * publishes its port on 127.0.0.1 only — never on a public interface.
+     * publishes a fixed port on 127.0.0.1 only — never on a public interface.
      */
     readonly network?: string
     /**
@@ -168,6 +174,9 @@ export class DockerPlacer implements Placer {
         env: Readonly<Record<string, string>> = {},
     ): Promise<PlacedSilo> {
         const name = `${BRAND.siloPrefix}${subject}`
+        // Read before the container goes: the new one publishes the same port, so the address the
+        // proxy, the relay and any webhook sender hold stays right.
+        const port = await this.#hostPort(name)
         // The container only; the volume, and everything in the silo, stays. Stopped first so the
         // runtime exits on SIGTERM: it releases its leases and flushes the delivery in flight, where
         // `rm --force` alone is a SIGKILL that does neither.
@@ -177,7 +186,7 @@ export class DockerPlacer implements Placer {
             "silo_recreate_failed",
             `Could not replace ${name}.`,
         )
-        await this.#runSilo(name, subject, token, env)
+        await this.#runSilo(name, subject, token, env, port)
         return { name, baseUrl: await this.address(name) }
     }
 
@@ -226,6 +235,36 @@ export class DockerPlacer implements Placer {
             })
         }
         return `http://${binding.trim()}`
+    }
+
+    async pinned(name: string): Promise<boolean> {
+        if (this.#network !== undefined) return true
+        return (await this.#boundPort(name)) !== undefined
+    }
+
+    /** The host port the container was created with; absent when Docker chose one at each start. */
+    async #boundPort(name: string): Promise<number | undefined> {
+        const out = await this.#run(
+            ["inspect", "--format", "{{json .HostConfig.PortBindings}}", name],
+            "silo_missing",
+            `No container ${name}.`,
+        )
+        const bindings = JSON.parse(out) as Record<string, { HostPort?: string }[] | null> | null
+        const port = Number(bindings?.[`${BRAND.runtime.port}/tcp`]?.[0]?.HostPort)
+        return Number.isInteger(port) && port > 0 ? port : undefined
+    }
+
+    /**
+     * The port to keep across a recreate: the fixed one, or for a silo placed before ports were fixed
+     * the one Docker chose at its last start, which is the address everything holds now. Absent when
+     * the container is gone or stopped with nothing fixed.
+     */
+    async #hostPort(name: string): Promise<number | undefined> {
+        if (this.#network !== undefined) return undefined
+        const bound = await this.#boundPort(name).catch(() => undefined)
+        if (bound !== undefined) return bound
+        const current = await this.address(name).catch(() => undefined)
+        return current === undefined ? undefined : Number(new URL(current).port)
     }
 
     async exportData(name: string): Promise<Readable> {
@@ -346,11 +385,64 @@ export class DockerPlacer implements Placer {
         subject: string,
         token: string,
         own: Readonly<Record<string, string>> = {},
+        keep?: number,
     ): Promise<void> {
         // Every value goes through the child's environment and `--env NAME`, never argv: a
         // `docker run` command line is readable in `ps` by every local user while it runs.
         const env = { ...this.#siloEnv, ...own, [BRAND.runtime.tokenEnv]: token }
-        const args = [
+        if (this.#network !== undefined) {
+            await this.#run(
+                this.#runArgs(name, subject, env, ["--network", this.#network]),
+                "silo_create_failed",
+                `Could not start a silo for "${subject}".`,
+                env,
+            )
+            return
+        }
+        // A fixed host port, never `127.0.0.1::port`: Docker picks an unpublished one again at every
+        // start, so a restart, a crash under the restart policy or a daemon restart moved the silo and
+        // could hand its old port to another silo. The kept port first; a fresh one if something took it
+        // meanwhile, or if two creates raced for the same free port.
+        const candidates = [
+            ...(keep === undefined ? [] : [keep]),
+            await freePort(),
+            await freePort(),
+        ]
+        for (const [index, port] of candidates.entries()) {
+            try {
+                await this.#run(
+                    this.#runArgs(name, subject, env, [
+                        "--publish",
+                        `127.0.0.1:${port}:${BRAND.runtime.port}`,
+                    ]),
+                    "silo_create_failed",
+                    `Could not start a silo for "${subject}".`,
+                    env,
+                )
+                return
+            } catch (error) {
+                const taken =
+                    error instanceof ControlError &&
+                    /port is already allocated|address already in use/i.test(error.message)
+                if (!taken || index === candidates.length - 1) throw error
+                // `docker run` leaves the container created when the bind fails.
+                await this.#run(
+                    ["rm", "--force", name],
+                    "silo_create_failed",
+                    `Could not clear ${name}.`,
+                )
+            }
+        }
+    }
+
+    /** `docker run` for a silo; `reach` is how the control plane gets to it, a network or a port. */
+    #runArgs(
+        name: string,
+        subject: string,
+        env: Readonly<Record<string, string>>,
+        reach: readonly string[],
+    ): string[] {
+        return [
             "run",
             "--detach",
             "--name",
@@ -366,12 +458,9 @@ export class DockerPlacer implements Placer {
             ...(this.#templates === undefined
                 ? []
                 : ["--volume", `${this.#templates}:${BRAND.runtime.templates}:ro`]),
-            ...(this.#network === undefined
-                ? ["--publish", `127.0.0.1::${BRAND.runtime.port}`]
-                : ["--network", this.#network]),
+            ...reach,
             this.#image,
         ]
-        await this.#run(args, "silo_create_failed", `Could not start a silo for "${subject}".`, env)
     }
 
     /** SIGTERM, then SIGKILL after 30 s. A paused container is unpaused first: it cannot take a signal. */
@@ -422,4 +511,20 @@ export class DockerPlacer implements Placer {
             )
         })
     }
+}
+
+/** A loopback port nothing is listening on, from the kernel. */
+function freePort(): Promise<number> {
+    return new Promise((resolve, reject) => {
+        const probe = createServer()
+        probe.once("error", reject)
+        probe.listen(0, "127.0.0.1", () => {
+            const address = probe.address()
+            probe.close(() =>
+                typeof address === "object" && address !== null
+                    ? resolve(address.port)
+                    : reject(new Error("no port")),
+            )
+        })
+    })
 }

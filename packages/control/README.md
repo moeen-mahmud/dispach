@@ -55,7 +55,7 @@ silo, in the runtime's template format (`docs/09-API-GUIDE.md` §1b).
 | `GET /v1/silos/:subject` | operator | One silo |
 | `POST /v1/silos/:subject/pause` | operator | Pause now. `409 silo_busy` while a turn, a delivery or a proxied request is open |
 | `POST /v1/silos/:subject/wake` | operator | Wake now |
-| `POST /v1/silos/:subject/recreate` | operator | New container, current image and `SILO_ENV`, same volume. How an upgrade rolls out. `409` while busy |
+| `POST /v1/silos/:subject/recreate` | operator | New container, current image and `SILO_ENV`, same volume, same port. How an upgrade rolls out. `409` while busy; a silo whose container is down is not busy |
 | `GET /v1/silos/:subject/backup` | operator | The silo's data as tar.gz, taken paused (crash-consistent). Woken again once the archive is read, unless suspend is on. Templates excluded. `409` while busy |
 | `PUT /v1/silos/:subject/backup` | operator | Restore that archive into this silo, **replacing** everything in it, keys included |
 | `DELETE /v1/silos/:subject` | operator | Remove the silo **and its volume**. Irreversible: it holds the silo's only store |
@@ -144,7 +144,10 @@ never on one failure. On when `DISPACH_CONTROL_HOOK_URL` is set.
 
 `Placer` (`src/placer.ts`) is the whole of the cloud-agnosticism: create, pause, wake, remove,
 address. v0 has one driver, **Docker**, which is also the AWS path: many silos on an EC2 Graviton
-host, `docker pause` as suspend. Each silo publishes its port on `127.0.0.1` only. When this process
+host, `docker pause` as suspend. Each silo publishes a port on `127.0.0.1` only, chosen at create and
+fixed for its lifetime: a restart, a crash under the restart policy, a daemon restart and `recreate`
+all leave it where it was. A silo placed by an older control plane, on a port Docker chose at each
+start, is recreated once by the sweep, when idle, onto the port it has at that moment. When this process
 runs in a container on the same network, set `DISPACH_CONTROL_NETWORK` instead, and silos are reached
 by name with no port published. A driver that *stops* silos rather than pausing them (Fargate) would
 have to start them before `nextWakeAt`, because a runtime that starts after an occurrence skips it.

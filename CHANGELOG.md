@@ -35,6 +35,7 @@
 
 ### Fixed
 
+- Control plane (#74): a silo's port is fixed for its lifetime. Docker used to choose a new one at every container start, so after a `docker restart`, a crash restart or a Docker daemon restart, control could not reach the silo: `recreate` and `pause` were refused with `silo_unreachable`, `wake` did nothing, and the proxy, the monitor and the peer-ask relay failed. A silo could also get another silo's old port. `recreate` keeps the port. The sweep moves a silo created before this change onto a fixed port, keeping the port it has, once it is idle.
 - A container recreated with `--init` (as the README now says) after one that ran without it was refused for 45 minutes with `agent_already_serving … pid 1`: the old lease named pid 1, and under `--init` pid 1 is `docker-init`, alive and not the runtime. A lease naming pid 1 is now dead when `/proc/1/exe` is not node or bun (decision 15.11).
 - README: every `docker run` names the `dispach-home` volume and passes `--init`, so an upgrade keeps the store and backgrounded `exec` children are reaped; the image tag is 0.2.1; the `.env` step copies `examples/minimal/.env.example` (only the example is tracked); compose text matches `docker-compose.yml` (plain `up` pulls, `DISPACH_VERSION` pins); the image's shell is dash, not busybox; package count and provider list corrected; load average 3.3.
 - `evals/CLAIMS.md` carries rows for the Ink import cost, compose startup time, image size breakdown and the 91 ms boot aside, marked `needs-run`.

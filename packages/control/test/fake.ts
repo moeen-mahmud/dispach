@@ -29,6 +29,11 @@ export interface FakeSilo {
     readonly webhooks: { url: string; types: string[] }[]
     /** Every path the silo was asked for, with the credential presented. */
     readonly seen: { path: string; auth: string }[]
+    /**
+     * False for a silo placed before ports were fixed: `restartContainer` then moves it to a new
+     * port, as Docker does. A recreate pins it.
+     */
+    pinned: boolean
     /** Resolve to end a held stream. */
     release?: () => void
     /** The environment the placer was handed for it: the relay URL and token. */
@@ -69,6 +74,7 @@ export class FakePlacer implements Placer {
             data: `data of ${subject}`,
             stopped: false,
             paused: false,
+            pinned: true,
             idle: true,
             seen: [],
             webhooks: [],
@@ -186,7 +192,7 @@ export class FakePlacer implements Placer {
         return { name, baseUrl: await this.address(name) }
     }
 
-    /** Same volume (keys, data), new container: a new server on a new port. */
+    /** Same volume (keys, data), new container, same port; and pinned from then on. */
     async recreate(
         subject: string,
         _token: string,
@@ -195,15 +201,36 @@ export class FakePlacer implements Placer {
         const name = `silo-${subject}`
         const silo = this.#get(name)
         silo.env = env
+        await this.#rebind(silo, true)
+        silo.paused = false
+        silo.stopped = false
+        silo.pinned = true
+        this.calls.push(`recreate ${name}`)
+        return { name, baseUrl: await this.address(name) }
+    }
+
+    /**
+     * What a `docker restart` or a daemon restart does to a running container, behind the control
+     * plane's back: a pinned one comes back on its port, an unpinned one on a new one.
+     */
+    async restartContainer(name: string): Promise<void> {
+        const silo = this.#get(name)
+        await this.#rebind(silo, silo.pinned)
+    }
+
+    async pinned(name: string): Promise<boolean> {
+        return this.#get(name).pinned
+    }
+
+    async #rebind(silo: FakeSilo, keepPort: boolean): Promise<void> {
+        const { port } = silo.server.address() as AddressInfo
         const handler = silo.server.listeners("request")[0] as RequestListener
         silo.server.closeAllConnections()
         await new Promise((resolve) => silo.server.close(resolve))
         silo.server = createServer(handler)
-        await new Promise<void>((resolve) => silo.server.listen(0, "127.0.0.1", resolve))
-        silo.paused = false
-        silo.stopped = false
-        this.calls.push(`recreate ${name}`)
-        return { name, baseUrl: await this.address(name) }
+        await new Promise<void>((resolve) =>
+            silo.server.listen(keepPort ? port : 0, "127.0.0.1", resolve),
+        )
     }
 
     async exportData(name: string): Promise<Readable> {
