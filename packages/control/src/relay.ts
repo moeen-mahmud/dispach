@@ -97,41 +97,49 @@ export class Relay {
             if (link.subject === caller.subject) continue
             const silo = this.#control.store.get(link.subject)
             if (silo === undefined) continue
-            const release = this.#control.hold(silo.subject)
-            try {
-                const awake = await this.#control.ensureAwake(silo)
-                const response = await this.#control.siloFetch(awake, "/v1/agents")
-                if (!response.ok) continue
-                const agents = (await response.json()) as readonly {
-                    id: string
-                    name?: string
-                    description?: string
-                    ask?: boolean
-                    assignee?: string | null
-                    status?: string
-                }[]
-                for (const agent of Array.isArray(agents) ? agents : []) {
-                    if (agent.status === "disabled") continue
-                    if (agent.ask !== true) continue
-                    const shared = agent.assignee === null || agent.assignee === undefined
-                    if (!shared && agent.assignee !== link.participantId) continue
-                    found.push({
-                        silo: silo.subject,
-                        agent: agent.id,
-                        ...(agent.name === undefined || agent.name === agent.id
-                            ? {}
-                            : { name: agent.name }),
-                        ...(agent.description === undefined
-                            ? {}
-                            : { description: agent.description }),
-                        shared,
-                    })
-                }
-            } finally {
-                release()
-            }
+            found.push(...(await this.#askable(silo, link.participantId)))
         }
         return found
+    }
+
+    /**
+     * The agents in `silo` this person may ask: declaring `delegation.ask`, running, and assigned to
+     * them there or to nobody. One function for listing and for asking, so an ask cannot reach an
+     * agent the listing would not have offered.
+     */
+    async #askable(silo: Silo, participantId: string): Promise<RemotePeer[]> {
+        const found: RemotePeer[] = []
+        const release = this.#control.hold(silo.subject)
+        try {
+            const awake = await this.#control.ensureAwake(silo)
+            const response = await this.#control.siloFetch(awake, "/v1/agents")
+            if (!response.ok) return found
+            const agents = (await response.json()) as readonly {
+                id: string
+                name?: string
+                description?: string
+                ask?: boolean
+                assignee?: string | null
+                status?: string
+            }[]
+            for (const agent of Array.isArray(agents) ? agents : []) {
+                if (agent.status === "disabled" || agent.ask !== true) continue
+                const shared = agent.assignee === null || agent.assignee === undefined
+                if (!shared && agent.assignee !== participantId) continue
+                found.push({
+                    silo: silo.subject,
+                    agent: agent.id,
+                    ...(agent.name === undefined || agent.name === agent.id
+                        ? {}
+                        : { name: agent.name }),
+                    ...(agent.description === undefined ? {} : { description: agent.description }),
+                    shared,
+                })
+            }
+            return found
+        } finally {
+            release()
+        }
     }
 
     async ask(
@@ -155,6 +163,10 @@ export class Relay {
         if (principal === undefined || target === undefined || silo === undefined) {
             throw unknownPeer()
         }
+        // The agent too, not only the person: a silo naming another member's agent, or one that never
+        // opted in, gets the same 404 as an unlinked person, before any key is minted.
+        const askable = await this.#askable(silo, target.participantId)
+        if (!askable.some((peer) => peer.agent === request.toAgent)) throw unknownPeer()
 
         const { askRatePerMinute } = this.rate(principal)
         const windowStart = this.#now() - 60_000

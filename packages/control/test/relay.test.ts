@@ -186,6 +186,19 @@ describe("ask", () => {
         expect(await stranger.json()).toEqual(await foreign.json())
     })
 
+    test("another person's agent, or one that never opted in, gets the same 404 and no key", async () => {
+        const { ask, fake } = await setup()
+        const bobs = await ask({ toAgent: "bobs-helper" })
+        const quiet = await ask({ toAgent: "quiet" })
+        const missing = await ask({ toAgent: "nobody" })
+        expect([bobs.status, quiet.status, missing.status]).toEqual([404, 404, 404])
+        expect(await bobs.json()).toEqual(await quiet.json())
+        expect(fake("team").minted).toEqual([])
+        expect(fake("team").messages).toEqual([])
+        // Ada's own agent there is askable.
+        expect((await ask({ toAgent: "adas-helper" })).status).toBe(200)
+    })
+
     test("the rate limit: the default, a per-person override, and back after null", async () => {
         const { ask, call, advance } = await setup()
         await call("PUT", "/v1/relay/config", { token: TOKEN, body: { askRatePerMinute: 2 } })

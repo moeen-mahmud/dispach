@@ -208,8 +208,9 @@ starting `ask:` (`relay_ask_invalid` otherwise):
 
 1. The caller is the silo matching the token. `participant` must be linked in it, giving a
    principal. `toSilo` must be linked to the same principal, giving the target participant. Either
-   failing answers `404 relay_peer_unknown`. The same answer for both, so a caller cannot tell
-   "not linked" from "no such silo".
+   failing answers `404 relay_peer_unknown`. So does a `toAgent` the listing would not offer there
+   (another person's, one without `delegation.ask`, a stopped one, or none): the same function decides
+   both. The same answer for all of them, so a caller cannot tell which, and no key is minted.
 2. Rate limit per principal, at the effective rate (`relay_rate_limited`, 429, `Retry-After`).
 3. `hold` and `ensureAwake` the target for the whole relay.
 4. Mint a key on the target: `scope: {participant: <target P>, agents: [toAgent], can: ["chat"],
