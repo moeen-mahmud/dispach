@@ -40,7 +40,7 @@ export interface AgentRow {
     readonly model?: string
     readonly disabledAt?: string
     readonly reason?: string
-    /** `owner`, `peer` or `channel-peer`: whether "new conversation" rotates (since 0.3). */
+    /** `owner`, `peer` or `channel-peer`: whether "new conversation" rotates (since 0.2.2). */
     readonly sessionScope?: string
 }
 
@@ -312,6 +312,57 @@ export interface ChannelActions {
  * Rendered above everything else on the overview and never collapsed. A warning behind a tab is one
  * this project has already watched go unread for weeks, and these are the reason a bot is silent.
  */
+/**
+ * Two per-conversation switches beside "clear history": whether this conversation is drawn on by
+ * history recall, and, on an agent with phases, which phase it is in. Recall is the lever for an
+ * old wrong answer that keeps steering new ones, without deleting the chat it came from.
+ */
+export function SessionControls(props: {
+    readonly session?: { readonly recall?: false; readonly phase?: string }
+    readonly phases?: readonly string[]
+    readonly busy?: boolean
+    readonly onRecall: (recall: boolean) => void
+    readonly onPhase: (phase: string) => void
+}): React.ReactElement {
+    const recalled = props.session?.recall !== false
+    return (
+        <>
+            <button
+                type="button"
+                className="ghost hide-narrow"
+                disabled={props.busy === true || props.session === undefined}
+                title={
+                    recalled
+                        ? "History recall can draw on this conversation. Keep it out; its messages stay."
+                        : "Kept out of history recall. Put it back."
+                }
+                onClick={() => props.onRecall(!recalled)}
+            >
+                {recalled ? "recall: on" : "recall: off"}
+            </button>
+            {props.phases === undefined ? null : (
+                <label className="hide-narrow inline-field">
+                    phase
+                    <select
+                        value={props.session?.phase ?? ""}
+                        disabled={props.busy === true || props.session === undefined}
+                        onChange={(event) => props.onPhase(event.target.value)}
+                    >
+                        {props.session?.phase === undefined ? (
+                            <option value="">entry</option>
+                        ) : null}
+                        {props.phases.map((phase) => (
+                            <option key={phase} value={phase}>
+                                {phase}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+            )}
+        </>
+    )
+}
+
 export function WarningsPanel(props: {
     readonly warnings: readonly WireError[]
 }): React.ReactElement | null {
@@ -353,6 +404,8 @@ export function ChannelsPanel(props: {
     readonly now: number
     /** Absent makes the panel read-only, which is what it was before 0.1.3. */
     readonly actions?: ChannelActions
+    /** `<server>/v1/agents/<id>`: where an A2A channel's agent card is served from. */
+    readonly agentUrl?: string
 }): React.ReactElement {
     if (props.channels.length === 0) {
         return (
@@ -385,6 +438,19 @@ export function ChannelsPanel(props: {
                                 : (channel.status ?? "not started here")}
                             {channel.detail === undefined ? null : ` — ${channel.detail}`}
                         </p>
+                        {channel.type !== "a2a" || props.agentUrl === undefined ? null : (
+                            <p className="sub">
+                                agent card{" "}
+                                <a
+                                    href={`${props.agentUrl}/plugins/a2a/.well-known/agent-card.json`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                >
+                                    <code>{`${props.agentUrl}/plugins/a2a/.well-known/agent-card.json`}</code>
+                                </a>
+                                . Behind a proxy, peers use the plugin's <code>publicUrl</code>.
+                            </p>
+                        )}
                         {channel.credentialEnv === undefined ? null : (
                             <p className={channel.credentialSet === true ? "sub" : "warn"}>
                                 <code>{channel.credentialEnv}</code>{" "}
@@ -511,6 +577,7 @@ export const SERVER_PANELS: readonly { readonly panel: PanelName; readonly label
     { panel: "rooms", label: "Rooms" },
     { panel: "actions", label: "Actions" },
     { panel: "memory", label: "Memory" },
+    { panel: "server-usage", label: "Usage" },
     { panel: "webhooks", label: "Webhooks" },
     { panel: "backup", label: "Backup" },
     { panel: "keys", label: "Keys" },

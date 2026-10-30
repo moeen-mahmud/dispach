@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { endedBadly, statusSentence, TurnsPanel } from "../src/turns.tsx"
+import { endedBadly, ReplayView, statusSentence, stepLabel, TurnsPanel } from "../src/turns.tsx"
 
 describe("turns", () => {
     test("every end reason has a sentence, and the bad ones are the bad ones", () => {
@@ -57,5 +57,59 @@ describe("turns", () => {
         expect(html).toContain("40 steps")
         expect(html).toContain(">older turns<")
         expect(html.match(/class="card turn bad"/g)?.length).toBe(1)
+    })
+})
+
+describe("a turn's replay", () => {
+    const turn = {
+        turnId: "t1",
+        sessionKey: "web:a",
+        status: "final",
+        input: "list it",
+        text: "done",
+        steps: 2,
+        promptTokens: 10,
+        outputTokens: 5,
+    }
+    test("labels each stored step by what wrote it, and shows a result as text, not markup", () => {
+        const html = renderToStaticMarkup(
+            createElement(ReplayView, {
+                turn,
+                replay: {
+                    state: "ready",
+                    steps: [
+                        { id: 1, role: "user", content: "list it" },
+                        {
+                            id: 2,
+                            role: "assistant",
+                            content: "",
+                            origin: "call",
+                            toolCalls: [{ name: "glob", arguments: '{"pattern":"**/*"}' }],
+                        },
+                        { id: 3, role: "user", content: "<b>a.txt</b>", origin: "observation" },
+                        { id: 4, role: "assistant", content: "done" },
+                    ],
+                },
+            }),
+        )
+        expect(stepLabel({ id: 2, role: "assistant", content: "", origin: "call" })).toBe(
+            "tool call",
+        )
+        expect(html.indexOf(">asked<")).toBeLessThan(html.indexOf(">tool call<"))
+        expect(html.indexOf(">tool result<")).toBeLessThan(html.indexOf(">reply<"))
+        expect(html).toContain("&lt;b&gt;a.txt&lt;/b&gt;")
+        // A native call is in toolCalls, its content empty: the replay shows the call, not a blank.
+        expect(html).toContain("glob({&quot;pattern&quot;:&quot;**/*&quot;})")
+    })
+
+    test("unasked offers the replay; nothing stored says why", () => {
+        expect(
+            renderToStaticMarkup(createElement(ReplayView, { turn, onReplay: () => undefined })),
+        ).toContain("replay every step")
+        expect(
+            renderToStaticMarkup(
+                createElement(ReplayView, { turn, replay: { state: "ready", steps: [] } }),
+            ),
+        ).toContain("No stored steps")
     })
 })

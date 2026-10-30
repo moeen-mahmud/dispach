@@ -7,6 +7,7 @@ import {
     CHANNEL_TYPES,
     FilesPanel,
     TemplateForm,
+    TemplateVars,
     WebhooksPanel,
 } from "../src/ops.tsx"
 
@@ -130,5 +131,33 @@ describe("add channel", () => {
             createElement(AddChannel, { existing: ["tg"], busy: false, onAdd: noop }),
         )
         expect(closed).toContain("+ add a channel")
+    })
+})
+
+describe("template vars", () => {
+    test("plain values are editable, secrets are named and never shown", () => {
+        const html = renderToStaticMarkup(
+            createElement(TemplateVars, {
+                template: "support",
+                values: { store: "Acme" },
+                declared: [
+                    {
+                        name: "store",
+                        description: "The shop's name",
+                        required: true,
+                        secret: false,
+                    },
+                    { name: "apiKey", required: true, secret: true },
+                ],
+                onSave: () => undefined,
+            }),
+        )
+        expect(html).toContain("<code>support</code>")
+        expect(html).toContain('value="Acme"')
+        expect(html).toContain("The shop&#x27;s name")
+        expect(html).toContain("not shown: apiKey.")
+        expect(html).not.toContain('value=""')
+        // Nothing changed yet, so there is nothing to save.
+        expect(html).toMatch(/<button type="submit"[^>]*disabled=""/)
     })
 })

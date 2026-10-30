@@ -31,25 +31,44 @@ export function rememberSession(agentId: string, key: string): string {
 /** A rotation's suffix: `~` and six symbols (`docs/23-SPEC-SESSIONS.md`). */
 const ROTATION = /~[0-9a-hjkmnp-tv-z]{6}$/
 
+/** A person's conversation across surfaces, named for them rather than shown as a key. */
+export function isPersonalConversation(key: string): boolean {
+    return key.startsWith("owner:") || key.startsWith("peer:")
+}
+
 /**
  * How the sidebar names a conversation. A person's own conversation across surfaces is "You", the
- * one before a "new conversation" is "You · earlier" with the day it was last used, and a registered
+ * one before a "new conversation" is "You · earlier" with when it was last used, and a registered
  * participant's is their id. Anything else is its key, which is what it has always shown.
  */
-export function conversationLabel(session: {
-    readonly sessionKey: string
-    readonly head?: boolean
-    readonly lastActivityAt?: string
-}): string {
+export function conversationLabel(
+    session: {
+        readonly sessionKey: string
+        readonly head?: boolean
+        readonly lastActivityAt?: string
+    },
+    now: Date = new Date(),
+): string {
     const key = session.sessionKey
     const earlier =
         session.head === false
-            ? ` · earlier${session.lastActivityAt === undefined ? "" : `, ${session.lastActivityAt.slice(0, 10)}`}`
+            ? ` · earlier${session.lastActivityAt === undefined ? "" : `, ${lastUsed(session.lastActivityAt, now)}`}`
             : ""
     if (key.startsWith("owner:")) return `You${earlier}`
     if (key.startsWith("peer:"))
         return `${key.slice("peer:".length).replace(ROTATION, "")}${earlier}`
     return key
+}
+
+/**
+ * The time when it was today, the day otherwise, both in the viewer's zone: two conversations set
+ * aside on the same day would otherwise carry the same label.
+ */
+function lastUsed(iso: string, now: Date): string {
+    const at = new Date(iso)
+    const pad = (n: number) => String(n).padStart(2, "0")
+    const day = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    return day(at) === day(now) ? `${pad(at.getHours())}:${pad(at.getMinutes())}` : day(at)
 }
 
 /** Whether `scope` puts a person's turns in one conversation, so "new conversation" is a rotation. */

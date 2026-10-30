@@ -28,6 +28,7 @@ export const PANELS = [
     "models",
     "turns",
     "usage",
+    "server-usage",
     "files",
     "tools",
     "schedules",

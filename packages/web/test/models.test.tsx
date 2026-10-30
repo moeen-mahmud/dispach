@@ -101,3 +101,45 @@ describe("the wordmark", () => {
         expect(decodeURIComponent(faviconHref())).toContain("#d75fd7")
     })
 })
+
+describe("capabilities", () => {
+    const resolved = {
+        contextWindow: 1_048_576,
+        maxOutput: 393_216,
+        thinking: "deepseek",
+        nativeTools: true,
+        promptCache: "none",
+        promptStyle: { delimiters: "markdown", intensity: "neutral" },
+    }
+    const render = (capabilities?: Record<string, unknown>) =>
+        renderToStaticMarkup(
+            createElement(ModelsPanel, {
+                settings: [
+                    {
+                        path: "model.main",
+                        means: "",
+                        value: {
+                            id: "deepseek-v4-pro",
+                            ...(capabilities === undefined ? {} : { capabilities }),
+                        },
+                    },
+                ],
+                secrets: [],
+                resolved,
+                onChange: () => undefined,
+                onSecret: () => undefined,
+            }),
+        )
+
+    test("the resolved values are shown, each marked as the registry's", () => {
+        const html = render()
+        expect(html).toContain("1,048,576")
+        expect(html).toContain('<option value="deepseek" selected="">deepseek</option>')
+        expect(html).toContain("markdown · neutral")
+        expect(html).not.toContain("overridden")
+    })
+
+    test("a field the manifest overrides says so and offers the reset", () => {
+        expect(render({ contextWindow: 32_768 })).toContain("overridden · reset")
+    })
+})

@@ -61,6 +61,14 @@ export type Row =
            * output can be anything. The text is in the stored session, on the reattach path.
            */
           readonly untrusted?: boolean
+          /**
+           * The arguments and the first 2 KB of the output, **only** under the agent's
+           * `tools.eventDetail: redacted`, which puts them on the events with credentials replaced.
+           * Absent otherwise, which is the default and the reason above.
+           */
+          readonly args?: Readonly<Record<string, unknown>>
+          readonly output?: string
+          readonly outputTruncated?: boolean
           /** The routed call ran in a subagent (pilot.6): its calls, folded under this row. */
           readonly subagent?: SubagentBlock
       }
@@ -332,6 +340,7 @@ function onEvent(state: Transcript, event: AnyEvent): Transcript {
                         callId: data.callId,
                         slug: data.slug,
                         mutating: data.mutating,
+                        ...(data.args === undefined ? {} : { args: data.args }),
                     },
                 ],
             }
@@ -361,6 +370,8 @@ function onEvent(state: Transcript, event: AnyEvent): Transcript {
                 truncated: data.truncated,
                 latencyMs: data.latencyMs,
                 ...(data.trust === "untrusted" ? { untrusted: true } : {}),
+                ...(data.output === undefined ? {} : { output: data.output }),
+                ...(data.outputTruncated === true ? { outputTruncated: true } : {}),
             }
             return { ...state, rows }
         }

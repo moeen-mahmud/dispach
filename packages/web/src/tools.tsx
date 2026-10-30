@@ -44,6 +44,75 @@ export interface RefreshReport {
 
 const RULE = /^[a-z][a-z0-9_]*(\([^)]*\))?$/i
 
+/**
+ * The built-in providers, and what naming each needs: nothing for `system` and `web` (`web: {}` is
+ * fetch only; search wants a backend), a key variable for Composio. MCP needs its servers, which is
+ * a shape for Settings rather than a switch.
+ */
+const KNOWN_PROVIDERS = [
+    { id: "system", what: "shell and files" },
+    { id: "web", what: "fetch pages; search with a backend" },
+    { id: "composio", what: "SaaS apps through Composio", keyEnv: "COMPOSIO_API_KEY" },
+] as const
+
+function ProviderSwitches(props: {
+    readonly providers: readonly ProviderRow[]
+    readonly config: Readonly<Record<string, unknown>>
+    readonly busy: boolean
+    readonly onChange?: (next: Readonly<Record<string, unknown>>) => void
+}): React.ReactElement {
+    const named = new Set(Object.keys(props.config))
+    const write = (id: string, value: unknown) => {
+        const next: Record<string, unknown> = { ...props.config }
+        if (value === undefined) delete next[id]
+        else next[id] = value
+        props.onChange?.(next)
+    }
+    const rows = [
+        ...KNOWN_PROVIDERS.map((known) => ({ ...known, on: named.has(known.id) })),
+        // Anything else the manifest names (mcp, a plugin's) is shown and can be dropped.
+        ...[...named]
+            .filter((id) => !KNOWN_PROVIDERS.some((known) => known.id === id))
+            .map((id) => ({ id, what: "", on: true })),
+    ]
+    return (
+        <div className="stats" style={{ marginBottom: 18, flexWrap: "wrap" }}>
+            {rows.map((row) => {
+                const status = props.providers.find((entry) => entry.id === row.id)
+                return (
+                    <span key={row.id} className={`pill${row.on ? " ok" : ""}`} title={row.what}>
+                        <span className={`dot ${row.on ? "live" : "off"}`} />
+                        {row.id}
+                        {status?.keyEnv === undefined ? null : (
+                            <>
+                                {" · "}
+                                {status.keyEnv} {status.keySet === true ? "set" : "missing"}
+                            </>
+                        )}
+                        {props.onChange === undefined ? null : (
+                            <button
+                                type="button"
+                                className="link"
+                                disabled={props.busy}
+                                onClick={() =>
+                                    row.on
+                                        ? write(row.id, undefined)
+                                        : write(
+                                              row.id,
+                                              "keyEnv" in row ? { apiKeyEnv: row.keyEnv } : {},
+                                          )
+                                }
+                            >
+                                {row.on ? "remove" : "add"}
+                            </button>
+                        )}
+                    </span>
+                )
+            })}
+        </div>
+    )
+}
+
 export function ToolsPanel(props: {
     readonly tools: readonly ToolRow[]
     /** What the catalogue costs on every turn, from `GET /agents/:id`. */
@@ -57,6 +126,13 @@ export function ToolsPanel(props: {
     readonly onPin?: (pinned: readonly string[]) => void
     readonly onRules?: (kind: "allow" | "deny", rules: readonly string[]) => void
     readonly onRefresh?: () => void
+    /**
+     * Name or drop a provider: the whole `tools.providers` map, written back. Naming one makes its
+     * tools pinnable and lets the agent say what it lacks; it grants nothing by itself.
+     */
+    readonly onProviders?: (next: Readonly<Record<string, unknown>>) => void
+    /** `tools.providers` as the manifest has it, so a switch writes back what it found. */
+    readonly providerConfig?: Readonly<Record<string, unknown>>
     readonly lastRefresh?: RefreshReport
 }): React.ReactElement {
     const [query, setQuery] = useState("")
@@ -154,28 +230,13 @@ export function ToolsPanel(props: {
                 </div>
             )}
 
-            {(props.providers ?? []).length === 0 ? null : (
-                <>
-                    <div className="section-title">Providers</div>
-                    <div className="stats" style={{ marginBottom: 18 }}>
-                        {(props.providers ?? []).map((provider) => (
-                            <span key={provider.id} className="pill">
-                                {provider.id}
-                                {provider.keyEnv === undefined ? null : (
-                                    <>
-                                        {" · "}
-                                        <span
-                                            className={`dot ${provider.keySet === true ? "live" : "warn"}`}
-                                        />
-                                        {provider.keyEnv}{" "}
-                                        {provider.keySet === true ? "set" : "missing"}
-                                    </>
-                                )}
-                            </span>
-                        ))}
-                    </div>
-                </>
-            )}
+            <div className="section-title">Providers</div>
+            <ProviderSwitches
+                providers={props.providers ?? []}
+                config={props.providerConfig ?? {}}
+                busy={props.busy === "tools.providers"}
+                {...(props.onProviders === undefined ? {} : { onChange: props.onProviders })}
+            />
 
             <div className="section-title">Catalogue</div>
             <input

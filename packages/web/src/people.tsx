@@ -15,6 +15,8 @@ export interface Person {
     readonly id: string
     readonly name?: string
     readonly role: "admin" | "member"
+    readonly title?: string
+    readonly timezone?: string
     readonly presence?: "online" | "offline"
     readonly presenceAt?: string
     readonly createdAt: string
@@ -41,12 +43,25 @@ export function PeoplePanel(props: {
     readonly agents: readonly AgentRef[]
     readonly busy?: string
     readonly note?: string
-    readonly onRegister?: (input: { id: string; name?: string; role: "admin" | "member" }) => void
+    readonly onRegister?: (input: {
+        id: string
+        name?: string
+        role: "admin" | "member"
+        title?: string
+        timezone?: string
+    }) => void
     readonly onRemove?: (participantId: string) => void
     readonly onPresence?: (participantId: string, presence: "online" | "offline") => void
     readonly onAssign?: (agentId: string, participantId: string | undefined) => void
 }): React.ReactElement {
-    const [draft, setDraft] = useState({ id: "", name: "", role: "member" as "admin" | "member" })
+    const blank = {
+        id: "",
+        name: "",
+        title: "",
+        timezone: "",
+        role: "member" as "admin" | "member",
+    }
+    const [draft, setDraft] = useState(blank)
     const owned = (participantId: string) =>
         Object.entries(props.assignments)
             .filter(([, owner]) => owner === participantId)
@@ -86,6 +101,14 @@ export function PeoplePanel(props: {
                                             {person.name ?? shortId(person.id)}
                                         </div>
                                         <div className="id">{person.id}</div>
+                                        {person.title === undefined &&
+                                        person.timezone === undefined ? null : (
+                                            <div className="sub">
+                                                {[person.title, person.timezone]
+                                                    .filter((part) => part !== undefined)
+                                                    .join(" · ")}
+                                            </div>
+                                        )}
                                     </div>
                                     <span
                                         className={`pill${person.role === "admin" ? " accent" : ""}`}
@@ -208,9 +231,13 @@ export function PeoplePanel(props: {
                         props.onRegister?.({
                             id: draft.id.trim(),
                             ...(draft.name.trim() === "" ? {} : { name: draft.name.trim() }),
+                            ...(draft.title.trim() === "" ? {} : { title: draft.title.trim() }),
+                            ...(draft.timezone.trim() === ""
+                                ? {}
+                                : { timezone: draft.timezone.trim() }),
                             role: draft.role,
                         })
-                        setDraft({ id: "", name: "", role: "member" })
+                        setDraft(blank)
                     }}
                 >
                     <h3>Register a person</h3>
@@ -233,6 +260,23 @@ export function PeoplePanel(props: {
                                 value={draft.name}
                                 placeholder="Ada"
                                 onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                            />
+                        </label>
+                        <label>
+                            Title <span className="sub">optional, not a permission</span>
+                            <input
+                                value={draft.title}
+                                placeholder="Head of support"
+                                onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+                            />
+                        </label>
+                        <label>
+                            Timezone{" "}
+                            <span className="sub">what "tomorrow at nine" means for them</span>
+                            <input
+                                value={draft.timezone}
+                                placeholder="Europe/London"
+                                onChange={(e) => setDraft({ ...draft, timezone: e.target.value })}
                             />
                         </label>
                         <label>
@@ -286,12 +330,31 @@ export interface RoomMessage {
     readonly createdAt: string
 }
 
+/**
+ * A message an agent read and did not answer, and why: the hop ceiling, its governor refusing, or a
+ * failure. Only ever an event, never stored, so a page shows the skips it was open for.
+ */
+export interface RoomSkip {
+    readonly messageId: string
+    readonly reason: "hop_limit" | "refused" | "failed"
+    readonly detail: string
+    readonly hop: number
+    readonly ceiling: number
+}
+
+const SKIP_REASON: Record<RoomSkip["reason"], string> = {
+    hop_limit: "hop limit reached",
+    refused: "refused",
+    failed: "failed",
+}
+
 export function RoomsPanel(props: {
     readonly rooms: readonly Room[]
     readonly people: readonly Person[]
     readonly agents: readonly AgentRef[]
     readonly selected?: string
     readonly messages: readonly RoomMessage[]
+    readonly skips?: readonly RoomSkip[]
     readonly busy?: string
     readonly note?: string
     readonly onSelect: (roomId: string | undefined) => void
@@ -367,6 +430,7 @@ export function RoomsPanel(props: {
                             people={props.people}
                             agents={props.agents}
                             messages={props.messages}
+                            skips={props.skips ?? []}
                             busy={props.busy === `post:${room.id}`}
                             {...(props.onPost === undefined ? {} : { onPost: props.onPost })}
                             {...(props.onMembers === undefined
@@ -484,6 +548,7 @@ function RoomView(props: {
     readonly people: readonly Person[]
     readonly agents: readonly AgentRef[]
     readonly messages: readonly RoomMessage[]
+    readonly skips: readonly RoomSkip[]
     readonly busy: boolean
     readonly onPost?: (
         roomId: string,
@@ -557,6 +622,21 @@ function RoomView(props: {
                             ) : (
                                 <p style={{ margin: 0 }}>{message.text}</p>
                             )}
+                            {props.skips
+                                .filter((skip) => skip.messageId === message.id)
+                                .map((skip, index) => (
+                                    <div
+                                        // biome-ignore lint/suspicious/noArrayIndexKey: skips of one message have no id of their own
+                                        key={index}
+                                        className="room-skip"
+                                        title={skip.detail}
+                                    >
+                                        not answered: {SKIP_REASON[skip.reason]}
+                                        {skip.reason === "hop_limit"
+                                            ? ` (hop ${skip.hop} of ${skip.ceiling})`
+                                            : ` — ${skip.detail}`}
+                                    </div>
+                                ))}
                         </div>
                     ))
                 )}
@@ -642,6 +722,17 @@ export interface Action {
     readonly decidedAt?: string
 }
 
+/** Pending actions per owner, owners in the order their oldest action arrived. */
+function byOwner(actions: readonly Action[]): [string, Action[]][] {
+    const groups = new Map<string, Action[]>()
+    for (const action of actions) {
+        const group = groups.get(action.ownerId)
+        if (group === undefined) groups.set(action.ownerId, [action])
+        else group.push(action)
+    }
+    return [...groups.entries()]
+}
+
 export function ActionsPanel(props: {
     readonly actions: readonly Action[]
     readonly busy?: string
@@ -668,43 +759,54 @@ export function ActionsPanel(props: {
                     </p>
                 </div>
             ) : (
-                <div className="grid">
-                    {pending.map((action) => (
-                        <div key={action.id} className="card">
-                            <div className="head">
-                                <code>{action.slug}</code>
-                                <span className="pill warn" style={{ marginLeft: "auto" }}>
-                                    pending
-                                </span>
-                            </div>
-                            <p className="sub">
-                                for {shortId(action.ownerId)}, asked by{" "}
-                                {shortId(action.requestedBy)} · agent {action.agentId} ·{" "}
-                                {action.createdAt.replace("T", " ").slice(0, 16)}
-                            </p>
-                            <pre className="snippet">{JSON.stringify(action.args, null, 2)}</pre>
-                            {props.onDecide === undefined ? null : (
-                                <div className="cta-row" style={{ marginTop: 10 }}>
-                                    <button
-                                        type="button"
-                                        className="primary"
-                                        disabled={props.busy === action.id}
-                                        onClick={() => props.onDecide?.(action.id, true)}
-                                    >
-                                        approve and run
-                                    </button>
-                                    <button
-                                        type="button"
-                                        disabled={props.busy === action.id}
-                                        onClick={() => props.onDecide?.(action.id, false)}
-                                    >
-                                        decline
-                                    </button>
-                                </div>
-                            )}
+                // Grouped by owner: each group is one person's to decide, and a person scanning
+                // for theirs should not have to read everybody else's calls to find it.
+                byOwner(pending).map(([owner, actions]) => (
+                    <div key={owner}>
+                        <div className="section-title">
+                            for {shortId(owner)} · {actions.length} waiting
                         </div>
-                    ))}
-                </div>
+                        <div className="grid">
+                            {actions.map((action) => (
+                                <div key={action.id} className="card">
+                                    <div className="head">
+                                        <code>{action.slug}</code>
+                                        <span className="pill warn" style={{ marginLeft: "auto" }}>
+                                            pending
+                                        </span>
+                                    </div>
+                                    <p className="sub">
+                                        for {shortId(action.ownerId)}, asked by{" "}
+                                        {shortId(action.requestedBy)} · agent {action.agentId} ·{" "}
+                                        {action.createdAt.replace("T", " ").slice(0, 16)}
+                                    </p>
+                                    <pre className="snippet">
+                                        {JSON.stringify(action.args, null, 2)}
+                                    </pre>
+                                    {props.onDecide === undefined ? null : (
+                                        <div className="cta-row" style={{ marginTop: 10 }}>
+                                            <button
+                                                type="button"
+                                                className="primary"
+                                                disabled={props.busy === action.id}
+                                                onClick={() => props.onDecide?.(action.id, true)}
+                                            >
+                                                approve and run
+                                            </button>
+                                            <button
+                                                type="button"
+                                                disabled={props.busy === action.id}
+                                                onClick={() => props.onDecide?.(action.id, false)}
+                                            >
+                                                decline
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                ))
             )}
             {settled.length === 0 ? null : (
                 <>

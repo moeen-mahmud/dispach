@@ -65,29 +65,15 @@ export function Keys(props: {
     const [minted, setMinted] = useState<string>()
     const [error, setError] = useState<string>()
 
-    const headers = useCallback(
-        (extra: Record<string, string> = {}) => ({
-            ...extra,
-            ...(props.token === undefined ? {} : { authorization: `Bearer ${props.token}` }),
-        }),
-        [props.token],
-    )
-
     const load = useCallback(async () => {
         try {
-            const response = await fetch(`${props.baseUrl}/v1/keys`, { headers: headers() })
-            const body = (await response.json()) as {
-                keys?: KeyRow[]
-                scope?: string
-                error?: { message?: string }
-            }
-            if (!response.ok) throw new Error(body.error?.message ?? `HTTP ${response.status}`)
-            setRows(body.keys ?? [])
+            const body = await props.client.keys()
+            setRows(body.keys)
             setScope(body.scope)
         } catch (caught) {
             setError(caught instanceof Error ? caught.message : String(caught))
         }
-    }, [props.baseUrl, headers])
+    }, [props.client])
 
     useEffect(() => {
         void load()
@@ -149,14 +135,7 @@ export function Keys(props: {
             return
         const held = storedKey()
         try {
-            const response = await fetch(`${props.baseUrl}/v1/keys/${row.keyId}`, {
-                method: "DELETE",
-                headers: headers(),
-            })
-            if (!response.ok) {
-                const body = (await response.json()) as { error?: { message?: string } }
-                throw new Error(body.error?.message ?? `HTTP ${response.status}`)
-            }
+            await props.client.revokeKey(row.keyId)
             // Whether *that* was this browser's key is discovered rather than predicted: reload
             // the listing, and if the credential we hold has stopped working, say so by clearing it
             // and starting over. Leaving a dead key in storage would make every later request a

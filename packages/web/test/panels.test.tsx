@@ -22,6 +22,7 @@ import {
     type ChannelRow,
     ChannelsPanel,
     SchedulesPanel,
+    SessionControls,
     ToolsPanel,
     WarningsPanel,
 } from "../src/panels.tsx"
@@ -375,7 +376,7 @@ describe("the 404 loop, guarded at the source", () => {
         expect(source.match(/status === 404/g)?.length).toBe(1)
         // Seven now: the approvals timer, the report panels, the session list, `write` — the one
         // writer behind the settings, schedule, model, tool and file panels — and the three readers
-        // the console added in the 0.3 line: usage, turns and the workspace listing. Counted rather
+        // the console added in 0.2.2: usage, turns and the workspace listing. Counted rather
         // than named, because an *eighth* fetch added later has to join them; this count caught the
         // fourth, and again each one since, which is the guard working rather than a number to keep
         // bumping. A write is the case that matters most of the reads: somebody saving a setting on
@@ -547,5 +548,55 @@ describe("the channel panel's controls", () => {
         expect(html).toContain("disabled")
         expect(html).toContain("working…")
         expect(html).toContain("working on it")
+    })
+})
+
+describe("session controls", () => {
+    const render = (props: Partial<Parameters<typeof SessionControls>[0]>) =>
+        renderToStaticMarkup(
+            createElement(SessionControls, {
+                onRecall: () => undefined,
+                onPhase: () => undefined,
+                ...props,
+            }),
+        )
+
+    test("recall reads the session's own flag; absent means recalled", () => {
+        expect(render({ session: {} })).toContain("recall: on")
+        expect(render({ session: { recall: false } })).toContain("recall: off")
+    })
+
+    test("a phase picker only on an agent with phases, on the session's phase", () => {
+        expect(render({ session: {} })).not.toContain("<select")
+        const html = render({ session: { phase: "build" }, phases: ["triage", "build"] })
+        expect(html).toContain('<option value="build" selected="">build</option>')
+        expect(html).not.toContain(">entry<")
+    })
+})
+
+describe("an A2A channel", () => {
+    test("links its agent card and shows the peers its status names", () => {
+        const html = renderToStaticMarkup(
+            createElement(ChannelsPanel, {
+                now: 0,
+                agentUrl: "http://127.0.0.1:7420/v1/agents/crew",
+                channels: [
+                    {
+                        id: "a2a",
+                        type: "a2a",
+                        status: "connected",
+                        detail: "acme calls in",
+                        enabled: true,
+                    },
+                    { id: "tg", type: "telegram", status: "connected", enabled: true },
+                ],
+            }),
+        )
+        expect(html).toContain(
+            "http://127.0.0.1:7420/v1/agents/crew/plugins/a2a/.well-known/agent-card.json",
+        )
+        expect(html).toContain("connected — acme calls in")
+        // Only the A2A channel has a card.
+        expect(html.split("agent-card.json").length - 1).toBe(2)
     })
 })

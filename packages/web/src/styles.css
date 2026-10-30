@@ -277,6 +277,10 @@ select:focus {
     font-family: var(--mono);
     font-size: 12px;
 }
+/* A person's conversation is named ("You"), not keyed: a name reads as prose. */
+.row-button.session.person {
+    font-family: var(--sans);
+}
 
 .group {
     font-size: 11px;
@@ -1497,6 +1501,17 @@ button.agent-card:hover:not(:disabled) {
     color: var(--warn);
     border-color: color-mix(in srgb, var(--warn) 35%, var(--line));
 }
+.pill.bad {
+    color: var(--bad);
+    border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
+    background: var(--bad-soft);
+}
+.error-line {
+    color: var(--bad);
+    font-size: 12px;
+    margin-top: 4px;
+    overflow-wrap: anywhere;
+}
 
 .member {
     border: 1px solid var(--line);
@@ -2048,4 +2063,136 @@ label.check {
     align-items: center;
     font-weight: 400;
     color: var(--text);
+}
+
+/* A label and its control on one line, for a toolbar. */
+.inline-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--dim);
+}
+
+.room-skip {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--warn);
+}
+
+.tool-detail {
+    margin-top: 6px;
+}
+.tool-detail-summary {
+    cursor: pointer;
+    color: var(--dim);
+    font-size: 12px;
+}
+.tool-detail pre {
+    max-height: 320px;
+    overflow: auto;
+}
+
+.replay {
+    list-style: none;
+    padding: 0;
+    margin: 12px 0 0;
+    display: grid;
+    gap: 10px;
+}
+.replay pre,
+.tool-detail pre {
+    max-width: 100%;
+    box-sizing: border-box;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.replay pre {
+    max-height: 280px;
+    overflow: auto;
+    margin: 4px 0 0;
+}
+
+.palette-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 12vh 16px 16px;
+}
+/* Both states: `button:hover:not(:disabled)` outranks a single class, and the pointer is always
+   over the backdrop, so without the second selector the page vanished behind an opaque button. */
+button.palette-backdrop,
+button.palette-backdrop:hover:not(:disabled) {
+    position: absolute;
+    inset: 0;
+    border: none;
+    border-radius: 0;
+    background: rgb(0 0 0 / 35%);
+    cursor: default;
+}
+.palette {
+    position: relative;
+    width: min(560px, 100%);
+    background: var(--raised);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgb(0 0 0 / 30%);
+    overflow: hidden;
+}
+.palette input {
+    width: 100%;
+    border: none;
+    border-bottom: 1px solid var(--line);
+    border-radius: 0;
+    padding: 14px 16px;
+    font-size: 15px;
+    background: transparent;
+}
+.palette-list {
+    list-style: none;
+    margin: 0;
+    padding: 6px;
+    max-height: 50vh;
+    overflow: auto;
+}
+.palette-item {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    text-align: left;
+}
+.palette-item[aria-current="true"] {
+    background: var(--raised-2);
+}
+.palette .sub {
+    margin: 0;
+}
+.palette .empty {
+    padding: 16px;
+}
+
+/* A capability row: value, override, provenance, left to right at their own widths. */
+.caps-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 0;
+}
+.caps-row .mono-value {
+    margin: 0;
+    min-width: 80px;
+}
+.caps-row select,
+.caps-row input {
+    width: auto;
 }

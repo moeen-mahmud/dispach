@@ -44,9 +44,11 @@ import {
 import { hrefFor, type PanelName, placeFrom } from "./lib/deep-link.ts"
 import { afterUserScroll } from "./lib/follow.ts"
 import { type LiveStream, liveStream } from "./lib/live.ts"
+import { paletteEntries } from "./lib/palette.ts"
 import { initialAnswers, missingAnswers, payloadFor } from "./lib/provision-form.ts"
 import {
     conversationLabel,
+    isPersonalConversation,
     newConversationKey,
     OPEN_SESSION,
     rememberedSession,
@@ -54,7 +56,12 @@ import {
     sharesConversations,
 } from "./lib/session.ts"
 import { EMPTY, emptyFor, reduce, type Transcript, withUser } from "./lib/transcript.ts"
-import { type ModelChange, ModelsPanel, type SecretRow } from "./models.tsx"
+import {
+    type ModelChange,
+    ModelsPanel,
+    type ResolvedCapabilities,
+    type SecretRow,
+} from "./models.tsx"
 import { Onboarding } from "./onboarding.tsx"
 import {
     AddChannel,
@@ -63,6 +70,7 @@ import {
     type ImportReport,
     type Template,
     TemplateForm,
+    TemplateVars,
     type Webhook,
     WebhooksPanel,
     type WorkspaceEntry,
@@ -74,7 +82,9 @@ import {
     type TeamMember,
     TeamPanel,
     ThemeToggle,
+    type WeekUsage,
 } from "./overview.tsx"
+import { Palette } from "./palette.tsx"
 import {
     AGENT_PANELS,
     AgentList,
@@ -84,6 +94,7 @@ import {
     ConfigPanel,
     SchedulesPanel,
     SERVER_PANELS,
+    SessionControls,
     ToolsPanel,
     WarningsPanel,
     type WireError,
@@ -98,10 +109,11 @@ import {
     type Project,
     type Room,
     type RoomMessage,
+    type RoomSkip,
     RoomsPanel,
 } from "./people.tsx"
 import type { RefreshReport } from "./tools.tsx"
-import { type TurnRow, TurnsPanel } from "./turns.tsx"
+import { type Replay, type ReplayStep, type TurnRow, TurnsPanel } from "./turns.tsx"
 import { RANGES, type RangeKey, UsagePanel, type UsageReport } from "./usage.tsx"
 import { Wordmark } from "./wordmark.tsx"
 
@@ -267,6 +279,7 @@ const TITLES: Readonly<Record<Exclude<Panel, "chat">, string>> = {
     models: "Models",
     turns: "Turns",
     usage: "Usage",
+    "server-usage": "Usage, all agents",
     api: "API",
     new: "New agent",
     tools: "Tools",
@@ -325,6 +338,7 @@ function Workspace(props: {
 
     const [sessions, setSessions] = useState<readonly SessionSummary[]>([])
     const [sessionKey, setSessionKey] = useState<string>()
+    const current = sessions.find((row) => row.sessionKey === sessionKey)
     /**
      * "+ new conversation" was clicked and nothing has been sent yet. Under an owner or peer scope the
      * rotation waits for the first message (decision 15.12): a click alone must not move where the
@@ -609,7 +623,7 @@ function Workspace(props: {
                 } catch {}
                 setSessionKey(key)
                 try {
-                    const messages = await history(props.baseUrl, props.token, agentId ?? "", key)
+                    const messages = await history(agent, key)
                     if (!cancelled) setState({ ...EMPTY, rows: messages })
                 } catch {
                     // A conversation that no longer exists opens empty, as a new one would.
@@ -625,7 +639,7 @@ function Workspace(props: {
             cancelled = true
             liveRef.current.abort()
         }
-    }, [agent, agentId, follow, props.baseUrl, props.token])
+    }, [agent, agentId, follow])
 
     useEffect(() => {
         if (agent === undefined) return
@@ -747,7 +761,7 @@ function Workspace(props: {
         // The stored conversation, so switching does not look like starting over. Prose only: turn
         // statistics were true of a process that has exited, which the TUI's `seedHistory` records.
         try {
-            const messages = await history(props.baseUrl, props.token, agentId ?? "", key)
+            const messages = await history(agent, key)
             setState({ ...EMPTY, rows: messages })
         } catch (caught) {
             setError(describe(caught))
@@ -775,6 +789,9 @@ function Workspace(props: {
         readonly secrets: readonly SecretRow[]
         readonly catalogueTokens?: number
         readonly config?: AgentConfig
+        /** The agent's declared phases; absent on an unphased agent, which has no phase to set. */
+        readonly phases?: readonly string[]
+        readonly capabilities?: ResolvedCapabilities
     }>({ tools: [], schedules: [], channels: [], warnings: [], secrets: [] })
 
     const [channelBusy, setChannelBusy] = useState<string | undefined>(undefined)
@@ -813,6 +830,12 @@ function Workspace(props: {
             ...(described.catalogueTokens === undefined
                 ? {}
                 : { catalogueTokens: described.catalogueTokens }),
+            ...(described.capabilities === undefined
+                ? {}
+                : { capabilities: described.capabilities }),
+            ...(described.phases === undefined || described.phases.length === 0
+                ? {}
+                : { phases: described.phases }),
             config,
         })
     }, [])
@@ -967,25 +990,51 @@ function Workspace(props: {
      * `by` is a list and one call with all three would multiply the buckets.
      */
     const [usage, setUsage] = useState<UsageReport>()
+    /** The Overview's line per agent: the last seven days, re-read each time the page opens. */
+    const [week, setWeek] = useState<readonly WeekUsage[]>()
+    useEffect(() => {
+        if (panel !== "home") return
+        let cancelled = false
+        clientRef.current
+            .usage({ by: ["agent"], from: new Date(Date.now() - 7 * 86_400_000).toISOString() })
+            .then((report) => {
+                if (!cancelled) setWeek(report.buckets)
+            })
+            // A key that cannot read the meter still sees its agents; the line is simply absent.
+            .catch(() => {
+                if (!cancelled) setWeek(undefined)
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [panel])
     const [usageRange, setUsageRange] = useState<RangeKey>("30d")
     const [usageLoading, setUsageLoading] = useState(false)
     useEffect(() => {
-        if (panel !== "usage" || agent === undefined) return
+        const server = panel === "server-usage"
+        if (!server && (panel !== "usage" || agent === undefined)) return
+        // The same four questions of one agent or of every agent this credential reaches; only the
+        // whole server also asks "which agent".
+        const meter = server ? clientRef.current : agent
+        if (meter === undefined) return
         let cancelled = false
+        setUsage(undefined)
         setUsageLoading(true)
         const days = RANGES.find((range) => range.key === usageRange)?.days ?? 30
         const from = new Date(Date.now() - days * 86_400_000).toISOString()
         Promise.all([
-            agent.usage({ by: ["day"], from }),
-            agent.usage({ by: ["model"], from }),
-            agent.usage({ by: ["sender"], from }),
+            meter.usage({ by: ["day"], from }),
+            meter.usage({ by: ["model"], from }),
+            meter.usage({ by: ["sender"], from }),
+            server ? meter.usage({ by: ["agent"], from }) : Promise.resolve(undefined),
         ])
-            .then(([byDay, byModel, bySender]) => {
+            .then(([byDay, byModel, bySender, byAgent]) => {
                 if (cancelled) return
                 setUsage({
                     byDay: byDay.buckets,
                     byModel: byModel.buckets,
                     bySender: bySender.buckets,
+                    ...(byAgent === undefined ? {} : { byAgent: byAgent.buckets }),
                     ...(byDay.meteredSince === undefined
                         ? {}
                         : { meteredSince: byDay.meteredSince }),
@@ -1004,6 +1053,44 @@ function Workspace(props: {
         }
     }, [panel, agent, usageRange, agentGone])
 
+    /**
+     * A turn's stored steps, read from its conversation and kept by turn id. Walked back page by
+     * page from the newest, because a turn's messages sit wherever it ran: up to five pages of 200,
+     * stopping once the turn has been passed.
+     */
+    const [replays, setReplays] = useState<Readonly<Record<string, Replay>>>({})
+    const replay = useCallback(
+        async (turnId: string, sessionKey: string) => {
+            if (agent === undefined) return
+            setReplays((previous) => ({ ...previous, [turnId]: { state: "loading" } }))
+            try {
+                const steps: ReplayStep[] = []
+                let before: number | undefined
+                for (let page = 0; page < 5; page += 1) {
+                    const body = await agent.messages(sessionKey, {
+                        limit: 200,
+                        ...(before === undefined ? {} : { before }),
+                    })
+                    const mine = body.messages.filter((message) => message.turnId === turnId)
+                    steps.push(...mine)
+                    // Found and then passed: older pages hold only earlier turns.
+                    if (steps.length > 0 && mine.length < body.messages.length) break
+                    if (body.nextBefore === undefined) break
+                    before = body.nextBefore
+                }
+                setReplays((previous) => ({
+                    ...previous,
+                    [turnId]: { state: "ready", steps: steps.reverse() },
+                }))
+            } catch (caught) {
+                setReplays((previous) => ({
+                    ...previous,
+                    [turnId]: { state: "failed", message: describe(caught) },
+                }))
+            }
+        },
+        [agent],
+    )
     const [turnRows, setTurnRows] = useState<readonly TurnRow[]>([])
     const [turnsBefore, setTurnsBefore] = useState<number>()
     const [turnsLoading, setTurnsLoading] = useState(false)
@@ -1045,9 +1132,26 @@ function Workspace(props: {
      */
     const [people, setPeople] = useState<readonly Person[]>([])
     const [assignments, setAssignments] = useState<Readonly<Record<string, string>>>({})
+    /** The Team page's owner: a participant id, `null` for a shared agent, absent until read. */
+    const [teamOwner, setTeamOwner] = useState<string | null>()
+    const loadTeamOwner = useCallback(async (target: AgentClient) => {
+        const [answer, list] = await Promise.all([
+            target.assignment(),
+            clientRef.current.participants(),
+        ])
+        setPeople(list)
+        setTeamOwner(answer.assignment?.participantId ?? null)
+    }, [])
+    useEffect(() => {
+        if (panel !== "team" || agent === undefined) return
+        setTeamOwner(undefined)
+        // A key that may not read participants still sees the team; only the picker is absent.
+        loadTeamOwner(agent).catch(() => setTeamOwner(undefined))
+    }, [panel, agent, loadTeamOwner])
     const [rooms, setRooms] = useState<readonly Room[]>([])
     const [roomId, setRoomId] = useState<string>()
     const [roomMessages, setRoomMessages] = useState<readonly RoomMessage[]>([])
+    const [roomSkips, setRoomSkips] = useState<readonly RoomSkip[]>([])
     const [actions, setActions] = useState<readonly Action[]>([])
     const [memoryScope, setMemoryScope] = useState("space")
     const [notes, setNotes] = useState<readonly Note[]>()
@@ -1144,9 +1248,30 @@ function Workspace(props: {
         }
         void tick()
         const timer = setInterval(() => void tick(), 3000)
+        // A skip is an event and nothing else, so it is heard rather than polled. A dropped stream
+        // costs only the skips while it was down; the log above keeps polling either way.
+        setRoomSkips([])
+        const listening = new AbortController()
+        void (async () => {
+            try {
+                for await (const item of clientRef.current.events({
+                    types: ["conversation.skipped"],
+                    signal: listening.signal,
+                })) {
+                    if (item.kind !== "event" || item.event.type !== "conversation.skipped")
+                        continue
+                    const data = item.event.data as RoomSkip & { conversationId: string }
+                    if (data.conversationId !== roomId) continue
+                    setRoomSkips((previous) => [...previous, data])
+                }
+            } catch {
+                // Aborted on leaving the room, or the stream dropped: neither is worth a banner.
+            }
+        })()
         return () => {
             cancelled = true
             clearInterval(timer)
+            listening.abort()
         }
     }, [panel, roomId])
 
@@ -1188,12 +1313,32 @@ function Workspace(props: {
     const [files, setFiles] = useState<readonly WorkspaceEntry[]>()
     const [fileName, setFileName] = useState<string>()
     const [fileContent, setFileContent] = useState<string>()
+    const [made, setMade] = useState<{
+        readonly template: string
+        readonly vars: Readonly<Record<string, string>>
+        readonly declared?: Template["vars"]
+    }>()
+    const loadMade = useCallback(async (target: AgentClient) => {
+        // `409 agent_not_from_template` and `501` both mean "nothing to edit here", not a fault.
+        const record = await target.vars().catch(() => undefined)
+        if (record === undefined) return setMade(undefined)
+        const declared = (await clientRef.current.templates().catch(() => [])).find(
+            (template) => template.name === record.template,
+        )?.vars
+        setMade({
+            template: record.template,
+            vars: record.vars,
+            ...(declared === undefined ? {} : { declared }),
+        })
+    }, [])
     useEffect(() => {
         if (panel !== "files" || agent === undefined) return
         let cancelled = false
         setFiles(undefined)
         setFileName(undefined)
         setFileContent(undefined)
+        setMade(undefined)
+        void loadMade(agent)
         agent
             .workspaceFiles()
             .then((listing) => {
@@ -1207,7 +1352,7 @@ function Workspace(props: {
         return () => {
             cancelled = true
         }
-    }, [panel, agent, agentGone])
+    }, [panel, agent, agentGone, loadMade])
     useEffect(() => {
         if (panel !== "files" || agent === undefined || fileName === undefined) return
         let cancelled = false
@@ -1252,6 +1397,12 @@ function Workspace(props: {
     )
     const [lastRefresh, setLastRefresh] = useState<RefreshReport>()
     /** Providers named under `tools.providers`, with their key variable's set state from `/secrets`. */
+    const providerConfig = useMemo(() => {
+        const providers = settingValue("tools.providers")
+        return providers !== null && typeof providers === "object" && !Array.isArray(providers)
+            ? (providers as Record<string, unknown>)
+            : {}
+    }, [settingValue])
     const providerRows = useMemo(() => {
         const providers = settingValue("tools.providers")
         if (providers === null || typeof providers !== "object" || Array.isArray(providers))
@@ -1411,6 +1562,30 @@ function Workspace(props: {
         },
         [agentId, agents, panel],
     )
+    /** ⌘K / Ctrl+K: one listener for the whole page, so every panel gets the palette for free. */
+    const [paletteOpen, setPaletteOpen] = useState(false)
+    useEffect(() => {
+        const onKey = (event: KeyboardEvent) => {
+            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+                event.preventDefault()
+                setPaletteOpen((open) => !open)
+            }
+        }
+        window.addEventListener("keydown", onKey)
+        return () => window.removeEventListener("keydown", onKey)
+    }, [])
+    const paletteList = useMemo(
+        () =>
+            paletteEntries({
+                agentPanels: AGENT_PANELS,
+                serverPanels: SERVER_PANELS,
+                agents: agentRefs,
+                ...(agentId === undefined
+                    ? {}
+                    : { current: { id: agentId, name: agentName ?? agentId } }),
+            }),
+        [agentRefs, agentId, agentName],
+    )
 
     /**
      * Switch a stopped agent back on, and re-read the listing rather than assuming it worked.
@@ -1503,7 +1678,7 @@ function Workspace(props: {
                                 <button
                                     type="button"
                                     key={session.sessionKey}
-                                    className="row-button session"
+                                    className={`row-button session${isPersonalConversation(session.sessionKey) ? " person" : ""}`}
                                     aria-current={
                                         panel === "chat" && sessionKey === session.sessionKey
                                     }
@@ -1565,6 +1740,16 @@ function Workspace(props: {
                 </footer>
             </aside>
 
+            {paletteOpen ? (
+                <Palette
+                    entries={paletteList}
+                    onClose={() => setPaletteOpen(false)}
+                    onPick={(entry) => {
+                        setPaletteOpen(false)
+                        goTo(entry.target)
+                    }}
+                />
+            ) : null}
             <main className="main">
                 <div className="bar">
                     <strong>{panel === "chat" ? (agentName ?? "") : TITLES[panel]}</strong>
@@ -1589,6 +1774,29 @@ function Workspace(props: {
                         >
                             clear history
                         </button>
+                    ) : null}
+                    {panel === "chat" && sessionKey !== undefined && agent !== undefined ? (
+                        <SessionControls
+                            {...(current === undefined ? {} : { session: current })}
+                            {...(report.phases === undefined ? {} : { phases: report.phases })}
+                            busy={state.running}
+                            onRecall={(recall) =>
+                                void write(`recall:${sessionKey}`, async (target) => {
+                                    await target.setRecall(sessionKey, recall)
+                                    await refreshSessions()
+                                    return recall
+                                        ? "This conversation is recalled again."
+                                        : "Kept out of history recall. Its messages stay."
+                                })
+                            }
+                            onPhase={(phase) =>
+                                void write(`phase:${sessionKey}`, async (target) => {
+                                    await target.setPhase(sessionKey, phase)
+                                    await refreshSessions()
+                                    return `Phase set to ${phase}.`
+                                })
+                            }
+                        />
                     ) : null}
                     {panel === "chat" ? (
                         <span className="crumb hide-narrow">
@@ -1623,6 +1831,8 @@ function Workspace(props: {
                             {panel === "home" ? (
                                 <HomePanel
                                     agents={agents}
+                                    {...(week === undefined ? {} : { week })}
+                                    onUsage={() => goTo({ panel: "server-usage" })}
                                     onOpen={(id) => goTo({ agentId: id, panel: "chat" })}
                                     onStart={(id) => void startAgent(id)}
                                     onNew={() => goTo({ panel: "new" })}
@@ -1639,6 +1849,9 @@ function Workspace(props: {
                                     <ModelsPanel
                                         settings={report.config.settings}
                                         secrets={report.secrets}
+                                        {...(report.capabilities === undefined
+                                            ? {}
+                                            : { resolved: report.capabilities })}
                                         {...(writing === undefined ? {} : { busy: writing })}
                                         {...(writeNote === undefined ? {} : { note: writeNote })}
                                         onChange={saveModels}
@@ -1656,6 +1869,21 @@ function Workspace(props: {
                                     onAsk={(on) =>
                                         saveSetting("delegation.ask", on ? "true" : "false", {
                                             confirm: false,
+                                        })
+                                    }
+                                    {...(teamOwner === undefined ? {} : { owner: teamOwner })}
+                                    people={people}
+                                    onAssign={(participantId) =>
+                                        void write("assign", async (target) => {
+                                            if (participantId === undefined) await target.unassign()
+                                            else await target.assign(participantId)
+                                            await loadTeamOwner(target)
+                                            // The peer list moves with the owner, by a reload the
+                                            // server schedules; the next read shows where it landed.
+                                            await refreshReport(target)
+                                            return participantId === undefined
+                                                ? "Now a shared agent: anyone's agent may ask it."
+                                                : `Now works for ${participantId}.`
                                         })
                                     }
                                 />
@@ -1803,23 +2031,7 @@ function Workspace(props: {
                                         void serverWrite(
                                             `remove:${id}`,
                                             async () => {
-                                                await fetch(
-                                                    `${props.baseUrl}/v1/participants/${encodeURIComponent(id)}`,
-                                                    {
-                                                        method: "DELETE",
-                                                        headers:
-                                                            props.token === undefined
-                                                                ? {}
-                                                                : {
-                                                                      authorization: `Bearer ${props.token}`,
-                                                                  },
-                                                    },
-                                                ).then((response) => {
-                                                    if (!response.ok)
-                                                        throw new Error(
-                                                            `remove failed: ${response.status}`,
-                                                        )
-                                                })
+                                                await clientRef.current.deleteParticipant(id)
                                                 return undefined
                                             },
                                             loadPeople,
@@ -1861,6 +2073,7 @@ function Workspace(props: {
                                     agents={agentRefs}
                                     {...(roomId === undefined ? {} : { selected: roomId })}
                                     messages={roomMessages}
+                                    skips={roomSkips}
                                     {...(serverBusy === undefined ? {} : { busy: serverBusy })}
                                     {...(serverNote === undefined ? {} : { note: serverNote })}
                                     onSelect={setRoomId}
@@ -2042,34 +2255,9 @@ function Workspace(props: {
                                         void serverWrite(
                                             "backup",
                                             async () => {
-                                                const query =
-                                                    include.length === 0
-                                                        ? ""
-                                                        : `?include=${include.join(",")}`
-                                                const response = await fetch(
-                                                    `${props.baseUrl}/v1/backup${query}`,
-                                                    {
-                                                        headers:
-                                                            props.token === undefined
-                                                                ? {}
-                                                                : {
-                                                                      authorization: `Bearer ${props.token}`,
-                                                                  },
-                                                    },
-                                                )
-                                                if (!response.ok) {
-                                                    const body = (await response
-                                                        .json()
-                                                        .catch(() => ({}))) as {
-                                                        error?: { message?: string; hint?: string }
-                                                    }
-                                                    throw new Error(
-                                                        `${body.error?.message ?? `HTTP ${response.status}`}${body.error?.hint === undefined ? "" : `\nhint: ${body.error.hint}`}`,
-                                                    )
-                                                }
                                                 download(
                                                     `${DEFAULT_BRAND.slug}-backup-${new Date().toISOString().slice(0, 10)}.tar.gz`,
-                                                    await response.blob(),
+                                                    await clientRef.current.backup(include),
                                                 )
                                                 return "Backup downloaded."
                                             },
@@ -2115,6 +2303,42 @@ function Workspace(props: {
                             ) : null}
                             {panel === "files" ? (
                                 <FilesPanel
+                                    {...(made === undefined
+                                        ? {}
+                                        : {
+                                              above: (
+                                                  <TemplateVars
+                                                      template={made.template}
+                                                      values={made.vars}
+                                                      {...(made.declared === undefined
+                                                          ? {}
+                                                          : { declared: made.declared })}
+                                                      busy={writing === "vars"}
+                                                      onSave={(vars) =>
+                                                          void write("vars", async (target) => {
+                                                              const result =
+                                                                  await target.setVars(vars)
+                                                              await loadMade(target)
+                                                              setFiles(
+                                                                  await target
+                                                                      .workspaceFiles()
+                                                                      .then(
+                                                                          (listing) =>
+                                                                              listing.files,
+                                                                      ),
+                                                              )
+                                                              const kept = result.skipped
+                                                                  .map(
+                                                                      (entry) =>
+                                                                          `${entry.file} (${entry.reason})`,
+                                                                  )
+                                                                  .join(", ")
+                                                              return `${result.rendered.length === 0 ? "No file changed" : `Re-rendered ${result.rendered.join(", ")}`}${kept === "" ? "" : `; kept ${kept}`}.${result.reload === "pending" ? " The reload waits for the running turn." : ""}`
+                                                          })
+                                                      }
+                                                  />
+                                              ),
+                                          })}
                                     files={files}
                                     {...(fileName === undefined ? {} : { selected: fileName })}
                                     {...(fileContent === undefined ? {} : { content: fileContent })}
@@ -2151,6 +2375,14 @@ function Workspace(props: {
                                     {...(agentName === undefined ? {} : { agentName })}
                                 />
                             ) : null}
+                            {panel === "server-usage" ? (
+                                <UsagePanel
+                                    report={usage}
+                                    range={usageRange}
+                                    onRange={setUsageRange}
+                                    loading={usageLoading}
+                                />
+                            ) : null}
                             {panel === "turns" ? (
                                 <TurnsPanel
                                     turns={turnRows}
@@ -2158,6 +2390,8 @@ function Workspace(props: {
                                     loading={turnsLoading}
                                     onMore={() => void loadTurns(turnsBefore)}
                                     onOpenSession={(key) => void openSession(key)}
+                                    replays={replays}
+                                    onReplay={(turn) => void replay(turn.turnId, turn.sessionKey)}
                                 />
                             ) : null}
                             {panel === "tools" ? (
@@ -2170,6 +2404,12 @@ function Workspace(props: {
                                     allow={stringList(settingValue("tools.policy.allow"))}
                                     deny={stringList(settingValue("tools.policy.deny"))}
                                     providers={providerRows}
+                                    providerConfig={providerConfig}
+                                    onProviders={(next) =>
+                                        saveSetting("tools.providers", JSON.stringify(next), {
+                                            confirm: false,
+                                        })
+                                    }
                                     {...(writing === undefined ? {} : { busy: writing })}
                                     {...(writeNote === undefined ? {} : { note: writeNote })}
                                     {...(lastRefresh === undefined ? {} : { lastRefresh })}
@@ -2268,6 +2508,11 @@ function Workspace(props: {
                                 <ChannelsPanel
                                     channels={report.channels}
                                     now={Date.now()}
+                                    {...(agentId === undefined
+                                        ? {}
+                                        : {
+                                              agentUrl: `${props.baseUrl}/v1/agents/${encodeURIComponent(agentId)}`,
+                                          })}
                                     actions={{
                                         onConnect: (channelId, enabled) =>
                                             void writeChannel(channelId, { enabled }),
@@ -2379,20 +2624,9 @@ function Tail(props: { readonly state: Transcript }): React.ReactElement {
  * `call`, `repair` and `digest` are the runtime's own text, and only unstamped messages are prose
  * somebody wrote.
  */
-async function history(
-    baseUrl: string,
-    token: string | undefined,
-    agentId: string,
-    sessionKey: string,
-): Promise<Transcript["rows"]> {
-    const response = await fetch(
-        `${baseUrl}/v1/agents/${agentId}/sessions/${encodeURIComponent(sessionKey)}/messages?limit=200`,
-        { headers: token === undefined ? {} : { authorization: `Bearer ${token}` } },
-    )
-    if (!response.ok) return []
-    const body = (await response.json()) as {
-        messages?: { role?: string; content?: string; origin?: string }[]
-    }
+async function history(agent: AgentClient, sessionKey: string): Promise<Transcript["rows"]> {
+    // Through the client, so a refusal is a typed error the caller sees rather than an empty page.
+    const body = await agent.messages(sessionKey, { limit: 200 })
     /**
      * **Reversed, because the page is newest-first and the screen is oldest-first.**
      *

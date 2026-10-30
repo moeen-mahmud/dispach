@@ -32,6 +32,11 @@ export interface ScheduleRow {
     readonly timeoutMs?: number | undefined
     readonly maxSteps?: number | undefined
     readonly sessionMode?: string | undefined
+    /** How the last run went: `ok`, `error` (the turn, or its delivery, failed) or `skipped`. */
+    readonly lastStatus?: string | undefined
+    readonly lastError?: string | undefined
+    readonly lastFiredAt?: string | undefined
+    readonly runs?: number | undefined
 }
 
 /** An address a reply can be sent to, offered from what has actually arrived (see `recipients`). */
@@ -64,7 +69,11 @@ export function whenSentence(row: Pick<ScheduleRow, "kind" | "expr" | "timezone"
 }
 
 /** "in 3 h 12 min", "in 2 d", "due now", "4 min ago". */
-export function relative(iso: string, now: number): string {
+/**
+ * `in 5 min`, `5 min ago`. Under a minute it depends on what the instant is: a next run that has
+ * just come is "due now", a run that just happened is "just now". `event` says it is the second.
+ */
+export function relative(iso: string, now: number, event = false): string {
     const delta = Date.parse(iso) - now
     if (Number.isNaN(delta)) return iso
     const abs = Math.abs(delta)
@@ -77,7 +86,7 @@ export function relative(iso: string, now: number): string {
               : minutes < 60 * 48
                 ? `${Math.floor(minutes / 60)} h${minutes % 60 === 0 ? "" : ` ${minutes % 60} min`}`
                 : `${Math.round(minutes / 1440)} d`
-    if (words === "now") return delta < 0 ? "due now" : "now"
+    if (words === "now") return event ? "just now" : delta < 0 ? "due now" : "now"
     return delta < 0 ? `${words} ago` : `in ${words}`
 }
 
@@ -158,6 +167,41 @@ export function SchedulesPanel(props: {
     )
 }
 
+/**
+ * The last run, and above all whether it failed. A schedule that fires every fifteen minutes and
+ * delivers nothing ("chat not found") is armed, due and wrong; without this row the card said only
+ * the first two.
+ */
+function LastOutcome(props: {
+    readonly row: ScheduleRow
+    readonly now: number
+}): React.ReactElement {
+    const { row } = props
+    if (row.lastStatus === undefined || row.lastFiredAt === undefined) return <>never run</>
+    const when = relative(row.lastFiredAt, props.now, true)
+    const runs = row.runs === undefined ? "" : ` · ${row.runs} run${row.runs === 1 ? "" : "s"}`
+    if (row.lastStatus === "error") {
+        return (
+            <>
+                <span className="pill bad">failed</span> {when}
+                {runs}
+                {row.lastError === undefined ? null : (
+                    <div className="error-line">{row.lastError}</div>
+                )}
+            </>
+        )
+    }
+    return (
+        <>
+            <span className={`pill ${row.lastStatus === "ok" ? "ok" : "warn"}`}>
+                {row.lastStatus}
+            </span>{" "}
+            {when}
+            {runs}
+        </>
+    )
+}
+
 function ScheduleCard(props: {
     readonly row: ScheduleRow
     readonly now: number
@@ -193,6 +237,10 @@ function ScheduleCard(props: {
                 <dd>{whenSentence(row)}</dd>
                 <dt>next</dt>
                 <dd>{next}</dd>
+                <dt>last</dt>
+                <dd>
+                    <LastOutcome row={row} now={props.now} />
+                </dd>
                 <dt>delivers to</dt>
                 <dd>
                     {row.deliverChannel === undefined

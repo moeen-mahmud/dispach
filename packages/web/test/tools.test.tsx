@@ -67,3 +67,26 @@ describe("the tools panel", () => {
         )
     })
 })
+
+describe("provider switches", () => {
+    test("named providers can be removed, the rest added, and an unknown one is still shown", () => {
+        const html = renderToStaticMarkup(
+            createElement(ToolsPanel, {
+                tools: [],
+                providers: [{ id: "web", keyEnv: "TAVILY_API_KEY", keySet: false }],
+                providerConfig: {
+                    web: { backend: "tavily", apiKeyEnv: "TAVILY_API_KEY" },
+                    mcp: {},
+                },
+                onProviders: () => undefined,
+            }),
+        )
+        const pill = (id: string) =>
+            html.slice(html.indexOf(`</span>${id}`), html.indexOf(`</span>${id}`) + 200)
+        expect(pill("web")).toContain("TAVILY_API_KEY missing")
+        expect(pill("web")).toContain(">remove<")
+        expect(pill("system")).toContain(">add<")
+        expect(pill("composio")).toContain(">add<")
+        expect(pill("mcp")).toContain(">remove<")
+    })
+})
