@@ -80,6 +80,11 @@ The web console reaches nearly every route the API has; one conversation per per
 - `dispach` on npm declares `engines.node >= 24`, so an install on an older Node warns instead of failing at runtime.
 - `docs/06-VELAOPS-INTEGRATION.md`: schedule routes, boot figure and the MCP row corrected.
 - `init --whatsapp` help no longer calls WhatsApp an opt-in plugin; `--whatsapp-number` says it sets `pairWith`.
+- `POST /v1/agents` refusing a missing answer names the missing answer keys and points at `GET /v1/provision`, not the terminal's wording (#61).
+- The unread `kv` store is removed: `Store.kv`, its SQLite table (migration 32) and its export (#63).
+- The harness benchmark reports pass^k, the tasks passed on every trial, beside the pass rate (#57).
+
+Thanks to @Dikshant-Neupane for #57, #61, #62 and #63.
 
 ## 0.2.1 — 2026-10-26
 
