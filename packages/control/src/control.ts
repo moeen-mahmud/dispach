@@ -89,6 +89,8 @@ export class ControlPlane {
     readonly #pending = new Map<string, Promise<Silo>>()
     #timer: ReturnType<typeof setInterval> | undefined
     #sweeping = false
+    /** Silos known to keep their address across a restart, so the sweep stops asking Docker. */
+    readonly #pinned = new Set<string>()
 
     constructor(options: ControlOptions) {
         this.store = options.store
@@ -186,7 +188,12 @@ export class ControlPlane {
      */
     async recreate(subject: string): Promise<Silo> {
         const silo = this.#find(subject)
-        if (silo.status === "running") await this.#requireIdle(silo)
+        if (silo.status === "running") {
+            // Asked at the address it answers on now. A container that is not up cannot be busy, and
+            // replacing it is how it comes back, so that is not a refusal.
+            const located = await this.#locate(silo)
+            if (located !== undefined) await this.#requireIdle(located)
+        }
         const relay = this.#relayEnv()
         const placed = await this.#placer.recreate(subject, silo.token, relay.env)
         if (relay.hash !== undefined) this.store.setRelayTokenHash(subject, relay.hash)
@@ -194,6 +201,7 @@ export class ControlPlane {
         this.store.setStatus(subject, "running")
         this.store.touch(subject, this.#iso())
         await this.#ready(placed.baseUrl, subject)
+        this.#pinned.add(subject)
         this.#log(`recreated ${subject}`)
         return this.#must(subject)
     }
@@ -305,7 +313,7 @@ export class ControlPlane {
             throw new ControlError({
                 code: "silo_unreachable",
                 message: `Silo "${silo.subject}" did not answer at ${silo.baseUrl}: ${String(error)}.`,
-                hint: `Check the container is up (docker ps --filter label=${BRAND.label}). A daemon restart moves published ports; waking the silo re-reads its address.`,
+                hint: `Check the container is up (docker ps --filter label=${BRAND.label}). POST /v1/silos/<subject>/recreate brings back one that is down, keeping its data and its port.`,
                 status: 502,
             })
         }
@@ -329,7 +337,7 @@ export class ControlPlane {
             throw new ControlError({
                 code: "silo_unreachable",
                 message: `Silo "${silo.subject}" did not answer at ${silo.baseUrl}: ${String(error)}.`,
-                hint: "Waking the silo re-reads its address; check the container is up.",
+                hint: `Check the container is up (docker ps --filter label=${BRAND.label}). POST /v1/silos/<subject>/recreate brings back one that is down, keeping its data and its port.`,
                 status: 502,
             })
         }
@@ -361,8 +369,10 @@ export class ControlPlane {
             const now = this.#now()
             for (const silo of this.store.list()) {
                 try {
-                    if (silo.status === "running") await this.#maybeSuspend(silo, now)
-                    else await this.#maybeWake(silo, now)
+                    if (silo.status === "running") {
+                        if (await this.#maybePin(silo)) continue
+                        await this.#maybeSuspend(silo, now)
+                    } else await this.#maybeWake(silo, now)
                 } catch (error) {
                     const code = error instanceof ControlError ? error.code : "sweep_failed"
                     this.#log(`sweep ${silo.subject}: ${code}: ${String(error)}`)
@@ -406,6 +416,38 @@ export class ControlPlane {
         const activity = await this.activity(silo)
         if (!activity.idle) return
         await this.#suspend(silo, activity)
+    }
+
+    /**
+     * Recreate a silo placed before ports were fixed, keeping the port it has now — its address does
+     * not change, and from then on no restart moves it. Only when idle, like an operator's recreate;
+     * a busy one is tried again next pass. True when it was recreated.
+     */
+    async #maybePin(silo: Silo): Promise<boolean> {
+        if (this.#pinned.has(silo.subject)) return false
+        if (await this.#placer.pinned(silo.name)) {
+            this.#pinned.add(silo.subject)
+            return false
+        }
+        const located = await this.#locate(silo)
+        if (located !== undefined) {
+            const activity = await this.activity(located)
+            if (!activity.idle || (this.#open.get(silo.subject) ?? 0) > 0) return false
+        }
+        await this.recreate(silo.subject)
+        this.#log(`pinned ${silo.subject} to ${this.#must(silo.subject).baseUrl}`)
+        return true
+    }
+
+    /**
+     * The silo at the address it answers on now, stored if it moved; undefined when its container is
+     * not up. Only a silo placed before ports were fixed can move.
+     */
+    async #locate(silo: Silo): Promise<Silo | undefined> {
+        const baseUrl = await this.#placer.address(silo.name).catch(() => undefined)
+        if (baseUrl === undefined) return undefined
+        if (baseUrl !== silo.baseUrl) this.store.setBaseUrl(silo.subject, baseUrl)
+        return this.#must(silo.subject)
     }
 
     async #maybeWake(silo: Silo, now: number): Promise<void> {

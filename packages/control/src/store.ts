@@ -241,7 +241,7 @@ export class SiloStore {
             .run(status, nextWakeAt ?? null, subject)
     }
 
-    /** The address can move: a restarted Docker daemon re-publishes on a new host port. */
+    /** Placed again (recreate, restore), or a silo from before fixed ports found on a new one. */
     setBaseUrl(subject: string, baseUrl: string): void {
         this.#db.prepare("UPDATE silos SET base_url = ? WHERE subject = ?").run(baseUrl, subject)
     }
