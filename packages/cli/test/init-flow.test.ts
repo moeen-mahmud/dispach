@@ -376,6 +376,10 @@ describe("planFiles", () => {
         // checks a comment, which is the whole argument for not shipping capabilities inside one.
         expect(yaml).toContain("\nmemory:\n  retriever: fts5")
         expect(yaml).toContain("includeHistory: true")
+        // Phase-scoped tools ship, and uncommenting the block loads (init.test.ts proves it), so
+        // the generated file must not claim otherwise (#25).
+        expect(yaml.includes("refused at load until")).toBe(false)
+        expect(yaml.includes("# Phase 7")).toBe(false)
         expect(yaml.includes("# memory:")).toBe(false)
         expect(yaml.includes("k: 6")).toBe(false)
         // Knowledge, the third capability that shipped inside a comment. Its note said "create
