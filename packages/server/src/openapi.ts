@@ -157,6 +157,14 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             },
         ],
     },
+    "GET /v1/agents/:id/vars": {
+        summary:
+            "The template an agent was made from and the plain variable values it was last rendered with. Secrets never appear.",
+        statuses: [
+            { code: 409, when: "an agent with no template record" },
+            { code: 501, when: "a server with no templates directory (an embedded handler)" },
+        ],
+    },
     "PATCH /v1/agents/:id/vars": {
         summary:
             "Apply changed template variables: re-render the files nobody edited since they were rendered, then reload.",

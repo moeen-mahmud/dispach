@@ -30,7 +30,10 @@ adapter was deleted rather than built.
 `code` is stable and machine-readable. `hint` names the likely fix. Every error type in
 `errors.ts` populates it. `detail`, when present, is a provider's own words verbatim, for an operator
 (pilot.14): AWS's text names the assumed-role ARN and the account, so it is kept out of `message`,
-which an embedder shows to people. A failed turn's record carries it as `errorDetail`.
+which an embedder shows to people. A failed turn's record carries it as `errorDetail`. `details[]`,
+when present, lists each failure of an error that stands for several (`manifest_validation_failed`
+and `manifest_schema_invalid` with more than one), each with its own `code`, `message`, `hint` and
+`field` (0.2.2; before it the list stayed on the server and the hint pointed at nothing).
 
 ### Error codes
 
@@ -253,7 +256,7 @@ actions (`/v1/participants`, `/v1/conversations`, `/v1/actions`), team memory an
 the `peer` capability, participant-bound keys (`scope.participant`), `limits.maxHops`, personal
 tools (`tool_personal`), per-message model roles (`POST /messages {role}`), media and its events,
 and the Slack and Teams channels, threading included. Each is marked where it appears. They are complete and tested; the browser console has screens for participants, conversations,
-actions, memory and projects since the 0.3 line (no TUI screens yet), and they may change
+actions, memory and projects since 0.2.2 (no TUI screens yet), and they may change
 within 0.2.x. Everything else here is stable.
 
 ### Health and readiness
@@ -318,8 +321,9 @@ GET /v1/agents           → [{ id, name, description?, ask, status, model, chan
                               phases?, sessionScope, assignee }]  (assignee, listing only: participant id or null)
                            plus a thin { id, name, status: "disabled", disabledAt?, reason? }
                            row per stopped agent
-GET /v1/agents/:id       → the above plus dialect, window, tool count, skills indexed,
-                           schedule count, warnings[], team? [{ id, task, artifact[] }],
+GET /v1/agents/:id       → the above plus dialect, window, capabilities (model.main's, resolved:
+                           the registry's row with the manifest's overrides; 0.2.2), tool count,
+                           skills indexed, schedule count, warnings[], team? [{ id, task, artifact[] }],
                            peers? [{ id, name?, description?, shared, remote }] (ask_agent),
                            assignedTo? { participantId, assignedBy?, assignedAt }
                            a stopped agent answers its listing row instead (since 0.2.0-pilot.5);
@@ -359,11 +363,13 @@ POST /v1/agents            { answers: {step: value, …} }
                            | { template, name, vars?: {var: value, …} }
                          → 201 { id, dir, files[], adopted[] }
 GET  /v1/templates       → { templates: [{ name, description?, vars[], problem? }] }
+GET   /v1/agents/:id/vars  → { id, template, vars: {var: value, …} }   (admin; 0.2.2) the plain values the
+                           agent was last rendered with; a secret var has none here. 409 agent_not_from_template
 PATCH /v1/agents/:id/vars  { vars: {var: value, …} }   (admin, gated like POST /v1/agents; since 0.2.0-pilot.5)
                          → 200 | 202 { id, rendered[], skipped: [{ file, reason: "edited" | "memory" | "removed" }],
                                        reload: "none" | "loaded" | "pending" }
-GET  /v1/agents/:id/workspace        → { id, files: [{ name, tier, field, exists, bytes }] }   (admin; 0.3)
-GET  /v1/agents/:id/workspace/:file  → { id, file, tier?, field?, exists, content }             (admin; 0.3)
+GET  /v1/agents/:id/workspace        → { id, files: [{ name, tier, field, exists, bytes }] }   (admin; 0.2.2)
+GET  /v1/agents/:id/workspace/:file  → { id, file, tier?, field?, exists, content }             (admin; 0.2.2)
 PUT  /v1/agents/:id/workspace/:file  { content }     (admin; since 0.2.0-pilot.15)
                          → 200 { id, file, written, loads, error?, applied, pending? }
 
@@ -744,7 +750,7 @@ as something the person said. At most 8,000 characters (`message_note_invalid`).
 `from.kind: "agent"` cannot carry one (`message_note_untrusted`): a peer's text is fenced as untrusted,
 and a note is trusted framing outside that fence. It is not part of the idempotency hash.
 
-#### `peerAsk` — another agent's ask (since 0.3.0)
+#### `peerAsk` — another agent's ask (since 0.2.2)
 
 ```json
 { "text": "How many deals are open?", "sessionKey": "ask:r_k2…", "peerAsk": { "askedBy": "personal/milo" } }
@@ -1062,6 +1068,7 @@ here that the server does not register, or a registered route missing from here,
 | `POST /v1/agents` | `admin` |
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/tools/refresh` | `admin` |
+| `GET /v1/agents/:id/vars` | `admin` |
 | `PATCH /v1/agents/:id/vars` | `admin` |
 | `GET /v1/agents/:id/workspace` | `admin` |
 | `GET /v1/agents/:id/workspace/:file` | `admin` |

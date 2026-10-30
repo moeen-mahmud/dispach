@@ -26,6 +26,11 @@ export interface ErrorDetail {
      * embedder shows to people: AWS's text names the assumed-role ARN and the account.
      */
     readonly detail?: string
+    /**
+     * Each failure, when one error stands for several: a manifest that broke two rules. Absent for a
+     * single failure, whose own fields already say it.
+     */
+    readonly details?: readonly ErrorDetail[]
 }
 
 export interface HarnessErrorInit {
@@ -133,6 +138,9 @@ export class HarnessError extends Error {
             hint: this.hint,
             ...(this.field === undefined ? {} : { field: this.field }),
             ...(this.detail === undefined ? {} : { detail: this.detail }),
+            // The hint of a multi-failure error says "each failure below", so the list has to travel
+            // with it: without it an HTTP caller got the count and a pointer to nothing.
+            ...(this.details.length > 1 ? { details: this.details } : {}),
         }
     }
 
