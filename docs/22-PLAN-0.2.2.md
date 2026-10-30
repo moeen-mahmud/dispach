@@ -46,3 +46,12 @@ Decisions 15.10, 15.16. Built with phase 35, at Moeen's call. Control gains `per
 token per silo, `GET /v1/relay/peers`, `POST /v1/relay/ask` (a 60-second key minted in the target,
 revoked after), an audit row per ask and a rate limit set over the API. The runtime gains `peerAsk`
 on `POST /messages`, `RelayClient` in core and its implementation in the CLI, built by `serve`.
+
+## Release audit (2026-10-30)
+
+Before release, every bullet of the plan was checked against the code. Workstream 2 had sixteen
+items no PR had built and no decision had dropped, among them the `⌘K` palette, server-wide usage,
+turn replay, a schedule's last outcome and the template vars editor. Moeen chose to build them all
+in 0.2.2 rather than move them to 0.3.0 issues, and they landed on `release/0.2.2`. Two needed the
+wire to say more: `GET /v1/agents/:id/vars` (the read half of `PATCH`) and `capabilities` on
+`GET /v1/agents/:id`. Decision 15.18 records the one decision the plan named and nobody wrote.

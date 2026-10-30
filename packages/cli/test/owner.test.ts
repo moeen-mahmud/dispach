@@ -124,7 +124,7 @@ describe("init makes you the owner of what it creates", () => {
 })
 
 describe("owner adopt", () => {
-    test("makes a pre-0.3 agent yours, and running it twice changes nothing", async () => {
+    test("makes a pre-0.2.2 agent yours, and running it twice changes nothing", async () => {
         await inSandbox(async (home) => {
             const dir = join(home, "agents", "scout")
             mkdirSync(dir, { recursive: true })

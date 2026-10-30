@@ -58,7 +58,7 @@ export async function ownerCommand(options: OwnerCommandOptions): Promise<number
         await store.close()
     }
 
-    // `sessions:` is a top-level block a manifest written before 0.3 does not have, and the source
+    // `sessions:` is a top-level block a manifest written before 0.2.2 does not have, and the source
     // editor appends only under a parent that exists — so it goes at the end, where a reader finds it.
     const edit = await editManifest({
         file: manifestPath,

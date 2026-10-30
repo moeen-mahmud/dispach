@@ -146,7 +146,7 @@ server:
 | `apiVersion` | `"dispach/v1"` | yes | Refused if unknown. Never silently upgraded. |
 | `id` | string | yes | Slug. Unique within a runtime. Used in session keys and API paths. May not start with `~`, which keys a shared memory scope (Phase 29). |
 | `name` | string | no | Display only. |
-| `description` | string | no | What the agent is for, one line, at most 200 characters (since 0.3.0). Shown beside it to the agents that may ask it (`ask_agent`), in `GET /v1/agents` and in the console. `init` writes the "what is it for" answer; `config_set` may change it. |
+| `description` | string | no | What the agent is for, one line, at most 200 characters (since 0.2.2). Shown beside it to the agents that may ask it (`ask_agent`), in `GET /v1/agents` and in the console. `init` writes the "what is it for" answer; `config_set` may change it. |
 | `extends` | string | no | Path to a base manifest. Shallow merge, arrays replace. |
 
 ### `model`
@@ -701,7 +701,7 @@ Text under 12 characters is not looked for elsewhere. A turn whose `memory_write
 | `threshold` | 0.20 | Score floor after original-query coverage and recency. `memory search` exposes all three terms. |
 | `budget` | 2000 | Total tokens across injected passages. Outside the workspace cap — this tier is retrieved, not carried. |
 | `includeHistory` | true | Index the person's messages and clean agent replies as well as the notes, under `session:<key>`. Never tool observations, runtime-authored messages, or tainted assistant prose. |
-| `shared` | true | For an assigned agent, a `memory_write` also leaves a copy in `agents:<owner>`, the memory its owner's agents share, and recall reads that pool (decisions 15.8, 15.13). Read only where private memory is read — never by a stand-in, a room or another member's ask — and the writer never recalls its own copies. `false` opts out both ways. Since 0.3; `23-SPEC-SESSIONS.md`. |
+| `shared` | true | For an assigned agent, a `memory_write` also leaves a copy in `agents:<owner>`, the memory its owner's agents share, and recall reads that pool (decisions 15.8, 15.13). Read only where private memory is read — never by a stand-in, a room or another member's ask — and the writer never recalls its own copies. `false` opts out both ways. Since 0.2.2; `23-SPEC-SESSIONS.md`. |
 
 **Shared scopes (Phase 29) need no field.** **Status: experimental in 0.2.0.** Multiplayer; it may
 change within 0.2.x. Beside its own memory — everything above, which is the
@@ -780,7 +780,7 @@ spot rather than a hypothetical one.
 
 ### `sessions`
 
-How a turn's conversation is chosen. Since 0.3; the full rules are `23-SPEC-SESSIONS.md`.
+How a turn's conversation is chosen. Since 0.2.2; the full rules are `23-SPEC-SESSIONS.md`.
 
 ```yaml
 sessions:
@@ -1146,7 +1146,7 @@ delegation:
       properties: { finding: { type: string } }
       required: [finding]
   to: "*"                 # or [agent ids]: whom I may delegate to (only agents that offer)
-  ask: true               # ask_agent: my owner's other agents, and shared ones (since 0.3.0)
+  ask: true               # ask_agent: my owner's other agents, and shared ones (since 0.2.2)
 ```
 
 **`standIn`** applies only in a DM between two people, and only to the agent assigned to the absent
@@ -1169,7 +1169,7 @@ for is its own owner. Targets are fixed when the coordinator loads; an agent ado
 reachable after the coordinator reloads. A person sets both fields with `PATCH /config`
 (`delegation.offer`, `delegation.to`); an agent's `config_set` cannot.
 
-**`delegation.ask`** (since 0.3.0, `24-SPEC-PEER-ASK.md`) gives the agent `ask_agent(peer, question)`:
+**`delegation.ask`** (since 0.2.2, `24-SPEC-PEER-ASK.md`) gives the agent `ask_agent(peer, question)`:
 a free-form question to another agent working for the same person, answered as text. Default
 `false`; `init` writes `true`. Both sides opt in: an agent is offered another that also declares it
 and is assigned to the same person, or to nobody — a **shared** agent, which is asked and never asks,

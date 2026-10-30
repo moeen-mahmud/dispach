@@ -9,6 +9,7 @@ with memory, tools, schedules, channels and approvals, on any OpenAI-compatible 
 
 ```bash
 npm i -g dispach      # Node 24+, or: brew install moeen-mahmud/tap/dispach
+# no Node? curl -fsSL https://github.com/moeen-mahmud/dispach/releases/latest/download/install.sh | sh
 dispach init          # name the agent, pick a model, paste a key
 dispach run milo      # talk to it in the terminal
 ```
@@ -23,7 +24,7 @@ agent and streams its reply in three requests.
 
 ```bash
 docker run -d --init -p 7420:7420 -v dispach-home:/home/dispach \
-  -e DISPACH_API_TOKEN=pick-a-secret ghcr.io/moeen-mahmud/dispach:0.2.1
+  -e DISPACH_API_TOKEN=pick-a-secret ghcr.io/moeen-mahmud/dispach:0.2.2
 ```
 
 The named volume is where the store, every agent and every key live; without it a `docker rm` for
@@ -48,6 +49,7 @@ they work for, and stand in for them, openly, when they are away. That half ship
 Everything else described in this README is stable.
 
 **Docs:** [dispach.blivius.com/docs](https://dispach.blivius.com/docs) ·
+**New in 0.2.2:** [the changelog, with upgrade notes](CHANGELOG.md) ·
 **New in 0.2.0:** [what changed and how to upgrade](developer-docs/runtime/whats-new-0-2-0.md) ·
 **Limits:** [what is measured, and what it does not do](developer-docs/runtime/limits-and-evidence.md)
 
@@ -66,7 +68,7 @@ or the [larger pieces that need an owner](https://github.com/moeen-mahmud/dispac
 ```bash
 export TOKEN=pick-a-secret
 docker run -d --init -p 7420:7420 -v dispach-home:/home/dispach -e DISPACH_API_TOKEN=$TOKEN \
-  ghcr.io/moeen-mahmud/dispach:0.2.1
+  ghcr.io/moeen-mahmud/dispach:0.2.2
 
 curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/agents \
   -d '{"answers":{"user":"you","name":"milo","apiKey":"sk-…"}}'
@@ -119,8 +121,8 @@ gap of a few runs is noise. Hermes leads on Gemini 4 Argon and the two small ope
 
 ## Status
 
-**0.2.1**, from npm, Homebrew or the container image. Every install runs
-under Node. [`CHANGELOG.md`](CHANGELOG.md) has what landed in each release.
+**0.2.2**, from npm, Homebrew, the container image or the standalone installer. Every install
+runs under Node. [`CHANGELOG.md`](CHANGELOG.md) has what landed in each release.
 
 Built and in use:
 
@@ -142,7 +144,7 @@ Built and in use:
 
 **Experimental in 0.2.0**: rooms, stand-ins and team memory; the Slack, Microsoft Teams and A2A
 channels; and media (transcription, image generation, spoken replies). The first three and the
-channels have screens in the browser console since the 0.3 line (People, Rooms, Actions, Memory,
+channels have screens in the browser console since 0.2.2 (People, Rooms, Actions, Memory,
 add a channel); media is still API-only.
 
 **MCP is a tool provider, never the substrate** (decision 4.7): remote servers over Streamable HTTP,
@@ -196,7 +198,7 @@ Full rationale for every decision, including the negative ones, is in `docs/00-D
 
 ```bash
 npm i -g dispach          # the `dispach` command
-dispach --version         # 0.2.1
+dispach --version         # 0.2.2
 ```
 
 and in an application that talks to a running server:
@@ -214,6 +216,34 @@ There is no `@dispach/*` scope, deliberately: the runtime is sixteen workspace p
 so there is one thing to install, one thing to version and one thing to trust. `dispach/client`
 pulls in no terminal UI — asserted by the package's own tests, because an HTTP client has no
 business paying the ~170-210 ms that importing Ink and React costs.
+
+### Or without Node
+
+```bash
+curl -fsSL https://github.com/moeen-mahmud/dispach/releases/latest/download/install.sh | sh
+```
+
+macOS and Linux (glibc), arm64 and x64. Each release attaches one archive per platform: an official
+Node 24, checked against nodejs.org's checksums, beside the same npm tarball the other installs use.
+It is not a single compiled file on purpose — Bun can compile one, and Bun cannot complete the
+WhatsApp handshake (see below), so what ships is Node. The script checks the archive against the
+release's `SHA256SUMS`, unpacks it into `~/.dispach/versions/<version>`, links
+`~/.dispach/bin/dispach`, and adds that directory to `PATH` in your shell's rc file, saying which.
+Nothing needs root. Run it again to upgrade.
+
+| Variable | Effect |
+| --- | --- |
+| `DISPACH_VERSION=0.2.2` | that release instead of the latest |
+| `DISPACH_NO_MODIFY_PATH=1` | change no rc file; it prints the line to add |
+| `DISPACH_INSTALL_DIR=<dir>` | install somewhere other than `~/.dispach` |
+
+An upgrade does not move a background server installed with `dispach daemon install`, because the
+service names the version directory it was started from; the script says so and keeps that
+version, and `dispach daemon install` moves it. To uninstall, delete `~/.dispach/bin` and
+`~/.dispach/versions` and the `PATH` line; your agents beside them in `~/.dispach` are left alone.
+
+**Windows:** run it inside WSL (`wsl --install`), or use the container. A native build needs the
+shell tool and the service manager ported; that is [open for contributions (#76)](https://github.com/moeen-mahmud/dispach/issues/76).
 
 ### Or with Homebrew
 
@@ -235,7 +265,7 @@ until `brew trust moeen-mahmud/tap` is run, because a bare name carries no such 
 ### Or the container
 
 ```bash
-docker pull ghcr.io/moeen-mahmud/dispach:0.2.1
+docker pull ghcr.io/moeen-mahmud/dispach:0.2.2
 ```
 
 The [Docker](#docker) and [Compose](#hosting-with-compose) sections below have the run lines and
@@ -254,7 +284,7 @@ bun run build                       # builds every package the binary imports
 cd packages/cli && bun link         # puts `dispach` on your PATH
 cd ../..
 
-dispach --version                   # 0.2.1
+dispach --version                   # 0.2.2
 dispach --help
 ```
 
@@ -315,7 +345,7 @@ the agents it creates and writes `sessions.scope: owner`, so what you said on Te
 is in the web console's chat and the terminal's this afternoon, and each reply goes back to wherever
 you asked. "New conversation" starts afresh on all of them at once. Strangers on a channel keep their
 own conversations, and anything one of your agents saves about you is recalled by your others.
-`dispach owner adopt <agent>` does the same for an agent made before 0.3
+`dispach owner adopt <agent>` does the same for an agent made before 0.2.2
 (`docs/23-SPEC-SESSIONS.md`).
 
 Local Ollama and Ollama Cloud are **two presets on purpose.** Local needs no key, and the absent
@@ -617,14 +647,14 @@ consequence: run it on a laptop and the policy is the only boundary there is.
 ## Docker
 
 ```bash
-docker pull ghcr.io/moeen-mahmud/dispach:0.2.1          # or build it: docker build -f docker/Dockerfile -t dispach .
+docker pull ghcr.io/moeen-mahmud/dispach:0.2.2          # or build it: docker build -f docker/Dockerfile -t dispach .
 cp examples/minimal/.env.example examples/minimal/.env  # then MODEL_API_KEY; only the example is tracked
 docker run --rm --init -p 7420:7420 \
   --env-file examples/minimal/.env \
   -e DISPACH_API_TOKEN=pick-something \
   -v "$PWD/examples/minimal:/agent" \
   -v dispach-home:/home/dispach \
-  ghcr.io/moeen-mahmud/dispach:0.2.1
+  ghcr.io/moeen-mahmud/dispach:0.2.2
 ```
 
 The token is not optional and is not boilerplate. The image binds `0.0.0.0`, because a process

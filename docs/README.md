@@ -25,7 +25,7 @@ VelaOps is its first consumer, not its owner.
 | `12-OPENCLAW-CUTOVER.md` | Moving off the runtime this one replaces. |
 | `13-QA.md` | The manual QA pass before a release reaches anyone: upgrade, CLI, server, channels, API, control plane, numbers. |
 | `17-KUBERNETES.md` | Running the image on a cluster, and the volume-ownership trap. |
-| `22-PLAN-0.3.0.md` | The 0.3 line: console, one conversation per person across surfaces, peer ask. |
+| `22-PLAN-0.2.2.md` | 0.2.2: console, one conversation per person across surfaces, peer ask. |
 | `23-SPEC-SESSIONS.md` | `sessions.scope`, the owner's conversation and its rotation, and the `agents:<P>` memory pool. |
 
 `10`, `11`, `14`–`16` and `18`–`21` are private working documents (the business plan, the 0.2.0
@@ -72,7 +72,7 @@ server, an idempotent outbox, memory on FTS5, skills with two catalogues, the co
 phase scoping, scheduling, the plugin API with all four middleware wrap points, supervisor
 delegation, launchd services, the Docker image and compose front door, a typed client, scoped
 operator keys, the full-screen TUI, and a browser console on the same origin as the API — which
-since the 0.3 line covers models (Bedrock and fallbacks included), tools, schedules, usage, turns,
+since 0.2.2 covers models (Bedrock and fallbacks included), tools, schedules, usage, turns,
 files, people, rooms, actions, shared memory, webhooks and backups.
 
 Measured numbers live in `evals/`, each with a script to reproduce it.

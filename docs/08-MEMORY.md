@@ -204,7 +204,7 @@ selection covers both. A stand-in reads its owner's scope and the space; a room 
 scopes only; both also go without the volatile tier. Reads of an owner scope made for somebody else
 are audited (`memory_reads`). Decisions 14.39–14.42; the reconcile reasoning is in CLAUDE.md.
 
-## 0.3 — an owner's agents share a pool (2026-10-29)
+## 0.2.2 — an owner's agents share a pool (2026-10-29)
 
 `agents:<participant>` is a fifth scope: what one person's agents remember, shared among them. An
 assigned agent's `memory_write` writes its own file as ever and leaves a copy in the pool; recall

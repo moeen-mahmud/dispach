@@ -9,5 +9,5 @@ Start with the [architecture](architecture.md), then follow the
 should read [deployment and operations](deployment-and-operations.md), especially the Docker socket
 trust boundary.
 
-This guide documents the control plane as of 0.2.1. Read [stable and
+This guide documents the control plane as of 0.2.2. Read [stable and
 pre-releases](../runtime/releases.md) before choosing an image or source revision.
