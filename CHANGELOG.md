@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.2.2 — 2026-10-30
+
 The web console reaches nearly every route the API has; one conversation per person across surfaces; an agent can ask another agent working for the same person; and a curl installer that needs no Node. Shipped as a patch because 0.3.0 is held for the open issues.
 
 ### Upgrading from 0.2.1

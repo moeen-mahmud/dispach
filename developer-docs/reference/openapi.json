@@ -2,7 +2,7 @@
     "openapi": "3.1.0",
     "info": {
         "title": "Dispach agent server",
-        "version": "0.2.1",
+        "version": "0.2.2",
         "description": "Generated from the router table and the request schemas — see openapi.ts. The binding contract is docs/04-SPEC-WIRE.md, which is checked against the code; @dispach/client's types are the response reference."
     },
     "servers": [
