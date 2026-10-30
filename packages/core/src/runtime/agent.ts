@@ -117,6 +117,7 @@ import {
     type Store,
     type TurnRecord,
 } from "../store/store.ts"
+import { ASK_AGENT } from "../team/ask.ts"
 import { routedTool, type SubagentRunner } from "../team/subagents.ts"
 import { HANDOFF } from "../team/supervisor.ts"
 import { type DialectId, passThroughFilter, type StreamFilter } from "../tools/dialect/dialect.ts"
@@ -1682,9 +1683,10 @@ export class Agent {
                   .filter((spec) => spec.personal === true)
                   .map((spec) => spec.slug)
             : []
+        const oneHop = [HANDOFF, ASK_AGENT].filter((slug) => slugs.includes(slug))
         const peerAllow =
-            options.peerAsk !== undefined && slugs.includes(HANDOFF)
-                ? (options.toolsAllow ?? slugs).filter((slug) => slug !== HANDOFF)
+            options.peerAsk !== undefined && oneHop.length > 0
+                ? (options.toolsAllow ?? slugs).filter((slug) => !oneHop.includes(slug))
                 : options.toolsAllow
         const toolsAllow =
             withheld.length === 0
@@ -2415,12 +2417,6 @@ export class Agent {
     }
 
     /**
-     * Which memory this turn may read (`memory/scopes.ts` has the rule and its reasons).
-     *
-     * Only a conversation turn or a stand-in narrows anything, and only those pay for the lookups that
-     * decide it — every other turn reads what it always read, plus any shared scope it belongs to.
-     */
-    /**
      * The asked turn's framing (pilot.9): this agent's owner, the asking agent and the
      * person it acts for, each with the title and timezone their participant record carries. Facts the
      * embedder registered, so nothing here is the model's to doubt; absent fields are left out.
@@ -2442,23 +2438,31 @@ export class Agent {
         const ownerId = (await conversations.assignment(this.id))?.participantId
         const owner = await describe(ownerId)
         const asker = await describe(actingFor)
+        // The same person's own agents asking each other (`ask_agent`, decision 15.9): one person, so
+        // nothing is withheld and the answer is not written for a stranger.
+        if (ownerId !== undefined && actingFor === ownerId) {
+            return `You are the agent of ${owner ?? ownerId}. ${askedBy}, another of their agents, is asking on their behalf. Answer from everything you know and can check; your reply goes back to ${askedBy}.`
+        }
+        // A shared agent: nobody's, so it answers from the team's projects.
+        if (ownerId === undefined) {
+            return [
+                asker === undefined
+                    ? `${askedBy} is asking you a question.`
+                    : `${askedBy} is asking you a question on behalf of ${asker}.`,
+                "You are a shared agent: answer from the team's projects and your tools. Where the answer depends on something you cannot check here, say so rather than guessing.",
+            ].join(" ")
+        }
+        // Only another member's ask reaches here: the owner's own and a shared agent's returned above.
         return [
-            owner === undefined
-                ? "You are answering another member's agent."
-                : `You are the agent of ${owner}, answering another member's agent.`,
+            `You are the agent of ${owner}, answering another member's agent.`,
             asker === undefined
                 ? `The agent asking is ${askedBy}.`
                 : `The agent asking is ${askedBy}, on behalf of ${asker}.`,
             "Your answer goes back to them, so it is written from what your owner shares, not from what they keep private.",
             // Without this an agent with no calendar answered "3pm works, no conflict I'm aware of",
-            // and the asker relayed it as a commitment (pilot.10). The owner's own ask reads
-            // everything, so it is not told this.
-            actingFor !== undefined && actingFor === ownerId
-                ? undefined
-                : "Their private notes and saved memory are not in this turn. Where the answer depends on something you cannot check here, such as their availability, a preference or a commitment, say you cannot confirm it rather than guessing.",
-        ]
-            .filter((line) => line !== undefined)
-            .join(" ")
+            // and the asker relayed it as a commitment (pilot.10).
+            "Their private notes and saved memory are not in this turn. Where the answer depends on something you cannot check here, such as their availability, a preference or a commitment, say you cannot confirm it rather than guessing.",
+        ].join(" ")
     }
 
     /**
@@ -2479,6 +2483,12 @@ export class Agent {
         return assignment !== undefined && isOwner(assignment, participant)
     }
 
+    /**
+     * Which memory this turn may read (`memory/scopes.ts` has the rule and its reasons).
+     *
+     * Only a conversation turn or a stand-in narrows anything, and only those pay for the lookups that
+     * decide it — every other turn reads what it always read, plus any shared scope it belongs to.
+     */
     async #readPlan(
         from: TurnSender | undefined,
         participant: ActingParticipant | null,

@@ -797,3 +797,13 @@ describe("the background service is the default answer", () => {
         throw new Error("the daemon question was never asked")
     })
 })
+
+describe("oneLineDescription", () => {
+    test("collapses a purpose to one line inside the schema's 200 characters", async () => {
+        const { oneLineDescription } = await import("../src/lib/init-flow.ts")
+        expect(oneLineDescription("  keeps\n my week ")).toBe("keeps my week")
+        const long = oneLineDescription("x ".repeat(300))
+        expect(long.length).toBe(200)
+        expect(long.endsWith("…")).toBe(true)
+    })
+})

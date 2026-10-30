@@ -161,6 +161,18 @@ export const MessageBody = z.object({
         description:
             "Your application's note about this message: shown to the model in its own block before the text, labelled as not written by the person, for this turn only. Kept on the turn record (`GET …/turns`), never in history. Refused when `from` is an agent.",
     }),
+    peerAsk: refuse(
+        z
+            .object({ askedBy: z.string().trim().min(1).max(200) })
+            .strict()
+            .optional(),
+        {
+            code: "message_peer_ask_invalid",
+            hint: 'Send { "peerAsk": { "askedBy": "<silo>/<agent>" } }, naming the agent that asked, or omit it.',
+            description:
+                "Marks this turn as another agent's ask (`docs/24-SPEC-PEER-ASK.md`): it runs without `handoff` and `ask_agent`, so it is one hop, and the agent is told who asked. It only narrows what the turn may do, so any caller may set it; the control plane's relay always does.",
+        },
+    ),
     images: refuse(
         z
             .array(

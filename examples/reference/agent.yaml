@@ -9,6 +9,8 @@
 apiVersion: dispach/v1
 id: reference
 name: Milo (Reference Assistant)
+# One line: what this agent is for. Its peers see it beside its id in ask_agent (since 0.3.0).
+description: Answers questions about this repository and keeps its notes current
 
 # Path to a base manifest. Shallow merge; arrays replace rather than concatenate.
 # extends: ./base.agent.yaml
@@ -492,6 +494,12 @@ memory:
 # conversation on every surface at once. Needs an owner: `dispach owner adopt <agent>`.
 sessions:
   scope: owner
+
+# Peer ask (since 0.3.0, docs/24-SPEC-PEER-ASK.md): ask the same person's other agents a question
+# with ask_agent, and be asked by them. Both sides must say yes; an agent assigned to nobody that
+# says yes is a shared agent anyone's agent may ask. Person-only, like the rest of delegation.
+delegation:
+  ask: true
 
 # ── Phase 4: channels, delivery, and the HTTP server ──────────────────────────────────────
 # `allowFrom` is **inbound-only**, and omitting it permits nobody. It confers nothing on outbound

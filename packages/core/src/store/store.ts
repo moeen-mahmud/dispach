@@ -383,6 +383,8 @@ export interface HandoffRecord {
      */
     readonly memberSession: string
     readonly task: string
+    /** `ask` for a peer ask (`ask_agent`), which returns text rather than an artifact. */
+    readonly kind: "handoff" | "ask"
     readonly outcome: HandoffOutcomeStatus
     /** JSON, present only when `outcome` is `ok`. */
     readonly artifact?: string
@@ -412,6 +414,8 @@ export interface HandoffStore {
         readonly memberSession: string
         readonly task: string
         readonly startedAt: string
+        /** Absent is `handoff`. */
+        readonly kind?: "handoff" | "ask"
     }): Promise<void>
     finish(
         handoffId: string,

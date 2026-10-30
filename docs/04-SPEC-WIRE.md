@@ -61,6 +61,7 @@ and WebSocket surfaces can return:
 | `tools_refresh_providers_invalid` | 400 | `POST …/tools/refresh` with `providers` that is not a non-empty list of ids. |
 | `model_role_unknown` | 400 | `POST /messages` with a `role` not declared under `model:`. Nothing is recorded. |
 | `message_note_invalid` | 400 | `POST /messages` with a `runtimeNote` that is empty or over 8,000 characters. |
+| `message_peer_ask_invalid` | 400 | `POST /messages` with a `peerAsk` that is not `{askedBy: <non-empty text>}` (`24-SPEC-PEER-ASK.md`). |
 | `message_note_untrusted` | 400 | `POST /messages` with a `runtimeNote` from a peer agent (`from.kind: "agent"`). |
 | `message_images_invalid` | 400 | `POST /messages` with `images` that is not a list of `{path}` or `{data, mediaType?}`. The checks on each image have their own codes (`image_*`, `model_no_vision`); see `images` above. |
 | `deliver_invalid` | 400 | `deliver` named a channel with no recipient, or an unknown shape. |
@@ -313,11 +314,13 @@ immediately instead of waiting for the next one.
 ### Agents
 
 ```
-GET /v1/agents           → [{ id, name, status, model, channels[], entryPhase, phases? }]
+GET /v1/agents           → [{ id, name, description?, ask, status, model, channels[], entryPhase,
+                              phases?, sessionScope, assignee }]  (assignee, listing only: participant id or null)
                            plus a thin { id, name, status: "disabled", disabledAt?, reason? }
                            row per stopped agent
 GET /v1/agents/:id       → the above plus dialect, window, tool count, skills indexed,
                            schedule count, warnings[], team? [{ id, task, artifact[] }],
+                           peers? [{ id, name?, description?, shared, remote }] (ask_agent),
                            assignedTo? { participantId, assignedBy?, assignedAt }
                            a stopped agent answers its listing row instead (since 0.2.0-pilot.5);
                            every route that acts on it still answers 404
@@ -740,6 +743,18 @@ and not from the person, for this turn only. It is kept on the turn record (`not
 as something the person said. At most 8,000 characters (`message_note_invalid`). A message with
 `from.kind: "agent"` cannot carry one (`message_note_untrusted`): a peer's text is fenced as untrusted,
 and a note is trusted framing outside that fence. It is not part of the idempotency hash.
+
+#### `peerAsk` — another agent's ask (since 0.3.0)
+
+```json
+{ "text": "How many deals are open?", "sessionKey": "ask:r_k2…", "peerAsk": { "askedBy": "personal/milo" } }
+```
+
+The turn is another agent's question (`24-SPEC-PEER-ASK.md`). It runs without `handoff` and
+`ask_agent`, so it is one hop, its session key is used as sent rather than moved into a person's
+conversation, and the agent is told who asked. It only narrows what the turn may do, so any caller may
+set it; the control plane's relay always does. `message_peer_ask_invalid` when it is not
+`{askedBy: <non-empty text>}`. Not on the WebSocket `send` frame: the relay speaks HTTP.
 
 #### `images` — what the model is shown with the text (since 0.2.0-pilot.5)
 
@@ -1472,6 +1487,8 @@ stream still ends on its own turn's `turn.end`, so read `turnId` before treating
 | `agent.channel.rejected` | inbound not turned into a turn | `channelId`, `reason` (`duplicate` \| `denied`), `sender`, `detail` |
 | `handoff.start` | a delegation began | `member`, `task`, `sessionKey`, `kind` (`member` or `self` for a subagent), `name?` (the subagent's), `callId?` (the parent's tool call) |
 | `handoff.result` | how it ended | `member`, `sessionKey`, `kind`, `name?`, `callId?`, `outcome`, `steps`, `tokens`, `errorCode?` |
+| `peer.ask` | an `ask_agent` call began (`24-SPEC-PEER-ASK.md`) | `askId`, `peer`, `remote`, `sessionKey`, `callId?` |
+| `peer.answer` | how it ended | `askId`, `peer`, `sessionKey`, `outcome` (`ok`, `budget`, `error`), `steps`, `tokens`, `errorCode?` |
 | `approval.requested` | a call is waiting on a person | `approvalId`, `slug`, `callId`, `match?`, `mutating`, `reason` |
 | `approval.resolved` | how it ended | `approvalId`, `slug`, `granted`, `by` |
 | `turn.start` | inbound accepted | `source`, `inputTokens`, `trust`, `from?`, `inputKind?` (`voice` for a transcribed voice note) |

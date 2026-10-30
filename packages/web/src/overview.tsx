@@ -146,17 +146,40 @@ export interface TeamMember {
     readonly artifact: readonly string[]
 }
 
+/** An agent `ask_agent` can ask, as `GET /v1/agents/:id` reports it (`peers`). */
+export interface Peer {
+    readonly id: string
+    readonly name?: string
+    readonly description?: string
+    readonly shared: boolean
+    readonly remote: boolean
+}
+
 /**
- * The supervisor and who it delegates to. Read-only by design: members are excluded from every
- * agent route so a member cannot be driven around its supervisor's policy.
+ * The supervisor and who it delegates to, then the person's other agents it can ask. Members are
+ * read-only by design: they are excluded from every agent route so a member cannot be driven around
+ * its supervisor's policy. The ask switch is `delegation.ask`, the person's setting.
  */
 export function TeamPanel(props: {
     readonly lead: { readonly id: string; readonly name: string }
     readonly team: readonly TeamMember[] | undefined
+    readonly peers?: readonly Peer[]
+    /** `delegation.ask` as the manifest has it. */
+    readonly ask?: boolean
+    readonly busy?: boolean
+    readonly onAsk?: (on: boolean) => void
 }): React.ReactElement {
     const team = props.team ?? []
+    const peers = props.peers ?? []
     return (
         <>
+            <AskSection
+                name={props.lead.name}
+                peers={peers}
+                ask={props.ask === true}
+                busy={props.busy === true}
+                {...(props.onAsk === undefined ? {} : { onAsk: props.onAsk })}
+            />
             <div className="page-head">
                 <h1>Team</h1>
                 <p>
@@ -204,6 +227,70 @@ export function TeamPanel(props: {
                 </div>
             )}
         </>
+    )
+}
+
+/** Peer ask (`ask_agent`): the switch, and whom it reaches. */
+function AskSection(props: {
+    readonly name: string
+    readonly peers: readonly Peer[]
+    readonly ask: boolean
+    readonly busy: boolean
+    readonly onAsk?: (on: boolean) => void
+}): React.ReactElement {
+    return (
+        // Spaced from the Team section below it, which starts with its own page heading.
+        <section style={{ marginBottom: 40 }}>
+            <div className="page-head">
+                <h1>Peers</h1>
+                <p>
+                    The other agents working for the same person, which {props.name} can ask a
+                    question. Both sides have to switch this on.
+                </p>
+            </div>
+            <label className="check" style={{ marginBottom: 16 }}>
+                <input
+                    type="checkbox"
+                    checked={props.ask}
+                    disabled={props.busy || props.onAsk === undefined}
+                    onChange={(event) => props.onAsk?.(event.target.checked)}
+                />
+                <span>
+                    Ask and be asked <code>delegation.ask</code>
+                </span>
+            </label>
+            {props.peers.length === 0 ? (
+                <div className="empty-state">
+                    <h3>Nobody to ask</h3>
+                    <p>
+                        {props.ask
+                            ? "Either no other agent of this person, and no shared agent, has peer ask on, or this agent is assigned to nobody: a shared agent is asked but never asks."
+                            : "Switch it on to let this agent ask the person's other agents, and be asked by them."}
+                    </p>
+                </div>
+            ) : (
+                <div className="grid">
+                    {props.peers.map((peer) => (
+                        <div key={peer.id} className="member">
+                            <div className="head">
+                                <span className="avatar">{initial(peer.name ?? peer.id)}</span>
+                                <strong>{peer.name ?? peer.id}</strong>
+                            </div>
+                            {peer.description === undefined ? null : (
+                                <p className="task">{peer.description}</p>
+                            )}
+                            <div className="stats">
+                                {peer.name === undefined ? null : (
+                                    <span className="pill">{peer.id}</span>
+                                )}
+                                {peer.shared ? <span className="pill">shared</span> : null}
+                                {peer.remote ? <span className="pill">another silo</span> : null}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </section>
     )
 }
 

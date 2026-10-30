@@ -110,6 +110,9 @@ describe("init makes you the owner of what it creates", () => {
             const loaded = await loadManifest(manifest, { env: { MODEL_API_KEY: "(pending)" } })
             expect(loaded.manifest.sessions?.scope).toBe("owner")
             expect(loaded.manifest.memory?.shared).toBe(true)
+            // Peer ask on, and the purpose as the description the other agents see (decision 15.9).
+            expect(loaded.manifest.delegation?.ask).toBe(true)
+            expect(loaded.manifest.description).toBe("keeps my week on track")
 
             const owner = readFileSync(join(home, "agents", ".owner"), "utf8").trim()
             expect(owner).toMatch(/^me:[0-9a-hjkmnp-tv-z]{6}$/)

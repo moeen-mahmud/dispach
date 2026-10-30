@@ -19,9 +19,16 @@
 - `POST /v1/participants` takes `channelIds`. `channelIds` (on participants and assignments) match like `allowFrom`: `telegram:@handle` recognises the numeric-id sender.
 - Web and terminal pickers name the person's conversation "You" and an older one "You · earlier"; a fresh tab or `run` opens the current one.
 - `@dispach/client`: `rotateSession`, `SessionSummary.head`, `AgentDescriptionLike.sessionScope`, `ParticipantLike.channelIds`.
+- `ask_agent(peer, question)` (#66, `docs/24-SPEC-PEER-ASK.md`): an agent asks another working for the same person, or a shared agent (assigned to nobody), and gets the reply as text. One hop, a fresh `ask:<runId>` session, recorded in `handoffs` with `kind: ask`, events `peer.ask` and `peer.answer`. `delegation.ask` turns it on (default off; `init` writes it on). Both sides opt in.
+- `description` on the manifest: one line saying what the agent is for, shown to its peers, in `GET /v1/agents` and in the console. `init` writes the "what is it for" answer.
+- A change to an assignment, `delegation.ask` or a peer's `description` reloads the agents whose peer list it changes, without a restart.
+- Across silos (decision 15.16): the control plane links one person's participants across silos (`PUT /v1/people/:principal/silos/:subject`), gives each silo a relay token on create and recreate (`DISPACH_RELAY_URL`, `DISPACH_RELAY_TOKEN`), lists a person's agents in their other silos (`GET /v1/relay/peers`) and relays an ask with a 60-second key minted in the target (`POST /v1/relay/ask`). Rate limit per person, set with `PUT /v1/relay/config` and `PUT /v1/people/:principal`. Audit row per ask.
+- `POST /messages` takes `peerAsk: {askedBy}`: the turn runs without `handoff` and `ask_agent` and is told who asked.
+- `GET /v1/agents` rows carry `description`, `ask` and `assignee`; `GET /v1/agents/:id` carries `peers`. The console's Team page has a Peers section with the `delegation.ask` switch.
 
 ### Changed
 
+- A shared agent (assigned to nobody) asked by another member's agent now reads its projects' memory as well as the space.
 - An assigned agent's `memory_write` also leaves a copy in `agents:<owner>`. The private file is written as before. `memory.shared: false` restores the old behaviour exactly.
 - Turns on one session key run one at a time on every surface. Two HTTP or WebSocket turns on the same key used to run concurrently over the same history.
 - A channel sender is recognised as the owner by the handle written in `channelIds`, not only by an exact id (the personal-tools fence, the owner-scope audit, `memory_forget`).

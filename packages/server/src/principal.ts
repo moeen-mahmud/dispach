@@ -208,10 +208,12 @@ export async function sessionFor(
     principal: Principal,
     requested: string,
     from: TurnSender | undefined,
+    peerAsk?: { readonly askedBy: string },
 ): Promise<string> {
     const resolved = await agent.resolveSessionKey(requested, {
         source: "api",
         ...(from === undefined ? {} : { from }),
+        ...(peerAsk === undefined ? {} : { peerAsk }),
     })
     return reachesSession(principal, resolved) ? resolved : requested
 }

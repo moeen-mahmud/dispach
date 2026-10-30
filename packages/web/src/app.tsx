@@ -67,7 +67,14 @@ import {
     WebhooksPanel,
     type WorkspaceEntry,
 } from "./ops.tsx"
-import { ApiPanel, HomePanel, type TeamMember, TeamPanel, ThemeToggle } from "./overview.tsx"
+import {
+    ApiPanel,
+    HomePanel,
+    type Peer,
+    type TeamMember,
+    TeamPanel,
+    ThemeToggle,
+} from "./overview.tsx"
 import {
     AGENT_PANELS,
     AgentList,
@@ -763,6 +770,8 @@ function Workspace(props: {
         /** Boot findings: capabilities this agent could not set up. See `WarningsPanel`. */
         readonly warnings: readonly WireError[]
         readonly team?: readonly TeamMember[]
+        readonly peers?: readonly Peer[]
+        readonly ask?: boolean
         readonly secrets: readonly SecretRow[]
         readonly catalogueTokens?: number
         readonly config?: AgentConfig
@@ -798,6 +807,8 @@ function Workspace(props: {
             channels: described.channels ?? [],
             warnings: described.warnings ?? [],
             ...(described.team === undefined ? {} : { team: described.team }),
+            ...(described.peers === undefined ? {} : { peers: described.peers }),
+            ask: described.ask === true,
             secrets,
             ...(described.catalogueTokens === undefined
                 ? {}
@@ -1639,6 +1650,14 @@ function Workspace(props: {
                                 <TeamPanel
                                     lead={{ id: agentId, name: agentName ?? agentId }}
                                     team={report.team}
+                                    {...(report.peers === undefined ? {} : { peers: report.peers })}
+                                    {...(report.ask === undefined ? {} : { ask: report.ask })}
+                                    busy={writing !== undefined}
+                                    onAsk={(on) =>
+                                        saveSetting("delegation.ask", on ? "true" : "false", {
+                                            confirm: false,
+                                        })
+                                    }
                                 />
                             ) : null}
                             {/*

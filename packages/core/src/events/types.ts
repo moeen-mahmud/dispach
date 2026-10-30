@@ -243,6 +243,27 @@ export interface EventDataMap {
         tokens: { prompt: number; output: number }
         errorCode?: string
     }
+    /**
+     * A peer ask (`ask_agent`, decision 15.9) began. `sessionKey` is the peer's fresh session, where
+     * its transcript is; for a remote peer it is the key in the other silo.
+     */
+    "peer.ask": {
+        askId: string
+        peer: string
+        remote: boolean
+        sessionKey: string
+        callId?: string
+    }
+    /** How it ended. `budget` carries a partial answer; `error` is a fault reaching or inside the peer. */
+    "peer.answer": {
+        askId: string
+        peer: string
+        sessionKey: string
+        outcome: "ok" | "budget" | "error"
+        steps: number
+        tokens: { prompt: number; output: number }
+        errorCode?: string
+    }
     "turn.start": {
         source: string
         inputTokens: number
@@ -744,6 +765,8 @@ export const EVENT_TYPES = [
     "approval.resolved",
     "handoff.start",
     "handoff.result",
+    "peer.ask",
+    "peer.answer",
     "turn.start",
     "context.assembled",
     "context.dropped",

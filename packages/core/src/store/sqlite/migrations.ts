@@ -1238,6 +1238,19 @@ CREATE TABLE session_heads (
 ALTER TABLE participants ADD COLUMN channel_ids TEXT;
 `,
     },
+    {
+        version: 34,
+        name: "handoff_kind",
+        /**
+         * A peer ask (`ask_agent`, decision 15.9) is recorded in `handoffs` beside a typed delegation:
+         * the same envelope, a fresh session, the same outcomes minus the artifact. `kind` tells them
+         * apart. A constant default, so `ADD COLUMN` with a `CHECK` is legal and every existing row is
+         * the delegation it always was.
+         */
+        sql: `
+ALTER TABLE handoffs ADD COLUMN kind TEXT NOT NULL DEFAULT 'handoff' CHECK (kind IN ('handoff', 'ask'));
+`,
+    },
 ]
 
 export interface MigrationReport {

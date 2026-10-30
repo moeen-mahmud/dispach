@@ -23,6 +23,7 @@ import { BRAND } from "./brand.ts"
 import { type ControlPlane, checkSubject } from "./control.ts"
 import type { Monitor } from "./monitor.ts"
 import { ControlError } from "./placer.ts"
+import type { Relay } from "./relay.ts"
 import type { Silo } from "./store.ts"
 
 /** Never forwarded: they describe one hop, not the request. */
@@ -40,9 +41,15 @@ const HOP_BY_HOP = new Set([
 
 const digest = (value: string) => createHash("sha256").update(value).digest()
 
-function send(res: ServerResponse, status: number, body: unknown): void {
+function send(
+    res: ServerResponse,
+    status: number,
+    body: unknown,
+    headers: Record<string, string> = {},
+): void {
     const text = JSON.stringify(body)
     res.writeHead(status, {
+        ...headers,
         "content-type": "application/json",
         "content-length": Buffer.byteLength(text),
     })
@@ -51,9 +58,12 @@ function send(res: ServerResponse, status: number, body: unknown): void {
 
 function fail(res: ServerResponse, error: unknown): void {
     if (error instanceof ControlError) {
-        send(res, error.status, {
-            error: { code: error.code, message: error.message, hint: error.hint },
-        })
+        send(
+            res,
+            error.status,
+            { error: { code: error.code, message: error.message, hint: error.hint } },
+            error.retryAfter === undefined ? {} : { "retry-after": String(error.retryAfter) },
+        )
         return
     }
     process.stderr.write(
@@ -119,6 +129,40 @@ export interface ServerOptions {
     readonly monitor?: Monitor
     /** The operator's token for `/v1/…`. */
     readonly token: string
+    /** The peer-ask relay, when `RELAY_URL` (or `HOOK_URL`) is set. Its routes answer 404 without it. */
+    readonly relay?: Relay
+}
+
+const relayOff = () =>
+    new ControlError({
+        code: "relay_off",
+        message: "The peer-ask relay is not running.",
+        hint: `Set ${BRAND.envPrefix}RELAY_URL to the address silos reach this process at, then recreate each silo so it gets a relay token.`,
+        status: 404,
+    })
+
+/** A principal is the embedder's opaque id for one person. Bounded, and nothing else about it. */
+function checkPrincipal(principal: string): void {
+    if (principal === "" || principal.length > 200 || /[\s/]/.test(principal)) {
+        throw new ControlError({
+            code: "principal_invalid",
+            message: `"${principal}" is not a usable principal.`,
+            hint: "A principal is your own id for one person: 1–200 characters, no spaces or slashes. Never a name or an email; this process stores nothing else about the person.",
+            status: 400,
+        })
+    }
+}
+
+function positiveRate(value: unknown, field: string): number {
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 10_000) {
+        throw new ControlError({
+            code: "relay_rate_invalid",
+            message: `${field} must be a whole number of asks per minute between 1 and 10000.`,
+            hint: `Send {"${field}": 30}.`,
+            status: 400,
+        })
+    }
+    return value
 }
 
 export function createControlServer(options: ServerOptions): Server {
@@ -180,6 +224,64 @@ export function createControlServer(options: ServerOptions): Server {
             res.writeHead(204)
             res.end()
             return
+        }
+
+        // Silos ask through here. Authenticated by the calling silo's relay token, never the
+        // operator's, so these sit before the operator gate the way /hooks does.
+        if (path === "/v1/relay/peers" || path === "/v1/relay/ask") {
+            const relay = options.relay
+            if (relay === undefined) throw relayOff()
+            const caller = relay.caller(req.headers.authorization)
+            if (method === "GET" && path === "/v1/relay/peers") {
+                const participant = url.searchParams.get("participant") ?? ""
+                send(res, 200, {
+                    peers: participant === "" ? [] : await relay.peers(caller, participant),
+                })
+                return
+            }
+            if (method === "POST" && path === "/v1/relay/ask") {
+                const body = await readJson(req)
+                const text = (name: string) =>
+                    typeof body[name] === "string" ? (body[name] as string) : ""
+                for (const name of [
+                    "participant",
+                    "toSilo",
+                    "toAgent",
+                    "question",
+                    "askedBy",
+                    "sessionKey",
+                ]) {
+                    if (text(name).trim() === "") {
+                        throw new ControlError({
+                            code: "relay_ask_invalid",
+                            message: `The body has no \`${name}\`.`,
+                            hint: "Send {participant, toSilo, toAgent, question, askedBy, sessionKey}, all non-empty text. sessionKey starts with ask:.",
+                            status: 400,
+                        })
+                    }
+                }
+                if (!text("sessionKey").startsWith("ask:")) {
+                    throw new ControlError({
+                        code: "relay_ask_invalid",
+                        message: "sessionKey must start with ask:.",
+                        hint: "An ask runs in a fresh ask:<id> session; the key minted for it reaches nothing else.",
+                        status: 400,
+                    })
+                }
+                send(
+                    res,
+                    200,
+                    await relay.ask(caller, {
+                        participantId: text("participant"),
+                        toSilo: text("toSilo"),
+                        toAgent: text("toAgent"),
+                        question: text("question"),
+                        askedBy: text("askedBy"),
+                        sessionKey: text("sessionKey"),
+                    }),
+                )
+                return
+            }
         }
 
         if (method === "GET" && path === "/v1/health") {
@@ -248,6 +350,90 @@ export function createControlServer(options: ServerOptions): Server {
                       },
             )
             return
+        }
+        if (path === "/v1/relay/config") {
+            const relay = options.relay
+            if (relay === undefined) throw relayOff()
+            if (method === "PUT") {
+                const body = await readJson(req)
+                control.store.setDefaultRate(
+                    positiveRate(body.askRatePerMinute, "askRatePerMinute"),
+                )
+            }
+            if (method === "PUT" || method === "GET") {
+                const set = control.store.defaultRate()
+                send(res, 200, {
+                    askRatePerMinute: set ?? relay.rate("").askRatePerMinute,
+                    set: set !== undefined,
+                })
+                return
+            }
+        }
+        const person = /^\/v1\/people\/([^/]+)(?:\/silos\/([^/]+))?$/.exec(path)
+        if (person !== null) {
+            const relay = options.relay
+            if (relay === undefined) throw relayOff()
+            const principal = decodeURIComponent(person[1] ?? "")
+            checkPrincipal(principal)
+            const subjectPart = person[2]
+            if (subjectPart === undefined) {
+                if (method === "PUT") {
+                    const body = await readJson(req)
+                    control.store.setPersonRate(
+                        principal,
+                        body.askRatePerMinute === null
+                            ? null
+                            : positiveRate(body.askRatePerMinute, "askRatePerMinute"),
+                    )
+                }
+                if (method === "PUT" || method === "GET") {
+                    send(res, 200, {
+                        principal,
+                        silos: control.store.links(principal),
+                        ...relay.rate(principal),
+                    })
+                    return
+                }
+            } else {
+                const subject = decodeURIComponent(subjectPart)
+                checkSubject(subject)
+                if (method === "PUT") {
+                    const body = await readJson(req)
+                    if (
+                        typeof body.participantId !== "string" ||
+                        body.participantId.trim() === ""
+                    ) {
+                        throw new ControlError({
+                            code: "participant_required",
+                            message: "The body has no `participantId`.",
+                            hint: 'Send {"participantId":"<this person\'s participant id in that silo>"}, as registered there with POST /v1/participants.',
+                            status: 400,
+                        })
+                    }
+                    if (control.store.get(subject) === undefined)
+                        return fail(res, notFound(subject))
+                    const holder = control.store.principalOf(subject, body.participantId)
+                    if (holder !== undefined && holder !== principal) {
+                        throw new ControlError({
+                            code: "participant_linked_elsewhere",
+                            message: `${body.participantId} in "${subject}" is already linked to another person.`,
+                            hint: `Unlink it first: DELETE /v1/people/<that principal>/silos/${subject}.`,
+                            status: 409,
+                        })
+                    }
+                    control.store.link(principal, subject, body.participantId)
+                    send(res, 200, { principal, silos: control.store.links(principal) })
+                    return
+                }
+                if (method === "DELETE") {
+                    send(res, 200, {
+                        principal,
+                        subject,
+                        unlinked: control.store.unlink(principal, subject),
+                    })
+                    return
+                }
+            }
         }
         if (method === "GET" && path === "/v1/usage") {
             send(res, 200, await usage(url.searchParams))

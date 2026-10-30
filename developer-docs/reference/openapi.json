@@ -998,6 +998,23 @@
                                         "minLength": 1,
                                         "maxLength": 8000
                                     },
+                                    "peerAsk": {
+                                        "code": "message_peer_ask_invalid",
+                                        "hint": "Send { \"peerAsk\": { \"askedBy\": \"<silo>/<agent>\" } }, naming the agent that asked, or omit it.",
+                                        "description": "Marks this turn as another agent's ask (`docs/24-SPEC-PEER-ASK.md`): it runs without `handoff` and `ask_agent`, so it is one hop, and the agent is told who asked. It only narrows what the turn may do, so any caller may set it; the control plane's relay always does.",
+                                        "type": "object",
+                                        "properties": {
+                                            "askedBy": {
+                                                "type": "string",
+                                                "minLength": 1,
+                                                "maxLength": 200
+                                            }
+                                        },
+                                        "required": [
+                                            "askedBy"
+                                        ],
+                                        "additionalProperties": false
+                                    },
                                     "images": {
                                         "code": "message_images_invalid",
                                         "hint": "Send images as [{ \"path\": \"files/…/shot.png\" }] (relative to the agent's directory), or [{ \"data\": \"<base64>\", \"mediaType\": \"image/png\" }].",

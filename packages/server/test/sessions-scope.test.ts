@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from "bun:test"
 import { attachWebSocket } from "../src/ws.ts"
-import { fakeSocket, harness, MANIFEST } from "./harness.ts"
+import { fakeSocket, harness, MANIFEST, readSse, recordingFetch } from "./harness.ts"
 
 const TOKEN = "t_operator"
 const OWNER = "me:k7m2xp"
@@ -200,5 +200,35 @@ describe("the rest of the wire", () => {
         const own = await mint(call, { participant: OWNER })
         const mine = await call("GET", `/v1/memory/notes?scope=agents:${OWNER}`, { token: own })
         expect(mine.status).toBe(200)
+    })
+})
+
+describe("peerAsk (`docs/24-SPEC-PEER-ASK.md`)", () => {
+    test("keeps the ask's own session and reaches the model as another agent's ask", async () => {
+        const recorded = recordingFetch(["two open deals"])
+        const setup = await harness({ token: TOKEN, manifest: SCOPED, fetch: recorded.fetch })
+        await setup.call("POST", "/v1/participants", { body: { id: OWNER, role: "admin" } })
+        await setup.call("PUT", "/v1/agents/assistant/assignee", { body: { participantId: OWNER } })
+        const response = await send(setup.call, {
+            sessionKey: "ask:r_1",
+            from: { id: OWNER, kind: "user" },
+            peerAsk: { askedBy: "personal/milo" },
+            stream: true,
+        })
+        expect(response.status).toBe(202)
+        const frames = await readSse(response)
+        // Not moved into the owner's conversation: an ask is its own fresh session.
+        expect(JSON.stringify(frames[0])).toContain("ask:r_1")
+        // Threaded through to the turn: the runtime's note names who asked, in the request body.
+        expect(recorded.prompts().join("\n")).toContain("personal/milo")
+    })
+
+    test("a malformed peerAsk is refused before anything runs", async () => {
+        const { call } = await owned()
+        const response = await send(call, { peerAsk: { askedBy: "" } })
+        expect(response.status).toBe(400)
+        expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+            "message_peer_ask_invalid",
+        )
     })
 })

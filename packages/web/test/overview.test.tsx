@@ -58,6 +58,35 @@ describe("the team panel", () => {
         expect(html).toContain("No team")
         expect(html).toContain("team:")
     })
+
+    test("peers: the switch, each peer's description, and which are shared or remote", () => {
+        const html = renderToStaticMarkup(
+            createElement(TeamPanel, {
+                lead: { id: "milo", name: "Milo" },
+                team: undefined,
+                ask: true,
+                onAsk: () => {},
+                peers: [
+                    { id: "nova", description: "Keeps the calendar", shared: false, remote: false },
+                    { id: "team/crm", name: "CRM", shared: true, remote: true },
+                ],
+            }),
+        )
+        expect(html).toContain("delegation.ask")
+        expect(html).toContain("checked")
+        expect(html).toContain("Keeps the calendar")
+        expect(html).toContain("another silo")
+        expect(html).toContain("shared")
+        expect(html).toContain("team/crm")
+    })
+
+    test("with peer ask off, it says how to switch it on rather than listing nobody", () => {
+        const html = renderToStaticMarkup(
+            createElement(TeamPanel, { lead: { id: "milo", name: "Milo" }, team: undefined }),
+        )
+        expect(html).toContain("Nobody to ask")
+        expect(html).toContain("Switch it on")
+    })
 })
 
 describe("the API panel", () => {
