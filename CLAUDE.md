@@ -2022,6 +2022,14 @@ Never claim a performance property without a number in `evals/` and a script to 
   structural rather than one test per field: `boundaries.test.ts` walks every `CommandSpec` flag and
   requires it to be named inside that command's **own** `case` block in `index.ts`. One guard, and a
   new flag is covered with nothing to remember.
+- **A row rebuilt as an object literal drops the field added after it was written.** Seventh instance:
+  `sessions` gained `head`, and both pickers in `run.ts` copied each row into a fresh literal naming the
+  fields they knew, so a conversation `/new` had set aside still read "You". Nothing type-checks it, because
+  the target type made `head` optional. The cure here was not a test per field: pass the rows through
+  unchanged, so no copy exists to drop one. Prefer that wherever a layer only forwards what it was given.
+  Eighth, found live a day later: the schedule `PATCH` rebuilt the stored row as a literal before
+  validating, so `{expr}` alone erased `tools`, `timeoutMs` and `maxSteps`, the three fields added
+  after it. Its guard writes every optional field, patches one, and requires the rest unmoved.
 - **A reported symptom can be true with a false mechanism, and fixing the mechanism you assumed leaves
   the cause running.** "`init` always creates the agent inside the codebase" was accurate and had
   nothing to do with the default: driven under a pty against the *installed* binary, the wizard offers

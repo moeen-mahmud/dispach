@@ -1,7 +1,7 @@
 # 24 — Peer ask between one person's agents
 
 Status: **accepted and built** (Moeen, 2026-10-29; issue #66; decisions 15.9, 15.10, 15.15, 15.16).
-Phases 35 and 36 in `22-PLAN-0.3.0.md`, built in one PR. Binding the way `02` and `04` are: a field,
+Phases 35 and 36 in `22-PLAN-0.2.2.md`, built in one PR. Binding the way `02` and `04` are: a field,
 route or rule it names changes here in the same PR as the code.
 
 ## The problem

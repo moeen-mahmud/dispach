@@ -806,6 +806,54 @@ describe("every read is unwrapped the way its route wraps it", () => {
         await runtime.stop()
     })
 
+    test("the 0.2.2 console's methods reach their routes, and a refusal is typed", async () => {
+        /**
+         * Each of these was either called by the console with no client test behind it, or done
+         * with a raw `fetch` beside the client (a participant delete that ignored the response, so
+         * a refused delete looked like one that worked). Reaching the route is the claim; a
+         * refusal counts as reaching it when it is the route's own typed answer, not a 404.
+         */
+        const { client, runtime } = await harness()
+        const agent = client.agent("assistant")
+
+        const preview = await agent.previewSchedule({ kind: "every", expr: "15m", count: 2 })
+        expect(preview.next).toHaveLength(2)
+        expect(Array.isArray((await agent.refreshTools()).providers)).toBe(true)
+        expect(Array.isArray((await agent.workspaceFiles()).files)).toBe(true)
+
+        await client.registerParticipant({ id: "user:eve", name: "Eve" })
+        expect(await client.deleteParticipant("user:eve")).toEqual({
+            id: "user:eve",
+            deleted: true,
+        })
+        expect((await client.participants()).map((p) => p.id)).not.toContain("user:eve")
+
+        const backup = await client.backup()
+        // gzip's magic number: a tarball, not a JSON error body read as bytes.
+        expect([...new Uint8Array(await backup.arrayBuffer()).slice(0, 2)]).toEqual([0x1f, 0x8b])
+
+        const code = async (call: () => Promise<unknown>) => {
+            try {
+                await call()
+                return "resolved"
+            } catch (error) {
+                return error instanceof DispachError ? error.code : String(error)
+            }
+        }
+        // No remover on an embedded handler, no channel `tg`, not made from a template: each is the
+        // route's own refusal, which a 404 from a misspelt path would not be.
+        expect(await code(() => client.deleteAgent("assistant", "assistant"))).toBe(
+            "agent_remove_unsupported",
+        )
+        expect(
+            await code(() => agent.deliver({ channel: "tg", to: "1", text: "hi", key: "k1" })),
+        ).not.toMatch(/^(resolved|not_found|route_not_found)$/)
+        expect(await code(() => agent.setVars({ name: "x" }))).not.toMatch(
+            /^(resolved|not_found|route_not_found)$/,
+        )
+        await runtime.stop()
+    })
+
     test("the step list is an array even when this server cannot provision", async () => {
         /**
          * The same class as `schedules()` above and the reason this is asserted rather than typed:
@@ -1121,5 +1169,23 @@ describe("activity", () => {
         expect(activity.idle).toBe(true)
         expect(activity.deliveries.webhooks.pending).toBe(0)
         await runtime.stop()
+    })
+})
+
+describe("an error that stands for several", () => {
+    test("its failures are on the error and in what an uncaught throw prints", () => {
+        const error = new DispachError({
+            code: "manifest_validation_failed",
+            message: "Manifest failed 2 validation rules.",
+            hint: "Each failure below names its field path and its fix.",
+            details: [
+                { code: "a", message: "first is wrong", hint: "h", field: "model.main.baseUrl" },
+                { code: "b", message: "second is wrong", hint: "h" },
+            ],
+        })
+        expect(error.details).toHaveLength(2)
+        expect(error.message).toBe(
+            "Manifest failed 2 validation rules.\n  - model.main.baseUrl: first is wrong\n  - second is wrong\n  hint: Each failure below names its field path and its fix.",
+        )
     })
 })

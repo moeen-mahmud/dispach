@@ -15,6 +15,7 @@ import type {
 } from "@dispach/core"
 import { toolContext } from "@dispach/core"
 import { A2AServer, type A2ATask, a2aTools, RPC, readConfig } from "../src/index.ts"
+import { peerSummary } from "../src/server.ts"
 
 const CONFIG = readConfig({
     card: { name: "Crew", description: "Triage.", skills: [{ id: "triage", name: "Triage" }] },
@@ -233,5 +234,22 @@ describe("config", () => {
             "same key",
         )
         expect(() => readConfig({ peers: { a: { url: "/relative" } } })).toThrow("absolute")
+    })
+})
+
+describe("the channel names its peers", () => {
+    test("each peer by direction, or that there are none", () => {
+        const config = readConfig({
+            card: { name: "Crew", description: "Triage." },
+            peers: {
+                acme: { key: "a2a-acme" },
+                partner: { url: "https://partner.example/a2a", tokenEnv: "PARTNER_A2A_TOKEN" },
+                both: { key: "a2a-both", url: "https://both.example/a2a", tokenEnv: "BOTH_TOKEN" },
+            },
+        })
+        expect(peerSummary(config.peers)).toBe(
+            "acme calls in · partner is called · both calls in and is called",
+        )
+        expect(peerSummary([])).toBe("no peers configured")
     })
 })

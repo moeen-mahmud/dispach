@@ -446,6 +446,56 @@ export interface AgentClient {
     ): Promise<AgentBundleLike>
     /** Merge a bundle into this agent. Memory note by note; knowledge kept (`skip`) or `overwrite`n. */
     importBundle(bundle: AgentBundleLike, mode?: "skip" | "overwrite"): Promise<ImportReportLike>
+    /**
+     * Re-render a template-made agent with new values. A file edited since it was rendered is
+     * `skipped` rather than overwritten, and a secret goes to `.env`, never back in the answer.
+     */
+    setVars(vars: Readonly<Record<string, string>>): Promise<VarsResultLike>
+    /** The template this agent was made from and its plain vars. `409` for one with no record. */
+    vars(): Promise<{
+        readonly id: string
+        readonly template: string
+        readonly vars: Readonly<Record<string, string>>
+    }>
+    /**
+     * Send exact text on one of the agent's channels, with no model turn, through the outbox. `key`
+     * makes it idempotent: a repeat answers `duplicate: true` and sends nothing.
+     */
+    deliver(input: {
+        readonly channel: string
+        readonly to: string
+        readonly text: string
+        readonly key: string
+    }): Promise<{ readonly sessionKey: string; readonly key: string; readonly duplicate: boolean }>
+}
+
+/** `model.main`'s capabilities as the runtime resolved them (`02-SPEC-MANIFEST.md`). */
+export interface ModelCapabilitiesLike {
+    readonly nativeTools: boolean
+    readonly strictSchema: boolean
+    readonly thinking: "none" | "anthropic" | "openai" | "deepseek"
+    readonly promptCache: "none" | "anthropic" | "openai" | "bedrock"
+    readonly parallelToolCalls: boolean
+    readonly contextWindow: number
+    readonly maxOutput: number
+    readonly vision?: boolean
+    readonly promptStyle: {
+        readonly delimiters: string
+        readonly intensity: string
+        readonly examplesIn: string
+        readonly skillsIn: string
+    }
+}
+
+/** What `setVars` reports: which files were rendered, which kept, and whether the agent reloaded. */
+export interface VarsResultLike {
+    readonly id: string
+    readonly rendered: readonly string[]
+    readonly skipped: readonly {
+        readonly file: string
+        readonly reason: "edited" | "memory" | "removed"
+    }[]
+    readonly reload: "none" | "loaded" | "pending"
 }
 
 /** What `stop` and `start` report back. */
@@ -494,6 +544,8 @@ export interface AgentDescriptionLike {
     readonly model?: string
     readonly dialect?: string
     readonly window?: number
+    /** The main model's resolved capabilities: the registry's row with the manifest's overrides. */
+    readonly capabilities?: ModelCapabilitiesLike
     readonly tools?: number
     /** What the catalogue costs per turn. A tool *count* says nothing about the bill. */
     readonly catalogueTokens?: number
@@ -501,7 +553,7 @@ export interface AgentDescriptionLike {
     readonly schedules?: number
     readonly entryPhase?: string | null
     readonly phases?: readonly string[]
-    /** How a turn's conversation is chosen: `owner`, `peer` or `channel-peer` (since 0.3). */
+    /** How a turn's conversation is chosen: `owner`, `peer` or `channel-peer` (since 0.2.2). */
     readonly sessionScope?: "owner" | "peer" | "channel-peer"
     /**
      * Each channel's last reported state. `unknown[]` until 16.6, which is why the web UI cast.
@@ -688,6 +740,12 @@ export interface StoredMessageLike {
     readonly turnId?: string
     readonly origin?: string
     readonly createdAt?: string
+    /** Under the `native` dialect only: the calls an assistant message made. Its `content` is then often empty. */
+    readonly toolCalls?: readonly {
+        readonly id: string
+        readonly name: string
+        readonly arguments: string
+    }[]
 }
 
 export interface MessagePageLike {
@@ -739,6 +797,8 @@ export interface SessionSummary {
     readonly thread?: string
     /** Phase-scoped tool visibility, persisted per session. Absent on an unphased agent. */
     readonly phase?: string
+    /** `false` on a conversation kept out of history recall; absent means it is recalled. */
+    readonly recall?: false
     /**
      * Whether this is the conversation its person's base key currently means: false for one a
      * rotation left behind. True for every key under `channel-peer`. Absent from a server before 0.3.
@@ -893,6 +953,10 @@ export interface ParticipantLike {
     readonly kind: "human"
     readonly name?: string
     readonly role: "admin" | "member"
+    /** A job title, as the team knows the person. Not a permission. */
+    readonly title?: string
+    /** An IANA zone, `Europe/London`: what "tomorrow at nine" means for this person. */
+    readonly timezone?: string
     readonly createdAt: string
     /** Pushed by the embedder; absent reads as online. */
     readonly presence?: "online" | "offline"
@@ -1202,6 +1266,24 @@ export interface DispachClient {
     }): Promise<OperatorKeyLike & { readonly secret: string }>
     /** Permanent. A revoked secret can never be re-presented. */
     revokeKey(keyId: string): Promise<OperatorKeyLike>
+    /**
+     * Delete an agent for good: its directory, its conversations and its memory. `confirm` must be
+     * the id again, the HTTP form of typing the name back.
+     */
+    deleteAgent(
+        agentId: string,
+        confirm: string,
+    ): Promise<
+        { readonly id: string; readonly removed: boolean } & Readonly<Record<string, unknown>>
+    >
+    /**
+     * The whole server as a tar.gz: `backup.json`, a consistent `store.db` snapshot and every hosted
+     * agent's directory. `include` adds `.env`, `.git` or the rest of the state directory.
+     */
+    backup(include?: readonly ("env" | "git" | "home")[]): Promise<Blob>
+    deleteParticipant(
+        participantId: string,
+    ): Promise<{ readonly id: string; readonly deleted: boolean }>
 }
 
 /** Narrow an event by type, so a `switch` over a stream keeps its `data` typed. */
@@ -1619,6 +1701,14 @@ export function createClient(options: ClientOptions): DispachClient {
                 json<ImportReportLike>("POST", at("/import"), {
                     body: { bundle, ...(mode === undefined ? {} : { mode }) },
                 }),
+            setVars: (vars) => json<VarsResultLike>("PATCH", at("/vars"), { body: { vars } }),
+            vars: () => json("GET", at("/vars")),
+            deliver: (input) =>
+                json<{ sessionKey: string; key: string; duplicate: boolean }>(
+                    "POST",
+                    at("/deliveries"),
+                    { body: input },
+                ),
 
             context: (opts) => {
                 const params = new URLSearchParams()
@@ -1665,6 +1755,24 @@ export function createClient(options: ClientOptions): DispachClient {
             json<OperatorKeyLike & { secret: string }>("POST", "/v1/keys", { body: input }),
         revokeKey: (keyId) =>
             json<OperatorKeyLike>("DELETE", `/v1/keys/${encodeURIComponent(keyId)}`),
+        deleteAgent: (agentId, confirm) =>
+            json(
+                "DELETE",
+                `/v1/agents/${encodeURIComponent(agentId)}?confirm=${encodeURIComponent(confirm)}`,
+            ),
+        backup: async (include) =>
+            (
+                await request(
+                    "GET",
+                    `/v1/backup${include === undefined || include.length === 0 ? "" : `?include=${include.join(",")}`}`,
+                    { accept: "application/gzip" },
+                )
+            ).blob(),
+        deleteParticipant: (participantId) =>
+            json<{ id: string; deleted: boolean }>(
+                "DELETE",
+                `/v1/participants/${encodeURIComponent(participantId)}`,
+            ),
         createAgent: (answers) =>
             json<ProvisionedAgentLike>("POST", "/v1/agents", { body: { answers } }),
         // Unwrapped, because the route wraps it: a list read declared as the wrong shape is how a

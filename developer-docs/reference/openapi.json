@@ -368,6 +368,36 @@
             }
         },
         "/v1/agents/{id}/vars": {
+            "get": {
+                "summary": "The template an agent was made from and the plain variable values it was last rendered with. Secrets never appear.",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "401": {
+                        "description": "No credential, or one this server does not accept."
+                    },
+                    "404": {
+                        "description": "No such agent, or it is switched off."
+                    },
+                    "409": {
+                        "description": "an agent with no template record"
+                    },
+                    "501": {
+                        "description": "a server with no templates directory (an embedded handler)"
+                    }
+                }
+            },
             "patch": {
                 "summary": "Apply changed template variables: re-render the files nobody edited since they were rendered, then reload.",
                 "parameters": [

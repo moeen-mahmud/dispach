@@ -519,7 +519,87 @@ export interface WorkspaceEntry {
     readonly bytes: number
 }
 
+/**
+ * An agent made from a template: the values it was rendered with, editable. A save re-renders only
+ * the files nobody edited since, so the result names what was kept as well as what changed. Secret
+ * vars are listed and never shown or set here: they live in `.env`, which no route returns.
+ */
+export function TemplateVars(props: {
+    readonly template: string
+    /** The template's declarations; absent when the template has since left the server. */
+    readonly declared?: Template["vars"]
+    readonly values: Readonly<Record<string, string>>
+    readonly busy?: boolean
+    readonly onSave?: (vars: Readonly<Record<string, string>>) => void
+}): React.ReactElement {
+    const [draft, setDraft] = useState<Readonly<Record<string, string>>>({})
+    const plain = (
+        props.declared ?? Object.keys(props.values).map((name) => ({ name, secret: false }))
+    ).filter((entry) => !entry.secret)
+    const secrets = (props.declared ?? []).filter((entry) => entry.secret)
+    const changed = Object.fromEntries(
+        Object.entries(draft).filter(([name, value]) => value !== (props.values[name] ?? "")),
+    )
+    return (
+        <form
+            className="card"
+            style={{ marginBottom: 18 }}
+            onSubmit={(event) => {
+                event.preventDefault()
+                props.onSave?.(changed)
+                setDraft({})
+            }}
+        >
+            <h3>
+                Made from <code>{props.template}</code>
+            </h3>
+            <p className="sub">
+                Changing a value re-renders the files nobody has edited since they were made; an
+                edited file and the agent's memory are kept as they are.
+            </p>
+            <div className="model-form" style={{ borderTop: "none", paddingTop: 0, marginTop: 0 }}>
+                {plain.map((entry) => (
+                    <label key={entry.name}>
+                        {entry.name}
+                        {"description" in entry && entry.description !== undefined ? (
+                            <span className="sub"> {entry.description}</span>
+                        ) : null}
+                        <input
+                            value={draft[entry.name] ?? props.values[entry.name] ?? ""}
+                            // A default was rendered without being recorded as a value; say what it is.
+                            placeholder={
+                                "default" in entry && entry.default !== undefined
+                                    ? entry.default
+                                    : ""
+                            }
+                            onChange={(e) => setDraft({ ...draft, [entry.name]: e.target.value })}
+                        />
+                    </label>
+                ))}
+            </div>
+            {secrets.length === 0 ? null : (
+                <p className="sub">
+                    Secret, kept in <code>.env</code> and not shown:{" "}
+                    {secrets.map((entry) => entry.name).join(", ")}.
+                </p>
+            )}
+            <button
+                type="submit"
+                className="primary"
+                style={{ marginTop: 12 }}
+                disabled={
+                    Object.keys(changed).length === 0 || props.onSave === undefined || props.busy
+                }
+            >
+                {props.busy === true ? "saving…" : "save and re-render"}
+            </button>
+        </form>
+    )
+}
+
 export function FilesPanel(props: {
+    /** Shown under the page heading: the template vars, for an agent made from one. */
+    readonly above?: React.ReactNode
     readonly files: readonly WorkspaceEntry[] | undefined
     readonly selected?: string
     readonly content?: string
@@ -543,6 +623,7 @@ export function FilesPanel(props: {
                 </p>
             </div>
             {props.note === undefined ? null : <p className="note">{props.note}</p>}
+            {props.above}
             {props.files === undefined ? (
                 <p className="empty">reading…</p>
             ) : props.files.length === 0 ? (

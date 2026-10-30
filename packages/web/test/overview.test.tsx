@@ -100,3 +100,47 @@ describe("the API panel", () => {
         expect(html).toContain("not an agent")
     })
 })
+
+describe("the overview's week", () => {
+    test("each agent carries its last seven days, an idle one says so, and the header sums them", () => {
+        const html = renderToStaticMarkup(
+            createElement(HomePanel, {
+                agents: [
+                    { id: "milo", name: "Milo", status: "loaded" },
+                    { id: "nova", name: "Nova", status: "loaded" },
+                ],
+                week: [{ agentId: "milo", calls: 12, promptTokens: 4_000, outputTokens: 1_500 }],
+                onOpen: () => undefined,
+                onStart: () => undefined,
+                onNew: () => undefined,
+                onUsage: () => undefined,
+            }),
+        )
+        expect(html).toContain("12 calls · 5.5k tokens in 7 days")
+        expect(html).toContain("no model calls in 7 days")
+        expect(html).toContain("12 model calls, 5.5k tokens in 7 days")
+    })
+})
+
+describe("whom an agent works for", () => {
+    test("the Team page names the owner, offers everyone, and nobody means shared", () => {
+        const render = (owner: string | null | undefined) =>
+            renderToStaticMarkup(
+                createElement(TeamPanel, {
+                    lead: { id: "milo", name: "Milo" },
+                    team: [],
+                    ...(owner === undefined ? {} : { owner }),
+                    people: [{ id: "user:ada", name: "Ada" }, { id: "user:bob" }],
+                    onAssign: () => undefined,
+                }),
+            )
+        expect(render("user:ada")).toContain(
+            '<option value="user:ada" selected="">Ada (user:ada)</option>',
+        )
+        expect(render(null)).toContain(
+            '<option value="" selected="">nobody: a shared agent</option>',
+        )
+        // Not yet read: no picker rather than a wrong "nobody".
+        expect(render(undefined)).not.toContain("Works for")
+    })
+})

@@ -226,11 +226,14 @@ export function provisionFromTemplate(input: TemplateRequest): ProvisionResult {
         }
         // Every variable the manifest reads and nothing supplied is stubbed for this check only: an
         // agent may be created before its key exists, which is what the secrets route is for. What
-        // the check proves is structure (schema, budgets, tiers, rules), not credentials.
+        // the check proves is structure (schema, budgets, tiers, rules), not credentials. One the
+        // server's own environment sets is left alone: stubbing it laid "(pending)" over a real
+        // `MODEL_BASE_URL` and refused a template whose agent would have loaded.
         const manifest = rendered.files.find((file) => file.relPath === "agent.yaml")
         const overlay: Record<string, string> = {}
         for (const ref of manifestEnvReferences(manifest?.contents ?? "")) {
-            if (rendered.env[ref.name] === undefined) overlay[ref.name] = "(pending)"
+            if (rendered.env[ref.name] === undefined && !process.env[ref.name])
+                overlay[ref.name] = "(pending)"
         }
         checkAgentLoads(manifestPath, overlay)
 
@@ -307,6 +310,16 @@ function writeProvenance(dir: string, provenance: Omit<Provenance, "version">): 
         `${JSON.stringify({ version: 1, ...provenance }, null, 2)}\n`,
         { mode: 0o600 },
     )
+}
+
+/** The template an agent was made from and its plain vars; undefined with no record. */
+export function templateRecordOf(
+    agentDir: string,
+): { readonly template: string; readonly vars: Readonly<Record<string, string>> } | undefined {
+    const recordPath = join(agentDir, PROVENANCE_FILE)
+    if (!existsSync(recordPath)) return undefined
+    const record = JSON.parse(readFileSync(recordPath, "utf8")) as Provenance
+    return { template: record.template, vars: record.vars }
 }
 
 export interface RerenderResult {

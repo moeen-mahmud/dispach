@@ -1,7 +1,7 @@
 # 23 — Sessions across surfaces, and an owner's shared memory
 
 Status: **accepted and built** (Moeen, 2026-10-29; issue #65; decisions 15.6–15.8, 15.12–15.14).
-Phase 34 in `22-PLAN-0.3.0.md`. This document is binding the way `02` and `04` are: a field, route
+Phase 34 in `22-PLAN-0.2.2.md`. This document is binding the way `02` and `04` are: a field, route
 or rule it names changes here in the same PR as the code.
 
 ## The problem

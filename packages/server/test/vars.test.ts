@@ -87,3 +87,31 @@ test("an unauthenticated network-reachable server may not rewrite files", async 
     expect(response.status).toBe(403)
     await runtime.stop()
 })
+
+test("GET reads the template record, and an agent without one is told so", async () => {
+    let record: { template: string; vars: Record<string, string> } | undefined = {
+        template: "support",
+        vars: { company: "Acme" },
+    }
+    const { runtime, call } = await harness({
+        token: TOKEN,
+        provision: {
+            ...provisioner(() => ({ rendered: [], skipped: [], undo: () => {} })),
+            templateOf: () => record,
+        },
+    })
+    const read = await call("GET", "/v1/agents/assistant/vars")
+    expect(read.status).toBe(200)
+    expect(await read.json()).toEqual({
+        id: "assistant",
+        template: "support",
+        vars: { company: "Acme" },
+    })
+    record = undefined
+    const none = await call("GET", "/v1/agents/assistant/vars")
+    expect(none.status).toBe(409)
+    expect(((await none.json()) as { error: { code: string } }).error.code).toBe(
+        "agent_not_from_template",
+    )
+    await runtime.stop()
+})

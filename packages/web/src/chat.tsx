@@ -75,7 +75,8 @@ function RowView(props: {
 
         case "tool":
             /**
-             * What a call *was* and how it went — never what it was given or what came back.
+             * What a call *was* and how it went — and what it was given and returned only when the
+             * agent's `tools.eventDetail: redacted` put that on the events.
              *
              * `tool.call` carries `argsHash` and `tool.result` carries `bytes`, not the text, and
              * that is the wire's decision rather than this page's: arguments can hold a file's
@@ -104,6 +105,23 @@ function RowView(props: {
                             </div>
                         </div>
                     ) : null}
+                    {row.args === undefined && row.output === undefined ? null : (
+                        // Only under `tools.eventDetail: redacted`, which put them on the events with
+                        // credentials replaced. Plain text, never Markdown: the output is what a
+                        // tool returned, and a stranger may have written it.
+                        <details className="tool-detail">
+                            <summary className="tool-detail-summary">details</summary>
+                            {row.args === undefined ? null : (
+                                <pre className="snippet">{JSON.stringify(row.args, null, 2)}</pre>
+                            )}
+                            {row.output === undefined ? null : (
+                                <pre className="snippet">
+                                    {row.output}
+                                    {row.outputTruncated === true ? "\n… (first 2 KB)" : ""}
+                                </pre>
+                            )}
+                        </details>
+                    )}
                     {row.subagent === undefined ? null : <Subagent block={row.subagent} />}
                 </div>
             )

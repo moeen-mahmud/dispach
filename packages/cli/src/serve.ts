@@ -36,7 +36,12 @@ import {
     serve,
 } from "@dispach/server"
 import { secretStatus, writeSecrets } from "#lib/agent-secrets"
-import { listTemplates, provisionFromTemplate, rerenderFromTemplate } from "#lib/agent-template"
+import {
+    listTemplates,
+    provisionFromTemplate,
+    rerenderFromTemplate,
+    templateRecordOf,
+} from "#lib/agent-template"
 import { ambientEnv } from "#lib/ambient"
 import { inContainer } from "#lib/bootstrap"
 import { setChannelCredential, setChannelEnabled, unpairChannel } from "#lib/channel-actions"
@@ -561,6 +566,7 @@ export async function serveCommand(options: ServeOptions): Promise<number> {
                         }),
                     rerender: (input) =>
                         rerenderFromTemplate({ ...input, templatesDir: templatesDir(env) }),
+                    templateOf: templateRecordOf,
                 },
                 /**
                  * `GET`/`PUT /v1/agents/:id/secrets`. The allowed names come from the agent's own

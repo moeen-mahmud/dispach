@@ -60,6 +60,38 @@ describe("the schedules panel", () => {
         expect(html).toContain("agent.yaml")
     })
 
+    test("the last run is on the card, and a failed one says why", () => {
+        const row = (extra: Record<string, unknown>) =>
+            renderToStaticMarkup(
+                createElement(SchedulesPanel, {
+                    now: Date.parse("2026-10-30T12:00:00Z"),
+                    schedules: [
+                        {
+                            id: "brief",
+                            kind: "every",
+                            expr: "15m",
+                            task: "Brief",
+                            enabled: true,
+                            ...extra,
+                        },
+                    ],
+                }),
+            )
+        expect(row({})).toContain("never run")
+        const failed = row({
+            lastStatus: "error",
+            lastFiredAt: "2026-10-30T11:45:00Z",
+            lastError: "Bad Request: chat not found",
+            runs: 7,
+        })
+        expect(failed).toContain(">failed<")
+        expect(failed).toContain("Bad Request: chat not found")
+        expect(failed).toContain("7 runs")
+        expect(row({ lastStatus: "ok", lastFiredAt: "2026-10-30T11:45:00Z", runs: 1 })).toContain(
+            "1 run<",
+        )
+    })
+
     test("the empty state and the new-schedule button", () => {
         const html = renderToStaticMarkup(
             createElement(SchedulesPanel, { now: 0, schedules: [], onCreate: () => undefined }),

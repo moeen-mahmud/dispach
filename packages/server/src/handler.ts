@@ -398,6 +398,13 @@ export interface Provisioner {
         readonly skipped: readonly { readonly file: string; readonly reason: string }[]
         readonly undo: () => void
     }
+    /**
+     * Which template an agent was made from and the plain values it was last rendered with: the read
+     * half of `rerender`. Undefined for an agent with no template record. Secrets are never in it.
+     */
+    templateOf?(
+        agentDir: string,
+    ): { readonly template: string; readonly vars: Readonly<Record<string, string>> } | undefined
 }
 
 /** One template as the wire carries it. Structural, so `packages/cli` needs no import from here. */
@@ -873,6 +880,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                           }),
                     dialect: agent.describe().dialect,
                     window: agent.window,
+                    // The main model's capabilities as resolved: the registry's row for its id, with
+                    // the manifest's overrides laid over. A form that offers an override has to show
+                    // what it overrides, and the registry lives here, not in the browser.
+                    capabilities: agent.roles.main.capabilities,
                     tools: agent.tools.size,
                     // What the catalogue costs every turn, beside how many tools there are. A count
                     // says nothing about the bill: eight system tools and eight Composio ones differ
@@ -1115,6 +1126,42 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * rewritten file is put back, so a bad value cannot leave an agent that will not start.
      * Gated like provisioning, because it writes the agent's files.
      */
+    /**
+     * The vars an agent was made with, so a form can show what a `PATCH` would change. The values
+     * are the plain ones `rerender` keeps on record; a secret var is declared by the template and
+     * never has a value here, because it lives in `.env`.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/vars",
+        (context) =>
+            withTarget(runtime, options, context, async (target) => {
+                const templateOf = options.provision?.templateOf
+                if (templateOf === undefined) {
+                    return fail(
+                        {
+                            code: "rerender_not_supported",
+                            message: "This server cannot read an agent's template record.",
+                            hint: "`serve` provides it; an embedder mounting this handler has no templates directory.",
+                        },
+                        501,
+                    )
+                }
+                const record = templateOf(target.agent?.dir ?? dirname(target.file ?? ""))
+                if (record === undefined) {
+                    return fail(
+                        {
+                            code: "agent_not_from_template",
+                            message: "This agent has no record of the template it was made from.",
+                            hint: "Only an agent created with POST /v1/agents {template} on 0.2.0 or later carries one. Edit its files directly instead.",
+                        },
+                        409,
+                    )
+                }
+                return json({ id: target.id, template: record.template, vars: record.vars })
+            }),
+        { capability: "admin" },
+    )
     router.add(
         "PATCH",
         "/v1/agents/:id/vars",
@@ -3776,6 +3823,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     enabled: existing.enabled,
                     ...(existing.timezone === undefined ? {} : { timezone: existing.timezone }),
                     ...(existing.role === undefined ? {} : { role: existing.role }),
+                    // Every stored field the write accepts, or a patch of `expr` alone erases them:
+                    // these three were added after this literal and were silently dropped until 0.2.2.
+                    ...(existing.toolsAllow === undefined
+                        ? {}
+                        : { tools: { allow: existing.toolsAllow } }),
+                    ...(existing.timeoutMs === undefined ? {} : { timeoutMs: existing.timeoutMs }),
+                    ...(existing.maxSteps === undefined ? {} : { maxSteps: existing.maxSteps }),
                     ...fields,
                     // The id is the row's identity and the key reconciliation matches on, so a patch
                     // that renamed it would create a second schedule and orphan the first. Dropped from

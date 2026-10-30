@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
     conversationLabel,
+    isPersonalConversation,
     newConversationKey,
     rememberedSession,
     rememberSession,
@@ -28,13 +29,33 @@ describe("conversationLabel", () => {
     test("a person's own conversation is You, the one before a new conversation is earlier", () => {
         expect(conversationLabel({ sessionKey: "owner:me:k7m2xp", head: true })).toBe("You")
         expect(
-            conversationLabel({
-                sessionKey: "owner:me:k7m2xp",
-                head: false,
-                lastActivityAt: "2026-10-28T09:00:00.000Z",
-            }),
+            conversationLabel(
+                {
+                    sessionKey: "owner:me:k7m2xp",
+                    head: false,
+                    lastActivityAt: new Date(2026, 9, 28, 9, 5).toISOString(),
+                },
+                new Date(2026, 9, 30, 15, 0),
+            ),
         ).toBe("You · earlier, 2026-10-28")
         expect(conversationLabel({ sessionKey: "owner:me:k7m2xp~ab12cd", head: true })).toBe("You")
+    })
+
+    test("one set aside today carries its time, so two from one day differ", () => {
+        const now = new Date(2026, 9, 30, 15, 0)
+        const at = (h: number, m: number) => ({
+            sessionKey: "owner:me:k7m2xp",
+            head: false,
+            lastActivityAt: new Date(2026, 9, 30, h, m).toISOString(),
+        })
+        expect(conversationLabel(at(9, 5), now)).toBe("You · earlier, 09:05")
+        expect(conversationLabel(at(13, 40), now)).toBe("You · earlier, 13:40")
+    })
+
+    test("only a person's conversation is named rather than keyed", () => {
+        expect(isPersonalConversation("owner:me:k7m2xp~ab12cd")).toBe(true)
+        expect(isPersonalConversation("peer:user:ada")).toBe(true)
+        expect(isPersonalConversation("tg:5550123")).toBe(false)
     })
 
     test("a participant's is their id, and every other key is shown as it is", () => {

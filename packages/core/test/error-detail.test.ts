@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BRAND } from "../src/brand.ts"
-import { ModelError } from "../src/errors.ts"
+import { ModelError, validationFailed } from "../src/errors.ts"
 import type { ModelTransport } from "../src/model/transport.ts"
 import { Runtime } from "../src/runtime/runtime.ts"
 import { describe, expect, test } from "./_harness.ts"
@@ -62,5 +62,40 @@ limits:
         expect(row?.errorDetail).toBe(ARN)
         expect(row?.errorMessage).not.toContain("arn:aws")
         expect(JSON.stringify(errors)).toContain("123456789012")
+    })
+})
+
+describe("an error that stands for several", () => {
+    test("carries each failure on the wire, since its hint points at them", () => {
+        const failed = validationFailed([
+            {
+                code: "a_rule",
+                message: "first is wrong",
+                hint: "fix the first",
+                field: "model.main.baseUrl",
+            },
+            {
+                code: "b_rule",
+                message: "second is wrong",
+                hint: "fix the second",
+                field: "tools.pinned",
+            },
+        ])
+        const wire = failed.toDetail()
+        expect(wire.hint).toContain("below")
+        expect(wire.details?.map((each) => each.field)).toEqual([
+            "model.main.baseUrl",
+            "tools.pinned",
+        ])
+        expect(wire.details?.[1]?.hint).toBe("fix the second")
+    })
+
+    test("a single failure says it itself and carries no list", () => {
+        const one = validationFailed([{ code: "a_rule", message: "only", hint: "fix it" }])
+        expect(one.toDetail()).toEqual({
+            code: "manifest_validation_failed",
+            message: "only",
+            hint: "fix it",
+        })
     })
 })

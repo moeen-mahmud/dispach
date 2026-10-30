@@ -33,6 +33,40 @@ export interface TurnRow {
     readonly note?: string
 }
 
+/** One stored message of a turn, as `GET …/sessions/:key/messages` returns it. */
+export interface ReplayStep {
+    readonly id: number
+    readonly role: string
+    readonly content: string
+    readonly origin?: string
+    /** Native dialect: the call itself lives here and `content` is often empty. */
+    readonly toolCalls?: readonly { readonly name: string; readonly arguments: string }[]
+}
+
+/** A step's text: under `native` a call's `content` is empty and the call is in `toolCalls`. */
+export function stepText(step: ReplayStep): string {
+    const calls = (step.toolCalls ?? []).map((call) => `${call.name}(${call.arguments})`)
+    return [step.content, ...calls].filter((part) => part !== "").join("\n")
+}
+
+/** A turn's replay: absent until asked for, `loading` while read, then its steps or why not. */
+export type Replay =
+    | { readonly state: "loading" }
+    | { readonly state: "ready"; readonly steps: readonly ReplayStep[] }
+    | { readonly state: "failed"; readonly message: string }
+
+/** What a step is, in words: the runtime stamps the text it authored with an `origin`. */
+export function stepLabel(step: ReplayStep): string {
+    if (step.origin === "call") return "tool call"
+    if (step.origin === "observation") return "tool result"
+    if (step.origin === "repair") return "repair asked for"
+    if (step.origin === "digest") return "compaction digest"
+    return step.role === "user" ? "asked" : step.role === "assistant" ? "reply" : step.role
+}
+
+/** An observation can be a whole file; the replay shows the start and says it cut it. */
+const STEP_CHARS = 4_000
+
 const BAD = new Set(["max_steps", "no_progress", "truncated", "timeout", "error"])
 
 export function endedBadly(status: string): boolean {
@@ -69,6 +103,9 @@ export function TurnsPanel(props: {
     readonly loading?: boolean
     readonly onMore?: () => void
     readonly onOpenSession?: (sessionKey: string) => void
+    /** Replays by turn id; a turn whose replay was never asked for has none. */
+    readonly replays?: Readonly<Record<string, Replay>>
+    readonly onReplay?: (turn: TurnRow) => void
 }): React.ReactElement {
     const bad = props.turns.filter((turn) => endedBadly(turn.status)).length
     return (
@@ -99,6 +136,10 @@ export function TurnsPanel(props: {
                         <TurnCard
                             key={turn.turnId}
                             turn={turn}
+                            {...(props.replays?.[turn.turnId] === undefined
+                                ? {}
+                                : { replay: props.replays[turn.turnId] })}
+                            {...(props.onReplay === undefined ? {} : { onReplay: props.onReplay })}
                             {...(props.onOpenSession === undefined
                                 ? {}
                                 : { onOpenSession: props.onOpenSession })}
@@ -122,7 +163,9 @@ export function TurnsPanel(props: {
 
 function TurnCard(props: {
     readonly turn: TurnRow
+    readonly replay?: Replay
     readonly onOpenSession?: (sessionKey: string) => void
+    readonly onReplay?: (turn: TurnRow) => void
 }): React.ReactElement {
     const { turn } = props
     const [open, setOpen] = useState(false)
@@ -230,8 +273,64 @@ function TurnCard(props: {
                             <Markdown text={turn.text} />
                         </div>
                     )}
+                    <ReplayView
+                        turn={turn}
+                        {...(props.replay === undefined ? {} : { replay: props.replay })}
+                        {...(props.onReplay === undefined ? {} : { onReplay: props.onReplay })}
+                    />
                 </div>
             ) : null}
         </div>
+    )
+}
+
+/**
+ * Every step of the turn as it was stored: the calls the model made and what each returned, in
+ * order. Plain text throughout — a tool result is what a tool returned, and a stranger may have
+ * written it, so nothing here goes through Markdown.
+ */
+export function ReplayView(props: {
+    readonly turn: TurnRow
+    readonly replay?: Replay
+    readonly onReplay?: (turn: TurnRow) => void
+}): React.ReactElement | null {
+    const { replay } = props
+    if (replay === undefined) {
+        return props.onReplay === undefined ? null : (
+            <button
+                type="button"
+                style={{ marginTop: 12 }}
+                onClick={() => props.onReplay?.(props.turn)}
+            >
+                replay every step
+            </button>
+        )
+    }
+    if (replay.state === "loading") return <p className="empty">reading the stored steps…</p>
+    if (replay.state === "failed") return <p className="note bad">{replay.message}</p>
+    if (replay.steps.length === 0) {
+        return (
+            <p className="empty">
+                No stored steps for this turn: its conversation was cleared, or it is older than the
+                last 1,000 messages of it.
+            </p>
+        )
+    }
+    return (
+        <ol className="replay">
+            {replay.steps.map((step) => (
+                <li key={step.id}>
+                    <div className="label">{stepLabel(step)}</div>
+                    <pre className="snippet">
+                        {(() => {
+                            const text = stepText(step)
+                            return text.length > STEP_CHARS
+                                ? `${text.slice(0, STEP_CHARS)}\n… (${text.length - STEP_CHARS} more characters)`
+                                : text
+                        })()}
+                    </pre>
+                </li>
+            ))}
+        </ol>
     )
 }

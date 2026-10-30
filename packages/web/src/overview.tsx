@@ -8,6 +8,7 @@
 import { DEFAULT_BRAND } from "@dispach/core/wire"
 import type React from "react"
 import { useState } from "react"
+import { compact } from "./usage.tsx"
 
 /** A listing row, with the optional fields `GET /v1/agents` carries for a running agent. */
 export interface OverviewAgent {
@@ -34,20 +35,58 @@ function initial(name: string): string {
  * A stopped one is a card with the `start` that fixes it and no way in — its resource answers 404,
  * the same reason `AgentList` disables the row. `stop` is not offered, as everywhere in this page.
  */
+/** One agent's last week from the meter: enough to see which agents are busy and which are idle. */
+export interface WeekUsage {
+    readonly agentId?: string
+    readonly calls: number
+    readonly promptTokens: number
+    readonly outputTokens: number
+}
+
+const tokens = (row: WeekUsage) => compact(row.promptTokens + row.outputTokens)
+
 export function HomePanel(props: {
     readonly agents: readonly OverviewAgent[]
     readonly onOpen: (id: string) => void
     readonly onStart: (id: string) => void
     readonly onNew: () => void
     readonly starting?: string
+    /** The last seven days by agent. Absent while it loads or when this key cannot read the meter. */
+    readonly week?: readonly WeekUsage[]
+    readonly onUsage?: () => void
 }): React.ReactElement {
     const running = props.agents.filter((agent) => agent.status !== "disabled").length
+    const all =
+        props.week === undefined
+            ? undefined
+            : props.week.reduce(
+                  (sum, row) => ({
+                      calls: sum.calls + row.calls,
+                      promptTokens: sum.promptTokens + row.promptTokens,
+                      outputTokens: sum.outputTokens + row.outputTokens,
+                  }),
+                  { calls: 0, promptTokens: 0, outputTokens: 0 },
+              )
     return (
         <>
             <div className="page-head">
                 <h1>Agents</h1>
                 <p>
                     {props.agents.length} on this server · {running} running
+                    {all === undefined ? null : (
+                        <>
+                            {" · "}
+                            {all.calls} model calls, {tokens(all)} tokens in 7 days
+                            {props.onUsage === undefined ? null : (
+                                <>
+                                    {" "}
+                                    <button type="button" className="link" onClick={props.onUsage}>
+                                        usage
+                                    </button>
+                                </>
+                            )}
+                        </>
+                    )}
                 </p>
             </div>
             {props.agents.length === 0 ? (
@@ -66,6 +105,15 @@ export function HomePanel(props: {
                         <AgentCard
                             key={agent.id}
                             agent={agent}
+                            {...(props.week === undefined
+                                ? {}
+                                : {
+                                      week: props.week.find((row) => row.agentId === agent.id) ?? {
+                                          calls: 0,
+                                          promptTokens: 0,
+                                          outputTokens: 0,
+                                      },
+                                  })}
                             onOpen={props.onOpen}
                             onStart={props.onStart}
                             starting={props.starting === agent.id}
@@ -79,6 +127,7 @@ export function HomePanel(props: {
 
 function AgentCard(props: {
     readonly agent: OverviewAgent
+    readonly week?: WeekUsage
     readonly onOpen: (id: string) => void
     readonly onStart: (id: string) => void
     readonly starting: boolean
@@ -112,6 +161,13 @@ function AgentCard(props: {
                     </span>
                 ))}
             </div>
+            {props.week === undefined ? null : (
+                <div className="sub" style={{ margin: 0 }}>
+                    {props.week.calls === 0
+                        ? "no model calls in 7 days"
+                        : `${props.week.calls} calls · ${tokens(props.week)} tokens in 7 days`}
+                </div>
+            )}
         </>
     )
     if (off) {
@@ -168,11 +224,42 @@ export function TeamPanel(props: {
     readonly ask?: boolean
     readonly busy?: boolean
     readonly onAsk?: (on: boolean) => void
+    /**
+     * Whom this agent works for: a participant id, `null` for nobody (a shared agent), absent while
+     * it is read. The person decides its peers, so it is set here as well as on People.
+     */
+    readonly owner?: string | null
+    readonly people?: readonly { readonly id: string; readonly name?: string }[]
+    readonly onAssign?: (participantId: string | undefined) => void
 }): React.ReactElement {
     const team = props.team ?? []
     const peers = props.peers ?? []
     return (
         <>
+            {props.owner === undefined ? null : (
+                <label className="inline-field" style={{ marginBottom: 18 }}>
+                    Works for
+                    <select
+                        aria-label={`whom ${props.lead.name} works for`}
+                        value={props.owner ?? ""}
+                        disabled={props.busy === true || props.onAssign === undefined}
+                        onChange={(event) =>
+                            props.onAssign?.(
+                                event.target.value === "" ? undefined : event.target.value,
+                            )
+                        }
+                    >
+                        <option value="">nobody: a shared agent</option>
+                        {(props.people ?? []).map((person) => (
+                            <option key={person.id} value={person.id}>
+                                {person.name === undefined
+                                    ? person.id
+                                    : `${person.name} (${person.id})`}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+            )}
             <AskSection
                 name={props.lead.name}
                 peers={peers}

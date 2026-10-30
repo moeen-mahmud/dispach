@@ -101,9 +101,24 @@ function connection(fields: ModelFields): Record<string, unknown> {
     }
 }
 
+/** `model.main`'s capabilities as the runtime resolved them. Only the fields the form reads. */
+export interface ResolvedCapabilities {
+    readonly contextWindow: number
+    readonly maxOutput: number
+    readonly thinking: string
+    readonly vision?: boolean
+    readonly nativeTools: boolean
+    readonly promptCache: string
+    readonly promptStyle: { readonly delimiters: string; readonly intensity: string }
+}
+
+const THINKING = ["none", "anthropic", "openai", "deepseek"] as const
+
 export function ModelsPanel(props: {
     readonly settings: readonly SettingRow[]
     readonly secrets: readonly SecretRow[]
+    /** The main model's resolved capabilities, from `GET /v1/agents/:id`. */
+    readonly resolved?: ResolvedCapabilities
     readonly busy?: string
     readonly note?: string
     readonly onChange: (key: string, changes: readonly ModelChange[]) => void
@@ -133,6 +148,7 @@ export function ModelsPanel(props: {
                 busy={props.busy === "model.main"}
                 onChange={(changes) => props.onChange("model.main", changes)}
                 onSecret={props.onSecret}
+                {...(props.resolved === undefined ? {} : { resolved: props.resolved })}
                 primary
             />
 
@@ -167,9 +183,127 @@ export function ModelsPanel(props: {
     )
 }
 
+/**
+ * What the registry says this model can do, with the manifest's overrides, and a way to correct the
+ * four that are most often wrong for a particular endpoint. An override is for when the shipped row
+ * is wrong; the registry stays the default, so a later model change still moves the rest.
+ */
+function Capabilities(props: {
+    readonly resolved: ResolvedCapabilities
+    readonly override: Role
+    readonly busy: boolean
+    readonly onOverride: (next: Readonly<Record<string, unknown>>) => void
+}): React.ReactElement {
+    const { resolved, override } = props
+    const [window, setWindow] = useState("")
+    const [output, setOutput] = useState("")
+    const put = (field: string, value: unknown) => {
+        const next: Record<string, unknown> = { ...override }
+        if (value === undefined) delete next[field]
+        else next[field] = value
+        props.onOverride(next)
+    }
+    const mark = (field: string) =>
+        field in override ? (
+            <button
+                type="button"
+                className="link"
+                disabled={props.busy}
+                onClick={() => put(field, undefined)}
+                title="Drop this override and use the registry's value"
+            >
+                overridden · reset
+            </button>
+        ) : (
+            <span className="sub">registry</span>
+        )
+    const number = (
+        field: "contextWindow" | "maxOutput",
+        draft: string,
+        setDraft: (value: string) => void,
+    ) => (
+        <form
+            className="caps-row"
+            onSubmit={(event) => {
+                event.preventDefault()
+                const value = Number(draft)
+                if (Number.isInteger(value) && value > 0) put(field, value)
+                setDraft("")
+            }}
+        >
+            <span className="mono-value">{resolved[field].toLocaleString()}</span>
+            <input
+                inputMode="numeric"
+                aria-label={`override ${field}`}
+                placeholder="override"
+                value={draft}
+                disabled={props.busy}
+                onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ""))}
+                style={{ width: 110 }}
+            />
+            {mark(field)}
+        </form>
+    )
+    return (
+        <div className="control">
+            <div className="control-label">
+                Capabilities
+                <span className="sub">
+                    What the shipped registry says this model can do. Override only when it is wrong
+                    for your endpoint.
+                </span>
+            </div>
+            <dl className="facts">
+                <dt>context window</dt>
+                <dd>{number("contextWindow", window, setWindow)}</dd>
+                <dt>output cap</dt>
+                <dd>{number("maxOutput", output, setOutput)}</dd>
+                <dt>reasoning</dt>
+                <dd className="caps-row">
+                    <select
+                        aria-label="reasoning protocol"
+                        value={resolved.thinking}
+                        disabled={props.busy}
+                        onChange={(e) => put("thinking", e.target.value)}
+                    >
+                        {THINKING.map((value) => (
+                            <option key={value} value={value}>
+                                {value}
+                            </option>
+                        ))}
+                    </select>
+                    {mark("thinking")}
+                </dd>
+                <dt>images</dt>
+                <dd className="caps-row">
+                    <label className="check">
+                        <input
+                            type="checkbox"
+                            checked={resolved.vision === true}
+                            disabled={props.busy}
+                            onChange={(e) => put("vision", e.target.checked)}
+                        />
+                        <span>reads images</span>
+                    </label>
+                    {mark("vision")}
+                </dd>
+                <dt>native tools</dt>
+                <dd>{resolved.nativeTools ? "yes" : "no"}</dd>
+                <dt>prompt cache</dt>
+                <dd>{resolved.promptCache}</dd>
+                <dt>prompt style</dt>
+                <dd>
+                    {resolved.promptStyle.delimiters} · {resolved.promptStyle.intensity}
+                </dd>
+            </dl>
+        </div>
+    )
+}
+
 function RoleCard(props: {
     readonly name: string
     readonly role: Role
+    readonly resolved?: ResolvedCapabilities
     readonly keySet: boolean | undefined
     readonly busy: boolean
     readonly primary?: boolean
@@ -190,7 +324,7 @@ function RoleCard(props: {
     const [tokens, setTokens] = useState(maxTokens)
 
     /** One field of this role, written whole so the main role and a named role take one path. */
-    const set = (field: string, value: string | undefined) =>
+    const set = (field: string, value: unknown) =>
         props.onChange([{ path, value: merged(role, { [field]: value }) }])
 
     return (
@@ -405,6 +539,17 @@ function RoleCard(props: {
                     </button>
                 )}
             </div>
+
+            {props.resolved === undefined ? null : (
+                <Capabilities
+                    resolved={props.resolved}
+                    override={asRole(role.capabilities)}
+                    busy={props.busy}
+                    onOverride={(next) =>
+                        set("capabilities", Object.keys(next).length === 0 ? undefined : next)
+                    }
+                />
+            )}
 
             <div className="model-foot">
                 <span className="sub" style={{ margin: 0 }}>

@@ -1,15 +1,18 @@
-# 22 — The 0.3 line
+# 22 — 0.2.2 (planned as "the 0.3 line")
 
-Planned with Moeen on 2026-10-28/29. Decisions 15.1–15.16 carry the reasoning; this file is the
-order and the bar. One GitHub issue and one branch off `development` per phase.
+Planned with Moeen on 2026-10-28/29 as "the 0.3 line". It is released as **0.2.2** (Moeen,
+2026-10-30): 0.3.0 is kept for the open issues, which are left for outside contributors. Decisions
+15.1–15.17 carry the reasoning; this file is the order and the bar. One GitHub issue and one branch
+off `development` per phase.
 
 | Phase | Issue | What | Status |
 | --- | --- | --- | --- |
 | 32 | #64 | README: the docker one-liner and every stale claim | **built** (PR #69) |
 | 33 | #67 | The web console reaches what the runtime does; Bedrock preset | **built** (PR #70) |
 | 34 | #65 | One conversation per person across surfaces; the owner's shared memory pool | **built** (PR #71) |
-| 35 | #66 | `ask_agent` between one owner's agents, in a silo | **built** |
+| 35 | #66 | `ask_agent` between one owner's agents, in a silo | **built** (PR #73) |
 | 36 | #66 | The same ask across silos, relayed by the control plane | **built** (one PR with 35) |
+| — | #74 | Control: a silo's port is fixed for its lifetime | **built** (PR #75) |
 
 ## Phase 34 — sessions across surfaces, shared pool
 
@@ -43,3 +46,12 @@ Decisions 15.10, 15.16. Built with phase 35, at Moeen's call. Control gains `per
 token per silo, `GET /v1/relay/peers`, `POST /v1/relay/ask` (a 60-second key minted in the target,
 revoked after), an audit row per ask and a rate limit set over the API. The runtime gains `peerAsk`
 on `POST /messages`, `RelayClient` in core and its implementation in the CLI, built by `serve`.
+
+## Release audit (2026-10-30)
+
+Before release, every bullet of the plan was checked against the code. Workstream 2 had sixteen
+items no PR had built and no decision had dropped, among them the `⌘K` palette, server-wide usage,
+turn replay, a schedule's last outcome and the template vars editor. Moeen chose to build them all
+in 0.2.2 rather than move them to 0.3.0 issues, and they landed on `release/0.2.2`. Two needed the
+wire to say more: `GET /v1/agents/:id/vars` (the read half of `PATCH`) and `capabilities` on
+`GET /v1/agents/:id`. Decision 15.18 records the one decision the plan named and nobody wrote.
