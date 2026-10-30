@@ -10,7 +10,15 @@
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import { App } from "./app.tsx"
+import { applyTheme, savedTheme } from "./overview.tsx"
 import "./styles.css"
+
+import { faviconHref } from "./wordmark.tsx"
+
+// Before the first render, so a saved light theme never flashes dark.
+applyTheme(savedTheme())
+// The pixel initial, drawn from the brand name — `index.html` carries only a neutral placeholder.
+document.querySelector<HTMLLinkElement>("link[rel=icon]")?.setAttribute("href", faviconHref())
 
 const root = document.getElementById("root")
 if (root === null) throw new Error("no #root in the document")

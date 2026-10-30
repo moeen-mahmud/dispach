@@ -37,6 +37,7 @@
  * double-poller gets created.
  */
 
+import { readlinkSync } from "node:fs"
 import { BRAND } from "../brand.ts"
 import { HarnessError } from "../errors.ts"
 import type { LeaseRecord, RuntimeMode, Store } from "../store/store.ts"
@@ -106,6 +107,31 @@ export interface ClaimOptions {
     readonly exclusive: boolean
     /** Injected for tests. Real implementation is `process.kill(pid, 0)`. */
     readonly isAlive?: (pid: number) => boolean
+    /**
+     * The basename of the executable behind a pid, or `undefined` when it cannot be read. Injected
+     * for tests; the real one reads `/proc/<pid>/exe` and answers `undefined` off Linux.
+     */
+    readonly executableOf?: (pid: number) => string | undefined
+}
+
+/**
+ * The executables a runtime can be running under. Anything else holding a lease's pid — an init
+ * (`docker-init`, `tini`), a shell — is a process that inherited the number, not a runtime.
+ */
+const RUNTIME_EXECUTABLES = /^(node|nodejs|bun)(\d+(\.\d+)*)?$/
+
+/**
+ * `readlink /proc/<pid>/exe`, basename only. `undefined` off Linux, for a process owned by another
+ * user (`EACCES`), or for one that exited between the probe and the read — every case where the
+ * answer is unknown rather than "not a runtime", which must fall through to the older rules.
+ */
+export function procExecutable(pid: number): string | undefined {
+    try {
+        const target = readlinkSync(`/proc/${pid}/exe`)
+        return target.slice(target.lastIndexOf("/") + 1).replace(/ \(deleted\)$/, "")
+    } catch {
+        return undefined
+    }
 }
 
 /**
@@ -127,6 +153,7 @@ export function processAlive(pid: number): boolean {
 
 export async function claimLeases(options: ClaimOptions): Promise<LeaseOutcome> {
     const alive = options.isAlive ?? processAlive
+    const executableOf = options.executableOf ?? procExecutable
     const pid = options.pid ?? process.pid
     const nowIso = new Date(options.now).toISOString()
 
@@ -189,6 +216,19 @@ export async function claimLeases(options: ClaimOptions): Promise<LeaseOutcome> 
         // crash under a restart policy) leaves a lease saying pid 1 — which the replacement, also
         // pid 1, then found "alive" and refused for the forty-five minutes below. Measured.
         if (lease.pid === pid && !LIVE_RUNTIMES.has(lease.runtimeId)) return false
+
+        // **A lease naming pid 1 whose pid 1 is an init, not a runtime, is dead.** The rule above
+        // assumes the replacement inherits the holder's pid, and `docker run --init` breaks that: a
+        // container that ran without an init left a lease saying pid 1, the replacement runs under
+        // `docker-init` as pid 1 with the runtime at pid 7, and pid 1 is alive — so the first
+        // recreate after following the README's `--init` advice was refused for the forty-five-
+        // minute reuse window below. Measured. Scoped to pid 1, the one number every container
+        // hands out, and only a positive "not node or bun" decides; an unreadable `/proc` (macOS,
+        // another user's process) falls through unchanged.
+        if (lease.pid === 1) {
+            const executable = executableOf(1)
+            if (executable !== undefined && !RUNTIME_EXECUTABLES.test(executable)) return false
+        }
 
         // The pid is alive, which is usually the end of it. The heartbeat only settles the case it
         // cannot: a pid recycled by an unrelated program. Below the stale window that is a live

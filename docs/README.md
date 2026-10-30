@@ -24,9 +24,12 @@ VelaOps is its first consumer, not its owner.
 | `09-API-GUIDE.md` | The agent server walked through, `compose up` to a streamed reply. The *guide*; doc 04 is the contract. |
 | `12-OPENCLAW-CUTOVER.md` | Moving off the runtime this one replaces. |
 | `13-QA.md` | The manual QA pass before a release reaches anyone: upgrade, CLI, server, channels, API, control plane, numbers. |
+| `17-KUBERNETES.md` | Running the image on a cluster, and the volume-ownership trap. |
+| `22-PLAN-0.2.2.md` | 0.2.2: console, one conversation per person across surfaces, peer ask. |
+| `23-SPEC-SESSIONS.md` | `sessions.scope`, the owner's conversation and its rotation, and the `agents:<P>` memory pool. |
 
-`10-*.md` and `11-*.md` are private working documents (the business plan and the 0.2.0 plan) and
-are gitignored on purpose, which is why the numbering skips from 09 to 12. Anything they decide that
+`10`, `11`, `14`–`16` and `18`–`21` are private working documents (the business plan, the 0.2.0
+plan, VelaCrew's notes) and are gitignored on purpose, which is why the numbering has gaps. Anything they decide that
 the code depends on is recorded in `00-DECISIONS.md`, and a rule that exists only in a private file
 does not bind anybody reading this repo.
 
@@ -68,8 +71,9 @@ Telegram and WhatsApp channels plus Slack, Teams and A2A (experimental in 0.2.0)
 server, an idempotent outbox, memory on FTS5, skills with two catalogues, the compaction ladder,
 phase scoping, scheduling, the plugin API with all four middleware wrap points, supervisor
 delegation, launchd services, the Docker image and compose front door, a typed client, scoped
-operator keys, the full-screen TUI, and a browser UI on the same origin as the API — which since
-0.1.1 edits settings and schedules rather than only reporting them.
+operator keys, the full-screen TUI, and a browser console on the same origin as the API — which
+since 0.2.2 covers models (Bedrock and fallbacks included), tools, schedules, usage, turns,
+files, people, rooms, actions, shared memory, webhooks and backups.
 
 Measured numbers live in `evals/`, each with a script to reproduce it.
 

@@ -150,6 +150,16 @@ export interface SessionStore {
     clear(agentId: string, sessionKey: string): Promise<void>
     /** Deletes the session and its derived session-memory source. Canonical files are untouched. */
     delete(agentId: string, sessionKey: string): Promise<void>
+    /** The conversation a person's base key (`owner:<P>`) means now: the base itself until rotated. */
+    head(agentId: string, baseKey: string): Promise<string>
+    /** Point `baseKey` at `headKey`, returning what it pointed at before. */
+    rotate(
+        agentId: string,
+        baseKey: string,
+        headKey: string,
+    ): Promise<{ readonly previous: string }>
+    /** Every rotated base and its head, for a listing that marks the current conversation. */
+    heads(agentId: string): Promise<ReadonlyMap<string, string>>
 }
 
 export interface MessageStore {
@@ -373,6 +383,8 @@ export interface HandoffRecord {
      */
     readonly memberSession: string
     readonly task: string
+    /** `ask` for a peer ask (`ask_agent`), which returns text rather than an artifact. */
+    readonly kind: "handoff" | "ask"
     readonly outcome: HandoffOutcomeStatus
     /** JSON, present only when `outcome` is `ok`. */
     readonly artifact?: string
@@ -402,6 +414,8 @@ export interface HandoffStore {
         readonly memberSession: string
         readonly task: string
         readonly startedAt: string
+        /** Absent is `handoff`. */
+        readonly kind?: "handoff" | "ask"
     }): Promise<void>
     finish(
         handoffId: string,
@@ -711,6 +725,11 @@ export interface ParticipantRecord {
     readonly role: "admin" | "member"
     /** A job title, as the team knows the person (pilot.9). Not a permission. */
     readonly title?: string
+    /**
+     * The person's own channel senders, `<type>:<id or handle>` (`telegram:@ada`): how `peer` session
+     * scope recognises them on a channel (`docs/23-SPEC-SESSIONS.md`). Matched like `allowFrom`.
+     */
+    readonly channelIds?: readonly string[]
     /** An IANA zone, `Europe/London`: what "tomorrow at nine" means for this person (pilot.9). */
     readonly timezone?: string
     readonly createdAt: string
@@ -1102,23 +1121,6 @@ export interface WebhookStore {
      * rows changed.
      */
     scrubBodies(agentId: string, needles: readonly string[], marker: string): Promise<number>
-}
-
-/**
- * A namespaced string map.
- *
- * **Nothing consumes this yet, and it is the one table with no `agent_id`.** Recorded rather than
- * quietly carried: `scope` is a free string, so an agent-scoped caller has to compose the key itself,
- * and `purgeAgent` therefore cannot clean up after one — there is no column to match on. The first
- * caller either passes an agent-derived scope and this grows an agent-aware delete, or the table is
- * dropped. Declared vocabulary with no consumer is how `includeHistory` sat unimplemented for three
- * phases while looking finished.
- */
-export interface KVStore {
-    get(scope: string, key: string): Promise<string | undefined>
-    set(scope: string, key: string, value: string): Promise<void>
-    delete(scope: string, key: string): Promise<void>
-    all(scope: string): Promise<Readonly<Record<string, string>>>
 }
 
 /**
@@ -1676,7 +1678,6 @@ export interface Store {
     readonly agentState: AgentStateStore
     /** Participants, rooms and DMs, their messages, and agent assignments (Phase 27). Server-wide. */
     readonly conversations: ConversationStore
-    readonly kv: KVStore
     readonly artifacts: ArtifactStore
     readonly memory: MemoryStore
     readonly schedules: ScheduleStore
@@ -1718,7 +1719,7 @@ export interface Store {
      * **One store is shared by every agent in a sandbox root**, so this is a `DELETE … WHERE
      * agent_id = ?` rather than dropping a file — which makes the isolation a property of these
      * queries rather than of the filesystem, and makes "another agent's rows are untouched" a thing to
-     * assert rather than assume. `kv` is not cleaned: it has no `agent_id` column, and no consumer.
+     * assert rather than assume.
      */
     purgeAgent(agentId: string): Promise<AgentFootprint>
     /**

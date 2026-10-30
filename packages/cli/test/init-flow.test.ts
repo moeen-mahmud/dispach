@@ -485,9 +485,15 @@ describe("planFiles", () => {
 })
 
 describe("PRESETS", () => {
-    test("exactly one preset is keyless, and it is the local one", () => {
+    test("two presets are keyless: local Ollama, and Bedrock, which takes its credentials from AWS", () => {
         const keyless = PRESETS.filter((preset) => preset.apiKeyEnv === undefined)
-        expect(keyless.map((preset) => preset.id)).toEqual(["ollama"])
+        expect(keyless.map((preset) => preset.id)).toEqual(["ollama", "bedrock"])
+        // And Bedrock is the one preset with no URL: it is asked for a region instead.
+        expect(
+            PRESETS.filter((preset) => preset.baseUrl === "" && preset.id !== "custom").map(
+                (p) => p.id,
+            ),
+        ).toEqual(["bedrock"])
     })
 })
 
@@ -789,5 +795,15 @@ describe("the background service is the default answer", () => {
                 question.step === "preset" ? "deepseek" : question.fallback || "x"
         }
         throw new Error("the daemon question was never asked")
+    })
+})
+
+describe("oneLineDescription", () => {
+    test("collapses a purpose to one line inside the schema's 200 characters", async () => {
+        const { oneLineDescription } = await import("../src/lib/init-flow.ts")
+        expect(oneLineDescription("  keeps\n my week ")).toBe("keeps my week")
+        const long = oneLineDescription("x ".repeat(300))
+        expect(long.length).toBe(200)
+        expect(long.endsWith("…")).toBe(true)
     })
 })

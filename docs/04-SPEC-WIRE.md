@@ -30,7 +30,10 @@ adapter was deleted rather than built.
 `code` is stable and machine-readable. `hint` names the likely fix. Every error type in
 `errors.ts` populates it. `detail`, when present, is a provider's own words verbatim, for an operator
 (pilot.14): AWS's text names the assumed-role ARN and the account, so it is kept out of `message`,
-which an embedder shows to people. A failed turn's record carries it as `errorDetail`.
+which an embedder shows to people. A failed turn's record carries it as `errorDetail`. `details[]`,
+when present, lists each failure of an error that stands for several (`manifest_validation_failed`
+and `manifest_schema_invalid` with more than one), each with its own `code`, `message`, `hint` and
+`field` (0.2.2; before it the list stayed on the server and the hint pointed at nothing).
 
 ### Error codes
 
@@ -61,6 +64,7 @@ and WebSocket surfaces can return:
 | `tools_refresh_providers_invalid` | 400 | `POST …/tools/refresh` with `providers` that is not a non-empty list of ids. |
 | `model_role_unknown` | 400 | `POST /messages` with a `role` not declared under `model:`. Nothing is recorded. |
 | `message_note_invalid` | 400 | `POST /messages` with a `runtimeNote` that is empty or over 8,000 characters. |
+| `message_peer_ask_invalid` | 400 | `POST /messages` with a `peerAsk` that is not `{askedBy: <non-empty text>}` (`24-SPEC-PEER-ASK.md`). |
 | `message_note_untrusted` | 400 | `POST /messages` with a `runtimeNote` from a peer agent (`from.kind: "agent"`). |
 | `message_images_invalid` | 400 | `POST /messages` with `images` that is not a list of `{path}` or `{data, mediaType?}`. The checks on each image have their own codes (`image_*`, `model_no_vision`); see `images` above. |
 | `deliver_invalid` | 400 | `deliver` named a channel with no recipient, or an unknown shape. |
@@ -188,12 +192,14 @@ and WebSocket surfaces can return:
 | `action_already_decided` | 409 | The action was approved or declined already. Nothing ran twice. |
 | `assignment_requires_admin` | 403 | A participant-bound key assigning an agent when its participant is not an `admin`. |
 | `participant_timezone_invalid` | 400 | `POST /v1/participants` with a `timezone` that is not an IANA zone the runtime knows. |
+| `participant_channel_ids_invalid` | 400 | `channelIds` on `POST /v1/participants` is not a list of `<channel type>:<id or handle>` strings. Nothing was written. |
+| `session_not_rotatable` | 409 | `POST /sessions/rotate` on an agent whose `sessions.scope` is `channel-peer`, by a sender with no conversation of their own, or with a key minted for a session prefix and speaking for nobody. Nothing changed. |
 | `backup_requires_unscoped_key` | 403 | `GET /v1/backup` with a key scoped to some agents: a backup holds every agent's data. |
 | `backup_include_invalid` | 400 | `GET /v1/backup?include=` names something other than `env`, `git` or `home`. |
 | `backup_home_unavailable` | 400 | `include=home` on a server that was not given its state directory (a handler embedded outside `serve`). |
-| `memory_scope_invalid` | 400 | A scope other than `space`, `owner:<participantId>` or `project:<projectId>`. An agent's private memory has no route: the agent writes it. |
+| `memory_scope_invalid` | 400 | A scope other than `space`, `owner:<participantId>`, `agents:<participantId>` or `project:<projectId>`. An agent's private memory has no route: the agent writes it. |
 | `memory_note_empty` | 400 | A note with no text. |
-| `memory_scope_forbidden` | 403 | This participant may not write — or, for an owner scope, read — that scope. `owner:<id>` is its owner's alone, admins included; the space takes an admin or the designated writer; a project, an admin. Also a non-admin participant defining a project or naming the space writer, and anyone but the person or an admin reading their audit. |
+| `memory_scope_forbidden` | 403 | This participant may not write — or, for an owner scope, read — that scope. `owner:<id>` and `agents:<id>` are their person's alone, admins included; the space takes an admin or the designated writer; a project, an admin. Also a non-admin participant defining a project or naming the space writer, and anyone but the person or an admin reading their audit. |
 | `memory_write_requires_admin` | 403 | An unbound key without `admin` writing a shared scope. A member writes through a participant-bound key. |
 | `memory_note_not_found` | 404 | No such note. |
 | `project_not_found` | 404 | A `project:<id>` scope naming a project nobody defined. |
@@ -249,7 +255,8 @@ actions (`/v1/participants`, `/v1/conversations`, `/v1/actions`), team memory an
 (`/v1/memory/*`, `/v1/projects`), export and import, the assignee routes, plugin-mounted routes and
 the `peer` capability, participant-bound keys (`scope.participant`), `limits.maxHops`, personal
 tools (`tool_personal`), per-message model roles (`POST /messages {role}`), media and its events,
-and the Slack and Teams channels, threading included. Each is marked where it appears. They are complete and tested, have no TUI or web screens yet, and may change
+and the Slack and Teams channels, threading included. Each is marked where it appears. They are complete and tested; the browser console has screens for participants, conversations,
+actions, memory and projects since 0.2.2 (no TUI screens yet), and they may change
 within 0.2.x. Everything else here is stable.
 
 ### Health and readiness
@@ -310,11 +317,14 @@ immediately instead of waiting for the next one.
 ### Agents
 
 ```
-GET /v1/agents           → [{ id, name, status, model, channels[], entryPhase, phases? }]
+GET /v1/agents           → [{ id, name, description?, ask, status, model, channels[], entryPhase,
+                              phases?, sessionScope, assignee }]  (assignee, listing only: participant id or null)
                            plus a thin { id, name, status: "disabled", disabledAt?, reason? }
                            row per stopped agent
-GET /v1/agents/:id       → the above plus dialect, window, tool count, skills indexed,
-                           schedule count, warnings[], team? [{ id, task, artifact[] }],
+GET /v1/agents/:id       → the above plus dialect, window, capabilities (model.main's, resolved:
+                           the registry's row with the manifest's overrides; 0.2.2), tool count,
+                           skills indexed, schedule count, warnings[], team? [{ id, task, artifact[] }],
+                           peers? [{ id, name?, description?, shared, remote }] (ask_agent),
                            assignedTo? { participantId, assignedBy?, assignedAt }
                            a stopped agent answers its listing row instead (since 0.2.0-pilot.5);
                            every route that acts on it still answers 404
@@ -353,9 +363,13 @@ POST /v1/agents            { answers: {step: value, …} }
                            | { template, name, vars?: {var: value, …} }
                          → 201 { id, dir, files[], adopted[] }
 GET  /v1/templates       → { templates: [{ name, description?, vars[], problem? }] }
+GET   /v1/agents/:id/vars  → { id, template, vars: {var: value, …} }   (admin; 0.2.2) the plain values the
+                           agent was last rendered with; a secret var has none here. 409 agent_not_from_template
 PATCH /v1/agents/:id/vars  { vars: {var: value, …} }   (admin, gated like POST /v1/agents; since 0.2.0-pilot.5)
                          → 200 | 202 { id, rendered[], skipped: [{ file, reason: "edited" | "memory" | "removed" }],
                                        reload: "none" | "loaded" | "pending" }
+GET  /v1/agents/:id/workspace        → { id, files: [{ name, tier, field, exists, bytes }] }   (admin; 0.2.2)
+GET  /v1/agents/:id/workspace/:file  → { id, file, tier?, field?, exists, content }             (admin; 0.2.2)
 PUT  /v1/agents/:id/workspace/:file  { content }     (admin; since 0.2.0-pilot.15)
                          → 200 { id, file, written, loads, error?, applied, pending? }
 
@@ -381,8 +395,8 @@ GET    /v1/webhooks            → { webhooks: [{ subscriptionId, url, types, sc
                                                 consecutiveFailures, lastError?, pending, … }] }
 DELETE /v1/webhooks/:webhookId → { id, deleted: true }
 
-POST   /v1/participants { id, name?, role?, title?, timezone? }
-                                                     → 201 { id, kind: "human", name?, role, title?, timezone?, createdAt }
+POST   /v1/participants { id, name?, role?, title?, timezone?, channelIds? }
+                                                     → 201 { id, kind: "human", name?, role, title?, timezone?, channelIds?, createdAt }
 GET    /v1/participants                              → { participants: [...] }
 DELETE /v1/participants/:participantId               → { id, deleted: true }
 POST   /v1/conversations { kind, members[], title? } → 201 { id, kind, title?, members, createdAt }
@@ -400,6 +414,7 @@ GET    /v1/agents/:id/assignee                       → { id, assignment: { age
 PUT    /v1/agents/:id/assignee { participantId, channelIds? } → { agentId, participantId, channelIds?, assignedBy?, assignedAt }
 DELETE /v1/agents/:id/assignee                       → { id, unassigned }
 POST   /v1/memory/notes { scope, text }              → 201 { id, scope, text, writtenBy, createdAt }
+                                                       (scope: space | owner:<id> | agents:<id> | project:<id>)
 GET    /v1/memory/notes?scope                        → { notes: [...] }   (oldest first)
 DELETE /v1/memory/notes/:noteId                      → { id, deleted: true }
 GET    /v1/participants/:participantId/memory/reads  → { reads: [{ scope, reader, turnId, sessionKey,
@@ -701,6 +716,13 @@ POST /v1/agents/:id/messages
 Returns `202` with `{ turnId, sessionKey }` immediately, then streams SSE if `stream` is
 true. **The turn is not bound to this connection.** Disconnecting does not cancel it.
 
+**`sessionKey` in the body is a request; the one in the `202` is the key the turn runs in.** Under
+`sessions.scope: owner` or `peer` (`23-SPEC-SESSIONS.md`) a person's turn lands in their
+conversation (`owner:<participantId>`, `peer:<participantId>`, or its current rotation) whatever key
+was sent, and a client adopts the answered key. Under the default `channel-peer` the two are always
+equal. A key minted for a session prefix and used with no `from` keeps the key it sent, because a
+turn never lands where its caller could not read it back.
+
 #### `role` — run this turn on another model role (since 0.2.0-pilot.7)
 
 **Experimental in 0.2.0**, and may change within 0.2.x.
@@ -727,6 +749,18 @@ and not from the person, for this turn only. It is kept on the turn record (`not
 as something the person said. At most 8,000 characters (`message_note_invalid`). A message with
 `from.kind: "agent"` cannot carry one (`message_note_untrusted`): a peer's text is fenced as untrusted,
 and a note is trusted framing outside that fence. It is not part of the idempotency hash.
+
+#### `peerAsk` — another agent's ask (since 0.2.2)
+
+```json
+{ "text": "How many deals are open?", "sessionKey": "ask:r_k2…", "peerAsk": { "askedBy": "personal/milo" } }
+```
+
+The turn is another agent's question (`24-SPEC-PEER-ASK.md`). It runs without `handoff` and
+`ask_agent`, so it is one hop, its session key is used as sent rather than moved into a person's
+conversation, and the agent is told who asked. It only narrows what the turn may do, so any caller may
+set it; the control plane's relay always does. `message_peer_ask_invalid` when it is not
+`{askedBy: <non-empty text>}`. Not on the WebSocket `send` frame: the relay speaks HTTP.
 
 #### `images` — what the model is shown with the text (since 0.2.0-pilot.5)
 
@@ -1005,6 +1039,7 @@ here that the server does not register, or a registered route missing from here,
 | `GET /v1/agents/:id/context` | `read` |
 | `GET /v1/agents/:id/schedules` | `read` |
 | `GET /v1/agents/:id/schedules/:sid` | `read` |
+| `GET /v1/agents/:id/schedules/preview` | `read` |
 | `GET /v1/agents/:id/sessions` | `read` |
 | `GET /v1/agents/:id/sessions/:key` | `read` |
 | `GET /v1/agents/:id/sessions/:key/messages` | `read` |
@@ -1029,10 +1064,14 @@ here that the server does not register, or a registered route missing from here,
 | `DELETE /v1/agents/:id/sessions/:key` | `write` |
 | `POST /v1/agents/:id/sessions/:key/phase` | `write` |
 | `POST /v1/agents/:id/sessions/:key/recall` | `write` |
+| `POST /v1/agents/:id/sessions/rotate` | `chat` |
 | `POST /v1/agents` | `admin` |
 | `POST /v1/agents/:id/reload` | `admin` |
 | `POST /v1/agents/:id/tools/refresh` | `admin` |
+| `GET /v1/agents/:id/vars` | `admin` |
 | `PATCH /v1/agents/:id/vars` | `admin` |
+| `GET /v1/agents/:id/workspace` | `admin` |
+| `GET /v1/agents/:id/workspace/:file` | `admin` |
 | `PUT /v1/agents/:id/workspace/:file` | `admin` |
 | `GET /v1/backup` | `admin` |
 | `GET /v1/agents/:id/export` | `admin` |
@@ -1122,7 +1161,15 @@ GET    /v1/agents/:id/sessions/:key/messages?before=&limit=
 DELETE /v1/agents/:id/sessions/:key          → clears history; keeps memory files
 POST   /v1/agents/:id/sessions/:key/phase    → { sessionKey, phase }
 POST   /v1/agents/:id/sessions/:key/recall   { recall } → { sessionKey, recall }
+POST   /v1/agents/:id/sessions/rotate        { from? } → { sessionKey, previous }
 ```
+
+Each listed session carries `head`: whether it is the conversation its base currently means. Under
+`sessions.scope: owner` or `peer`, `rotate` starts the caller's conversation afresh on every surface
+at once (decision 15.12): `previous` stays listed and is continued by naming it. `409
+session_not_rotatable` for a `channel-peer` agent, a sender with no conversation of their own, or a
+key minted for a session prefix speaking for nobody. A key bound to participant P reaches
+`owner:P`, `peer:P` and their rotations (`<base>~` plus six symbols) beside its own prefix.
 
 `DELETE` clears conversation state only. Memory markdown is a file artifact and is never
 deleted by an API call.
@@ -1169,7 +1216,14 @@ GET    /v1/agents/:id/schedules/:sid
 PATCH  /v1/agents/:id/schedules/:sid
 DELETE /v1/agents/:id/schedules/:sid
 POST   /v1/agents/:id/schedules/:sid/run     → fire now, out of band
+GET    /v1/agents/:id/schedules/preview      → ?kind=&expr=&timezone=&count= — the next instants an
+                                               expression would fire at, the zone in force and the
+                                               jitter it would carry; parsed by the same core function
+                                               the write uses, so a preview cannot disagree with a save
 ```
+
+A preview answers `{ kind, zone, next: [<ISO>, …], jitterMs }`; a refused expression is the same
+`400` the write would give, hint included.
 
 ```json
 {
@@ -1440,6 +1494,8 @@ stream still ends on its own turn's `turn.end`, so read `turnId` before treating
 | `agent.channel.rejected` | inbound not turned into a turn | `channelId`, `reason` (`duplicate` \| `denied`), `sender`, `detail` |
 | `handoff.start` | a delegation began | `member`, `task`, `sessionKey`, `kind` (`member` or `self` for a subagent), `name?` (the subagent's), `callId?` (the parent's tool call) |
 | `handoff.result` | how it ended | `member`, `sessionKey`, `kind`, `name?`, `callId?`, `outcome`, `steps`, `tokens`, `errorCode?` |
+| `peer.ask` | an `ask_agent` call began (`24-SPEC-PEER-ASK.md`) | `askId`, `peer`, `remote`, `sessionKey`, `callId?` |
+| `peer.answer` | how it ended | `askId`, `peer`, `sessionKey`, `outcome` (`ok`, `budget`, `error`), `steps`, `tokens`, `errorCode?` |
 | `approval.requested` | a call is waiting on a person | `approvalId`, `slug`, `callId`, `match?`, `mutating`, `reason` |
 | `approval.resolved` | how it ended | `approvalId`, `slug`, `granted`, `by` |
 | `turn.start` | inbound accepted | `source`, `inputTokens`, `trust`, `from?`, `inputKind?` (`voice` for a transcribed voice note) |
@@ -1640,7 +1696,7 @@ Client frames:
 
 | Frame | Fields | Answer |
 | --- | --- | --- |
-| `message` | `text`, `sessionKey?` (default `api:default`) | `ws.accepted { turnId }`. Runs on the socket's current agent; the frame carries no `agentId` and no `from` (a participant-bound key supplies one). |
+| `message` | `text`, `sessionKey?` (default `api:default`) | `ws.accepted { turnId, sessionKey }` — the key the turn runs in, as in the `202` of `POST /messages`. Runs on the socket's current agent; the frame carries no `agentId` and no `from` (a participant-bound key supplies one). |
 | `stop` | `turnId` | `ws.stopping { turnId, found }` |
 | `subscribe` | `agentId`, `chunks?` | `ws.subscribed { agentId, chunks }` |
 | `ping` | — | `pong` |

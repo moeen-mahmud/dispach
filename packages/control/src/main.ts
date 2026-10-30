@@ -10,6 +10,7 @@ import { BRAND } from "./brand.ts"
 import { ControlPlane } from "./control.ts"
 import { type AlertRules, DEFAULT_RULES, Monitor, telegramAlert } from "./monitor.ts"
 import { ControlError, DockerPlacer, resolveSiloEnv } from "./placer.ts"
+import { Relay } from "./relay.ts"
 import { createControlServer } from "./server.ts"
 import { SiloStore } from "./store.ts"
 
@@ -103,8 +104,12 @@ const monitor =
                   ? {}
                   : { alert: telegramAlert(alertToken, alertChat) }),
           })
+// Where silos reach this process for the peer-ask relay. The monitor's address is the same one when
+// only that is set: both are "this control plane, as a silo sees it".
+const relayUrl = env("RELAY_URL") ?? hookUrl
 const control = new ControlPlane({
     ...(monitor === undefined ? {} : { monitor }),
+    ...(relayUrl === undefined ? {} : { relayUrl }),
     store,
     placer,
     suspend,
@@ -117,6 +122,7 @@ const port = number("PORT", 7600)
 const server = createControlServer({
     control,
     token,
+    ...(relayUrl === undefined ? {} : { relay: new Relay(control) }),
     ...(monitor === undefined ? {} : { monitor }),
 })
 
@@ -134,6 +140,9 @@ server.listen(port, host, () => {
     } else {
         process.stdout.write(`  monitor on · silos report to ${hookUrl}/hooks/<subject>\n`)
         void control.watchAll()
+    }
+    if (relayUrl !== undefined) {
+        process.stdout.write(`  relay on · silos ask through ${relayUrl}/v1/relay/ask\n`)
     }
 })
 

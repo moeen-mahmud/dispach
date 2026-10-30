@@ -6,8 +6,21 @@
  * order, and no amount of component testing can.
  */
 
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { Row, SubagentBlock, Transcript } from "./lib/transcript.ts"
+import { Markdown } from "./Markdown.tsx"
+
+/** One attached image, already read into base64. The wire takes `{data, mediaType}`. */
+export interface Attachment {
+    readonly name: string
+    readonly mediaType: string
+    readonly data: string
+    /** For the thumbnail only; never sent. */
+    readonly url: string
+}
+
+export const MAX_IMAGES = 5
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"]
 
 export function Rows(props: {
     readonly state: Transcript
@@ -27,7 +40,11 @@ export function Rows(props: {
             {props.state.liveReasoning === "" ? null : (
                 <Fold label="thinking" text={props.state.liveReasoning} open />
             )}
-            {props.state.live === "" ? null : <p className="row">{props.state.live}</p>}
+            {props.state.live === "" ? null : (
+                <div className="row reply">
+                    <Markdown text={props.state.live} />
+                </div>
+            )}
         </>
     )
 }
@@ -42,7 +59,13 @@ function RowView(props: {
             return <p className="row user">{row.text}</p>
 
         case "reply":
-            return <p className="row">{row.text}</p>
+            // Markdown, through a parser with no HTML branch: the text is the model's and the
+            // model's text is untrusted. See `lib/markdown.ts`.
+            return (
+                <div className="row reply">
+                    <Markdown text={row.text} />
+                </div>
+            )
 
         case "reasoning":
             // Folded rather than shown, and closed by default once committed: a 23-row reasoning
@@ -52,7 +75,8 @@ function RowView(props: {
 
         case "tool":
             /**
-             * What a call *was* and how it went — never what it was given or what came back.
+             * What a call *was* and how it went — and what it was given and returned only when the
+             * agent's `tools.eventDetail: redacted` put that on the events.
              *
              * `tool.call` carries `argsHash` and `tool.result` carries `bytes`, not the text, and
              * that is the wire's decision rather than this page's: arguments can hold a file's
@@ -81,6 +105,23 @@ function RowView(props: {
                             </div>
                         </div>
                     ) : null}
+                    {row.args === undefined && row.output === undefined ? null : (
+                        // Only under `tools.eventDetail: redacted`, which put them on the events with
+                        // credentials replaced. Plain text, never Markdown: the output is what a
+                        // tool returned, and a stranger may have written it.
+                        <details className="tool-detail">
+                            <summary className="tool-detail-summary">details</summary>
+                            {row.args === undefined ? null : (
+                                <pre className="snippet">{JSON.stringify(row.args, null, 2)}</pre>
+                            )}
+                            {row.output === undefined ? null : (
+                                <pre className="snippet">
+                                    {row.output}
+                                    {row.outputTruncated === true ? "\n… (first 2 KB)" : ""}
+                                </pre>
+                            )}
+                        </details>
+                    )}
                     {row.subagent === undefined ? null : <Subagent block={row.subagent} />}
                 </div>
             )
@@ -199,8 +240,47 @@ export function Composer(props: {
     readonly onChange: (value: string) => void
     readonly onSend: () => void
     readonly onStop: () => void
+    /** Model roles declared under `model:`; the picker is hidden when there is only `main`. */
+    readonly roles?: readonly string[]
+    readonly role?: string
+    readonly onRole?: (role: string | undefined) => void
+    readonly images?: readonly Attachment[]
+    readonly onImages?: (images: readonly Attachment[]) => void
 }): React.ReactElement {
     const area = useRef<HTMLTextAreaElement>(null)
+    const [imageNote, setImageNote] = useState<string>()
+    const images = props.images ?? []
+
+    /** Files from a paste or a drop: images only, five at most, read to base64 for the wire. */
+    const addFiles = (files: readonly File[]) => {
+        const accepted = files.filter((file) => IMAGE_TYPES.includes(file.type))
+        if (accepted.length === 0) return
+        const room = MAX_IMAGES - images.length
+        if (room <= 0) {
+            setImageNote(`at most ${MAX_IMAGES} images per message`)
+            return
+        }
+        setImageNote(undefined)
+        void Promise.all(
+            accepted.slice(0, room).map(
+                (file) =>
+                    new Promise<Attachment>((resolve, reject) => {
+                        const reader = new FileReader()
+                        reader.onerror = () => reject(reader.error)
+                        reader.onload = () => {
+                            const url = String(reader.result)
+                            resolve({
+                                name: file.name,
+                                mediaType: file.type,
+                                data: url.slice(url.indexOf(",") + 1),
+                                url,
+                            })
+                        }
+                        reader.readAsDataURL(file)
+                    }),
+            ),
+        ).then((read) => props.onImages?.([...images, ...read]))
+    }
 
     // Grow with the text up to the CSS cap, so a pasted paragraph is visible while being edited.
     // The body reads `area.current`, not `props.value` — so the rule offers to drop it, and without
@@ -215,12 +295,45 @@ export function Composer(props: {
 
     return (
         <div className="composer">
+            {images.length === 0 ? null : (
+                <div className="attachments">
+                    {images.map((image, index) => (
+                        <span key={`${image.name}:${image.data.length}`} className="attachment">
+                            <img src={image.url} alt={image.name} />
+                            <button
+                                type="button"
+                                aria-label={`remove ${image.name}`}
+                                onClick={() =>
+                                    props.onImages?.(images.filter((_, at) => at !== index))
+                                }
+                            >
+                                ×
+                            </button>
+                        </span>
+                    ))}
+                </div>
+            )}
             <div className="inner">
                 <textarea
                     ref={area}
                     value={props.value}
                     placeholder="Ask the agent something"
                     onChange={(event) => props.onChange(event.target.value)}
+                    onDragOver={(event) => {
+                        if (props.onImages !== undefined) event.preventDefault()
+                    }}
+                    onDrop={(event) => {
+                        if (props.onImages === undefined) return
+                        event.preventDefault()
+                        addFiles(Array.from(event.dataTransfer.files))
+                    }}
+                    onPaste={(event) => {
+                        const files = Array.from(event.clipboardData.files)
+                        if (files.length > 0 && props.onImages !== undefined) {
+                            event.preventDefault()
+                            addFiles(files)
+                        }
+                    }}
                     onKeyDown={(event) => {
                         // Enter sends, shift-enter composes — the opposite of the terminal's paste
                         // rule and the right one here, because a browser textarea has no paste
@@ -232,6 +345,25 @@ export function Composer(props: {
                         }
                     }}
                 />
+                {(props.roles ?? []).length > 1 ? (
+                    <select
+                        className="role-pick"
+                        aria-label="model role for this message"
+                        value={props.role ?? ""}
+                        disabled={props.busy}
+                        onChange={(event) =>
+                            props.onRole?.(
+                                event.target.value === "" ? undefined : event.target.value,
+                            )
+                        }
+                    >
+                        {(props.roles ?? []).map((role) => (
+                            <option key={role} value={role === "main" ? "" : role}>
+                                {role}
+                            </option>
+                        ))}
+                    </select>
+                ) : null}
                 {props.busy ? (
                     <button type="button" onClick={props.onStop}>
                         Stop
@@ -240,7 +372,7 @@ export function Composer(props: {
                     <button
                         type="button"
                         className="primary"
-                        disabled={props.value.trim() === ""}
+                        disabled={props.value.trim() === "" && images.length === 0}
                         onClick={props.onSend}
                     >
                         Send
@@ -250,7 +382,8 @@ export function Composer(props: {
             <p className="hint">
                 {props.busy
                     ? "Running. Closing this page does not stop it — the turn is detached, and reopening reattaches."
-                    : "Enter sends · shift-enter for a new line"}
+                    : (imageNote ??
+                      `Enter sends · shift-enter for a new line${props.onImages === undefined ? "" : " · paste or drop an image"}`)}
             </p>
         </div>
     )

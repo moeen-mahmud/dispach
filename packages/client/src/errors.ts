@@ -19,6 +19,8 @@ export interface WireError {
     readonly hint?: string
     /** The manifest path or request field at fault, when the server can name one. */
     readonly field?: string
+    /** Each failure, when this error stands for several (a manifest that broke two rules). */
+    readonly details?: readonly WireError[]
 }
 
 export class DispachError extends Error {
@@ -27,6 +29,8 @@ export class DispachError extends Error {
     /** What to do about it. Empty only if the server sent none, which `spec.test.ts` forbids. */
     readonly hint: string
     readonly field: string | undefined
+    /** Each failure, when this error stands for several. Empty otherwise. */
+    readonly details: readonly WireError[]
     /** HTTP status, or `undefined` for a failure that never reached a response. */
     readonly status: number | undefined
     /** The request that produced it, so a caught error is traceable without a log. */
@@ -44,14 +48,20 @@ export class DispachError extends Error {
         // The hint is in the message because an uncaught throw prints only that, and the whole
         // argument for hints is that the expensive part of a failure is not knowing what was wrong.
         super(
-            detail.hint === undefined
-                ? detail.message
-                : `${detail.message}\n  hint: ${detail.hint}`,
+            [
+                detail.message,
+                ...(detail.details ?? []).map(
+                    (each) =>
+                        `  - ${each.field === undefined ? "" : `${each.field}: `}${each.message}`,
+                ),
+                ...(detail.hint === undefined ? [] : [`  hint: ${detail.hint}`]),
+            ].join("\n"),
         )
         this.name = "DispachError"
         this.code = detail.code
         this.hint = detail.hint ?? ""
         this.field = detail.field
+        this.details = detail.details ?? []
         this.status = context.status
         this.request =
             context.method === undefined || context.path === undefined

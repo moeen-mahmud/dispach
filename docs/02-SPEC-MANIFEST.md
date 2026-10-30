@@ -146,6 +146,7 @@ server:
 | `apiVersion` | `"dispach/v1"` | yes | Refused if unknown. Never silently upgraded. |
 | `id` | string | yes | Slug. Unique within a runtime. Used in session keys and API paths. May not start with `~`, which keys a shared memory scope (Phase 29). |
 | `name` | string | no | Display only. |
+| `description` | string | no | What the agent is for, one line, at most 200 characters (since 0.2.2). Shown beside it to the agents that may ask it (`ask_agent`), in `GET /v1/agents` and in the console. `init` writes the "what is it for" answer; `config_set` may change it. |
 | `extends` | string | no | Path to a base manifest. Shallow merge, arrays replace. |
 
 ### `model`
@@ -160,7 +161,7 @@ nothing references is warned about, because that is also what a misspelled `comp
 | `id` | string | Sent verbatim as the `model` parameter. |
 | `api` | string | Which transport speaks to the model. **Omitted, `chat-completions`**, so every manifest written before this field existed is unchanged. `bedrock-converse` is AWS Bedrock (Phase 26c). An unknown value refuses the load, naming the registered transports. |
 | `options` | map | Transport settings, checked by that transport at load. `bedrock-converse` takes `region` and an optional `profile`. Never a credential. |
-| `baseUrl` | string | **Required for `chat-completions`** and ignored by a transport that addresses its endpoint another way. Must end at the version segment, e.g. `.../v1`. Requests go to `{baseUrl}/chat/completions`, so a URL pasted from a provider's docs **with** that path is refused — by the wizard, by the loader, and by a comment in the generated file. Any OpenAI-compatible endpoint works and there is no provider branch in the transport; `init --preset` carries the ones worth not typing from memory (OpenAI, Anthropic, DeepSeek, OpenRouter, Groq, NVIDIA NIM, Ollama local and hosted), and `custom` is a first-class answer rather than a fight with the nearest preset. |
+| `baseUrl` | string | **Required for `chat-completions`** and ignored by a transport that addresses its endpoint another way. Must end at the version segment, e.g. `.../v1`. Requests go to `{baseUrl}/chat/completions`, so a URL pasted from a provider's docs **with** that path is refused — by the wizard, by the loader, and by a comment in the generated file. Any OpenAI-compatible endpoint works and there is no provider branch in the transport; `init --preset` carries the ones worth not typing from memory (OpenAI, Anthropic, DeepSeek, OpenRouter, Groq, NVIDIA NIM, Ollama local and hosted), and `custom` is a first-class answer rather than a fight with the nearest preset. `--preset bedrock --region <aws-region>` is the one preset that writes `api` and `options` instead of a URL. |
 | `apiKeyEnv` | string | **Name of the env var**, never the key itself. A literal key in the manifest fails validation. **Omit it entirely for an endpoint that needs no key** — a local Ollama — and the provider then sends no `authorization` header at all. Absent and empty are different things: absent is a keyless endpoint, and a named variable that is unset fails the load. |
 | `temperature`, `topP` | number | Optional passthrough. |
 | `maxTokens` | number | The cap on what the endpoint may generate. **Omitted from the request entirely when unset** — not derived from `reserveOutput`, which answers a different question. Bounded by `capabilities.maxOutput` and by the window. |
@@ -700,6 +701,7 @@ Text under 12 characters is not looked for elsewhere. A turn whose `memory_write
 | `threshold` | 0.20 | Score floor after original-query coverage and recency. `memory search` exposes all three terms. |
 | `budget` | 2000 | Total tokens across injected passages. Outside the workspace cap — this tier is retrieved, not carried. |
 | `includeHistory` | true | Index the person's messages and clean agent replies as well as the notes, under `session:<key>`. Never tool observations, runtime-authored messages, or tainted assistant prose. |
+| `shared` | true | For an assigned agent, a `memory_write` also leaves a copy in `agents:<owner>`, the memory its owner's agents share, and recall reads that pool (decisions 15.8, 15.13). Read only where private memory is read — never by a stand-in, a room or another member's ask — and the writer never recalls its own copies. `false` opts out both ways. Since 0.2.2; `23-SPEC-SESSIONS.md`. |
 
 **Shared scopes (Phase 29) need no field.** **Status: experimental in 0.2.0.** Multiplayer; it may
 change within 0.2.x. Beside its own memory — everything above, which is the
@@ -775,6 +777,24 @@ threshold and does not exclude the carried file, because the question it exists 
 "why was that *not* recalled". `dispach memory rebuild <agent>` forgets the index and re-reads every
 file — staleness is detected from mtime **and** size, and an edit preserving both is a real blind
 spot rather than a hypothetical one.
+
+### `sessions`
+
+How a turn's conversation is chosen. Since 0.2.2; the full rules are `23-SPEC-SESSIONS.md`.
+
+```yaml
+sessions:
+  scope: owner    # owner | peer | channel-peer (default)
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `scope` | `channel-peer` | `channel-peer`: the key a surface sent is the key used, one conversation per surface — what every agent did before. `owner`: every turn from the assigned owner — any channel, the web, the terminal, an unscoped API key with no `from` — lands in the owner's conversation, `owner:<participantId>`; the reply still goes to the surface it was asked on. `peer`: `owner`, and each registered participant whose `channelIds` match gets one too. A room, a schedule, a child turn, a peer ask and an agent sender always keep their own key. |
+
+The default does not move: an embedder that chooses and parses its own keys keeps them. `init` writes
+`owner`. `owner` or `peer` on an agent nobody is assigned to loads, behaves as `channel-peer`, and
+warns `sessions_scope_unassigned` naming `owner adopt`. Person-settable only (`config set`); an agent's
+`config_set` cannot change whose conversations merge.
 
 ### `channels`
 
@@ -1126,6 +1146,7 @@ delegation:
       properties: { finding: { type: string } }
       required: [finding]
   to: "*"                 # or [agent ids]: whom I may delegate to (only agents that offer)
+  ask: true               # ask_agent: my owner's other agents, and shared ones (since 0.2.2)
 ```
 
 **`standIn`** applies only in a DM between two people, and only to the agent assigned to the absent
@@ -1147,6 +1168,16 @@ stand-in: its owner's shared notes and the space, never private memory, unless t
 for is its own owner. Targets are fixed when the coordinator loads; an agent adopted later is
 reachable after the coordinator reloads. A person sets both fields with `PATCH /config`
 (`delegation.offer`, `delegation.to`); an agent's `config_set` cannot.
+
+**`delegation.ask`** (since 0.2.2, `24-SPEC-PEER-ASK.md`) gives the agent `ask_agent(peer, question)`:
+a free-form question to another agent working for the same person, answered as text. Default
+`false`; `init` writes `true`. Both sides opt in: an agent is offered another that also declares it
+and is assigned to the same person, or to nobody — a **shared** agent, which is asked and never asks,
+and answers from its projects' memory rather than anybody's private notes. Across silos the control
+plane's relay adds the person's agents in their other silos, on a turn acting for the owner only. The
+asked turn is one hop (no `handoff`, no `ask_agent`). A change to an assignment, to this field or to a
+peer's `description` reloads the agents whose peer list it changes; nothing waits for a restart.
+Person-only, like the rest of `delegation`.
 
 ### `subagents` (since 0.2.0-pilot.6)
 

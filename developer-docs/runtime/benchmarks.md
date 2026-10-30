@@ -34,24 +34,25 @@ With 125 runs an arm, a gap of a few runs is noise: the 95% intervals are in
 ## Tool-call dialects
 
 Dispach can call tools through the provider's native function calling or through NLT, a plain-text
-format. `init` writes native wherever the model supports it.
+format. `init` writes native wherever the model supports it. The all 5 columns count tasks passed
+on every trial (pass^k): what a user who repeats a task cares about, beside the rate over runs.
 
-| Model | Native | NLT |
-| --- | --- | --- |
-| Claude Opus 5.5 | 125/125 (100%) | 125/125 (100%) |
-| Claude Sonnet 5.5 | 125/125 (100%) | 124/125 (99%) |
-| Claude Haiku 5.5 | 124/125 (99%) | 124/125 (99%) |
-| GPT-6.1 Sol | 125/125 (100%) | 125/125 (100%) |
-| GPT-6 Luna | 114/125 (91%) | 85/125 (68%) |
-| Gemini 4 Argon | 119/125 (95%) | 118/125 (94%) |
-| Gemini 3.8 Flash | 125/125 (100%) | 119/125 (95%) |
-| Grok 4.7 | 124/125 (99%) | 62/125 (50%) |
-| GLM 5.3 | 125/125 (100%) | 119/125 (95%) |
-| DeepSeek V4 Pro | 125/125 (100%) | 124/125 (99%) |
-| Kimi K3 | 115/125 (92%) | 71/125 (57%) |
-| Gemma 4 26B-A4B | 112/125 (90%) | 75/125 (60%) |
-| qwen3.5-9b | 104/125 (83%) | paused at 45/52 |
-| gpt-oss-20b | 97/125 (78%) | 89/125 (71%) |
+| Model | Native | Native all 5 | NLT | NLT all 5 |
+| --- | --- | --- | --- | --- |
+| Claude Opus 5.5 | 125/125 (100%) | 25/25 | 125/125 (100%) | 25/25 |
+| Claude Sonnet 5.5 | 125/125 (100%) | 25/25 | 124/125 (99%) | 24/25 |
+| Claude Haiku 5.5 | 124/125 (99%) | 24/25 | 124/125 (99%) | 24/25 |
+| GPT-6.1 Sol | 125/125 (100%) | 25/25 | 125/125 (100%) | 25/25 |
+| GPT-6 Luna | 114/125 (91%) | 20/25 | 85/125 (68%) | 9/25 |
+| Gemini 4 Argon | 119/125 (95%) | 23/25 | 118/125 (94%) | 22/25 |
+| Gemini 3.8 Flash | 125/125 (100%) | 25/25 | 119/125 (95%) | 22/25 |
+| Grok 4.7 | 124/125 (99%) | 24/25 | 62/125 (50%) | 4/25 |
+| GLM 5.3 | 125/125 (100%) | 25/25 | 119/125 (95%) | 20/25 |
+| DeepSeek V4 Pro | 125/125 (100%) | 25/25 | 124/125 (99%) | 24/25 |
+| Kimi K3 | 115/125 (92%) | 19/25 | 71/125 (57%) | 6/25 |
+| Gemma 4 26B-A4B | 112/125 (90%) | 18/25 | 75/125 (60%) | 10/25 |
+| qwen3.5-9b | 104/125 (83%) | 13/25 | paused at 45/52 | paused |
+| gpt-oss-20b | 97/125 (78%) | 12/25 | 89/125 (71%) | 11/25 |
 
 ## How it is run
 

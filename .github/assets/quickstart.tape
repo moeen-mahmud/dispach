@@ -16,7 +16,7 @@ Sleep 1s
 Show
 
 Type "# 1. Start the server: no agents yet, nothing to configure but a token" Enter
-Type "docker run -d -p 7420:7420 -v milo-demo:/home/dispach -e DISPACH_API_TOKEN=$TOKEN --name milo-demo ghcr.io/moeen-mahmud/dispach:0.2.0" Enter
+Type "docker run -d --init -p 7420:7420 -v milo-demo:/home/dispach -e DISPACH_API_TOKEN=$TOKEN --name milo-demo ghcr.io/moeen-mahmud/dispach:0.2.2" Enter
 Sleep 2s
 Type "# 2. Create an agent over HTTP, live with no restart" Enter
 Type `curl -s -H "Authorization: Bearer $TOKEN" localhost:7420/v1/agents -d '{"answers":{"user":"you","name":"milo","model":"deepseek-v4-flash","baseUrl":"https://api.deepseek.com/v1","apiKey":"'$KEY'"}}' | jq -c '{id, adopted}'` Enter

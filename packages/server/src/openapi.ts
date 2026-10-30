@@ -53,6 +53,7 @@ import {
     ProjectBody,
     ProvisionBody,
     RecallBody,
+    RotateBody,
     SecretsBody,
     SpaceWriterBody,
     StopBody,
@@ -126,6 +127,20 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
             },
         ],
     },
+    "GET /v1/agents/:id/workspace": {
+        summary:
+            "The files the agent's prompt is built from: name, tier, field, whether it exists, size.",
+        statuses: [
+            { code: 409, when: "the manifest does not parse, so its files cannot be named" },
+        ],
+    },
+    "GET /v1/agents/:id/workspace/:file": {
+        summary: "One declared workspace file's text, for an editor to show before it replaces it.",
+        statuses: [
+            { code: 404, when: "not a file the manifest declares" },
+            { code: 409, when: "the manifest does not parse" },
+        ],
+    },
     "PUT /v1/agents/:id/workspace/:file": {
         summary:
             "Replace one of the agent's declared workspace files; reload it, or diagnose it when it is not running.",
@@ -140,6 +155,14 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
                 code: 409,
                 when: "an agent with no manifest file, or one whose manifest does not parse",
             },
+        ],
+    },
+    "GET /v1/agents/:id/vars": {
+        summary:
+            "The template an agent was made from and the plain variable values it was last rendered with. Secrets never appear.",
+        statuses: [
+            { code: 409, when: "an agent with no template record" },
+            { code: 501, when: "a server with no templates directory (an embedded handler)" },
         ],
     },
     "PATCH /v1/agents/:id/vars": {
@@ -444,6 +467,11 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
         summary: "Keep a conversation out of history recall, or put it back; its messages stay.",
         body: RecallBody,
     },
+    "POST /v1/agents/:id/sessions/rotate": {
+        summary:
+            "Start the caller's conversation afresh on every surface (sessions.scope owner or peer).",
+        body: RotateBody,
+    },
     "GET /v1/agents/:id/config": {
         summary: "Every manifest field this surface may set, what it does, and its current value.",
     },
@@ -477,6 +505,11 @@ const DOCS: Readonly<Record<string, RouteDoc>> = {
     "POST /v1/agents/:id/schedules": {
         summary: "Create a schedule. Validated by the manifest's own schedule rules.",
         statuses: [{ code: 201, when: "created" }],
+    },
+    "GET /v1/agents/:id/schedules/preview": {
+        summary:
+            "What an expression means before it is written: the next instants, zone and jitter.",
+        statuses: [{ code: 400, when: "an expression core's own parser refuses, with its hint" }],
     },
     "GET /v1/agents/:id/schedules/:sid": { summary: "One schedule's row." },
     "PATCH /v1/agents/:id/schedules/:sid": {

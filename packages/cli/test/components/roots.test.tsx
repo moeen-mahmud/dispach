@@ -644,6 +644,8 @@ function stubSource(): AppProps["source"] {
         history: async () => [],
         sessions: async () => [],
         clearSession: async () => {},
+        ownConversation: async () => undefined,
+        rotateSession: async () => undefined,
         tools: async () => ({ dialect: "nlt", catalogueTokens: 120, tools: [] }),
         context: async () => {
             throw new Error("no context in a frame test")

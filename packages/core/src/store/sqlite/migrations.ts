@@ -1199,6 +1199,58 @@ ALTER TABLE agent_assignments ADD COLUMN channel_ids TEXT;
 ALTER TABLE turns ADD COLUMN participant_id TEXT;
 `,
     },
+    {
+        version: 32,
+        name: "drop_kv",
+        /**
+         * The `kv` table had no consumer anywhere and no `agent_id` column, so `purgeAgent`
+         * could never clean up after it. Nothing in the source tree read or wrote it, so
+         * dropping it loses no reachable data; `IF EXISTS` keeps the step safe for a
+         * database whose first migration never ran it.
+         */
+        sql: `
+DROP TABLE IF EXISTS kv;
+`,
+    },
+    {
+        version: 33,
+        name: "session_heads",
+        /**
+         * One conversation per person across surfaces (decisions 15.6, 15.12; `docs/23-SPEC-SESSIONS.md`).
+         *
+         * `session_heads` maps a person's base key (`owner:<P>`, `peer:<P>`) to the conversation it means
+         * now; "new conversation" rotates it, from every surface at once. No row means the base is its own
+         * head, which is every base that was never rotated. Keyed by agent, purged with it.
+         *
+         * `participants.channel_ids` is what `peer` scope recognises a channel sender by, the same shape as
+         * `agent_assignments.channel_ids` (migration 30). NULL before: nobody is matched until named.
+         *
+         * No `turns` column: `source` and `participant_id` already say which surface and which sender.
+         */
+        sql: `
+CREATE TABLE session_heads (
+    agent_id   TEXT NOT NULL,
+    base_key   TEXT NOT NULL,
+    head_key   TEXT NOT NULL,
+    rotated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, base_key)
+);
+ALTER TABLE participants ADD COLUMN channel_ids TEXT;
+`,
+    },
+    {
+        version: 34,
+        name: "handoff_kind",
+        /**
+         * A peer ask (`ask_agent`, decision 15.9) is recorded in `handoffs` beside a typed delegation:
+         * the same envelope, a fresh session, the same outcomes minus the artifact. `kind` tells them
+         * apart. A constant default, so `ADD COLUMN` with a `CHECK` is legal and every existing row is
+         * the delegation it always was.
+         */
+        sql: `
+ALTER TABLE handoffs ADD COLUMN kind TEXT NOT NULL DEFAULT 'handoff' CHECK (kind IN ('handoff', 'ask'));
+`,
+    },
 ]
 
 export interface MigrationReport {

@@ -173,6 +173,8 @@ export type {
     PhaseConfig,
     ScheduleConfig,
     ServerConfig,
+    SessionScope,
+    SessionsConfig,
     SkillsConfig,
     TeamConfig,
     TeamMemberConfig,
@@ -185,6 +187,7 @@ export {
     DEFAULT_MODEL_API,
     isReservedRole,
     MODEL_ROLES,
+    SESSION_SCOPES,
 } from "./manifest/schema.ts"
 export {
     AGENT_SETTABLE_PATHS,
@@ -495,7 +498,11 @@ export {
 } from "./store/buffer.ts"
 export {
     formatSessionKey,
+    isConversationOf,
+    isHead,
     isSessionKey,
+    KEY_SYMBOLS,
+    keySymbols,
     parseSessionKey,
     type SessionParts,
 } from "./store/session-key.ts"
@@ -538,7 +545,6 @@ export type {
     HandoffRecord,
     HandoffStore,
     KeyScope,
-    KVStore,
     // Exported so the CLI can read a lease's address without re-declaring the row's shape —
     // the `stop` path needs `baseUrl`, and a second definition of it is the drift this repo
     // keeps paying for.
@@ -585,6 +591,7 @@ export {
     SUBMIT_ARTIFACT,
     submitArtifactTool,
 } from "./team/artifact.ts"
+export { ASK_AGENT, type AskPeer, askAgentTool } from "./team/ask.ts"
 export { isChildSession } from "./team/child-session.ts"
 export { type ExpandedTeams, expandTeams } from "./team/expand.ts"
 export {
@@ -593,6 +600,13 @@ export {
     type HandoffTarget,
     runHandoff,
 } from "./team/handoff.ts"
+export {
+    type AskPeerInfo,
+    askPeerSignature,
+    askPeersOf,
+    type RelayClient,
+    type RemotePeer,
+} from "./team/relay.ts"
 export {
     checkTeamGraph,
     HANDOFF,

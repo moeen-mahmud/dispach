@@ -57,9 +57,22 @@ export interface Cell {
     readonly rate: number
     readonly low: number
     readonly high: number
+    /** Tasks passed on every trial (pass^k), beside the pass rate. */
+    readonly passK: { readonly pass: number; readonly tasks: number }
     readonly cost: number
     readonly measured: string
     readonly paused?: true
+}
+
+/**
+ * Pass^k over an arm: tasks where every trial passed. `arm.tasks` already counts
+ * each task once however its rows were sharded (`load` merges `<arm>.rN.jsonl`
+ * shards into one arm) and already leaves throttled rows out (`summarise` scores
+ * only what was measured), so a throttled trial never counts against its task.
+ */
+export function passK(arm: Arm): Cell["passK"] {
+    const tasks = Object.values(arm.tasks)
+    return { pass: tasks.filter((t) => t.pass === t.n).length, tasks: tasks.length }
 }
 
 const dateOf = (dir: string, arm: string): string => {
@@ -71,7 +84,17 @@ const dateOf = (dir: string, arm: string): string => {
 
 function cell(arm: Arm, measured: string, paused = false): Cell {
     const { pass, n, rate, low, high } = arm.overall
-    return { pass, n, rate, low, high, cost: arm.cost, measured, ...(paused ? { paused } : {}) }
+    return {
+        pass,
+        n,
+        rate,
+        low,
+        high,
+        passK: passK(arm),
+        cost: arm.cost,
+        measured,
+        ...(paused ? { paused } : {}),
+    }
 }
 
 export function build() {
@@ -132,6 +155,9 @@ const score = (c: Cell | undefined) =>
           ? `paused at ${c.pass}/${c.n}`
           : `${c.pass}/${c.n} (${pct(c)})`
 const money = (c: Cell | undefined) => (c === undefined ? "" : `$${c.cost.toFixed(2)}`)
+/** Pass^k as a column: a paused arm ran no full sweep, so it has no all-trials figure. */
+const all5 = (c: Cell | undefined) =>
+    c === undefined ? "not measured" : c.paused ? "paused" : `${c.passK.pass}/${c.passK.tasks}`
 
 /** The head-to-head table: the docs page and the root README both carry it. */
 export function table(summary: ReturnType<typeof build>): string {
@@ -191,11 +217,12 @@ With 125 runs an arm, a gap of a few runs is noise: the 95% intervals are in
 ## Tool-call dialects
 
 ${name} can call tools through the provider's native function calling or through NLT, a plain-text
-format. \`init\` writes native wherever the model supports it.
+format. \`init\` writes native wherever the model supports it. The all 5 columns count tasks passed
+on every trial (pass^k): what a user who repeats a task cares about, beside the rate over runs.
 
-| Model | Native | NLT |
-| --- | --- | --- |
-${summary.models.map((m) => `| ${m.name} | ${score(m.native)} | ${score(m.nlt)} |`).join("\n")}
+| Model | Native | Native all 5 | NLT | NLT all 5 |
+| --- | --- | --- | --- | --- |
+${summary.models.map((m) => `| ${m.name} | ${score(m.native)} | ${all5(m.native)} | ${score(m.nlt)} | ${all5(m.nlt)} |`).join("\n")}
 
 ## How it is run
 

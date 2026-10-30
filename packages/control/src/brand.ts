@@ -19,6 +19,9 @@ export const BRAND = {
         tokenEnv: "DISPACH_API_TOKEN",
         /** The runtime's private-receiver allowlist for webhooks — the first thing a silo needs. */
         webhookAllowEnv: "DISPACH_WEBHOOK_ALLOW",
+        /** Where the silo reaches this control plane's peer-ask relay, and its token for it. */
+        relayUrlEnv: "DISPACH_RELAY_URL",
+        relayTokenEnv: "DISPACH_RELAY_TOKEN",
         port: 7420,
         home: "/home/dispach",
         /** The image's unprivileged user, which must own `home` after a restore. */

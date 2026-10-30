@@ -57,6 +57,7 @@ export function Keys(props: {
     readonly client: DispachClient
     readonly baseUrl: string
     readonly token: string | undefined
+    readonly agents: readonly { readonly id: string; readonly name: string }[]
 }): React.ReactElement {
     const [rows, setRows] = useState<readonly KeyRow[]>([])
     const [scope, setScope] = useState<string>()
@@ -64,49 +65,49 @@ export function Keys(props: {
     const [minted, setMinted] = useState<string>()
     const [error, setError] = useState<string>()
 
-    const headers = useCallback(
-        (extra: Record<string, string> = {}) => ({
-            ...extra,
-            ...(props.token === undefined ? {} : { authorization: `Bearer ${props.token}` }),
-        }),
-        [props.token],
-    )
-
     const load = useCallback(async () => {
         try {
-            const response = await fetch(`${props.baseUrl}/v1/keys`, { headers: headers() })
-            const body = (await response.json()) as {
-                keys?: KeyRow[]
-                scope?: string
-                error?: { message?: string }
-            }
-            if (!response.ok) throw new Error(body.error?.message ?? `HTTP ${response.status}`)
-            setRows(body.keys ?? [])
+            const body = await props.client.keys()
+            setRows(body.keys)
             setScope(body.scope)
         } catch (caught) {
             setError(caught instanceof Error ? caught.message : String(caught))
         }
-    }, [props.baseUrl, headers])
+    }, [props.client])
 
     useEffect(() => {
         void load()
     }, [load])
 
+    /**
+     * Opt-in narrowing (decision 14.34). Every field absent is an unscoped key — what every key
+     * minted before scopes existed is — and an empty capability set is honoured as written.
+     */
+    const [narrow, setNarrow] = useState(false)
+    const [scopeAgents, setScopeAgents] = useState<readonly string[]>([])
+    const [can, setCan] = useState<readonly ("read" | "chat" | "write" | "admin" | "peer")[]>([])
+    const [sessions, setSessions] = useState("")
+    const [participant, setParticipant] = useState("")
+    const [expiresDays, setExpiresDays] = useState("")
+
     const mint = async () => {
         setError(undefined)
         try {
-            const response = await fetch(`${props.baseUrl}/v1/keys`, {
-                method: "POST",
-                headers: headers({ "content-type": "application/json" }),
-                body: JSON.stringify({ label: label.trim() }),
+            const days = Number(expiresDays)
+            const scope = narrow
+                ? {
+                      ...(scopeAgents.length === 0 ? {} : { agents: scopeAgents }),
+                      ...(can.length === 0 ? {} : { can }),
+                      ...(sessions.trim() === "" ? {} : { sessions: sessions.trim() }),
+                      ...(participant.trim() === "" ? {} : { participant: participant.trim() }),
+                      ...(Number.isInteger(days) && days > 0 ? { expiresIn: days * 86_400 } : {}),
+                  }
+                : undefined
+            const made = await props.client.createKey({
+                label: label.trim(),
+                ...(scope === undefined || Object.keys(scope).length === 0 ? {} : { scope }),
             })
-            const body = (await response.json()) as {
-                secret?: string
-                error?: { message?: string }
-            }
-            if (!response.ok || body.secret === undefined)
-                throw new Error(body.error?.message ?? `HTTP ${response.status}`)
-            setMinted(body.secret)
+            setMinted(made.secret)
             setLabel("")
             await load()
         } catch (caught) {
@@ -134,14 +135,7 @@ export function Keys(props: {
             return
         const held = storedKey()
         try {
-            const response = await fetch(`${props.baseUrl}/v1/keys/${row.keyId}`, {
-                method: "DELETE",
-                headers: headers(),
-            })
-            if (!response.ok) {
-                const body = (await response.json()) as { error?: { message?: string } }
-                throw new Error(body.error?.message ?? `HTTP ${response.status}`)
-            }
+            await props.client.revokeKey(row.keyId)
             // Whether *that* was this browser's key is discovered rather than predicted: reload
             // the listing, and if the credential we hold has stopped working, say so by clearing it
             // and starting over. Leaving a dead key in storage would make every later request a
@@ -198,6 +192,83 @@ export function Keys(props: {
                         Issue
                     </button>
                 </div>
+                <label className="check" style={{ marginTop: 12 }}>
+                    <input type="checkbox" checked={narrow} onChange={() => setNarrow(!narrow)} />
+                    narrow what this key reaches
+                </label>
+                {narrow ? (
+                    <div className="model-form">
+                        <div className="field-like">
+                            <span className="field-label">
+                                Agents <span className="sub">none ticked reaches every agent</span>
+                            </span>
+                            <div className="members">
+                                {props.agents.map((agent) => (
+                                    <label key={agent.id} className="check">
+                                        <input
+                                            type="checkbox"
+                                            checked={scopeAgents.includes(agent.id)}
+                                            onChange={() =>
+                                                setScopeAgents(
+                                                    scopeAgents.includes(agent.id)
+                                                        ? scopeAgents.filter((a) => a !== agent.id)
+                                                        : [...scopeAgents, agent.id],
+                                                )
+                                            }
+                                        />
+                                        {agent.name}
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="field-like">
+                            <span className="field-label">
+                                Capabilities <span className="sub">none ticked means all five</span>
+                            </span>
+                            <div className="members">
+                                {(["read", "chat", "write", "admin", "peer"] as const).map(
+                                    (capability) => (
+                                        <label key={capability} className="check">
+                                            <input
+                                                type="checkbox"
+                                                checked={can.includes(capability)}
+                                                onChange={() =>
+                                                    setCan(
+                                                        can.includes(capability)
+                                                            ? can.filter((c) => c !== capability)
+                                                            : [...can, capability],
+                                                    )
+                                                }
+                                            />
+                                            {capability}
+                                        </label>
+                                    ),
+                                )}
+                            </div>
+                        </div>
+                        <label>
+                            Session prefix <span className="sub">e.g. team_42:</span>
+                            <input value={sessions} onChange={(e) => setSessions(e.target.value)} />
+                        </label>
+                        <label>
+                            Acts for participant{" "}
+                            <span className="sub">every turn it starts is this person's</span>
+                            <input
+                                value={participant}
+                                placeholder="user:ada"
+                                onChange={(e) => setParticipant(e.target.value)}
+                            />
+                        </label>
+                        <label>
+                            Expires in days <span className="sub">blank never expires</span>
+                            <input
+                                inputMode="numeric"
+                                value={expiresDays}
+                                onChange={(e) => setExpiresDays(e.target.value.replace(/\D/g, ""))}
+                            />
+                        </label>
+                    </div>
+                ) : null}
             </div>
 
             <div className="card">

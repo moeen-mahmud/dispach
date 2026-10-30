@@ -46,6 +46,16 @@ describe("a named role", () => {
         expect(response.status).toBe(200)
         expect(readFileSync(join(dir, "agent.yaml"), "utf8")).toContain("fast-model")
         expect(runtime.agent("assistant")?.roles.byName("fast").config.id).toBe("fast-model")
+
+        // And it can be found again: the template row has no value, so the concrete row is the
+        // only way a client learns which roles exist.
+        const after = (await (await call("GET", "/v1/agents/assistant/config")).json()) as {
+            settings: { path: string; value?: { id?: string } }[]
+        }
+        const fast = after.settings.find((setting) => setting.path === "model.fast")
+        expect(fast?.value?.id).toBe("fast-model")
+        expect(after.settings.some((setting) => setting.path === "model.main")).toBe(true)
+        expect(after.settings.filter((setting) => setting.path === "model.main").length).toBe(1)
         await runtime.stop()
     })
 

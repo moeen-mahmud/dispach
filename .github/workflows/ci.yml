@@ -32,6 +32,11 @@ jobs:
       - name: lint
         run: bun run lint
 
+      # Biome does not read shell. The installer runs under whatever `sh` a stranger's machine has
+      # (dash on Debian), so it is checked as POSIX sh, not bash. shellcheck ships on the runner.
+      - name: shellcheck install.sh
+        run: shellcheck -s sh scripts/install.sh
+
       # `build` is second, and the ordering is load-bearing rather than tidy. Every sibling import
       # resolves through that package's `dist/` — so on a fresh checkout, which has none, both
       # `typecheck` and `test` fail with 79 `TS2307: Cannot find module '@dispach/core'` and 34

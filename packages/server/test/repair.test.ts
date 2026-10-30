@@ -73,3 +73,30 @@ test("a broken agent is diagnosed, repaired over the API, and started", async ()
     expect(runtime.list().some((agent) => agent.id === "assistant")).toBe(true)
     await runtime.stop()
 })
+
+test("the workspace can be listed and read before it is written, by the same declaration", async () => {
+    const { runtime, call } = await harness({
+        manifest: WITH_SOUL,
+        files: { "workspace/SOUL.md": SMALL },
+    })
+    const listing = (await (await call("GET", "/v1/agents/assistant/workspace")).json()) as {
+        files: { name: string; tier: string; exists: boolean }[]
+    }
+    expect(listing.files.map((file) => file.name)).toContain("SOUL.md")
+    const before = (await (await call("GET", "/v1/agents/assistant/workspace/SOUL.md")).json()) as {
+        content: string
+        exists: boolean
+    }
+    expect(before.exists).toBe(true)
+    const content = `${before.content}\n\nI answer briefly.\n`
+    expect(
+        (await call("PUT", "/v1/agents/assistant/workspace/SOUL.md", { body: { content } })).status,
+    ).toBe(200)
+    const after = (await (await call("GET", "/v1/agents/assistant/workspace/SOUL.md")).json()) as {
+        content: string
+    }
+    expect(after.content).toBe(content)
+    // The same refusal as the write, from the same list.
+    expect((await call("GET", "/v1/agents/assistant/workspace/agent.yaml")).status).toBe(404)
+    await runtime.stop()
+})

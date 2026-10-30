@@ -498,6 +498,29 @@ export const MemorySchema = z
          * not say.
          */
         includeHistory: z.boolean().default(true),
+        /**
+         * Read and write `agents:<owner>`, the memory this agent's owner's agents share (decision 15.8).
+         * Only matters when the agent is assigned. `false` opts out both ways: `memory_write` stays
+         * private and the pool is never read. `docs/23-SPEC-SESSIONS.md`.
+         */
+        shared: z.boolean().default(true),
+    })
+    .strict()
+
+/**
+ * How a turn's session key is chosen (decision 15.6, `docs/23-SPEC-SESSIONS.md`).
+ *
+ * `channel-peer` is the default and is what every surface did before: the key sent is the key used.
+ * `owner` puts every turn from the assigned owner — any channel, the web, the terminal — in one
+ * conversation; `peer` does the same for each registered participant. The default does not move:
+ * embedders choose and parse their own keys, and `init` writes `owner` into what it generates.
+ */
+export const SESSION_SCOPES = ["owner", "peer", "channel-peer"] as const
+export type SessionScope = (typeof SESSION_SCOPES)[number]
+
+export const SessionsSchema = z
+    .object({
+        scope: z.enum(SESSION_SCOPES).default("channel-peer"),
     })
     .strict()
 
@@ -770,6 +793,13 @@ export const DelegationSchema = z
             .optional(),
         /** The agents this one may delegate to, by id, or "*" for every agent that offers. */
         to: z.union([z.literal("*"), z.array(slug).min(1)]).optional(),
+        /**
+         * Free-form asks between one person's agents (`ask_agent`, decisions 15.9 and 15.15;
+         * `docs/24-SPEC-PEER-ASK.md`). Both sides opt in: an agent is offered another that declares it
+         * too and is assigned to the same person, or to nobody (a shared agent). Off unless declared;
+         * `init` writes it on.
+         */
+        ask: z.boolean().default(false),
     })
     .strict()
 
@@ -942,6 +972,22 @@ export const AgentManifestSchema = z
                 "An agent id may not start with `~`; that prefix is reserved for shared memory scopes.",
         }),
         name: z.string().min(1).optional(),
+        /**
+         * What this agent is for, in one line (decision 15.15). Shown beside its id to the agents that
+         * may ask it (`ask_agent`), in `GET /v1/agents` and in the console. One line because it is
+         * rendered into a tool description, where a line break splits a listing.
+         */
+        description: z
+            .string()
+            .min(1)
+            .max(200, {
+                message:
+                    "A description is one line of at most 200 characters; it is rendered into every peer's ask_agent description.",
+            })
+            .refine((value) => !/[\r\n]/.test(value), {
+                message: "A description is one line; put the detail in AGENTS.md.",
+            })
+            .optional(),
         /** Path to a base manifest. Shallow merge; arrays replace. */
         extends: z.string().min(1).optional(),
 
@@ -952,6 +998,7 @@ export const AgentManifestSchema = z
         skills: SkillsSchema.optional(),
         knowledge: KnowledgeSchema.optional(),
         memory: MemorySchema.optional(),
+        sessions: SessionsSchema.optional(),
         channels: z.array(ChannelSchema).default([]),
         delivery: DeliverySchema.optional(),
         schedules: z.array(ScheduleSchema).default([]),
@@ -979,6 +1026,7 @@ export type SkillsConfig = z.infer<typeof SkillsSchema>
 export type KnowledgeConfig = z.infer<typeof KnowledgeSchema>
 export type SoulConfig = z.infer<typeof SoulSchema>
 export type MemoryConfig = z.infer<typeof MemorySchema>
+export type SessionsConfig = z.infer<typeof SessionsSchema>
 export type ChannelConfig = z.infer<typeof ChannelSchema>
 export type DeliveryConfig = z.infer<typeof DeliverySchema>
 export type ScheduleConfig = z.infer<typeof ScheduleSchema>

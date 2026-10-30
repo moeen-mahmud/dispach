@@ -26,6 +26,11 @@ export interface ErrorDetail {
      * embedder shows to people: AWS's text names the assumed-role ARN and the account.
      */
     readonly detail?: string
+    /**
+     * Each failure, when one error stands for several: a manifest that broke two rules. Absent for a
+     * single failure, whose own fields already say it.
+     */
+    readonly details?: readonly ErrorDetail[]
 }
 
 export interface HarnessErrorInit {
@@ -133,6 +138,9 @@ export class HarnessError extends Error {
             hint: this.hint,
             ...(this.field === undefined ? {} : { field: this.field }),
             ...(this.detail === undefined ? {} : { detail: this.detail }),
+            // The hint of a multi-failure error says "each failure below", so the list has to travel
+            // with it: without it an HTTP caller got the count and a pointer to nothing.
+            ...(this.details.length > 1 ? { details: this.details } : {}),
         }
     }
 
@@ -415,6 +423,19 @@ export function unknownToolAtRuntime(slug: string, known: readonly string[]): To
         message: `The tool "${slug}" is not in this agent's catalogue.`,
         hint: `The catalogue is fixed at load and holds: ${known.length === 0 ? "no tools" : known.join(", ")}. A model inventing a slug is handled as a repair; reaching this error means something in the harness asked for a tool it never resolved.`,
     })
+}
+
+/**
+ * An owner or peer session scope with nobody assigned (decision 15.14). Not a load failure: the agent
+ * still answers, one conversation per surface, and this says why that is.
+ */
+export function sessionsScopeUnassigned(agentId: string, scope: string): ErrorDetail {
+    return {
+        code: "sessions_scope_unassigned",
+        message: `sessions.scope is "${scope}", and nobody is assigned to agent "${agentId}", so each surface keeps its own conversation.`,
+        hint: `The scope merges a person's conversations, and an agent with no owner has nobody to merge them for. Run \`${BRAND.slug} owner adopt ${agentId}\` to make you its owner, or assign one with PUT /v1/agents/${agentId}/assignee. Set sessions.scope to "channel-peer" to make the manifest say what happens.`,
+        field: "sessions.scope",
+    }
 }
 
 /**

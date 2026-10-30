@@ -318,14 +318,15 @@ describe("operator settings reach silos by name", () => {
 })
 
 describe("recreate, backup and restore", () => {
-    test("recreate moves the silo to a new container; its keys and data survive", async () => {
-        const { call, mint, store, fake } = await setup()
+    test("recreate moves the silo to a new container at the same address; keys and data survive", async () => {
+        const { call, mint, store, fake, placer } = await setup()
         await call("POST", "/v1/silos", { token: TOKEN, body: { subject: "a" } })
         const key = await mint("a")
         const before = store.get("a")?.baseUrl
         const response = await call("POST", "/v1/silos/a/recreate", { token: TOKEN })
         expect(response.status).toBe(200)
-        expect(store.get("a")?.baseUrl).not.toBe(before)
+        expect(placer.calls).toContain("recreate silo-a")
+        expect(store.get("a")?.baseUrl).toBe(before)
         expect((await call("GET", "/silos/a/v1/agents", { token: key })).status).toBe(200)
         expect(fake("a").data).toBe("data of a")
     })
@@ -386,5 +387,53 @@ describe("recreate, backup and restore", () => {
             await new Promise((resolve) => setTimeout(resolve, 10))
         }
         expect(store.get("a")?.status).toBe("running")
+    })
+})
+
+describe("a silo's port is fixed", () => {
+    /** A silo placed before ports were fixed, whose container Docker then restarted on a new port. */
+    async function moved() {
+        const harness = await setup()
+        await harness.call("POST", "/v1/silos", { token: TOKEN, body: { subject: "a" } })
+        const key = await harness.mint("a")
+        const stale = harness.store.get("a")?.baseUrl
+        harness.fake("a").pinned = false
+        await harness.placer.restartContainer("silo-a")
+        const current = await harness.placer.address("silo-a")
+        expect(current).not.toBe(stale)
+        return { ...harness, key, current }
+    }
+
+    test("the sweep pins a moved silo on the port it has now, and it never moves again", async () => {
+        const { control, store, placer, fake, call, key, current } = await moved()
+        await control.sweep()
+        expect(placer.calls).toContain("recreate silo-a")
+        expect(store.get("a")?.baseUrl).toBe(current)
+        expect(fake("a").pinned).toBe(true)
+        await placer.restartContainer("silo-a")
+        expect(await placer.address("silo-a")).toBe(current)
+        expect((await call("GET", "/silos/a/v1/agents", { token: key })).status).toBe(200)
+        // Pinned once is pinned: later passes do not recreate it again.
+        await control.sweep()
+        expect(placer.calls.filter((c) => c === "recreate silo-a")).toHaveLength(1)
+    })
+
+    test("a busy moved silo is left alone and pinned on a later pass", async () => {
+        const { control, placer, fake, store, current } = await moved()
+        fake("a").idle = false
+        await control.sweep()
+        expect(placer.calls).not.toContain("recreate silo-a")
+        // It was found where it answers now, though, so the proxy reaches it meanwhile.
+        expect(store.get("a")?.baseUrl).toBe(current)
+        fake("a").idle = true
+        await control.sweep()
+        expect(placer.calls).toContain("recreate silo-a")
+    })
+
+    test("an operator's recreate works while the stored address is stale", async () => {
+        const { call, store, current } = await moved()
+        const response = await call("POST", "/v1/silos/a/recreate", { token: TOKEN })
+        expect(response.status).toBe(200)
+        expect(store.get("a")?.baseUrl).toBe(current)
     })
 })

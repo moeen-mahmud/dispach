@@ -134,7 +134,9 @@ export class A2AServer {
             ),
             start: async (host) => {
                 this.#host = host
-                host.status("connected")
+                // The peers in the detail, because nothing else a front end can read names them: they
+                // live in the plugin's config, which no route returns.
+                host.status("connected", peerSummary(this.#config.peers))
             },
             stop: async () => {
                 this.#host = undefined
@@ -482,4 +484,18 @@ function reply(id: unknown, result: unknown): Response {
 
 function rpcError(id: unknown, code: number, message: string, status: number): Response {
     return Response.json({ jsonrpc: "2.0", id, error: { code, message } }, { status })
+}
+
+/** `acme calls in · partner is called`, or that there is nobody: what the channel card shows. */
+export function peerSummary(peers: A2AConfig["peers"]): string {
+    if (peers.length === 0) return "no peers configured"
+    return peers
+        .map((peer) => {
+            const ways = [
+                ...(peer.key === undefined ? [] : ["calls in"]),
+                ...(peer.url === undefined ? [] : ["is called"]),
+            ]
+            return `${peer.name} ${ways.join(" and ")}`
+        })
+        .join(" · ")
 }

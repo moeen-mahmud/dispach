@@ -55,7 +55,7 @@ silo, in the runtime's template format (`docs/09-API-GUIDE.md` §1b).
 | `GET /v1/silos/:subject` | operator | One silo |
 | `POST /v1/silos/:subject/pause` | operator | Pause now. `409 silo_busy` while a turn, a delivery or a proxied request is open |
 | `POST /v1/silos/:subject/wake` | operator | Wake now |
-| `POST /v1/silos/:subject/recreate` | operator | New container, current image and `SILO_ENV`, same volume. How an upgrade rolls out. `409` while busy |
+| `POST /v1/silos/:subject/recreate` | operator | New container, current image and `SILO_ENV`, same volume, same port. How an upgrade rolls out. `409` while busy; a silo whose container is down is not busy |
 | `GET /v1/silos/:subject/backup` | operator | The silo's data as tar.gz, taken paused (crash-consistent). Woken again once the archive is read, unless suspend is on. Templates excluded. `409` while busy |
 | `PUT /v1/silos/:subject/backup` | operator | Restore that archive into this silo, **replacing** everything in it, keys included |
 | `DELETE /v1/silos/:subject` | operator | Remove the silo **and its volume**. Irreversible: it holds the silo's only store |
@@ -64,6 +64,13 @@ silo, in the runtime's template format (`docs/09-API-GUIDE.md` §1b).
 | `GET /v1/monitor` | operator | The pilot monitor's rates, overall and per silo, the rules firing, and any silo it is not hearing from |
 | `GET /v1/monitor/failures?limit=` | operator | Turns that did not end `final`, failed tool calls and lost deliveries, newest first: the rows to label |
 | `POST /hooks/:subject` | a silo's signature | Where each silo delivers its monitored events. Open, verified by the subscription's Standard Webhooks signature |
+| `PUT /v1/people/:principal/silos/:subject` `{participantId}` | operator | Link one person's participant in that silo (peer ask, `docs/24-SPEC-PEER-ASK.md`). Opaque ids only. `409` when the participant is already another person's |
+| `DELETE /v1/people/:principal/silos/:subject` | operator | Unlink |
+| `GET /v1/people/:principal` | operator | Their links and their ask rate, saying whether it is their own |
+| `PUT /v1/people/:principal` `{askRatePerMinute}` | operator | Their own ask rate; `null` returns them to the default |
+| `GET`/`PUT /v1/relay/config` `{askRatePerMinute}` | operator | The default ask rate for everybody. 30 until set |
+| `GET /v1/relay/peers?participant=` | a silo's relay token | The person's askable agents in their other silos: their own and shared ones. Unlinked is an empty list |
+| `POST /v1/relay/ask` | a silo's relay token | Relay one ask: a 60-second key minted in the target, bound to the person there, revoked after. `404 relay_peer_unknown` for an unlinked person or silo alike, `429 relay_rate_limited` with `Retry-After` |
 | `ANY /silos/:subject/v1/…` | a silo key | The silo's own `/v1`, woken first if paused, streamed through |
 
 **Operator** means `Authorization: Bearer $DISPACH_CONTROL_TOKEN`. A silo key is refused on operator
@@ -137,7 +144,10 @@ never on one failure. On when `DISPACH_CONTROL_HOOK_URL` is set.
 
 `Placer` (`src/placer.ts`) is the whole of the cloud-agnosticism: create, pause, wake, remove,
 address. v0 has one driver, **Docker**, which is also the AWS path: many silos on an EC2 Graviton
-host, `docker pause` as suspend. Each silo publishes its port on `127.0.0.1` only. When this process
+host, `docker pause` as suspend. Each silo publishes a port on `127.0.0.1` only, chosen at create and
+fixed for its lifetime: a restart, a crash under the restart policy, a daemon restart and `recreate`
+all leave it where it was. A silo placed by an older control plane, on a port Docker chose at each
+start, is recreated once by the sweep, when idle, onto the port it has at that moment. When this process
 runs in a container on the same network, set `DISPACH_CONTROL_NETWORK` instead, and silos are reached
 by name with no port published. A driver that *stops* silos rather than pausing them (Fargate) would
 have to start them before `nextWakeAt`, because a runtime that starts after an occurrence skips it.
@@ -174,6 +184,7 @@ sign-up, agents, messages, webhooks, billing, backup, upgrade, deletion.
 | `DISPACH_CONTROL_WAKE_MARGIN_MS` | `30000` | How early a silo is woken for a schedule |
 | `DISPACH_CONTROL_SWEEP_MS` | `5000` | How often the pause/wake pass runs |
 | `DISPACH_CONTROL_HOOK_URL` | — | Where silos reach this process (`http://control:7600` on the compose network). Setting it turns the pilot monitor on |
+| `DISPACH_CONTROL_RELAY_URL` | `HOOK_URL` | Where silos reach this process for the peer-ask relay. Set (or `HOOK_URL` set), every silo created or recreated gets `DISPACH_RELAY_URL` and its own `DISPACH_RELAY_TOKEN`; recreate an existing silo to give it one. The ask rate is not here: it is set over the API (`PUT /v1/relay/config`) |
 | `DISPACH_CONTROL_ALERT_WINDOW` / `_ALERT_MIN_TURNS` | `50` / `20` | Turns a rate is taken over, and the fewest a rate alert fires on |
 | `DISPACH_CONTROL_ALERT_NON_FINAL` / `_ALERT_TOOL_ERRORS` | `0.05` / `0.1` | Rate thresholds |
 | `DISPACH_CONTROL_ALERT_TG_TOKEN` / `_ALERT_TG_CHAT` | — | A Telegram bot token and chat id for alerts. Both or neither |

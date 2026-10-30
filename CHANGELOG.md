@@ -2,7 +2,89 @@
 
 ## Unreleased
 
-_Nothing yet._
+The web console reaches nearly every route the API has; one conversation per person across surfaces; an agent can ask another agent working for the same person; and a curl installer that needs no Node. Shipped as a patch because 0.3.0 is held for the open issues.
+
+### Upgrading from 0.2.1
+
+- `npm i dispach@^0.2.1` picks this up on its own. Nothing an existing manifest, store or client relies on is removed; the items below are what can change on upgrade.
+- Store migrations 32–34 run on first boot (drop the unused `kv` table; add `session_heads` and `handoffs.kind`), with no down-migration. Back up `store.db` first, or take `GET /v1/backup`.
+- An agent **assigned to a person** now also copies each `memory_write` into `agents:<owner>`, which that person's other agents recall. Set `memory.shared: false` to keep memory private as before. An unassigned agent is unaffected.
+- Turns on one session key now run one at a time over HTTP and WebSocket too; a second turn waits instead of running concurrently on the same history.
+- `sessions.scope` defaults to `channel-peer` and `delegation.ask` to `false`, so an existing agent keeps its sessions and gains no `ask_agent`. `init` writes `owner` and `ask: true` for agents it creates; For an existing agent, `dispach owner adopt <agent>` writes the scope, and `delegation.ask: true` (or the Team page's switch) turns on asking.
+- `DispachError.message` now lists `details[]` lines before the hint. Code matching on the exact message text should match `code` instead.
+- Control plane: an existing silo that was published on a Docker-chosen port is recreated on that same port the next time it is idle, and keeps it from then on (#74).
+
+### Added
+
+- Install without Node: `curl -fsSL https://github.com/moeen-mahmud/dispach/releases/latest/download/install.sh | sh`. macOS and Linux (glibc), arm64 and x64; each release attaches one archive per platform (Node 24 plus the npm package) and `SHA256SUMS`. Windows: WSL or the container.
+- Web console: replies render as Markdown (headings, lists, tables, fenced code with a copy button; no HTML, links only `http(s)`/`mailto`), the transcript follows the newest row by a scroll-owned pin, a role picker on the composer, image attachments by paste or drop, and on the Models page an AWS Bedrock preset (region, optional profile) and a fallback-chain editor per role.
+- `init --preset bedrock --region <aws-region>` and `POST /v1/agents {answers: {preset: "bedrock", region}}` write `api: bedrock-converse` with `options.region`, no URL and no key variable. The region is a wizard step asked only for that preset.
+- Web console, new pages (#67): **Schedules** as cards with a sentence for the expression, the next run as a distance, and a form with role, tools, limits, timezone, shared session and a live preview of the next instants; **Tools** grouped by provider with the catalogue's token cost, search, pin/unpin, allow/deny policy rules and a catalogue refresh; **Usage** (calls, prompt/cached/output tokens, a tokens-by-day chart, by model and by sender, 7/30/90 days); **Turns** (every turn, how it ended, expandable asked/reply); **People** (participants, presence, assigned agents), **Rooms** (rooms and DMs, mentions, stand-in and hop labels, polled log), **Actions** (the stand-in queue, approve/decline), **Memory** (shared scopes, notes, projects, space writer, read audit); **Webhooks**, **Backup** (server tar.gz, agent bundle export/import), **Files** (the declared workspace files, read and edited in place); creating an agent **from a template**; key scopes (agents, capabilities, session prefix, participant, expiry) on the Keys page; an **add a channel** form (Telegram, WhatsApp, Slack, Teams, A2A); and **clear history** on a conversation.
+- `GET /v1/agents/:id/schedules/preview?kind=&expr=&timezone=&count=` answers the next instants an expression would fire at, the zone in force and the jitter, parsed by the same core function the write uses.
+- `GET /v1/agents/:id/workspace` lists the files the agent's prompt is built from, and `GET /v1/agents/:id/workspace/:file` returns one file's text — the read half of the existing `PUT`, from the same declaration.
+- `@dispach/client`: `previewSchedule`, `refreshTools`, `assignment`, `workspaceFiles`, `workspaceFile`, `putWorkspaceFile`; `KeyScopeLike.can` includes `peer`; `registerParticipant` takes `title` and `timezone`; `AgentDescriptionLike.team` typed.
+- The provider preset table moved to `packages/cli/src/lib/presets.ts`, a pure module the console and `init` both read.
+- `sessions.scope: owner | peer | channel-peer` (#65, `docs/23-SPEC-SESSIONS.md`). Under `owner` the assigned owner's turns from Telegram, WhatsApp, the web, the terminal and an unscoped API key share one conversation, `owner:<participantId>`; each reply still goes where it was asked. `peer` does the same for registered participants. Default `channel-peer`, unchanged.
+- "New conversation" rotates the owner's conversation on every surface: `POST /v1/agents/:id/sessions/rotate`, the web's "+ new conversation" (on first send) and the terminal's `/new`. Sessions carry `head`; the agent carries `sessionScope`.
+- The `202` of `POST /messages` and `ws.accepted` carry the key the turn runs in; clients adopt it.
+- `agents:<participantId>`: the memory one person's agents share. `memory.shared` (default true).
+- `init` mints the sandbox owner (`me:<6 symbols>`), assigns the agents it creates with `channelIds` from `allowFrom`, and writes `sessions.scope: owner`. `dispach owner adopt <agent>` does it for an existing agent; `owner show` prints the id. `POST /v1/agents` claims the same way.
+- `POST /v1/participants` takes `channelIds`. `channelIds` (on participants and assignments) match like `allowFrom`: `telegram:@handle` recognises the numeric-id sender.
+- Web and terminal pickers name the person's conversation "You" and an older one "You · earlier"; a fresh tab or `run` opens the current one.
+- `@dispach/client`: `rotateSession`, `SessionSummary.head`, `AgentDescriptionLike.sessionScope`, `ParticipantLike.channelIds`.
+- `ask_agent(peer, question)` (#66, `docs/24-SPEC-PEER-ASK.md`): an agent asks another working for the same person, or a shared agent (assigned to nobody), and gets the reply as text. One hop, a fresh `ask:<runId>` session, recorded in `handoffs` with `kind: ask`, events `peer.ask` and `peer.answer`. `delegation.ask` turns it on (default off; `init` writes it on). Both sides opt in.
+- `description` on the manifest: one line saying what the agent is for, shown to its peers, in `GET /v1/agents` and in the console. `init` writes the "what is it for" answer.
+- A change to an assignment, `delegation.ask` or a peer's `description` reloads the agents whose peer list it changes, without a restart.
+- Across silos (decision 15.16): the control plane links one person's participants across silos (`PUT /v1/people/:principal/silos/:subject`), gives each silo a relay token on create and recreate (`DISPACH_RELAY_URL`, `DISPACH_RELAY_TOKEN`), lists a person's agents in their other silos (`GET /v1/relay/peers`) and relays an ask with a 60-second key minted in the target (`POST /v1/relay/ask`). Rate limit per person, set with `PUT /v1/relay/config` and `PUT /v1/people/:principal`. Audit row per ask.
+- `POST /messages` takes `peerAsk: {askedBy}`: the turn runs without `handoff` and `ask_agent` and is told who asked.
+- `GET /v1/agents` rows carry `description`, `ask` and `assignee`; `GET /v1/agents/:id` carries `peers`. The console's Team page has a Peers section with the `delegation.ask` switch.
+- Web console, the rest of the 0.2.2 plan:
+  - **⌘K / Ctrl+K** opens a palette over every page and agent.
+  - **Usage** for the whole server, by agent, and a seven-day line on each agent card on the Overview.
+  - **Turns** replay every stored step of a turn: each tool call, its result, then the reply.
+  - **Chat:** a tool call expands to its arguments and output when the agent sets `tools.eventDetail: redacted`.
+  - **Models:** the main model's resolved capabilities, with overrides for context window, output cap, reasoning protocol and images.
+  - **Tools:** providers are added and removed with a switch.
+  - **Schedules:** each card shows its last run.
+  - **People:** title and timezone.
+  - **Rooms:** a hop an agent did not answer, and why.
+  - **Actions:** grouped by owner.
+  - **Team:** "Works for" sets the owner, or none for a shared agent.
+  - **Files:** a template-made agent's variables, edited and re-rendered.
+  - **Channels:** an A2A channel links its agent card and names its peers.
+  - **Chat bar:** a recall switch and a phase picker per conversation.
+- `GET /v1/agents/:id/vars` returns the template an agent was made from and its plain variables, the read half of `PATCH`. `GET /v1/agents/:id` carries `capabilities`: the main model's, as the runtime resolved them.
+- `@dispach/client`: `deleteAgent`, `backup`, `deleteParticipant`, `agent.setVars`, `agent.vars`, `agent.deliver`. `ParticipantLike` has `title` and `timezone`, `SessionSummary` has `recall`, and `AgentDescriptionLike` has `capabilities`. The console no longer calls the API with its own `fetch` beside the client.
+- The A2A channel's status names its peers and which way each one calls.
+
+### Changed
+
+- A shared agent (assigned to nobody) asked by another member's agent now reads its projects' memory as well as the space.
+- An assigned agent's `memory_write` also leaves a copy in `agents:<owner>`. The private file is written as before. `memory.shared: false` restores the old behaviour exactly.
+- Turns on one session key run one at a time on every surface. Two HTTP or WebSocket turns on the same key used to run concurrently over the same history.
+- A channel sender is recognised as the owner by the handle written in `channelIds`, not only by an exact id (the personal-tools fence, the owner-scope audit, `memory_forget`).
+
+### Fixed
+
+- Creating an agent from a template whose manifest reads a variable the server's own environment sets (`baseUrl: ${MODEL_BASE_URL}`) was refused: the load check stubbed the variable as `(pending)` over the real value. Only a variable nothing supplies is stubbed now.
+- `PATCH /v1/agents/:id/schedules/:sid` erased the schedule's `tools`, `timeoutMs` and `maxSteps` when the patch did not mention them. The console's enable/disable switch sends exactly such a patch, so every toggle dropped them.
+- An error standing for several failures (`manifest_validation_failed`, `manifest_schema_invalid`) now carries them in `details[]` over HTTP. Its hint said "each failure below" and nothing was below. `DispachError` exposes `details` and prints them.
+- Web console: a turn's replay shows a `native` tool call itself, whose stored `content` is empty.
+- The recorded quickstart (`.github/assets/quickstart.tape`) runs the container with `--init` and the 0.2.2 tag. The GIF in the README is re-recorded after this release.
+- Web console: a conversation set aside today is labelled with the time it was last used, an older one with its date, both in the viewer's zone (it was the UTC date). Named conversations ("You") are set in the text face, not the code face.
+- Web console: each schedule card shows its last run, `failed` with the error when it failed, so a schedule whose delivery fails no longer looks healthy.
+- Control plane (#74): a silo's port is fixed for its lifetime. Docker used to choose a new one at every container start, so after a `docker restart`, a crash restart or a Docker daemon restart, control could not reach the silo: `recreate` and `pause` were refused with `silo_unreachable`, `wake` did nothing, and the proxy, the monitor and the peer-ask relay failed. A silo could also get another silo's old port. `recreate` keeps the port. The sweep moves a silo created before this change onto a fixed port, keeping the port it has, once it is idle.
+- A container recreated with `--init` (as the README now says) after one that ran without it was refused for 45 minutes with `agent_already_serving … pid 1`: the old lease named pid 1, and under `--init` pid 1 is `docker-init`, alive and not the runtime. A lease naming pid 1 is now dead when `/proc/1/exe` is not node or bun (decision 15.11).
+- README: every `docker run` names the `dispach-home` volume and passes `--init`, so an upgrade keeps the store and backgrounded `exec` children are reaped; the image tag is the current release; the `.env` step copies `examples/minimal/.env.example` (only the example is tracked); compose text matches `docker-compose.yml` (plain `up` pulls, `DISPACH_VERSION` pins); the image's shell is dash, not busybox; package count and provider list corrected; load average 3.3.
+- `evals/CLAIMS.md` carries rows for the Ink import cost, compose startup time, image size breakdown and the 91 ms boot aside, marked `needs-run`.
+- `dispach` on npm declares `engines.node >= 24`, so an install on an older Node warns instead of failing at runtime.
+- `docs/06-VELAOPS-INTEGRATION.md`: schedule routes, boot figure and the MCP row corrected.
+- `init --whatsapp` help no longer calls WhatsApp an opt-in plugin; `--whatsapp-number` says it sets `pairWith`.
+- `POST /v1/agents` refusing a missing answer names the missing answer keys and points at `GET /v1/provision`, not the terminal's wording (#61).
+- The unread `kv` store is removed: `Store.kv`, its SQLite table (migration 32) and its export (#63).
+- The harness benchmark reports pass^k, the tasks passed on every trial, beside the pass rate (#57).
+
+Thanks to @Dikshant-Neupane for #57, #61, #62 and #63.
 
 ## 0.2.1 — 2026-10-26
 

@@ -5,7 +5,7 @@
 Every number Dispach states in public has a row in [`CLAIMS.md`](CLAIMS.md) naming the file it
 comes from. Negative results are listed with the positive ones.
 
-**31 claims:** 23 verified, 2 cited from external research, 5 waiting on a run, 0 to fix, 1 removed.
+**35 claims:** 23 verified, 2 cited from external research, 9 waiting on a run, 0 to fix, 1 removed.
 
 | Eval | What it measures | Committed results | Last measured |
 | --- | --- | --- | --- |
@@ -28,6 +28,10 @@ comes from. Negative results are listed with the positive ones.
 ## Claims not yet backed by a committed run
 
 - Constraining tools per phase took local models from 2/10 to 10/10 — **remove**. Decision 4.5 now names it as unsourced motivation beside the negative local result. Never quoted publicly
+- Importing Ink and React costs ~170-210 ms under Node, so no shared CLI path imports them — **needs-run**. The guard is structural; the figure is from one machine and not re-measured by CI
+- `docker compose up -d --wait` reaches healthy in about six seconds; 26 `model.chunk` frames in the first streamed turn — **needs-run**. Dominated by the first healthcheck probe interval; the frame count is one DeepSeek reply
+- Image size breakdown: 110 MB Debian, 160 MB Node, 158 MB apt (git 92 MB), 47 MB uv, 58 MB package — **needs-run**. Not re-measured by CI (only the total is)
+- An earlier run at load average ~5 measured 91 ms boot — **needs-run**. Illustrates load sensitivity only
 - A remote provider's post-ready refresh takes ~1.5 s, so awaiting it in boot would multiply boot — **needs-run**. No committed result
 - The gateway Dispach replaced blocked for minutes on network calls during hook initialisation — **needs-run**. The README now says "observed, not measured" and gives no number; a figure needs the log evidence
 - Rule compliance on a small model — **needs-run**. Which is current is not recorded; the README now says so. Neither is quoted

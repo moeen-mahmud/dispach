@@ -22,6 +22,7 @@ import {
     type ChannelRow,
     ChannelsPanel,
     SchedulesPanel,
+    SessionControls,
     ToolsPanel,
     WarningsPanel,
 } from "../src/panels.tsx"
@@ -137,6 +138,7 @@ describe("the schedules panel", () => {
     test("a spent one-shot says never again rather than leaving a blank", () => {
         const html = renderToStaticMarkup(
             createElement(SchedulesPanel, {
+                now: Date.parse("2026-09-21T05:00:00.000Z"),
                 schedules: [
                     {
                         id: "brief",
@@ -168,15 +170,18 @@ describe("the schedules panel", () => {
         // in — the same reason the `serve` banner names them at all.
         expect(html).toContain("never again")
         expect(html).toContain("2026-09-21T08:00:00.000Z")
-        expect(html).toContain("Asia/Dhaka")
+        // And as a distance from the injected clock, which is what a person reads first.
+        expect(html).toContain("in 3 h")
+        expect(html).toContain("cron 0 8 * * * (Asia/Dhaka)")
         // A disabled one reads as disabled, in the column where its next run would be.
         expect(html).toContain("disabled")
-        expect(html).toContain('class="off"')
+        expect(html).toContain("schedule-card off")
     })
 
     test("a schedule with no delivery target says where it goes instead", () => {
         const html = renderToStaticMarkup(
             createElement(SchedulesPanel, {
+                now: 0,
                 schedules: [{ id: "s", kind: "every", expr: "1h", task: "t", enabled: true }],
             }),
         )
@@ -369,13 +374,15 @@ describe("the 404 loop, guarded at the source", () => {
         // what a missing agent means.
         expect(source).toContain("caught instanceof DispachError && caught.status === 404")
         expect(source.match(/status === 404/g)?.length).toBe(1)
-        // Four now: the approvals timer, the report panels, the session list, and `write` — the one
-        // writer behind the settings and schedule panels. Counted rather than named, because a
-        // *fifth* fetch added later has to join them; and this count is what caught the fourth,
-        // which is the guard working rather than a number to keep bumping. A write is the case that
-        // matters most of the three reads: somebody saving a setting on an agent that has just been
-        // stopped otherwise gets a transport error where "this agent is gone" is the answer.
-        expect(source.match(/isGone\(caught\)/g)?.length).toBe(4)
+        // Seven now: the approvals timer, the report panels, the session list, `write` — the one
+        // writer behind the settings, schedule, model, tool and file panels — and the three readers
+        // the console added in 0.2.2: usage, turns and the workspace listing. Counted rather
+        // than named, because an *eighth* fetch added later has to join them; this count caught the
+        // fourth, and again each one since, which is the guard working rather than a number to keep
+        // bumping. A write is the case that matters most of the reads: somebody saving a setting on
+        // an agent that has just been stopped otherwise gets a transport error where "this agent is
+        // gone" is the answer.
+        expect(source.match(/isGone\(caught\)/g)?.length).toBe(7)
         // And the handler clears the selection, or the page keeps a current agent that is gone.
         expect(source).toContain("setAgentId(undefined)")
     })
@@ -541,5 +548,55 @@ describe("the channel panel's controls", () => {
         expect(html).toContain("disabled")
         expect(html).toContain("working…")
         expect(html).toContain("working on it")
+    })
+})
+
+describe("session controls", () => {
+    const render = (props: Partial<Parameters<typeof SessionControls>[0]>) =>
+        renderToStaticMarkup(
+            createElement(SessionControls, {
+                onRecall: () => undefined,
+                onPhase: () => undefined,
+                ...props,
+            }),
+        )
+
+    test("recall reads the session's own flag; absent means recalled", () => {
+        expect(render({ session: {} })).toContain("recall: on")
+        expect(render({ session: { recall: false } })).toContain("recall: off")
+    })
+
+    test("a phase picker only on an agent with phases, on the session's phase", () => {
+        expect(render({ session: {} })).not.toContain("<select")
+        const html = render({ session: { phase: "build" }, phases: ["triage", "build"] })
+        expect(html).toContain('<option value="build" selected="">build</option>')
+        expect(html).not.toContain(">entry<")
+    })
+})
+
+describe("an A2A channel", () => {
+    test("links its agent card and shows the peers its status names", () => {
+        const html = renderToStaticMarkup(
+            createElement(ChannelsPanel, {
+                now: 0,
+                agentUrl: "http://127.0.0.1:7420/v1/agents/crew",
+                channels: [
+                    {
+                        id: "a2a",
+                        type: "a2a",
+                        status: "connected",
+                        detail: "acme calls in",
+                        enabled: true,
+                    },
+                    { id: "tg", type: "telegram", status: "connected", enabled: true },
+                ],
+            }),
+        )
+        expect(html).toContain(
+            "http://127.0.0.1:7420/v1/agents/crew/plugins/a2a/.well-known/agent-card.json",
+        )
+        expect(html).toContain("connected — acme calls in")
+        // Only the A2A channel has a card.
+        expect(html.split("agent-card.json").length - 1).toBe(2)
     })
 })

@@ -166,7 +166,44 @@ export class SiloStore {
             );
             CREATE INDEX IF NOT EXISTS monitor_events_type ON monitor_events (type, id);
             CREATE INDEX IF NOT EXISTS monitor_events_subject ON monitor_events (subject, type, id);
+            -- The peer-ask relay (decision 15.10). Which participant in which silo is one person,
+            -- written by the embedder: opaque id pairs, nothing about the person (14.2, 14.6).
+            CREATE TABLE IF NOT EXISTS person_links (
+                principal      TEXT NOT NULL,
+                subject        TEXT NOT NULL,
+                participant_id TEXT NOT NULL,
+                PRIMARY KEY (principal, subject),
+                UNIQUE (subject, participant_id)
+            );
+            -- A person's own ask rate, when the default is not theirs.
+            CREATE TABLE IF NOT EXISTS people (
+                principal           TEXT PRIMARY KEY,
+                ask_rate_per_minute INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS relay_config (
+                id                  INTEGER PRIMARY KEY CHECK (id = 1),
+                ask_rate_per_minute INTEGER NOT NULL
+            );
+            -- One row per relayed ask: the audit, and the window the rate limit counts. No text.
+            CREATE TABLE IF NOT EXISTS relay_asks (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                at           TEXT NOT NULL,
+                principal    TEXT NOT NULL,
+                from_subject TEXT NOT NULL,
+                from_agent   TEXT NOT NULL,
+                to_subject   TEXT NOT NULL,
+                to_agent     TEXT NOT NULL,
+                outcome      TEXT NOT NULL,
+                duration_ms  INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS relay_asks_principal ON relay_asks (principal, at);
         `)
+        // Added after the table shipped, so an existing control.db gains it here rather than in the
+        // CREATE above. A SHA-256 of the silo's relay token; the token itself is only in its env.
+        const columns = db.prepare("PRAGMA table_info(silos)").all() as { name: string }[]
+        if (!columns.some((column) => column.name === "relay_token_hash")) {
+            db.exec("ALTER TABLE silos ADD COLUMN relay_token_hash TEXT")
+        }
         return new SiloStore(db)
     }
 
@@ -204,7 +241,7 @@ export class SiloStore {
             .run(status, nextWakeAt ?? null, subject)
     }
 
-    /** The address can move: a restarted Docker daemon re-publishes on a new host port. */
+    /** Placed again (recreate, restore), or a silo from before fixed ports found on a new one. */
     setBaseUrl(subject: string, baseUrl: string): void {
         this.#db.prepare("UPDATE silos SET base_url = ? WHERE subject = ?").run(baseUrl, subject)
     }
@@ -218,6 +255,138 @@ export class SiloStore {
         this.#db.prepare("DELETE FROM silos WHERE subject = ?").run(subject)
         this.#db.prepare("DELETE FROM hooks WHERE subject = ?").run(subject)
         this.#db.prepare("DELETE FROM monitor_events WHERE subject = ?").run(subject)
+        this.#db.prepare("DELETE FROM person_links WHERE subject = ?").run(subject)
+        this.#db
+            .prepare("DELETE FROM relay_asks WHERE from_subject = ? OR to_subject = ?")
+            .run(subject, subject)
+    }
+
+    // ─── the peer-ask relay ──────────────────────────────────────────────────────────────────
+
+    setRelayTokenHash(subject: string, hash: string): void {
+        this.#db
+            .prepare("UPDATE silos SET relay_token_hash = ? WHERE subject = ?")
+            .run(hash, subject)
+    }
+
+    /** The silo a relay token belongs to, by its hash. */
+    siloByRelayHash(hash: string): Silo | undefined {
+        const row = this.#db.prepare("SELECT * FROM silos WHERE relay_token_hash = ?").get(hash)
+        return row === undefined || row === null ? undefined : toSilo(row as SiloRow)
+    }
+
+    link(principal: string, subject: string, participantId: string): void {
+        this.#db
+            .prepare(
+                `INSERT INTO person_links (principal, subject, participant_id) VALUES (?, ?, ?)
+                 ON CONFLICT (principal, subject) DO UPDATE SET participant_id = excluded.participant_id`,
+            )
+            .run(principal, subject, participantId)
+    }
+
+    unlink(principal: string, subject: string): boolean {
+        const before = this.links(principal).length
+        this.#db
+            .prepare("DELETE FROM person_links WHERE principal = ? AND subject = ?")
+            .run(principal, subject)
+        return this.links(principal).length < before
+    }
+
+    links(principal: string): readonly { subject: string; participantId: string }[] {
+        return (
+            this.#db
+                .prepare(
+                    "SELECT subject, participant_id FROM person_links WHERE principal = ? ORDER BY subject",
+                )
+                .all(principal) as { subject: string; participant_id: string }[]
+        ).map((row) => ({ subject: row.subject, participantId: row.participant_id }))
+    }
+
+    /** Whose a participant in a silo is, or `undefined` when nobody linked them. */
+    principalOf(subject: string, participantId: string): string | undefined {
+        const row = this.#db
+            .prepare("SELECT principal FROM person_links WHERE subject = ? AND participant_id = ?")
+            .get(subject, participantId) as { principal: string } | undefined | null
+        return row?.principal ?? undefined
+    }
+
+    /** `undefined` for no override: the default applies. */
+    personRate(principal: string): number | undefined {
+        const row = this.#db
+            .prepare("SELECT ask_rate_per_minute FROM people WHERE principal = ?")
+            .get(principal) as { ask_rate_per_minute: number | null } | undefined | null
+        return row?.ask_rate_per_minute ?? undefined
+    }
+
+    setPersonRate(principal: string, rate: number | null): void {
+        this.#db
+            .prepare(
+                `INSERT INTO people (principal, ask_rate_per_minute) VALUES (?, ?)
+                 ON CONFLICT (principal) DO UPDATE SET ask_rate_per_minute = excluded.ask_rate_per_minute`,
+            )
+            .run(principal, rate)
+    }
+
+    /** `undefined` until an operator sets one. */
+    defaultRate(): number | undefined {
+        const row = this.#db
+            .prepare("SELECT ask_rate_per_minute FROM relay_config WHERE id = 1")
+            .get() as { ask_rate_per_minute: number } | undefined | null
+        return row?.ask_rate_per_minute ?? undefined
+    }
+
+    setDefaultRate(rate: number): void {
+        this.#db
+            .prepare(
+                `INSERT INTO relay_config (id, ask_rate_per_minute) VALUES (1, ?)
+                 ON CONFLICT (id) DO UPDATE SET ask_rate_per_minute = excluded.ask_rate_per_minute`,
+            )
+            .run(rate)
+    }
+
+    /** Written when the ask starts, so a burst counts against the limit before any of it finishes. */
+    recordAsk(ask: {
+        readonly at: string
+        readonly principal: string
+        readonly fromSubject: string
+        readonly fromAgent: string
+        readonly toSubject: string
+        readonly toAgent: string
+        readonly outcome: string
+        readonly durationMs: number
+    }): number {
+        this.#db
+            .prepare(
+                `INSERT INTO relay_asks (at, principal, from_subject, from_agent, to_subject, to_agent, outcome, duration_ms)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+                ask.at,
+                ask.principal,
+                ask.fromSubject,
+                ask.fromAgent,
+                ask.toSubject,
+                ask.toAgent,
+                ask.outcome,
+                ask.durationMs,
+            )
+        const row = this.#db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }
+        return row.id
+    }
+
+    finishAsk(id: number, outcome: string, durationMs: number): void {
+        this.#db
+            .prepare("UPDATE relay_asks SET outcome = ?, duration_ms = ? WHERE id = ?")
+            .run(outcome, durationMs, id)
+    }
+
+    /** Asks by one person since an instant, oldest first: the sliding window the limit counts. */
+    asksSince(principal: string, since: string): readonly string[] {
+        return (
+            this.#db
+                .prepare("SELECT at FROM relay_asks WHERE principal = ? AND at >= ? ORDER BY at")
+                .all(principal, since) as { at: string }[]
+        ).map((row) => row.at)
     }
 
     // ─── the monitor's rows ──────────────────────────────────────────────────────────────────

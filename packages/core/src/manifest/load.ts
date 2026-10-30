@@ -258,7 +258,10 @@ export function loadManifestFromObject(
         dir: options.dir,
         window,
         env: liveEnv,
-        envOverrides: overrides,
+        // The server token is the host's, not the agent's: one process serves every agent on one
+        // token, and a container exporting it over a stale copy in the agent's `.env` is the design
+        // working. Warning about it put a scary banner on every correctly configured container.
+        envOverrides: overrides.filter((entry) => entry.key !== manifest.server.tokenEnv),
     }
 }
 

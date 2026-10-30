@@ -20,7 +20,29 @@
  * here. It was also the only one that wrote anything until `config` and the schedule form joined
  * it, which is what 0.1.1 was about.
  */
-export const PANELS = ["chat", "new", "tools", "schedules", "channels", "config", "keys"] as const
+export const PANELS = [
+    "chat",
+    "home",
+    "new",
+    "team",
+    "models",
+    "turns",
+    "usage",
+    "server-usage",
+    "files",
+    "tools",
+    "schedules",
+    "channels",
+    "config",
+    "keys",
+    "people",
+    "rooms",
+    "actions",
+    "memory",
+    "webhooks",
+    "backup",
+    "api",
+] as const
 
 export type PanelName = (typeof PANELS)[number]
 

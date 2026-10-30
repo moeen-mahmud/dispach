@@ -1,5 +1,6 @@
 /**
- * The read-only surfaces, and the agent picker.
+ * The agent picker, the channel, settings and warnings panels, and the two panel lists the sidebar
+ * is generated from. Tools, schedules and the newer surfaces live in their own modules.
  *
  * Every component here takes its data as **props** and fetches nothing. That is not ceremony: it
  * is what lets the rendered output be asserted with `renderToStaticMarkup` and no DOM, which is the
@@ -39,6 +40,8 @@ export interface AgentRow {
     readonly model?: string
     readonly disabledAt?: string
     readonly reason?: string
+    /** `owner`, `peer` or `channel-peer`: whether "new conversation" rotates (since 0.2.2). */
+    readonly sessionScope?: string
 }
 
 /**
@@ -107,66 +110,6 @@ export function AgentList(props: {
     )
 }
 
-export interface ToolRow {
-    readonly slug: string
-    readonly summary: string
-    readonly mutating: boolean
-    readonly trust: string
-    readonly trustReason?: string
-    readonly provider: string
-}
-
-/**
- * The catalogue, with the two columns that are not cosmetic.
- *
- * `trust` is shown because an untrusted tool **taints the turn**: after it has run, a mutating call
- * needs an explicit rule or a live approval, and "why did my second `exec` get blocked?" is
- * answered by this column and by nothing else on this surface. `trustReason` is shown for the
- * reason it exists at all — the boot warning fired on every start of every system-provider agent,
- * and a warning always present for a correct configuration is one people stop reading, so the
- * reason belongs where somebody is already looking at the catalogue.
- */
-export function ToolsPanel(props: { readonly tools: readonly ToolRow[] }): React.ReactElement {
-    if (props.tools.length === 0) {
-        return (
-            <p className="empty">
-                No tools are pinned. An agent with none can still hold a conversation; a manifest's{" "}
-                <code>tools.pinned</code> is what grants the rest.
-            </p>
-        )
-    }
-    return (
-        <table className="panel-table">
-            <thead>
-                <tr>
-                    <th>tool</th>
-                    <th>provider</th>
-                    <th>writes</th>
-                    <th>trust</th>
-                </tr>
-            </thead>
-            <tbody>
-                {props.tools.map((tool) => (
-                    <tr key={tool.slug}>
-                        <td>
-                            <code>{tool.slug}</code>
-                            <div className="sub">{tool.summary}</div>
-                        </td>
-                        <td>{tool.provider}</td>
-                        <td>{tool.mutating ? "yes" : "no"}</td>
-                        <td>
-                            {tool.trust}
-                            {tool.trustReason === undefined ? null : (
-                                <div className="sub">{tool.trustReason}</div>
-                            )}
-                        </td>
-                    </tr>
-                ))}
-            </tbody>
-        </table>
-    )
-}
-
 /**
  * `?: string | undefined` rather than `?: string` throughout.
  *
@@ -175,275 +118,8 @@ export function ToolsPanel(props: { readonly tools: readonly ToolRow[] }): React
  * would make the panel reject the very record the route sends, and the fix would be a remap of
  * nine fields at the call site: which is where a field goes missing and nothing reports it.
  */
-export interface ScheduleRow {
-    readonly id: string
-    readonly kind: string
-    readonly expr: string
-    readonly task: string
-    readonly enabled: boolean
-    readonly nextRunAt?: string | undefined
-    readonly timezone?: string | undefined
-    readonly deliverChannel?: string | undefined
-    readonly deliverTo?: string | undefined
-    /**
-     * `manifest` or `api`, and it decides whether this row may be edited here at all.
-     *
-     * Shown rather than kept for the buttons' benefit: reconciliation restores every field of a
-     * manifest-declared schedule from the file at the next boot, so an edit through the API is
-     * undone — which the route now refuses with `schedule_manifest_owned`. A panel that offered the
-     * button anyway would be offering a 409, and the column is what explains why it does not.
-     */
-    readonly origin?: string | undefined
-}
-
-/**
- * What is armed, and — the part that matters — what is not.
- *
- * `nextRunAt` absent means **never again**: a spent one-shot. It is printed as that rather than
- * left blank, because a blank cell in a row that looks otherwise healthy is how a schedule comes to
- * be believed in. The same reasoning as the `serve` banner naming schedules: this is the last place
- * somebody looks before walking away, and "it is set up" is exactly the belief a schedule that
- * never fires depends on going unchecked.
- */
-export function SchedulesPanel(props: {
-    readonly schedules: readonly ScheduleRow[]
-    /** Undefined while the listing is still being read, so the form does not offer to write early. */
-    readonly onCreate?: (schedule: Readonly<Record<string, unknown>>) => void
-    readonly onDelete?: (scheduleId: string) => void
-    readonly onRun?: (scheduleId: string) => void
-    readonly onToggle?: (scheduleId: string, enabled: boolean) => void
-    /** The id currently being written, so one row can say so without freezing the rest. */
-    readonly busy?: string
-}): React.ReactElement {
-    return (
-        <>
-            {props.schedules.length === 0 ? (
-                <p className="empty">
-                    No schedules. Add one below, or declare it in the manifest's{" "}
-                    <code>schedules:</code> block — a declared one survives a rebuild and shows up
-                    in a diff.
-                </p>
-            ) : (
-                <table className="panel-table">
-                    <thead>
-                        <tr>
-                            <th>schedule</th>
-                            <th>when</th>
-                            <th>next</th>
-                            <th>delivers to</th>
-                            <th>declared in</th>
-                            <th />
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {props.schedules.map((schedule) => {
-                            /**
-                             * A manifest-declared row is **shown and not editable here**, and the
-                             * cell says which file decides it.
-                             *
-                             * Reconciliation restores every field from the manifest at the next
-                             * boot, `enabled` included, so a write through this surface lasts until
-                             * the next start — the route refuses it for that reason and the terminal
-                             * already did. Offering a button whose only outcome is a 409 is worse
-                             * than not offering one, and worse again than the old behaviour, which
-                             * reported success on a change that quietly went away.
-                             */
-                            const owned = schedule.origin === "manifest"
-                            const working = props.busy === schedule.id
-                            return (
-                                <tr key={schedule.id} className={schedule.enabled ? "" : "off"}>
-                                    <td>
-                                        <code>{schedule.id}</code>
-                                        <div className="sub">{schedule.task}</div>
-                                    </td>
-                                    <td>
-                                        {schedule.kind} {schedule.expr}
-                                        {schedule.timezone === undefined ? null : (
-                                            <div className="sub">{schedule.timezone}</div>
-                                        )}
-                                    </td>
-                                    <td>
-                                        {!schedule.enabled
-                                            ? "disabled"
-                                            : (schedule.nextRunAt ??
-                                              "never again — a spent one-shot")}
-                                    </td>
-                                    <td>
-                                        {schedule.deliverChannel === undefined
-                                            ? "this session only"
-                                            : `${schedule.deliverChannel}${schedule.deliverTo === undefined ? "" : ` → ${schedule.deliverTo}`}`}
-                                    </td>
-                                    <td>
-                                        {owned ? "agent.yaml" : "the API"}
-                                        {owned ? (
-                                            <div className="sub">
-                                                the manifest decides it — edit the file, or the{" "}
-                                                <code>schedules</code> field under config
-                                            </div>
-                                        ) : null}
-                                    </td>
-                                    <td style={{ whiteSpace: "nowrap" }}>
-                                        {/*
-                                         * `run` is offered for a manifest-declared schedule too:
-                                         * it writes nothing and does not move the next run, so it
-                                         * is the one action reconciliation cannot undo — and
-                                         * "does it work" is the question somebody has about a
-                                         * schedule they cannot see fire.
-                                         */}
-                                        {props.onRun === undefined ? null : (
-                                            <button
-                                                type="button"
-                                                disabled={working}
-                                                onClick={() => props.onRun?.(schedule.id)}
-                                            >
-                                                run now
-                                            </button>
-                                        )}
-                                        {props.onToggle === undefined || owned ? null : (
-                                            <button
-                                                type="button"
-                                                disabled={working}
-                                                onClick={() =>
-                                                    props.onToggle?.(schedule.id, !schedule.enabled)
-                                                }
-                                            >
-                                                {schedule.enabled ? "disable" : "enable"}
-                                            </button>
-                                        )}
-                                        {props.onDelete === undefined || owned ? null : (
-                                            <button
-                                                type="button"
-                                                disabled={working}
-                                                onClick={() => props.onDelete?.(schedule.id)}
-                                            >
-                                                delete
-                                            </button>
-                                        )}
-                                    </td>
-                                </tr>
-                            )
-                        })}
-                    </tbody>
-                </table>
-            )}
-            {props.onCreate === undefined ? null : <ScheduleForm onCreate={props.onCreate} />}
-        </>
-    )
-}
-
-/**
- * Arm a new schedule.
- *
- * Deliberately five fields and no expression builder. `expr` is validated by
- * `prepareScheduleWrite` in core — the same function the manifest path uses, so a cron this accepts
- * is one a file accepts — and the refusal it produces names the field and says what is wrong. A
- * builder here would be a second, worse opinion about what a valid expression is.
- *
- * `deliver` is the field worth the sentence under it: on Telegram it is the **numeric chat id**, not
- * an `@handle`. Measured live before that note existed — an agent copied the handle out of
- * `allowFrom`, the obvious move since that is the recognisable form, and every send came back
- * `Bad Request: chat not found` while the schedule fired perfectly every 15 minutes.
- */
-function ScheduleForm(props: {
-    readonly onCreate: (schedule: Readonly<Record<string, unknown>>) => void
-}): React.ReactElement {
-    const [id, setId] = useState("")
-    const [kind, setKind] = useState("cron")
-    const [expr, setExpr] = useState("")
-    const [task, setTask] = useState("")
-    const [channel, setChannel] = useState("")
-    const [to, setTo] = useState("")
-
-    const ready = id.trim() !== "" && expr.trim() !== "" && task.trim() !== ""
-
-    return (
-        <section style={{ marginTop: 24 }}>
-            <h3 style={{ fontSize: 13, margin: "0 0 8px" }}>Add a schedule</h3>
-            <div className="form-grid">
-                <label htmlFor="sched-id">id</label>
-                <input
-                    id="sched-id"
-                    value={id}
-                    placeholder="morning-brief"
-                    onChange={(event) => setId(event.target.value)}
-                />
-
-                <label htmlFor="sched-kind">kind</label>
-                <select
-                    id="sched-kind"
-                    value={kind}
-                    onChange={(event) => setKind(event.target.value)}
-                >
-                    <option value="cron">cron — a 5- or 6-field expression</option>
-                    <option value="every">every — a duration like 15m</option>
-                    <option value="at">at — one ISO instant, once</option>
-                </select>
-
-                <label htmlFor="sched-expr">expr</label>
-                <input
-                    id="sched-expr"
-                    value={expr}
-                    placeholder={kind === "cron" ? "0 8 * * *" : kind === "every" ? "15m" : ""}
-                    onChange={(event) => setExpr(event.target.value)}
-                />
-
-                <label htmlFor="sched-task">task</label>
-                <input
-                    id="sched-task"
-                    value={task}
-                    placeholder="Summarise today's calendar."
-                    onChange={(event) => setTask(event.target.value)}
-                />
-
-                <label htmlFor="sched-channel">deliver</label>
-                <div>
-                    <input
-                        id="sched-channel"
-                        value={channel}
-                        placeholder="channel id — blank for this session only"
-                        onChange={(event) => setChannel(event.target.value)}
-                    />
-                    {channel.trim() === "" ? null : (
-                        <>
-                            <input
-                                value={to}
-                                placeholder="address"
-                                onChange={(event) => setTo(event.target.value)}
-                            />
-                            <p className="sub">
-                                The address a reply is <em>sent</em> to — on Telegram the numeric
-                                chat id, never an <code>@handle</code>, which addresses a channel
-                                and not a person. It is the id inbound messages arrive on.
-                            </p>
-                        </>
-                    )}
-                </div>
-            </div>
-            <button
-                type="button"
-                disabled={!ready}
-                style={{ marginTop: 10 }}
-                onClick={() =>
-                    props.onCreate({
-                        id: id.trim(),
-                        kind,
-                        expr: expr.trim(),
-                        task: task.trim(),
-                        // `"none"` is the literal the schema expects, not an omitted field: a
-                        // schedule with no delivery returns its result through the event stream,
-                        // which is a choice rather than an absence.
-                        deliver:
-                            channel.trim() === ""
-                                ? "none"
-                                : { channel: channel.trim(), to: to.trim() },
-                    })
-                }
-            >
-                add
-            </button>
-        </section>
-    )
-}
+export { type ScheduleRow, SchedulesPanel } from "./schedules.tsx"
+export { type ToolRow, ToolsPanel } from "./tools.tsx"
 
 /**
  * The person's editor, in a browser.
@@ -636,16 +312,75 @@ export interface ChannelActions {
  * Rendered above everything else on the overview and never collapsed. A warning behind a tab is one
  * this project has already watched go unread for weeks, and these are the reason a bot is silent.
  */
+/**
+ * Two per-conversation switches beside "clear history": whether this conversation is drawn on by
+ * history recall, and, on an agent with phases, which phase it is in. Recall is the lever for an
+ * old wrong answer that keeps steering new ones, without deleting the chat it came from.
+ */
+export function SessionControls(props: {
+    readonly session?: { readonly recall?: false; readonly phase?: string }
+    readonly phases?: readonly string[]
+    readonly busy?: boolean
+    readonly onRecall: (recall: boolean) => void
+    readonly onPhase: (phase: string) => void
+}): React.ReactElement {
+    const recalled = props.session?.recall !== false
+    return (
+        <>
+            <button
+                type="button"
+                className="ghost hide-narrow"
+                disabled={props.busy === true || props.session === undefined}
+                title={
+                    recalled
+                        ? "History recall can draw on this conversation. Keep it out; its messages stay."
+                        : "Kept out of history recall. Put it back."
+                }
+                onClick={() => props.onRecall(!recalled)}
+            >
+                {recalled ? "recall: on" : "recall: off"}
+            </button>
+            {props.phases === undefined ? null : (
+                <label className="hide-narrow inline-field">
+                    phase
+                    <select
+                        value={props.session?.phase ?? ""}
+                        disabled={props.busy === true || props.session === undefined}
+                        onChange={(event) => props.onPhase(event.target.value)}
+                    >
+                        {props.session?.phase === undefined ? (
+                            <option value="">entry</option>
+                        ) : null}
+                        {props.phases.map((phase) => (
+                            <option key={phase} value={phase}>
+                                {phase}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+            )}
+        </>
+    )
+}
+
 export function WarningsPanel(props: {
     readonly warnings: readonly WireError[]
 }): React.ReactElement | null {
     if (props.warnings.length === 0) return null
+    // A one-line headline that is always on screen, with the detail a click away: the count stays
+    // visible above every report panel, and a working agent stops reading as an outage.
     return (
-        <section className="warnings">
-            <h3>
-                {props.warnings.length} thing{props.warnings.length === 1 ? "" : "s"} this agent
-                could not set up
-            </h3>
+        <details className="warnings">
+            <summary>
+                <span className="dot warn" />
+                <h3>
+                    {props.warnings.length} thing{props.warnings.length === 1 ? "" : "s"} this agent
+                    could not set up
+                </h3>
+                <span className="sub" style={{ margin: "0 0 0 auto" }}>
+                    details
+                </span>
+            </summary>
             <p className="sub">
                 It is running. Each of these is a capability it does not have — fix the cause and
                 restart the agent.
@@ -659,7 +394,7 @@ export function WarningsPanel(props: {
                     {warning.hint === undefined ? null : <p className="hint">{warning.hint}</p>}
                 </div>
             ))}
-        </section>
+        </details>
     )
 }
 
@@ -669,6 +404,8 @@ export function ChannelsPanel(props: {
     readonly now: number
     /** Absent makes the panel read-only, which is what it was before 0.1.3. */
     readonly actions?: ChannelActions
+    /** `<server>/v1/agents/<id>`: where an A2A channel's agent card is served from. */
+    readonly agentUrl?: string
 }): React.ReactElement {
     if (props.channels.length === 0) {
         return (
@@ -701,6 +438,19 @@ export function ChannelsPanel(props: {
                                 : (channel.status ?? "not started here")}
                             {channel.detail === undefined ? null : ` — ${channel.detail}`}
                         </p>
+                        {channel.type !== "a2a" || props.agentUrl === undefined ? null : (
+                            <p className="sub">
+                                agent card{" "}
+                                <a
+                                    href={`${props.agentUrl}/plugins/a2a/.well-known/agent-card.json`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                >
+                                    <code>{`${props.agentUrl}/plugins/a2a/.well-known/agent-card.json`}</code>
+                                </a>
+                                . Behind a proxy, peers use the plugin's <code>publicUrl</code>.
+                            </p>
+                        )}
                         {channel.credentialEnv === undefined ? null : (
                             <p className={channel.credentialSet === true ? "sub" : "warn"}>
                                 <code>{channel.credentialEnv}</code>{" "}
@@ -806,13 +556,32 @@ function ChannelControls(props: {
     )
 }
 
-/** The sidebar's server group, so the shell does not restate the panel list. */
+/** The sidebar's per-agent group, so the shell does not restate the panel list. */
+export const AGENT_PANELS: readonly { readonly panel: PanelName; readonly label: string }[] = [
+    { panel: "chat", label: "Chat" },
+    { panel: "models", label: "Models" },
+    { panel: "team", label: "Team" },
+    { panel: "tools", label: "Tools" },
+    { panel: "schedules", label: "Schedules" },
+    { panel: "channels", label: "Channels" },
+    { panel: "turns", label: "Turns" },
+    { panel: "usage", label: "Usage" },
+    { panel: "files", label: "Files" },
+    { panel: "config", label: "Settings" },
+]
+
+/** The sidebar's server group. `new` is the shell's own button, since it is the one that writes. */
 export const SERVER_PANELS: readonly { readonly panel: PanelName; readonly label: string }[] = [
-    { panel: "tools", label: "tools" },
-    { panel: "schedules", label: "schedules" },
-    { panel: "channels", label: "channels" },
-    { panel: "config", label: "config" },
-    { panel: "keys", label: "keys" },
+    { panel: "home", label: "Overview" },
+    { panel: "people", label: "People" },
+    { panel: "rooms", label: "Rooms" },
+    { panel: "actions", label: "Actions" },
+    { panel: "memory", label: "Memory" },
+    { panel: "server-usage", label: "Usage" },
+    { panel: "webhooks", label: "Webhooks" },
+    { panel: "backup", label: "Backup" },
+    { panel: "keys", label: "Keys" },
+    { panel: "api", label: "API" },
 ]
 
 /**

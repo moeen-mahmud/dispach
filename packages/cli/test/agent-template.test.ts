@@ -25,7 +25,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BRAND, type HarnessError, loadManifest } from "@dispach/core"
 import { secretStatus, writeSecrets } from "#lib/agent-secrets"
-import { listTemplates, provisionFromTemplate, rerenderFromTemplate } from "#lib/agent-template"
+import {
+    listTemplates,
+    provisionFromTemplate,
+    rerenderFromTemplate,
+    templateRecordOf,
+} from "#lib/agent-template"
 import { provisionAgent } from "#lib/provision"
 
 const dirs: string[] = []
@@ -72,6 +77,52 @@ function codeOf(run: () => unknown): string {
     }
     return "(no error)"
 }
+
+describe("a template reading the server's environment", () => {
+    test("loads when the server sets the variable, and is refused naming it when nothing does", () => {
+        const box = sandbox()
+        const path = join(box.templates, "support", "agent.yaml")
+        writeFileSync(
+            path,
+            // biome-ignore lint/suspicious/noTemplateCurlyInString: the manifest's own ${VAR} syntax
+            readFileSync(path, "utf8").replace(/baseUrl: .*/, "baseUrl: ${PROBE_BASE_URL}"),
+        )
+        const make = (name: string) => () =>
+            provisionFromTemplate({
+                templatesDir: box.templates,
+                agentDirBase: box.agents,
+                template: "support",
+                name,
+                vars: { store: "Acme" },
+            })
+        // Unset: stubbed, and the stub is not a URL, so the refusal names the field.
+        expect(codeOf(make("First"))).toBe("manifest_validation_failed")
+        process.env.PROBE_BASE_URL = "https://api.example.com/v1"
+        try {
+            expect(make("Second")().agentId).toBe("second")
+        } finally {
+            delete process.env.PROBE_BASE_URL
+        }
+    })
+})
+
+describe("templateRecordOf", () => {
+    test("reads the template and the plain vars, never the secret one", () => {
+        const box = sandbox()
+        const result = provisionFromTemplate({
+            templatesDir: box.templates,
+            agentDirBase: box.agents,
+            template: "support",
+            name: "Acme Store",
+            vars: { store: "Acme", apiKey: "sk-acme" },
+        })
+        expect(templateRecordOf(result.dir)).toEqual({
+            template: "support",
+            vars: { store: "Acme" },
+        })
+        expect(templateRecordOf(box.root)).toBeUndefined()
+    })
+})
 
 describe("provisionFromTemplate", () => {
     test("writes an agent that loads, under the derived id, with its secret at 0600", () => {

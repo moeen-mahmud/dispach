@@ -59,3 +59,4 @@ control.db*
 .metrics/
 # Browser-automation output
 .playwright-mcp/
+dist-standalone/

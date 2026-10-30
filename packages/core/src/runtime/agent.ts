@@ -36,6 +36,7 @@ import {
     phaseAllowUnmatched,
     privateMemoryRefused,
     scheduleToolUnknown,
+    sessionsScopeUnassigned,
     tokenBudgetExhausted,
     toolGatedAfterFirstUse,
     turnsAtCapacity,
@@ -60,6 +61,7 @@ import { resolveProviders } from "../manifest/providers.ts"
 import type {
     AgentManifest,
     ModelRole,
+    SessionScope,
     SpeechConfig,
     TranscriptionConfig,
 } from "../manifest/schema.ts"
@@ -80,6 +82,7 @@ import {
     fts5Retriever,
     type IndexReport,
     type MemoryRetriever,
+    noteSource,
     type ReadPlan,
     type RetrievedPassage,
     readPlan,
@@ -106,6 +109,7 @@ import type { Middleware } from "../plugins/middleware.ts"
 import { loadSkills, type SkillCatalogue } from "../skills/index.ts"
 import { activateSkills } from "../skills/load.ts"
 import { renderScripts, skillScriptTools } from "../skills/tools.ts"
+import { keySymbols } from "../store/session-key.ts"
 import {
     FORGOTTEN_MARKER,
     type MessageReach,
@@ -113,6 +117,7 @@ import {
     type Store,
     type TurnRecord,
 } from "../store/store.ts"
+import { ASK_AGENT } from "../team/ask.ts"
 import { routedTool, type SubagentRunner } from "../team/subagents.ts"
 import { HANDOFF } from "../team/supervisor.ts"
 import { type DialectId, passThroughFilter, type StreamFilter } from "../tools/dialect/dialect.ts"
@@ -136,6 +141,7 @@ import {
     writeTarget,
 } from "../workspace/load.ts"
 import { planSoul } from "../workspace/soul.ts"
+import { isOwner, resolveParticipant } from "./owner.ts"
 
 /** Boot-time mtime, or `undefined` for a manifest that never came from a file. */
 function mtimeOf(path: string): number | undefined {
@@ -328,7 +334,21 @@ export interface AgentSendOptions {
      * out of its catalogue, so a peer ask is one hop and `A ↔ B` cannot loop.
      */
     readonly peerAsk?: { readonly askedBy: string }
+    /**
+     * `sessionKey` is final: a surface already ran `resolveSessionKey` and chose what to do with the
+     * answer — the server keeps the requested key when the resolved one is outside a caller's reach.
+     */
+    readonly sessionResolved?: boolean
 }
+
+/** What `resolveSessionKey` reads off a turn: the same fields `send` takes. */
+export type SessionTurn = Pick<AgentSendOptions, "from" | "participant" | "source" | "peerAsk">
+
+/**
+ * Channel segments whose keys are never moved into a person's conversation: a room is several people,
+ * and a child, a hand-off, a schedule run and a peer ask each own the session they were given.
+ */
+const KEPT_CHANNELS = new Set(["room", "subagent", "handoff", "schedule", "ask"])
 
 /** How much of a child's prompt budget its routed call's output may take; the rest is its task. */
 const CHILD_OBSERVATION_SHARE = 0.75
@@ -435,7 +455,10 @@ export class Agent {
      */
     #volatileSeen: string | undefined = undefined
     /** Non-fatal load findings, emitted as `agent.warning` by `Runtime`. */
-    readonly warnings: readonly ErrorDetail[]
+    get warnings(): readonly ErrorDetail[] {
+        return this.#warnings
+    }
+    #warnings: readonly ErrorDetail[]
     readonly store: Store
     /**
      * Resolved memory wiring, or `undefined` when the manifest configures none.
@@ -583,7 +606,7 @@ export class Agent {
         this.#workspace = init.workspace
         this.identity = init.workspace.static
         // What a configured role's transport could not honour, once per role that was written down.
-        this.warnings = [
+        this.#warnings = [
             ...init.warnings,
             ...[
                 init.roles.main,
@@ -641,8 +664,8 @@ export class Agent {
         // whether or not a catalogue exists; the catalogue only decides whether anything would have
         // asked.
         if (this.manifest.tools.untrusted.onMutate === "confirm" && init.approve === undefined) {
-            this.warnings = [
-                ...this.warnings,
+            this.#warnings = [
+                ...this.#warnings,
                 {
                     code: "confirm_without_approver",
                     message:
@@ -737,7 +760,7 @@ export class Agent {
                 onMutate: this.manifest.tools.untrusted.onMutate,
             })
             if (onceOnly.length > 0) {
-                this.warnings = [...this.warnings, toolGatedAfterFirstUse(onceOnly)]
+                this.#warnings = [...this.#warnings, toolGatedAfterFirstUse(onceOnly)]
             }
 
             // Spec rule 6, and it throws rather than warns for the same reason `resolve()` throws on an
@@ -1323,10 +1346,103 @@ export class Agent {
         }
         options.admission.consume()
         try {
-            return await this.#send(input, options)
+            const requested = options.sessionKey ?? Agent.DEFAULT_SESSION
+            const sessionKey =
+                options.sessionResolved === true
+                    ? requested
+                    : await this.resolveSessionKey(requested, options)
+            return await this.#serialised(sessionKey, () =>
+                this.#send(input, { ...options, sessionKey }),
+            )
         } finally {
             this.#settle()
         }
+    }
+
+    /**
+     * The session a turn runs in (`docs/23-SPEC-SESSIONS.md`): `requested`, unless `sessions.scope`
+     * puts this sender's turns in one conversation across surfaces. Public so a route can answer with
+     * the key before the turn runs; `send` resolves again, and a resolved key resolves to itself.
+     */
+    async resolveSessionKey(requested: string, turn: SessionTurn = {}): Promise<string> {
+        const scope = this.manifest.sessions?.scope ?? "channel-peer"
+        if (scope === "channel-peer") return requested
+        // A peer agent, a peer ask and a schedule name their own sessions on purpose: a `shared:<key>`
+        // schedule's key is whatever its author wrote, so the source decides, not the key.
+        if (turn.peerAsk !== undefined || turn.from?.kind === "agent") return requested
+        if (turn.source?.startsWith("schedule:") === true) return requested
+        const channel = requested.slice(0, Math.max(requested.indexOf(":"), 0))
+        if (KEPT_CHANNELS.has(channel)) return requested
+        const base = await this.#personBase(turn, scope)
+        if (base === undefined) return requested
+        // A person's conversation named on purpose: the base means its head, and an older rotation
+        // (or somebody else's base, which only an unscoped caller can name) is kept as written.
+        if ((channel === "owner" || channel === "peer") && requested !== base) return requested
+        return this.store.sessions.head(this.id, base)
+    }
+
+    /**
+     * Start a new conversation for this sender, on every surface at once (decision 15.12). `undefined`
+     * when the scope or the sender has no conversation to rotate — a stranger, `channel-peer`.
+     */
+    async rotateSession(
+        turn: SessionTurn = {},
+    ): Promise<{ readonly sessionKey: string; readonly previous: string } | undefined> {
+        const scope = this.manifest.sessions?.scope ?? "channel-peer"
+        if (scope === "channel-peer" || turn.from?.kind === "agent") return undefined
+        const base = await this.#personBase(turn, scope)
+        if (base === undefined) return undefined
+        const sessionKey = `${base}~${keySymbols(randomBytes(6))}`
+        const { previous } = await this.store.sessions.rotate(this.id, base, sessionKey)
+        return { sessionKey, previous }
+    }
+
+    /** `owner:<P>` or `peer:<Q>` for this sender, or `undefined` for a stranger or an unassigned agent. */
+    async #personBase(turn: SessionTurn, scope: SessionScope): Promise<string | undefined> {
+        const assignment = await this.store.conversations.assignment(this.id)
+        if (assignment === undefined) return undefined
+        const participant = turn.participant ?? participantOf(turn.from)
+        // Nobody named is the operator — the terminal, an unscoped key — and unattributed work on the
+        // owner's agent is work for the owner (14.42).
+        if (participant === null || isOwner(assignment, participant)) {
+            return `owner:${assignment.participantId}`
+        }
+        if (scope !== "peer") return undefined
+        const known = resolveParticipant(await this.store.conversations.participants(), participant)
+        return known === undefined ? undefined : `peer:${known}`
+    }
+
+    /**
+     * One turn at a time per session. Channels and rooms always queued per key; once a person's turns
+     * from several surfaces share one, a web turn and a Telegram turn would otherwise race the same
+     * history. A child or a peer ask runs in its own key, so a turn never waits on itself.
+     */
+    async #serialised<T>(sessionKey: string, work: () => Promise<T>): Promise<T> {
+        const previous = this.#sessionChains.get(sessionKey) ?? Promise.resolve()
+        const next = previous.catch(() => {}).then(work)
+        this.#sessionChains.set(sessionKey, next)
+        try {
+            return await next
+        } finally {
+            if (this.#sessionChains.get(sessionKey) === next) this.#sessionChains.delete(sessionKey)
+        }
+    }
+    readonly #sessionChains = new Map<string, Promise<unknown>>()
+
+    /**
+     * Put `sessions_scope_unassigned` on `warnings` when it is true (decision 15.14): an owner or peer
+     * scope on an agent nobody is assigned to behaves as `channel-peer`. Asked by the runtime before it
+     * reports an agent's warnings, and again by whatever changes the assignment.
+     */
+    async checkSessionScope(): Promise<void> {
+        const scope = this.manifest.sessions?.scope ?? "channel-peer"
+        const unassigned =
+            scope !== "channel-peer" &&
+            (await this.store.conversations.assignment(this.id)) === undefined
+        this.#warnings = [
+            ...this.#warnings.filter((warning) => warning.code !== "sessions_scope_unassigned"),
+            ...(unassigned ? [sessionsScopeUnassigned(this.id, scope)] : []),
+        ]
     }
 
     /**
@@ -1560,15 +1676,17 @@ export class Agent {
         // The owner's personal tools (Composio, MCP servers marked personal) only for a turn that acts
         // for the owner (pilot.15): another member asking, a delegation from their agent, a stand-in
         // or a channel sender who is not one of the owner's own gets none of them.
+        const actsForOwner = await this.#actsForOwner(participant)
         const withheld = (await this.#notTheOwners(participant))
             ? this.tools
                   .specs()
                   .filter((spec) => spec.personal === true)
                   .map((spec) => spec.slug)
             : []
+        const oneHop = [HANDOFF, ASK_AGENT].filter((slug) => slugs.includes(slug))
         const peerAllow =
-            options.peerAsk !== undefined && slugs.includes(HANDOFF)
-                ? (options.toolsAllow ?? slugs).filter((slug) => slug !== HANDOFF)
+            options.peerAsk !== undefined && oneHop.length > 0
+                ? (options.toolsAllow ?? slugs).filter((slug) => !oneHop.includes(slug))
                 : options.toolsAllow
         const toolsAllow =
             withheld.length === 0
@@ -1581,6 +1699,7 @@ export class Agent {
                       turnId,
                       participant,
                       owner: plan.owner,
+                      actsForOwner,
                   })
 
         const meter = this.#meter(sessionKey, turnId, options.from?.id)
@@ -1610,6 +1729,7 @@ export class Agent {
         if (options.deferMutations !== undefined) this.#defers.set(turnId, options.deferMutations)
         this.#inputs.set(turnId, input)
         const spaceWriter = (await this.store.conversations.spaceWriter()) === `agent:${this.id}`
+        const pool = plan.pool
         const result = await runTurn({
             agentId: this.id,
             meter,
@@ -1702,7 +1822,9 @@ export class Agent {
             ...(spaceWriter
                 ? { writeNote: (text: string) => this.#writeSpaceNote(text) }
                 : plan.private
-                  ? {}
+                  ? pool === undefined
+                      ? {}
+                      : { shareNote: (text: string) => this.#writePoolNote(text, pool) }
                   : {
                         writeNote: async () => {
                             throw privateMemoryRefused()
@@ -1716,13 +1838,14 @@ export class Agent {
                         this.#forget("private", request, {
                             sessionKey,
                             turnId,
+                            ...(pool === undefined ? {} : { pool }),
                             // A person reaches what they said; the owner also what predates attribution.
                             reach:
                                 participant === null
                                     ? {}
                                     : {
                                           participant: participant.id,
-                                          unattributed: participant.id === plan.owner,
+                                          unattributed: actsForOwner,
                                       },
                         })
                   : async () => {
@@ -1795,7 +1918,7 @@ export class Agent {
         await this.#indexHistory()
 
         this.#reportManifestChange()
-        return result
+        return { ...result, sessionKey }
     }
 
     /** Turns in a session that listed or deleted with `memory_forget`, until a deletion lands. */
@@ -2196,6 +2319,7 @@ export class Agent {
                   readonly turnId: string
                   readonly participant: ActingParticipant | null
                   readonly owner: string | undefined
+                  readonly actsForOwner: boolean
               }
             | undefined,
     ): Promise<readonly { source: string; at: string; text: string; because?: string }[]> {
@@ -2250,6 +2374,9 @@ export class Agent {
                 exclude: [
                     sessionSource(sessionKey),
                     ...(memory.carried === undefined ? [] : [memory.carried]),
+                    // This agent's own copies in its owner's pool: the original is in its own files,
+                    // carried or archived, so retrieving the copy would say the same thing twice.
+                    ...(plan.pool === undefined ? [] : await this.#ownCopies(plan.pool)),
                 ],
             })
 
@@ -2290,12 +2417,6 @@ export class Agent {
     }
 
     /**
-     * Which memory this turn may read (`memory/scopes.ts` has the rule and its reasons).
-     *
-     * Only a conversation turn or a stand-in narrows anything, and only those pay for the lookups that
-     * decide it — every other turn reads what it always read, plus any shared scope it belongs to.
-     */
-    /**
      * The asked turn's framing (pilot.9): this agent's owner, the asking agent and the
      * person it acts for, each with the title and timezone their participant record carries. Facts the
      * embedder registered, so nothing here is the model's to doubt; absent fields are left out.
@@ -2317,23 +2438,31 @@ export class Agent {
         const ownerId = (await conversations.assignment(this.id))?.participantId
         const owner = await describe(ownerId)
         const asker = await describe(actingFor)
+        // The same person's own agents asking each other (`ask_agent`, decision 15.9): one person, so
+        // nothing is withheld and the answer is not written for a stranger.
+        if (ownerId !== undefined && actingFor === ownerId) {
+            return `You are the agent of ${owner ?? ownerId}. ${askedBy}, another of their agents, is asking on their behalf. Answer from everything you know and can check; your reply goes back to ${askedBy}.`
+        }
+        // A shared agent: nobody's, so it answers from the team's projects.
+        if (ownerId === undefined) {
+            return [
+                asker === undefined
+                    ? `${askedBy} is asking you a question.`
+                    : `${askedBy} is asking you a question on behalf of ${asker}.`,
+                "You are a shared agent: answer from the team's projects and your tools. Where the answer depends on something you cannot check here, say so rather than guessing.",
+            ].join(" ")
+        }
+        // Only another member's ask reaches here: the owner's own and a shared agent's returned above.
         return [
-            owner === undefined
-                ? "You are answering another member's agent."
-                : `You are the agent of ${owner}, answering another member's agent.`,
+            `You are the agent of ${owner}, answering another member's agent.`,
             asker === undefined
                 ? `The agent asking is ${askedBy}.`
                 : `The agent asking is ${askedBy}, on behalf of ${asker}.`,
             "Your answer goes back to them, so it is written from what your owner shares, not from what they keep private.",
             // Without this an agent with no calendar answered "3pm works, no conflict I'm aware of",
-            // and the asker relayed it as a commitment (pilot.10). The owner's own ask reads
-            // everything, so it is not told this.
-            actingFor !== undefined && actingFor === ownerId
-                ? undefined
-                : "Their private notes and saved memory are not in this turn. Where the answer depends on something you cannot check here, such as their availability, a preference or a commitment, say you cannot confirm it rather than guessing.",
-        ]
-            .filter((line) => line !== undefined)
-            .join(" ")
+            // and the asker relayed it as a commitment (pilot.10).
+            "Their private notes and saved memory are not in this turn. Where the answer depends on something you cannot check here, such as their availability, a preference or a commitment, say you cannot confirm it rather than guessing.",
+        ].join(" ")
     }
 
     /**
@@ -2344,14 +2473,22 @@ export class Agent {
     async #notTheOwners(participant: ActingParticipant | null): Promise<boolean> {
         if (participant === null) return false
         const assignment = await this.store.conversations.assignment(this.id)
-        if (assignment === undefined) return false
-        if (participant.onBehalfOf !== undefined) return true
-        return (
-            participant.id !== assignment.participantId &&
-            !(assignment.channelIds ?? []).includes(participant.id)
-        )
+        return assignment !== undefined && !isOwner(assignment, participant)
     }
 
+    /** Whether a person-attributed turn is the assigned owner speaking, on any surface (`owner.ts`). */
+    async #actsForOwner(participant: ActingParticipant | null): Promise<boolean> {
+        if (participant === null) return false
+        const assignment = await this.store.conversations.assignment(this.id)
+        return assignment !== undefined && isOwner(assignment, participant)
+    }
+
+    /**
+     * Which memory this turn may read (`memory/scopes.ts` has the rule and its reasons).
+     *
+     * Only a conversation turn or a stand-in narrows anything, and only those pay for the lookups that
+     * decide it — every other turn reads what it always read, plus any shared scope it belongs to.
+     */
     async #readPlan(
         from: TurnSender | undefined,
         participant: ActingParticipant | null,
@@ -2373,6 +2510,7 @@ export class Agent {
             ...(conversation === undefined ? {} : { conversation }),
             ...(owner === undefined ? {} : { owner }),
             projects: await conversations.projectsOf(this.id),
+            shared: this.manifest.memory?.shared ?? true,
         })
     }
 
@@ -2389,6 +2527,8 @@ export class Agent {
             readonly sessionKey: string
             readonly turnId: string
             readonly reach?: MessageReach
+            /** The owner's pool, which `memory_write` writes to on this turn: forgotten from as well. */
+            readonly pool?: string
         },
     ): Promise<ForgetResult> {
         const conversations = this.store.conversations
@@ -2419,8 +2559,16 @@ export class Agent {
             archiveDir: this.#memory?.dir ?? join(this.dir, MEMORY_DIR),
         })
         const reach = context.reach ?? {}
+        const pooled =
+            context.pool === undefined
+                ? []
+                : (await conversations.notes(context.pool)).map((note) => ({
+                      id: note.id,
+                      source: "shared with your owner's other agents",
+                      text: note.text,
+                  }))
         if ("query" in request) {
-            const notes = (await notesIn(files)).filter((note) =>
+            const notes = [...(await notesIn(files)), ...pooled].filter((note) =>
                 matchesQuery(note.text, request.query),
             )
             // Past conversations too: recall answers from them, so a forgotten note that was also said
@@ -2442,7 +2590,10 @@ export class Agent {
             .filter((id) => id.startsWith(FORGET_MESSAGE_PREFIX))
             .map((id) => Number(id.slice(FORGET_MESSAGE_PREFIX.length)))
             .filter((id) => Number.isInteger(id))
-        const gone = await forgetNotes(files, new Set(request.ids))
+        const wanted = new Set(request.ids)
+        const poolGone = pooled.filter((note) => wanted.has(note.id))
+        for (const note of poolGone) await conversations.deleteNote(note.id)
+        const gone = [...(await forgetNotes(files, wanted)), ...poolGone]
         const redacted = await this.store.messages.redact(
             this.id,
             messageIds,
@@ -2527,6 +2678,28 @@ export class Agent {
         return { scope, notes: gone, missing: ids.filter((id) => !found.has(id)) }
     }
 
+    /**
+     * The copy a private `memory_write` leaves in the pool its owner's agents share (decision 15.8), so
+     * the next agent the person talks to already knows. The private file keeps the original.
+     */
+    async #writePoolNote(text: string, pool: string): Promise<string> {
+        await this.store.conversations.addNote({
+            id: `mn_${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+            scope: pool,
+            text,
+            writtenBy: `agent:${this.id}`,
+            createdAt: new Date().toISOString(),
+        })
+        return "A copy went to the memory your owner's other agents share, where they can recall it."
+    }
+
+    /** The sources of this agent's own copies in `pool`, which its recall leaves out. */
+    async #ownCopies(pool: string): Promise<readonly string[]> {
+        return (await this.store.conversations.notes(pool))
+            .filter((note) => note.writtenBy === `agent:${this.id}`)
+            .map((note) => noteSource(pool, note.id))
+    }
+
     /** `memory_write` for the space writer: a team note, indexed at the next read of the space. */
     async #writeSpaceNote(text: string): Promise<string> {
         await this.store.conversations.addNote({
@@ -2552,6 +2725,8 @@ export class Agent {
             readonly turnId: string
             readonly participant: ActingParticipant | null
             readonly owner: string | undefined
+            /** The owner on a channel, by handle: their own request, like `participant.id === owner`. */
+            readonly actsForOwner: boolean
         },
     ): Promise<void> {
         const byScope = new Map<string, string[]>()
@@ -2560,6 +2735,7 @@ export class Agent {
             if (scope === undefined || !scope.startsWith("owner:")) continue
             const owner = scope.slice("owner:".length)
             if (audit.participant?.id === owner) continue
+            if (audit.actsForOwner && audit.owner === owner) continue
             // Unattributed work on the owner's own agent — a schedule, the operator's console — is
             // work for the owner, not a disclosure to someone else.
             if (audit.participant === null && audit.owner === owner) continue

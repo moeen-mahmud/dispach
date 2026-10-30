@@ -293,7 +293,8 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
         expect(inspected).toContain(BRAND.runtime.webhookAllowEnv)
     })
 
-    test("recreate replaces the container and keeps the agents and keys", async () => {
+    test("recreate replaces the container and keeps the agents, the keys and the address", async () => {
+        const address = store.get(A)?.baseUrl
         const before = execFileSync("docker", [
             "inspect",
             "--format",
@@ -315,9 +316,33 @@ describe.skipIf(!ENABLED)("e2e against the real runtime (CONTROL_E2E=1)", () => 
             `${BRAND.siloPrefix}${A}`,
         ]).toString()
         expect(after).not.toBe(before)
+        // A new container on the same port: the address everything holds stays right (#74).
+        expect(store.get(A)?.baseUrl).toBe(address)
         const agents = await call(`/silos/${A}/v1/agents`, { token: keys[A] ?? "" })
         expect(agents.status).toBe(200)
         expect(await agents.text()).toContain("helper")
+        expect((await turn(A)).text).toBe("Hello from the mock.")
+    })
+
+    test("a restart behind the control plane's back keeps the silo's port", async () => {
+        // `docker restart`, a crash under the restart policy and a daemon restart all start the
+        // container again; a port Docker chose would be chosen again (#74).
+        const address = store.get(A)?.baseUrl
+        execFileSync("docker", ["restart", `${BRAND.siloPrefix}${A}`])
+        expect(
+            `http://${execFileSync("docker", [
+                "port",
+                `${BRAND.siloPrefix}${A}`,
+                String(BRAND.runtime.port),
+            ])
+                .toString()
+                .trim()}`,
+        ).toBe(address ?? "")
+        for (let i = 0; i < 100; i += 1) {
+            const ready = await fetch(`${address}/v1/ready`).catch(() => undefined)
+            if (ready?.status === 200) break
+            await new Promise((resolve) => setTimeout(resolve, 100))
+        }
         expect((await turn(A)).text).toBe("Hello from the mock.")
     })
 

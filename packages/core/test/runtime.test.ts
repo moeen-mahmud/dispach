@@ -978,6 +978,37 @@ model:
         await runtime.stop()
     })
 
+    test("the server token winning over the agent's .env is not an override", async () => {
+        // One process serves every agent on one token; a container exporting it is the design.
+        const dir = mkdtempSync(join(tmpdir(), "runtime-override-token-"))
+        writeFileSync(
+            join(dir, "agent.yaml"),
+            `apiVersion: ${BRAND.apiVersion}
+id: test
+model:
+  main:
+    id: \${MODEL_ID}
+    baseUrl: https://api.example.com/v1
+    apiKeyEnv: MODEL_API_KEY
+`,
+        )
+        const tokenEnv = `${BRAND.envPrefix}API_TOKEN`
+        writeFileSync(join(dir, ".env"), `MODEL_ID=mine\nMODEL_API_KEY=k\n${tokenEnv}=stale\n`)
+
+        const runtime = await Runtime.create({
+            agents: [join(dir, "agent.yaml")],
+            env: { MODEL_ID: "theirs", MODEL_API_KEY: "k", [tokenEnv]: "server" },
+            fetch: replyFetch,
+        })
+
+        const warning = runtime
+            .agent("test")
+            .warnings.find((entry) => entry.code === "env_overridden")
+        expect(warning?.message).toContain("MODEL_ID")
+        expect((warning?.message ?? "").includes(tokenEnv)).toBe(false)
+        await runtime.stop()
+    })
+
     test("a model that matches no registry row warns, naming the role and the floor", async () => {
         // `CONSERVATIVE`'s 8,192 for an unmatched id is indistinguishable from a measured 8,192, and
         // the budget divides by it — on a model with a real 200k window almost all of it goes unused,

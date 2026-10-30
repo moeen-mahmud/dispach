@@ -266,6 +266,22 @@ export interface AgentClient {
         patch: Readonly<Record<string, unknown>>,
     ): Promise<ScheduleRecord>
     deleteSchedule(scheduleId: string): Promise<void>
+    /**
+     * Fetch the tool providers' catalogues now and reload only if what the agent serves moved.
+     * `providers` narrows to some of them; omitted is all. 202 when a turn is running and the
+     * reload is pending.
+     */
+    refreshTools(options?: { readonly providers?: readonly string[] }): Promise<ToolsRefreshResult>
+    /**
+     * What an expression means before it is written: the next instants, the zone in force and the
+     * jitter it would carry. Parsed by the server with the same function the write uses.
+     */
+    previewSchedule(input: {
+        readonly kind: "cron" | "every" | "at"
+        readonly expr: string
+        readonly timezone?: string
+        readonly count?: number
+    }): Promise<SchedulePreview>
     /** Fire one now, out of band. Does **not** move its next scheduled run. */
     runSchedule(scheduleId: string): Promise<{
         readonly scheduleId: string
@@ -336,6 +352,14 @@ export interface AgentClient {
         sessionKey: string,
         recall: boolean,
     ): Promise<{ readonly sessionKey: string; readonly recall: boolean }>
+    /**
+     * Start the caller's conversation afresh on every surface, for an agent whose `sessionScope` is
+     * `owner` or `peer` (`docs/23-SPEC-SESSIONS.md`). `409 session_not_rotatable` for `channel-peer`,
+     * where a new conversation is simply a new `sessionKey` on the next message.
+     */
+    rotateSession(options?: {
+        readonly from?: TurnSender
+    }): Promise<{ readonly sessionKey: string; readonly previous: string }>
     context(options?: { readonly sessionKey?: string; readonly input?: string }): Promise<unknown>
     /**
      * What is waiting on a person right now, oldest first.
@@ -376,13 +400,102 @@ export interface AgentClient {
     start(): Promise<AgentLifecycleState>
     /** Record which member this agent works for. An admin participant's act (Phase 27). */
     assign(participantId: string): Promise<AssignmentLike>
+    /** Who the agent works for, or `null` when nobody. */
+    assignment(): Promise<{ readonly id: string; readonly assignment: AssignmentLike | null }>
     unassign(): Promise<{ readonly id: string; readonly unassigned: boolean }>
+    /** The files the agent's prompt is built from, as the manifest declares them. */
+    workspaceFiles(): Promise<{
+        readonly id: string
+        readonly files: readonly {
+            readonly name: string
+            readonly tier: string
+            readonly field: string
+            readonly exists: boolean
+            readonly bytes: number
+        }[]
+    }>
+    /** One declared workspace file's text. `exists: false` with empty content for one not yet written. */
+    workspaceFile(name: string): Promise<{
+        readonly id: string
+        readonly file: string
+        readonly tier?: string
+        readonly field?: string
+        readonly exists: boolean
+        readonly content: string
+    }>
+    /**
+     * Replace one declared workspace file, whole. On a running agent the reload is attempted and a
+     * text that would stop it loading is refused with the old text put back; `applied` says
+     * whether the new text is in force.
+     */
+    putWorkspaceFile(
+        name: string,
+        content: string,
+    ): Promise<{
+        readonly id: string
+        readonly file: string
+        readonly written: boolean
+        readonly loads: boolean
+        readonly error?: WireError
+        readonly applied: boolean
+        readonly pending?: WireError
+    }>
     /** A slice of this agent — its carried memory, archive and knowledge — as a bundle (R11). */
     exportBundle(
         paths?: readonly ("MEMORY.md" | "memory/" | "knowledge/")[],
     ): Promise<AgentBundleLike>
     /** Merge a bundle into this agent. Memory note by note; knowledge kept (`skip`) or `overwrite`n. */
     importBundle(bundle: AgentBundleLike, mode?: "skip" | "overwrite"): Promise<ImportReportLike>
+    /**
+     * Re-render a template-made agent with new values. A file edited since it was rendered is
+     * `skipped` rather than overwritten, and a secret goes to `.env`, never back in the answer.
+     */
+    setVars(vars: Readonly<Record<string, string>>): Promise<VarsResultLike>
+    /** The template this agent was made from and its plain vars. `409` for one with no record. */
+    vars(): Promise<{
+        readonly id: string
+        readonly template: string
+        readonly vars: Readonly<Record<string, string>>
+    }>
+    /**
+     * Send exact text on one of the agent's channels, with no model turn, through the outbox. `key`
+     * makes it idempotent: a repeat answers `duplicate: true` and sends nothing.
+     */
+    deliver(input: {
+        readonly channel: string
+        readonly to: string
+        readonly text: string
+        readonly key: string
+    }): Promise<{ readonly sessionKey: string; readonly key: string; readonly duplicate: boolean }>
+}
+
+/** `model.main`'s capabilities as the runtime resolved them (`02-SPEC-MANIFEST.md`). */
+export interface ModelCapabilitiesLike {
+    readonly nativeTools: boolean
+    readonly strictSchema: boolean
+    readonly thinking: "none" | "anthropic" | "openai" | "deepseek"
+    readonly promptCache: "none" | "anthropic" | "openai" | "bedrock"
+    readonly parallelToolCalls: boolean
+    readonly contextWindow: number
+    readonly maxOutput: number
+    readonly vision?: boolean
+    readonly promptStyle: {
+        readonly delimiters: string
+        readonly intensity: string
+        readonly examplesIn: string
+        readonly skillsIn: string
+    }
+}
+
+/** What `setVars` reports: which files were rendered, which kept, and whether the agent reloaded. */
+export interface VarsResultLike {
+    readonly id: string
+    readonly rendered: readonly string[]
+    readonly skipped: readonly {
+        readonly file: string
+        readonly reason: "edited" | "memory" | "removed"
+    }[]
+    readonly reload: "none" | "loaded" | "pending"
 }
 
 /** What `stop` and `start` report back. */
@@ -431,6 +544,8 @@ export interface AgentDescriptionLike {
     readonly model?: string
     readonly dialect?: string
     readonly window?: number
+    /** The main model's resolved capabilities: the registry's row with the manifest's overrides. */
+    readonly capabilities?: ModelCapabilitiesLike
     readonly tools?: number
     /** What the catalogue costs per turn. A tool *count* says nothing about the bill. */
     readonly catalogueTokens?: number
@@ -438,6 +553,8 @@ export interface AgentDescriptionLike {
     readonly schedules?: number
     readonly entryPhase?: string | null
     readonly phases?: readonly string[]
+    /** How a turn's conversation is chosen: `owner`, `peer` or `channel-peer` (since 0.2.2). */
+    readonly sessionScope?: "owner" | "peer" | "channel-peer"
     /**
      * Each channel's last reported state. `unknown[]` until 16.6, which is why the web UI cast.
      *
@@ -459,6 +576,30 @@ export interface AgentDescriptionLike {
         }
     }[]
     readonly warnings?: readonly WireError[]
+    /**
+     * Who this agent delegates to, on `GET /v1/agents/:id` only. Members are observable here and
+     * addressable nowhere. Absent for an agent with no team.
+     */
+    readonly team?: readonly {
+        readonly id: string
+        readonly task: string
+        /** The field names the member hands back. */
+        readonly artifact: readonly string[]
+    }[]
+    /** What the agent is for, in one line (`description` in its manifest). */
+    readonly description?: string
+    /** Whether it takes part in `ask_agent` (`delegation.ask`). */
+    readonly ask?: boolean
+    /** Its assignee's participant id, or `null` for a shared agent. On the listing only. */
+    readonly assignee?: string | null
+    /** Whom `ask_agent` can ask, on `GET /v1/agents/:id` only. Absent when nobody. */
+    readonly peers?: readonly {
+        readonly id: string
+        readonly name?: string
+        readonly description?: string
+        readonly shared: boolean
+        readonly remote: boolean
+    }[]
     /** Set on a `disabled` row: when it was switched off, and why if anybody said. */
     readonly disabledAt?: string
     readonly reason?: string
@@ -599,6 +740,12 @@ export interface StoredMessageLike {
     readonly turnId?: string
     readonly origin?: string
     readonly createdAt?: string
+    /** Under the `native` dialect only: the calls an assistant message made. Its `content` is then often empty. */
+    readonly toolCalls?: readonly {
+        readonly id: string
+        readonly name: string
+        readonly arguments: string
+    }[]
 }
 
 export interface MessagePageLike {
@@ -615,6 +762,29 @@ export interface MessagePageLike {
  * conversation is, and the field is *there*, so the only way to find out is to read the server. The
  * same shape as `channels` being `readonly unknown[]` until 16.6.
  */
+/** `POST …/tools/refresh`. */
+export interface ToolsRefreshResult {
+    readonly id: string
+    readonly providers: readonly {
+        readonly provider: string
+        readonly ok: boolean
+        readonly fetched: number
+        readonly error?: string
+    }[]
+    readonly added: readonly string[]
+    readonly removed: readonly string[]
+    readonly changed: readonly string[]
+    readonly reload?: string
+}
+
+/** `GET …/schedules/preview`. */
+export interface SchedulePreview {
+    readonly kind: "cron" | "every" | "at"
+    readonly zone: string
+    readonly next: readonly string[]
+    readonly jitterMs: number
+}
+
 export interface SessionSummary {
     readonly sessionKey: string
     readonly channel: string
@@ -627,6 +797,13 @@ export interface SessionSummary {
     readonly thread?: string
     /** Phase-scoped tool visibility, persisted per session. Absent on an unphased agent. */
     readonly phase?: string
+    /** `false` on a conversation kept out of history recall; absent means it is recalled. */
+    readonly recall?: false
+    /**
+     * Whether this is the conversation its person's base key currently means: false for one a
+     * rotation left behind. True for every key under `channel-peer`. Absent from a server before 0.3.
+     */
+    readonly head?: boolean
 }
 
 export interface MessagesOptions {
@@ -776,10 +953,15 @@ export interface ParticipantLike {
     readonly kind: "human"
     readonly name?: string
     readonly role: "admin" | "member"
+    /** A job title, as the team knows the person. Not a permission. */
+    readonly title?: string
+    /** An IANA zone, `Europe/London`: what "tomorrow at nine" means for this person. */
+    readonly timezone?: string
     readonly createdAt: string
     /** Pushed by the embedder; absent reads as online. */
     readonly presence?: "online" | "offline"
     readonly presenceAt?: string
+    readonly channelIds?: readonly string[]
 }
 
 /** A slice of one agent: the carried memory file, the memory archive and knowledge (R11). */
@@ -926,7 +1108,7 @@ export interface KeyScopeLike {
     readonly agents?: readonly string[]
     /** A session-key prefix; a trailing `*` is accepted and ignored. */
     readonly sessions?: string
-    readonly can?: readonly ("read" | "chat" | "write" | "admin")[]
+    readonly can?: readonly ("read" | "chat" | "write" | "admin" | "peer")[]
     /** The one participant this key speaks for: every turn it starts acts for them. */
     readonly participant?: string
 }
@@ -980,6 +1162,10 @@ export interface DispachClient {
         readonly id: string
         readonly name?: string
         readonly role?: "admin" | "member"
+        readonly title?: string
+        readonly timezone?: string
+        /** `<channel type>:<id or handle>`: what `peer` session scope recognises them by. */
+        readonly channelIds?: readonly string[]
     }): Promise<ParticipantLike>
     /** The rooms and DMs this credential can see. */
     conversations(): Promise<readonly ConversationLike[]>
@@ -1080,6 +1266,24 @@ export interface DispachClient {
     }): Promise<OperatorKeyLike & { readonly secret: string }>
     /** Permanent. A revoked secret can never be re-presented. */
     revokeKey(keyId: string): Promise<OperatorKeyLike>
+    /**
+     * Delete an agent for good: its directory, its conversations and its memory. `confirm` must be
+     * the id again, the HTTP form of typing the name back.
+     */
+    deleteAgent(
+        agentId: string,
+        confirm: string,
+    ): Promise<
+        { readonly id: string; readonly removed: boolean } & Readonly<Record<string, unknown>>
+    >
+    /**
+     * The whole server as a tar.gz: `backup.json`, a consistent `store.db` snapshot and every hosted
+     * agent's directory. `include` adds `.env`, `.git` or the rest of the state directory.
+     */
+    backup(include?: readonly ("env" | "git" | "home")[]): Promise<Blob>
+    deleteParticipant(
+        participantId: string,
+    ): Promise<{ readonly id: string; readonly deleted: boolean }>
 }
 
 /** Narrow an event by type, so a `switch` over a stream keeps its `data` typed. */
@@ -1383,6 +1587,16 @@ export function createClient(options: ClientOptions): DispachClient {
              * "pretend it fired" are different things, and a caller who believed the second would
              * find the real one firing a minute later.
              */
+            refreshTools: (options) =>
+                json<ToolsRefreshResult>("POST", at("/tools/refresh"), {
+                    body: options?.providers === undefined ? {} : { providers: options.providers },
+                }),
+            previewSchedule: (input) => {
+                const query = new URLSearchParams({ kind: input.kind, expr: input.expr })
+                if (input.timezone !== undefined) query.set("timezone", input.timezone)
+                if (input.count !== undefined) query.set("count", String(input.count))
+                return json<SchedulePreview>("GET", at(`/schedules/preview?${query.toString()}`))
+            },
             runSchedule: (scheduleId) =>
                 json<{ scheduleId: string; turnId: string; sessionKey: string }>(
                     "POST",
@@ -1447,6 +1661,11 @@ export function createClient(options: ClientOptions): DispachClient {
                     { body: { recall } },
                 ),
 
+            rotateSession: (options) =>
+                json<{ sessionKey: string; previous: string }>("POST", at("/sessions/rotate"), {
+                    body: options?.from === undefined ? {} : { from: options.from },
+                }),
+
             approve: async (approvalId, granted) => {
                 await json<unknown>("POST", at(`/approvals/${encodeURIComponent(approvalId)}`), {
                     // Always sent, never defaulted. The server refuses a body without it for the
@@ -1465,6 +1684,12 @@ export function createClient(options: ClientOptions): DispachClient {
             assign: (participantId) =>
                 json<AssignmentLike>("PUT", at("/assignee"), { body: { participantId } }),
             unassign: () => json<{ id: string; unassigned: boolean }>("DELETE", at("/assignee")),
+            assignment: () =>
+                json<{ id: string; assignment: AssignmentLike | null }>("GET", at("/assignee")),
+            workspaceFiles: () => json("GET", at("/workspace")),
+            workspaceFile: (name) => json("GET", at(`/workspace/${encodeURIComponent(name)}`)),
+            putWorkspaceFile: (name, content) =>
+                json("PUT", at(`/workspace/${encodeURIComponent(name)}`), { body: { content } }),
             exportBundle: (paths) =>
                 json<AgentBundleLike>(
                     "GET",
@@ -1476,6 +1701,14 @@ export function createClient(options: ClientOptions): DispachClient {
                 json<ImportReportLike>("POST", at("/import"), {
                     body: { bundle, ...(mode === undefined ? {} : { mode }) },
                 }),
+            setVars: (vars) => json<VarsResultLike>("PATCH", at("/vars"), { body: { vars } }),
+            vars: () => json("GET", at("/vars")),
+            deliver: (input) =>
+                json<{ sessionKey: string; key: string; duplicate: boolean }>(
+                    "POST",
+                    at("/deliveries"),
+                    { body: input },
+                ),
 
             context: (opts) => {
                 const params = new URLSearchParams()
@@ -1522,6 +1755,24 @@ export function createClient(options: ClientOptions): DispachClient {
             json<OperatorKeyLike & { secret: string }>("POST", "/v1/keys", { body: input }),
         revokeKey: (keyId) =>
             json<OperatorKeyLike>("DELETE", `/v1/keys/${encodeURIComponent(keyId)}`),
+        deleteAgent: (agentId, confirm) =>
+            json(
+                "DELETE",
+                `/v1/agents/${encodeURIComponent(agentId)}?confirm=${encodeURIComponent(confirm)}`,
+            ),
+        backup: async (include) =>
+            (
+                await request(
+                    "GET",
+                    `/v1/backup${include === undefined || include.length === 0 ? "" : `?include=${include.join(",")}`}`,
+                    { accept: "application/gzip" },
+                )
+            ).blob(),
+        deleteParticipant: (participantId) =>
+            json<{ id: string; deleted: boolean }>(
+                "DELETE",
+                `/v1/participants/${encodeURIComponent(participantId)}`,
+            ),
         createAgent: (answers) =>
             json<ProvisionedAgentLike>("POST", "/v1/agents", { body: { answers } }),
         // Unwrapped, because the route wraps it: a list read declared as the wrong shape is how a

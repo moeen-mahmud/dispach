@@ -12,7 +12,7 @@
  * why `TurnStreams` exists — a client that comes back has to be able to find out what it missed.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, relative, resolve as resolvePath, sep } from "node:path"
@@ -35,7 +35,9 @@ import {
     type ImageInput,
     importBundle,
     isHarnessError,
+    isHead,
     isPhased,
+    jitterFor,
     keyFingerprint,
     keyLabelProblem,
     MAX_KEY_LABEL,
@@ -48,8 +50,10 @@ import {
     newRunId,
     newTurnId,
     newWebhookSecret,
+    nextCron,
     PERSON_SETTABLE_PATHS,
     type PluginCaller,
+    parseSchedule,
     parseSettingValue,
     personSetting,
     phasesFor,
@@ -93,6 +97,7 @@ import {
     reachesSession,
     scopeFilter,
     senderFor,
+    sessionFor,
 } from "./principal.ts"
 import { claimSpent, fail, forbidden } from "./respond.ts"
 import { Router } from "./router.ts"
@@ -120,6 +125,7 @@ import {
     ProvisionBody,
     parseBody,
     RecallBody,
+    RotateBody,
     SecretsBody,
     SpaceWriterBody,
     StopBody,
@@ -364,6 +370,13 @@ export interface Provisioner {
         readonly dir: string
         readonly files: readonly string[]
     }
+    /**
+     * Make the sandbox's owner the owner of an agent `create` just wrote, before it is adopted
+     * (decision 15.7): `create` writes `sessions.scope: owner`, which needs somebody to be the owner.
+     * Optional, so an embedder's provisioner without one still compiles; a template's agent is never
+     * claimed, since its manifest is the operator's.
+     */
+    claim?(manifestPath: string): Promise<void>
     /** Every template in this server's sandbox, with its variables. A broken one carries `problem`. */
     templates(): readonly TemplateWire[]
     /** Create an agent from a template. Throws a `HarnessError`, as `create` does. */
@@ -385,6 +398,13 @@ export interface Provisioner {
         readonly skipped: readonly { readonly file: string; readonly reason: string }[]
         readonly undo: () => void
     }
+    /**
+     * Which template an agent was made from and the plain values it was last rendered with: the read
+     * half of `rerender`. Undefined for an agent with no template record. Secrets are never in it.
+     */
+    templateOf?(
+        agentDir: string,
+    ): { readonly template: string; readonly vars: Readonly<Record<string, string>> } | undefined
 }
 
 /** One template as the wire carries it. Structural, so `packages/cli` needs no import from here. */
@@ -776,7 +796,16 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "GET",
         "/v1/agents",
         async (context) => {
-            const hosted = runtime.list().map((agent) => summary(runtime, agent))
+            // Who each agent is assigned to, so the control plane's relay can list a person's peers
+            // without a request per agent (`24-SPEC-PEER-ASK.md`). `null` is a shared agent.
+            const hosted = await Promise.all(
+                runtime.list().map(async (agent) => ({
+                    ...summary(runtime, agent),
+                    assignee:
+                        (await runtime.store.conversations.assignment(agent.id))?.participantId ??
+                        null,
+                })),
+            )
             const live = new Set(hosted.map((entry) => entry.id))
             const stopped = (await runtime.store.agentState.list())
                 .filter((state) => !state.enabled && !live.has(state.agentId))
@@ -835,6 +864,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 // Who it works for, when an admin recorded it (Phase 27): the person accountable for
                 // what it is asked to do.
                 const assignment = await runtime.store.conversations.assignment(agent.id)
+                const peers = await runtime.askPeers(agent.id)
                 return json({
                     ...summary(runtime, agent),
                     ...(assignment === undefined
@@ -850,6 +880,10 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                           }),
                     dialect: agent.describe().dialect,
                     window: agent.window,
+                    // The main model's capabilities as resolved: the registry's row for its id, with
+                    // the manifest's overrides laid over. A form that offers an override has to show
+                    // what it overrides, and the registry lives here, not in the browser.
+                    capabilities: agent.roles.main.capabilities,
                     tools: agent.tools.size,
                     // What the catalogue costs every turn, beside how many tools there are. A count
                     // says nothing about the bill: eight system tools and eight Composio ones differ
@@ -857,6 +891,9 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     catalogueTokens: agent.describe().catalogueTokens,
                     skills: agent.skills?.skills.length ?? 0,
                     schedules: schedules.length,
+                    // Whom `ask_agent` can ask (`24-SPEC-PEER-ASK.md`). Absent when nobody, like
+                    // `team`.
+                    ...(peers.length === 0 ? {} : { peers }),
                     /**
                      * Who this agent delegates to.
                      *
@@ -1089,6 +1126,42 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * rewritten file is put back, so a bad value cannot leave an agent that will not start.
      * Gated like provisioning, because it writes the agent's files.
      */
+    /**
+     * The vars an agent was made with, so a form can show what a `PATCH` would change. The values
+     * are the plain ones `rerender` keeps on record; a secret var is declared by the template and
+     * never has a value here, because it lives in `.env`.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/vars",
+        (context) =>
+            withTarget(runtime, options, context, async (target) => {
+                const templateOf = options.provision?.templateOf
+                if (templateOf === undefined) {
+                    return fail(
+                        {
+                            code: "rerender_not_supported",
+                            message: "This server cannot read an agent's template record.",
+                            hint: "`serve` provides it; an embedder mounting this handler has no templates directory.",
+                        },
+                        501,
+                    )
+                }
+                const record = templateOf(target.agent?.dir ?? dirname(target.file ?? ""))
+                if (record === undefined) {
+                    return fail(
+                        {
+                            code: "agent_not_from_template",
+                            message: "This agent has no record of the template it was made from.",
+                            hint: "Only an agent created with POST /v1/agents {template} on 0.2.0 or later carries one. Edit its files directly instead.",
+                        },
+                        409,
+                    )
+                }
+                return json({ id: target.id, template: record.template, vars: record.vars })
+            }),
+        { capability: "admin" },
+    )
     router.add(
         "PATCH",
         "/v1/agents/:id/vars",
@@ -1169,6 +1242,58 @@ export function createHandler(options: HandlerOptions): ServerHandler {
      * and the reason returned. An agent that is not running gets the file and a diagnosis, so a repair
      * can take several writes before `POST /start`. `admin`: it changes the agent's instructions.
      */
+    /**
+     * The files the agent's prompt is built from, and one file's text — the read half of the
+     * `PUT` below, so an editor can show what it is about to replace. Same declaration logic, so
+     * the two cannot disagree about which files exist.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/workspace",
+        (context) =>
+            withTarget(runtime, options, context, async (target) => {
+                const manifest = target.file
+                if (manifest === undefined) return json({ id: target.id, files: [] })
+                const named = await declaredWorkspace(target.id, manifest)
+                if (named instanceof Response) return named
+                return json({
+                    id: target.id,
+                    files: named.declared.map((ref) => ({
+                        name: basename(ref.path),
+                        tier: ref.tier,
+                        field: ref.field,
+                        exists: existsSync(ref.path),
+                        bytes: existsSync(ref.path) ? statSync(ref.path).size : 0,
+                    })),
+                })
+            }),
+        { capability: "admin" },
+    )
+
+    router.add(
+        "GET",
+        "/v1/agents/:id/workspace/:file",
+        (context) =>
+            withTarget(runtime, options, context, async (target) => {
+                const manifest = target.file
+                const name = context.params.file ?? ""
+                if (manifest === undefined) return unknownWorkspaceFile(target.id, name, [])
+                const named = await declaredWorkspace(target.id, manifest)
+                if (named instanceof Response) return named
+                const path = findDeclared(named.declared, named.workspaceDir, name)
+                if (path === undefined) return unknownWorkspaceFile(target.id, name, named.declared)
+                const ref = named.declared.find((entry) => entry.path === path)
+                return json({
+                    id: target.id,
+                    file: basename(path),
+                    ...(ref === undefined ? {} : { tier: ref.tier, field: ref.field }),
+                    exists: existsSync(path),
+                    content: existsSync(path) ? readFileSync(path, "utf8") : "",
+                })
+            }),
+        { capability: "admin" },
+    )
+
     router.add(
         "PUT",
         "/v1/agents/:id/workspace/:file",
@@ -1189,46 +1314,12 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         409,
                     )
                 }
-                const read = AgentManifestSchema.safeParse(
-                    manifestDocument(await readFile(manifest, "utf8")),
-                )
-                if (!read.success) {
-                    return fail(
-                        {
-                            code: "workspace_manifest_invalid",
-                            message: `${target.id}'s manifest does not parse, so its workspace files cannot be named.`,
-                            hint: "Fix the manifest first: PATCH /v1/agents/:id/config, and GET /v1/agents/:id for what is wrong.",
-                        },
-                        409,
-                    )
-                }
-                const dir = dirname(manifest)
-                const contextConfig = read.data.context
-                const workspaceDir = resolvePath(dir, contextConfig.workspace)
-                const soul = contextConfig.soul
-                const declared = [
-                    ...planWorkspace(contextConfig, dir).refs.map((ref) => ref.path),
-                    ...[soul?.file, soul?.distilled]
-                        .filter((name): name is string => name !== undefined)
-                        .map((name) => resolvePath(workspaceDir, name)),
-                ]
+                const named = await declaredWorkspace(target.id, manifest)
+                if (named instanceof Response) return named
+                const { workspaceDir, declared } = named
                 const name = context.params.file ?? ""
-                const path = declared.find(
-                    (candidate) =>
-                        candidate === resolvePath(workspaceDir, name) ||
-                        basename(candidate) === name,
-                )
-                if (path === undefined) {
-                    return fail(
-                        {
-                            code: "workspace_file_unknown",
-                            message: `${name} is not one of ${target.id}'s workspace files.`,
-                            hint: `Declared: ${declared.map((candidate) => basename(candidate)).join(", ") || "none"}. A new file is added to context.static or context.volatile with PATCH /config first.`,
-                            field: "file",
-                        },
-                        404,
-                    )
-                }
+                const path = findDeclared(declared, workspaceDir, name)
+                if (path === undefined) return unknownWorkspaceFile(target.id, name, declared)
                 const before = existsSync(path) ? readFileSync(path, "utf8") : undefined
                 mkdirSync(dirname(path), { recursive: true })
                 writeFileSync(path, parsed.value.content, "utf8")
@@ -1572,6 +1663,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
              * answer — the thing they asked for exists, and it is not running yet.
              */
             try {
+                if (template === undefined) await provision.claim?.(created.manifestPath)
                 const admitted = await runtime.adopt(created.manifestPath)
                 return json(
                     {
@@ -1961,11 +2053,11 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 const wantsChunks = input.chunks === true
                 const text = input.text
 
-                const sessionKey = input.sessionKey ?? "api:default"
+                const requested = input.sessionKey ?? "api:default"
                 // The one place a caller *names* a session they may never have seen. Without this,
                 // a key scoped to `team_42:` could write into `team_7:`'s conversation simply by
                 // asking — which is the difference between a filter and a boundary.
-                const outside = outsideSession(context, sessionKey)
+                const outside = outsideSession(context, requested)
                 if (outside !== undefined) return outside
                 const deliver = parseDeliver(input.deliver)
                 if (deliver.kind === "error") return fail(deliver.error, 400)
@@ -1974,6 +2066,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                 if (parsedFrom.kind === "error") return fail(parsedFrom.error, 400)
                 const from = senderFor(context.principal, parsedFrom.from)
                 if (!from.ok) return fail(from.error, 403)
+                const sessionKey = await sessionFor(
+                    agent,
+                    context.principal,
+                    requested,
+                    from.from,
+                    input.peerAsk,
+                )
 
                 const idempotency = parseIdempotencyKey(context.request)
                 if (idempotency.kind === "error") return fail(idempotency.error, 400)
@@ -2095,12 +2194,14 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     .send(text, {
                         admission,
                         sessionKey,
+                        sessionResolved: true,
                         turnId,
                         source: "api",
                         ...(from.from === undefined ? {} : { from: from.from }),
                         ...(images.length === 0 ? {} : { images }),
                         ...(input.runtimeNote === undefined ? {} : { turnNote: input.runtimeNote }),
                         ...(input.role === undefined ? {} : { role: input.role }),
+                        ...(input.peerAsk === undefined ? {} : { peerAsk: input.peerAsk }),
                         signal: controller.signal,
                     })
                     .then(async (result) => {
@@ -2742,6 +2843,7 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                         ...(input.role === undefined ? {} : { role: input.role }),
                         ...(input.title === undefined ? {} : { title: input.title }),
                         ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
+                        ...(input.channelIds === undefined ? {} : { channelIds: input.channelIds }),
                     }),
                     201,
                 )
@@ -3067,16 +3169,17 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     }
                 }
                 try {
-                    return json(
-                        await runtime.conversations.assign({
-                            agentId: agent.id,
-                            participantId: parsed.value.participantId,
-                            ...(bound === undefined ? {} : { assignedBy: bound }),
-                            ...(parsed.value.channelIds === undefined
-                                ? {}
-                                : { channelIds: parsed.value.channelIds }),
-                        }),
-                    )
+                    const assigned = await runtime.conversations.assign({
+                        agentId: agent.id,
+                        participantId: parsed.value.participantId,
+                        ...(bound === undefined ? {} : { assignedBy: bound }),
+                        ...(parsed.value.channelIds === undefined
+                            ? {}
+                            : { channelIds: parsed.value.channelIds }),
+                    })
+                    // An owner or peer session scope works from now on; its warning goes (15.14).
+                    await agent.checkSessionScope()
+                    return json(assigned)
                 } catch (error) {
                     return refusedBy(error)
                 }
@@ -3105,12 +3208,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "DELETE",
         "/v1/agents/:id/assignee",
         (context) =>
-            withAgent(runtime, context, async (agent) =>
-                json({
-                    id: agent.id,
-                    unassigned: await runtime.store.conversations.unassign(agent.id),
-                }),
-            ),
+            withAgent(runtime, context, async (agent) => {
+                const unassigned = await runtime.store.conversations.unassign(agent.id)
+                // Its peers, and its former siblings', change with it (`ask_agent`, hot reload).
+                if (unassigned) runtime.schedulePeerCheck()
+                await agent.checkSessionScope()
+                return json({ id: agent.id, unassigned })
+            }),
         { capability: "admin" },
     )
 
@@ -3400,10 +3504,65 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         "GET",
         "/v1/agents/:id/sessions",
         (context) =>
-            withAgent(runtime, context, async (agent) =>
-                json(visibleSessions(context.principal, await agent.store.sessions.list(agent.id))),
-            ),
+            withAgent(runtime, context, async (agent) => {
+                const sessions = await agent.store.sessions.list(agent.id)
+                const heads = await agent.store.sessions.heads(agent.id)
+                return json(
+                    visibleSessions(
+                        context.principal,
+                        sessions.map((session) => ({
+                            ...session,
+                            head: isHead(session.sessionKey, heads),
+                        })),
+                    ),
+                )
+            }),
         { capability: "read" },
+    )
+
+    /**
+     * "New conversation" for an owner or peer scope (decision 15.12): the caller's conversation now
+     * means a fresh key, on every surface, Telegram included. Registered before `:key` routes.
+     */
+    router.add(
+        "POST",
+        "/v1/agents/:id/sessions/rotate",
+        (context) =>
+            withAgent(runtime, context, async (agent) => {
+                const body = await readJson(context.request)
+                if (body.kind === "error") return fail(body.error, 400)
+                const parsed = parseBody(RotateBody, body.value)
+                if (!parsed.ok) return fail(parsed.error, 400)
+                const parsedFrom = parseFrom(parsed.value.from)
+                if (parsedFrom.kind === "error") return fail(parsedFrom.error, 400)
+                const from = senderFor(context.principal, parsedFrom.from)
+                if (!from.ok) return fail(from.error, 403)
+                // Only a conversation the caller could read back, by the rule `POST /messages` applies:
+                // resolve where a turn from this sender would land, and refuse when that is outside the
+                // key's reach — a key minted for `team_42:` naming the owner as `from` included.
+                const sender = {
+                    source: "api",
+                    ...(from.from === undefined ? {} : { from: from.from }),
+                }
+                const probe = "api:-"
+                const current = await agent.resolveSessionKey(probe, sender)
+                const rotated =
+                    current === probe || !reachesSession(context.principal, current)
+                        ? undefined
+                        : await agent.rotateSession(sender)
+                if (rotated === undefined) {
+                    return fail(
+                        {
+                            code: "session_not_rotatable",
+                            message: `Agent "${agent.id}" has no conversation of yours to start afresh.`,
+                            hint: `Rotation is for sessions.scope owner or peer, for the owner or a registered participant, by a key that reaches that conversation; this agent's scope is "${agent.manifest.sessions?.scope ?? "channel-peer"}". Otherwise a new conversation is a new sessionKey of your own on the next message.`,
+                        },
+                        409,
+                    )
+                }
+                return json(rotated)
+            }),
+        { capability: "chat" },
     )
 
     router.add(
@@ -3542,6 +3701,81 @@ export function createHandler(options: HandlerOptions): ServerHandler {
         { capability: "write" },
     )
 
+    /**
+     * What a schedule expression means, before it is written: the next few instants, the zone in
+     * force and the jitter it would carry. The parser is core's own `parseSchedule`, so a form that
+     * previews here cannot disagree with the write that follows — a second cron parser in the
+     * browser would be a second opinion about what a valid expression is. Registered before `:sid`,
+     * because the router is first-match and "preview" would otherwise be a schedule id.
+     */
+    router.add(
+        "GET",
+        "/v1/agents/:id/schedules/preview",
+        (context) =>
+            withAgent(runtime, context, async () => {
+                const query = context.url.searchParams
+                const kind = query.get("kind") ?? ""
+                const expr = query.get("expr") ?? ""
+                const timezone = query.get("timezone") ?? undefined
+                const count = Math.min(10, Math.max(1, Number(query.get("count") ?? "3") || 3))
+                if (kind !== "cron" && kind !== "every" && kind !== "at") {
+                    return fail(
+                        {
+                            code: "schedule_invalid",
+                            message: `kind must be cron, every or at; got ${JSON.stringify(kind)}.`,
+                            hint: "Send ?kind=cron&expr=0 8 * * *&timezone=Asia/Dhaka, or kind=every&expr=15m, or kind=at&expr=<ISO instant>.",
+                            field: "kind",
+                        },
+                        400,
+                    )
+                }
+                const now = Date.now()
+                let parsed: ReturnType<typeof parseSchedule>
+                try {
+                    parsed = parseSchedule({
+                        id: "preview",
+                        kind,
+                        expr,
+                        timezone,
+                        now,
+                        field: "expr",
+                    })
+                } catch (caught) {
+                    if (isHarnessError(caught)) return fail(caught.toDetail(), 400)
+                    throw caught
+                }
+                const next: number[] = []
+                if (parsed.kind === "at") next.push(parsed.at)
+                else if (parsed.kind === "every") {
+                    for (let step = 1; step <= count; step += 1)
+                        next.push(now + step * parsed.every.ms)
+                } else {
+                    let cursor = now
+                    for (let step = 0; step < count; step += 1) {
+                        const occurrence = nextCron(parsed.spec, cursor, parsed.zone)
+                        if (occurrence === undefined) break
+                        next.push(occurrence)
+                        cursor = occurrence
+                    }
+                }
+                const interval =
+                    parsed.kind === "every"
+                        ? parsed.every.ms
+                        : parsed.kind === "cron" && next.length > 1
+                          ? (next[1] ?? 0) - (next[0] ?? 0)
+                          : undefined
+                return json({
+                    kind: parsed.kind,
+                    zone: parsed.zone,
+                    next: next.map((instant) => new Date(instant).toISOString()),
+                    // The displacement every fire of this schedule would carry, for the id "preview".
+                    // Indicative: the real jitter is keyed on the schedule's own id.
+                    jitterMs: interval === undefined ? 0 : jitterFor("preview", interval),
+                })
+            }),
+        { capability: "read" },
+    )
+
     router.add(
         "GET",
         "/v1/agents/:id/schedules/:sid",
@@ -3589,6 +3823,13 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     enabled: existing.enabled,
                     ...(existing.timezone === undefined ? {} : { timezone: existing.timezone }),
                     ...(existing.role === undefined ? {} : { role: existing.role }),
+                    // Every stored field the write accepts, or a patch of `expr` alone erases them:
+                    // these three were added after this literal and were silently dropped until 0.2.2.
+                    ...(existing.toolsAllow === undefined
+                        ? {}
+                        : { tools: { allow: existing.toolsAllow } }),
+                    ...(existing.timeoutMs === undefined ? {} : { timeoutMs: existing.timeoutMs }),
+                    ...(existing.maxSteps === undefined ? {} : { maxSteps: existing.maxSteps }),
                     ...fields,
                     // The id is the row's identity and the key reconciliation matches on, so a patch
                     // that renamed it would create a second schedule and orphan the first. Dropped from
@@ -3704,18 +3945,24 @@ export function createHandler(options: HandlerOptions): ServerHandler {
                     // client that cannot tell will offer a form whose save can only fail.
                     ...(file === undefined ? { editable: false } : { editable: true, file }),
                     // `model.<role>` is the one placeholder a person fills in: `model.fast`.
-                    settings: SETTINGS.filter(
-                        (setting) =>
-                            PERSON_SETTABLE_PATHS.includes(setting.path) ||
-                            setting.path === "model.<role>",
-                    ).map((setting) => ({
-                        path: setting.path,
-                        means: setting.means,
-                        ...(setting.confirm === undefined ? {} : { confirm: setting.confirm }),
-                        ...(text === undefined
-                            ? {}
-                            : { value: manifestValueAt(text, setting.path.split(".")) }),
-                    })),
+                    settings: [
+                        ...SETTINGS.filter(
+                            (setting) =>
+                                PERSON_SETTABLE_PATHS.includes(setting.path) ||
+                                setting.path === "model.<role>",
+                        ).map((setting) => ({
+                            path: setting.path,
+                            means: setting.means,
+                            ...(setting.confirm === undefined ? {} : { confirm: setting.confirm }),
+                            ...(text === undefined
+                                ? {}
+                                : { value: manifestValueAt(text, setting.path.split(".")) }),
+                        })),
+                        // Every named role the file declares, as its concrete path. Without these a
+                        // client can add `model.fast` and then never find it again: the template row
+                        // above has no value, and nothing else lists the roles.
+                        ...declaredRoles(text),
+                    ],
                 })
             }),
         { capability: "admin" },
@@ -5089,6 +5336,107 @@ function outsideTurn(
     return !reachesSession(context.principal, record.sessionKey)
 }
 
+/** `GET /config`'s rows for the named model roles the source declares, `main` excepted. */
+function declaredRoles(
+    text: string | undefined,
+): { readonly path: string; readonly means: string; readonly value: unknown }[] {
+    if (text === undefined) return []
+    const model = manifestValueAt(text, ["model"])
+    if (model === null || typeof model !== "object" || Array.isArray(model)) return []
+    const means = settingByPath("model.<role>")?.means ?? "a named model role"
+    return Object.entries(model as Record<string, unknown>)
+        .filter(([name]) => name !== "main")
+        .map(([name, value]) => ({ path: `model.${name}`, means, value }))
+}
+
+/** One declared workspace file, with where it came from. The soul files carry their own tier. */
+interface DeclaredFile {
+    readonly path: string
+    readonly tier: string
+    readonly field: string
+}
+
+/**
+ * The files an agent's manifest declares, read from the file on disk. Shared by the workspace
+ * routes so a listing, a read and a write agree about what exists; a manifest that does not parse
+ * is the same `409` on all three.
+ */
+async function declaredWorkspace(
+    agentId: string,
+    manifest: string,
+): Promise<
+    { readonly workspaceDir: string; readonly declared: readonly DeclaredFile[] } | Response
+> {
+    const read = AgentManifestSchema.safeParse(manifestDocument(await readFile(manifest, "utf8")))
+    if (!read.success) {
+        return fail(
+            {
+                code: "workspace_manifest_invalid",
+                message: `${agentId}'s manifest does not parse, so its workspace files cannot be named.`,
+                hint: "Fix the manifest first: PATCH /v1/agents/:id/config, and GET /v1/agents/:id for what is wrong.",
+            },
+            409,
+        )
+    }
+    const dir = dirname(manifest)
+    const contextConfig = read.data.context
+    const workspaceDir = resolvePath(dir, contextConfig.workspace)
+    const soul = contextConfig.soul
+    const declared: DeclaredFile[] = [
+        ...planWorkspace(contextConfig, dir).refs.map((ref) => ({
+            path: ref.path,
+            tier: ref.tier,
+            field: ref.field,
+        })),
+        ...(soul?.file === undefined
+            ? []
+            : [
+                  {
+                      path: resolvePath(workspaceDir, soul.file),
+                      tier: "soul",
+                      field: "context.soul.file",
+                  },
+              ]),
+        ...(soul?.distilled === undefined
+            ? []
+            : [
+                  {
+                      path: resolvePath(workspaceDir, soul.distilled),
+                      tier: "soul",
+                      field: "context.soul.distilled",
+                  },
+              ]),
+    ]
+    return { workspaceDir, declared }
+}
+
+function findDeclared(
+    declared: readonly DeclaredFile[],
+    workspaceDir: string,
+    name: string,
+): string | undefined {
+    return declared.find(
+        (candidate) =>
+            candidate.path === resolvePath(workspaceDir, name) || basename(candidate.path) === name,
+    )?.path
+}
+
+function unknownWorkspaceFile(
+    agentId: string,
+    name: string,
+    declared: readonly DeclaredFile[],
+): Response {
+    return fail(
+        {
+            code: "workspace_file_unknown",
+            message: `${name} is not one of ${agentId}'s workspace files.`,
+            hint: `Declared: ${declared.map((candidate) => basename(candidate.path)).join(", ") || "none"}. A new file is added to context.static or context.volatile with PATCH /config first.`,
+            field: "file",
+        },
+        404,
+    )
+}
+
 /**
  * The shared shape of an agent in the listing and at the head of its detail.
  *
@@ -5109,6 +5457,11 @@ function summary(runtime: Runtime, agent: Agent) {
     return {
         id: agent.id,
         name: agent.manifest.name ?? agent.id,
+        ...(agent.manifest.description === undefined
+            ? {}
+            : { description: agent.manifest.description }),
+        // Whether it takes part in `ask_agent` (`24-SPEC-PEER-ASK.md`).
+        ask: agent.manifest.delegation?.ask === true,
         status: "loaded",
         model: agent.manifest.model.main.id,
         // Runtime status **layered over the manifest**, because a panel that offers "connect" needs
@@ -5144,6 +5497,9 @@ function summary(runtime: Runtime, agent: Agent) {
         }),
         entryPhase: phased ? (entryPhase(phases) ?? null) : null,
         ...(phased ? { phases: Object.keys(phases) } : {}),
+        // How this agent chooses a turn's conversation, so a client knows whether "new conversation"
+        // is a rotation (`docs/23-SPEC-SESSIONS.md`) or a fresh key of its own.
+        sessionScope: agent.manifest.sessions?.scope ?? "channel-peer",
     }
 }
 

@@ -60,6 +60,7 @@ export const FLAG_FOR: Record<InitStep, string> = {
     preset: "--preset",
     model: "--model",
     baseUrl: "--base-url",
+    region: "--region",
     apiKeyEnv: "--api-key-env",
     // No flag, on purpose: a key on the command line lands in shell history. With --yes the .env
     // is written with an empty value and the next steps say where to put it.
@@ -96,11 +97,17 @@ export const FLAG_FOR: Record<InitStep, string> = {
  * a refusal, not a guess. All gaps report at once — with `--preset custom` that is the endpoint
  * flags too, not just the names — and the refusal says *why* the questions could not be asked,
  * which is the mode decision's `because` string doing its first useful work.
+ *
+ * `naming` phrases the missing names for the caller: the terminal names flags, while the
+ * provisioning API names answer keys, because an HTTP caller has no flags to pass and no
+ * terminal to sit at. The default is the terminal phrasing, so the CLI path is unchanged
+ * unless a caller opts in.
  */
 export function fillDefaults(
     partial: Partial<Record<InitStep, string>>,
     because: string,
     defaults: QuestionDefaults,
+    options?: { naming?: "flags" | "answers" },
 ): void {
     const missing: InitStep[] = []
     for (;;) {
@@ -122,6 +129,14 @@ export function fillDefaults(
         if (checked.ok) partial[question.step] = checked.value
     }
     if (missing.length > 0) {
+        if (options?.naming === "answers") {
+            const keys = missing.map((step) => `answers.${step}`).join(", ")
+            throw new HarnessError({
+                code: "cli_init_missing_answers",
+                message: `Not interactive (${because}), and ${missing.join(", ")} ${missing.length === 1 ? "has" : "have"} no default.`,
+                hint: `Provide ${keys} in the request body. GET /v1/provision lists every question with its prompt, its default and its choices.`,
+            })
+        }
         const flags = missing.map((step) => FLAG_FOR[step]).join(", ")
         throw new HarnessError({
             code: "cli_init_missing_answers",
@@ -152,6 +167,8 @@ export function complete(
             | "server"
             | "dir"
             | "dirChoice"
+            | "region"
+            | "baseUrl"
         >,
         string
     > & {
@@ -180,6 +197,9 @@ export function complete(
         /** Both stay undefined unless the Telegram answer was `connected`. */
         telegramToken?: string
         telegramAllow?: string
+        /** Asked only for the `bedrock` preset; every other transport asks for `baseUrl`. */
+        region?: string
+        baseUrl?: string
         /** Undefined unless `dirChoice` was `custom`; derived below otherwise. */
         dir?: string
         /** Undefined when `--dir` answered the question, which is what skips it. */
@@ -221,7 +241,10 @@ export function complete(
         purpose: answers.purpose,
         preset: answers.preset as InitAnswers["preset"],
         model: answers.model,
-        baseUrl: answers.baseUrl,
+        // Bedrock has no URL; `fillDefaults` never asked for one, so the field is empty rather than
+        // the preset's "" by accident — and the renderer branches on `region`, not on it.
+        baseUrl: answers.baseUrl ?? "",
+        ...(answers.region === undefined ? {} : { region: answers.region }),
         system: answers.system,
         web: answers.web,
         ...(answers.webBackend === undefined ? {} : { webBackend: answers.webBackend }),
@@ -725,9 +748,9 @@ export function provisionAgent(input: ProvisionRequest): ProvisionResult {
         partial[step] = checked.value
     }
 
-    // Everything unanswered takes its default, and anything with no default is refused by name —
-    // the same sentence `init --yes` gives, from the same function.
-    fillDefaults(partial, "this is the provisioning API", input.defaults)
+    // Everything unanswered takes its default, and anything with no default is refused by name,
+    // naming the answer keys an HTTP caller can actually supply.
+    fillDefaults(partial, "this is the provisioning API", input.defaults, { naming: "answers" })
     const answers: InitAnswers = complete(partial, input.defaults)
 
     /**

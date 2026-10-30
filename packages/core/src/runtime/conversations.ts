@@ -121,6 +121,8 @@ export class ConversationHub {
         readonly role?: "admin" | "member"
         readonly title?: string
         readonly timezone?: string
+        /** `<type>:<id or handle>`, matched like `allowFrom`: what `peer` session scope knows them by. */
+        readonly channelIds?: readonly string[]
     }): Promise<ParticipantRecord> {
         if (input.timezone !== undefined && !isTimeZone(input.timezone)) {
             throw refused(
@@ -145,6 +147,7 @@ export class ConversationHub {
             role: input.role ?? "member",
             ...(input.title === undefined ? {} : { title: input.title }),
             ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
+            ...(input.channelIds === undefined ? {} : { channelIds: input.channelIds }),
             createdAt: this.#now().toISOString(),
         })
     }
@@ -346,6 +349,8 @@ export class ConversationHub {
      * already admitted by its capability — who may write anything an admin may.
      *
      * - `owner:<X>`: only X. Not even an admin: another member's memory is theirs to edit (a non-goal).
+     * - `agents:<X>`: the same rule (decision 15.8). It is X's agents' memory; the agents themselves
+     *   write it through the runtime, never through here.
      * - `space`: an admin, or the one designated space writer.
      * - `project:<id>`: an admin, into a project that exists.
      */
@@ -359,8 +364,8 @@ export class ConversationHub {
             )
         }
         const admin = actorId === undefined || actor?.role === "admin"
-        if (scope.startsWith("owner:")) {
-            const owner = scope.slice("owner:".length)
+        if (scope.startsWith("owner:") || scope.startsWith("agents:")) {
+            const owner = scope.slice(scope.indexOf(":") + 1)
             if ((await this.#store.participant(owner)) === undefined) {
                 throw refused(
                     "participant_not_found",
@@ -373,7 +378,7 @@ export class ConversationHub {
                 throw refused(
                     "memory_scope_forbidden",
                     `${actorId} may not write ${scope}.`,
-                    "An owner scope is written only by its owner; an admin writes the space or a project instead.",
+                    "An owner scope, and the memory a person's agents share, is written only by that person; an admin writes the space or a project instead.",
                     "scope",
                 )
             }
@@ -408,7 +413,7 @@ export class ConversationHub {
             throw refused(
                 "memory_scope_invalid",
                 `"${value}" is not a memory scope.`,
-                "A shared scope is `space`, `owner:<participantId>` or `project:<projectId>`. An agent's private memory is written by the agent itself.",
+                "A shared scope is `space`, `owner:<participantId>`, `agents:<participantId>` or `project:<projectId>`. An agent's private memory is written by the agent itself.",
                 "scope",
             )
         }
@@ -443,7 +448,9 @@ export class ConversationHub {
     /** Readable by whoever may write it, and by everyone for the space and projects. */
     async notes(scopeValue: string, actorId?: string): Promise<readonly MemoryNoteRecord[]> {
         const scope = this.#scope(scopeValue)
-        if (scope.startsWith("owner:")) await this.#mayWrite(scope, actorId)
+        if (scope.startsWith("owner:") || scope.startsWith("agents:")) {
+            await this.#mayWrite(scope, actorId)
+        }
         return this.#store.notes(scope)
     }
 

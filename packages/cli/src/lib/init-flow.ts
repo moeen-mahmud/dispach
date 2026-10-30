@@ -50,114 +50,14 @@ export const INIT_LOCAL_TOOLS: readonly { readonly slug: string; readonly note: 
 /** Exported so the drift test can compare against core without re-deriving the mapping. */
 export const INIT_LOCAL_TOOL_SLUGS: readonly string[] = INIT_LOCAL_TOOLS.map((tool) => tool.slug)
 
-export type PresetId =
-    | "openai"
-    | "anthropic"
-    | "deepseek"
-    | "openrouter"
-    | "groq"
-    | "nvidia"
-    | "ollama"
-    | "ollama-cloud"
-    | "custom"
+export { PRESETS, type Preset, type PresetId, presetById } from "#lib/presets"
 
-export interface Preset {
-    readonly id: PresetId
-    readonly label: string
-    /** Empty for `custom`, which has no defaults to offer. */
-    readonly modelId: string
-    readonly baseUrl: string
-    /** Absent means the manifest omits `apiKeyEnv` entirely — a keyless local endpoint. */
-    readonly apiKeyEnv?: string
-}
+import { PRESETS, type PresetId, presetById } from "#lib/presets"
 
-/**
- * The same presets the examples' `.env.example` documents, plus the aggregators and Ollama.
- * `custom` exists so an unlisted endpoint is a first-class answer rather than a fight with the
- * nearest preset.
- *
- * **Every one of these is the same transport.** There is no provider branch in
- * `chat-completions.ts` — one POST, one body builder — so a preset is nothing but three strings,
- * and adding one is cheap precisely because it buys no special-casing. What a preset *is* for is
- * that a base URL has to end at the version segment (the runtime appends `/chat/completions`
- * itself, and a URL pasted from a provider's docs with the full path is refused three times over),
- * and that is the sort of thing nobody should have to get right from memory.
- *
- * **`ollama` and `ollama-cloud` are two rows on purpose.** Local Ollama needs no key, and the
- * absent `apiKeyEnv` is what makes the manifest omit the field and the provider send no
- * `authorization` header. Ollama Cloud needs one. With a single row, choosing `ollama` and then
- * editing the base URL to the hosted endpoint produced a **keyless manifest with no route to a
- * key** short of hand-editing `apiKeyEnv` back in — a dead end reached by the obvious move.
- */
-export const PRESETS: readonly Preset[] = [
-    {
-        id: "openai",
-        label: "OpenAI",
-        modelId: "gpt-5-6-sol",
-        baseUrl: "https://api.openai.com/v1",
-        apiKeyEnv: "MODEL_API_KEY",
-    },
-    {
-        id: "anthropic",
-        label: "Anthropic (OpenAI-compatible endpoint)",
-        modelId: "claude-sonnet-5",
-        baseUrl: "https://api.anthropic.com/v1",
-        apiKeyEnv: "MODEL_API_KEY",
-    },
-    {
-        id: "deepseek",
-        label: "DeepSeek",
-        modelId: "deepseek-v4-flash",
-        baseUrl: "https://api.deepseek.com/v1",
-        apiKeyEnv: "MODEL_API_KEY",
-    },
-    {
-        id: "openrouter",
-        label: "OpenRouter (many providers, one key)",
-        modelId: "deepseek/deepseek-chat",
-        baseUrl: "https://openrouter.ai/api/v1",
-        apiKeyEnv: "MODEL_API_KEY",
-    },
-    {
-        id: "groq",
-        label: "Groq",
-        modelId: "llama-3.3-70b-versatile",
-        baseUrl: "https://api.groq.com/openai/v1",
-        apiKeyEnv: "MODEL_API_KEY",
-    },
-    {
-        id: "nvidia",
-        label: "NVIDIA NIM",
-        modelId: "meta/llama-3.3-70b-instruct",
-        baseUrl: "https://integrate.api.nvidia.com/v1",
-        apiKeyEnv: "MODEL_API_KEY",
-    },
-    {
-        id: "ollama",
-        label: "Ollama (local, no key)",
-        modelId: "qwen3.5:9b",
-        baseUrl: "http://localhost:11434/v1",
-    },
-    {
-        // Two rows rather than one — see the block comment above. The hosted endpoint takes a key
-        // and the local one must not, and a single row made the second reachable only by hand.
-        id: "ollama-cloud",
-        label: "Ollama Cloud (hosted, needs a key)",
-        modelId: "gpt-oss:120b",
-        baseUrl: "https://ollama.com/v1",
-        apiKeyEnv: "MODEL_API_KEY",
-    },
-    {
-        id: "custom",
-        label: "any other OpenAI-compatible endpoint",
-        modelId: "",
-        baseUrl: "",
-        apiKeyEnv: "MODEL_API_KEY",
-    },
-] as const
-
-export function presetById(id: string): Preset | undefined {
-    return PRESETS.find((preset) => preset.id === id)
+/** A purpose as the manifest's `description`: one line, inside the schema's 200 characters. */
+export function oneLineDescription(purpose: string): string {
+    const line = purpose.replace(/\s+/g, " ").trim()
+    return line.length <= 200 ? line : `${line.slice(0, 199)}…`
 }
 
 export interface InitAnswers {
@@ -169,7 +69,10 @@ export interface InitAnswers {
     readonly purpose: string
     readonly preset: PresetId
     readonly model: string
+    /** Empty for a transport that addresses its endpoint another way (Bedrock). */
     readonly baseUrl: string
+    /** The AWS region, asked only for the `bedrock` preset; becomes `options.region`. */
+    readonly region?: string
     /**
      * The env var the manifest names. Absent = the manifest omits the field entirely (a keyless
      * endpoint). Set from `--api-key-env` or the preset, never asked: which *variable* holds the
@@ -766,6 +669,7 @@ export const STEP_ORDER: readonly InitStep[] = [
     "preset",
     "model",
     "baseUrl",
+    "region",
     "apiKey",
     "system",
     "web",
@@ -887,6 +791,9 @@ export function nextQuestion(
         if (step === "apiKey" && preset !== undefined && preset.apiKeyEnv === undefined) {
             continue
         }
+        // Bedrock has no URL and is asked for a region instead; every other transport the reverse.
+        if (step === "baseUrl" && preset?.api === "bedrock-converse") continue
+        if (step === "region" && preset?.api !== "bedrock-converse") continue
         // The backend and its key are only questions for someone who asked for search. Skipped
         // rather than asked-and-ignored: an answer the flow discards is a question that lies.
         if ((step === "webBackend" || step === "webKey") && partial.web !== "search") continue
@@ -943,6 +850,8 @@ export function nextQuestion(
                 return { step, prompt: "Model id", fallback: preset?.modelId ?? "" }
             case "baseUrl":
                 return { step, prompt: "Base URL", fallback: preset?.baseUrl ?? "" }
+            case "region":
+                return { step, prompt: "AWS region", fallback: preset?.region ?? "us-east-1" }
             case "apiKey":
                 return {
                     step,
@@ -1335,6 +1244,14 @@ export function validateAnswer(step: InitStep, raw: string): Answered {
                   }
                 : { ok: true, value: chosen.value }
         }
+
+        case "region":
+            return /^[a-z]{2}(-[a-z]+)+-\d$/.test(value)
+                ? { ok: true, value }
+                : {
+                      ok: false,
+                      reason: "is not an AWS region name, such as eu-west-1 or us-east-1.",
+                  }
 
         case "baseUrl": {
             let url: URL
@@ -2130,6 +2047,12 @@ function manifestFor(answers: InitAnswers, window: MeasuredWindow | undefined): 
         `apiVersion: ${BRAND.apiVersion}`,
         `id: ${slug}`,
         `name: ${answers.name}`,
+        // The "what is it for" answer, so this person's other agents know when to ask this one
+        // (decision 15.9). Quoted, because a purpose is free text and a colon in it is YAML.
+        // Left out when empty: the schema refuses an empty description, and a blank is not one.
+        ...(oneLineDescription(answers.purpose) === ""
+            ? []
+            : [`description: ${JSON.stringify(oneLineDescription(answers.purpose))}`]),
         ``,
         rule("model"),
         `model:`,
@@ -2144,11 +2067,24 @@ function manifestFor(answers: InitAnswers, window: MeasuredWindow | undefined): 
         // \${VAR} still expands everywhere. It is simply not what a generated file should reach for
         // when the value is a fact about this agent.
         `    id: ${answers.model}`,
-        `    # Must end at the version segment; the runtime appends /chat/completions itself.`,
-        `    baseUrl: ${answers.baseUrl}`,
-        `    # Both take \${VAR} if you would rather set them from the environment — a container, say.`,
-        `    # The KEY never goes here in either form; the manifest names its variable, below.`,
     ]
+    if (answers.region !== undefined) {
+        lines.push(
+            `    # AWS Bedrock over the Converse API. No URL and no key variable: credentials come from`,
+            `    # the AWS default chain — environment, a named profile, the container or instance role.`,
+            `    api: bedrock-converse`,
+            `    options:`,
+            `      region: ${answers.region}`,
+            `      # profile: my-aws-profile`,
+        )
+    } else {
+        lines.push(
+            `    # Must end at the version segment; the runtime appends /chat/completions itself.`,
+            `    baseUrl: ${answers.baseUrl}`,
+            `    # Both take \${VAR} if you would rather set them from the environment — a container, say.`,
+            `    # The KEY never goes here in either form; the manifest names its variable, below.`,
+        )
+    }
     if (answers.apiKeyEnv !== undefined) {
         lines.push(
             `    # The *name* of an env var, never a value — a literal key fails validation.`,
@@ -2175,7 +2111,9 @@ function manifestFor(answers: InitAnswers, window: MeasuredWindow | undefined): 
         `  # A cheap model for tool selection and summarisation. \`$ref\` reuses a role.`,
         `  # selector:`,
         `  #   id: a-cheaper-model`,
-        `  #   baseUrl: ${answers.baseUrl}`,
+        ...(answers.region === undefined
+            ? [`  #   baseUrl: ${answers.baseUrl}`]
+            : [`  #   api: bedrock-converse`, `  #   options: { region: ${answers.region} }`]),
         `  # compactor: { $ref: model.selector }`,
         ``,
         rule("context"),
@@ -2313,6 +2251,25 @@ function manifestFor(answers: InitAnswers, window: MeasuredWindow | undefined): 
         `  includeHistory: true   # index clean prose, not only what was deliberately saved.`,
         `  #                      # Tool output and replies derived from it are never indexed: text a`,
         `  #                      # stranger wrote must not outlive the write gate`,
+        `  shared: true           # a saved note is also recalled by your other agents (agents:<you>).`,
+        `  #                      # A stand-in or a room never reads it`,
+        ``,
+        // Written live, because `init` makes the person this agent's owner: one conversation with
+        // them across the web, the terminal and every channel is what they would expect, and the
+        // per-surface default is what an embedder choosing its own keys needs (decision 15.6).
+        `# Sessions — how a conversation is chosen. owner: your turns from the web, the terminal and`,
+        `# every channel share one, and a stranger keeps their own. channel-peer: one per surface.`,
+        `# "New conversation" in the web or the terminal starts afresh everywhere at once.`,
+        `sessions:`,
+        `  scope: owner`,
+        ``,
+        // On, for the reason `sessions.scope` is: `init` makes the person this agent's owner, and
+        // their agents asking each other is what they would expect. The schema default stays off so
+        // an embedder's agents change nothing on upgrade (decision 15.15).
+        `# Delegation — ask: your other agents can ask this one a question (ask_agent), and it can`,
+        `# ask them. Both have to say yes. Off is "keep me out of it".`,
+        `delegation:`,
+        `  ask: true`,
         ``,
         // Named and switched on for the reason skills above is: `knowledge.dir` naming a path that
         // does not exist is a load failure, so the directory is scaffolded and an empty one is a

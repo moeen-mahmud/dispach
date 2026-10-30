@@ -1739,9 +1739,10 @@ Never claim a performance property without a number in `evals/` and a script to 
   thing to *assert*: a `DELETE` missing its `WHERE agent_id = ?` passes every test that only ever puts
   one agent in the store, which is every test anybody writes by default. `store-purge.test.ts` populates
   two. Two consequences already load-bearing elsewhere: `memory_fts*` shadow tables are shared, which is
-  why ranking is computed in `rank/bm25.ts` rather than through FTS5's `bm25()`; and `kv` is the one
-  table with no `agent_id` **and no consumer anywhere**, so `purgeAgent` cannot clean up after it — dead
-  vocabulary, the `includeHistory` shape again, and now documented as such on the interface.
+  why ranking is computed in `rank/bm25.ts` rather than through FTS5's `bm25()`; and the `kv` table
+  was the one table with no `agent_id` **and no consumer anywhere**, so `purgeAgent` could never clean
+  up after it — dead vocabulary, the `includeHistory` shape again, removed by migration 32 rather
+  than carried.
 - **The store, the logs and the launchd label are keyed by the manifest `id`; the directory is keyed by
   its own name.** They are usually equal and need not be. Two directories with one id share one
   conversation history — `listAgents` already warned about it, and it is why `remove` *refuses* rather
@@ -2021,6 +2022,14 @@ Never claim a performance property without a number in `evals/` and a script to 
   structural rather than one test per field: `boundaries.test.ts` walks every `CommandSpec` flag and
   requires it to be named inside that command's **own** `case` block in `index.ts`. One guard, and a
   new flag is covered with nothing to remember.
+- **A row rebuilt as an object literal drops the field added after it was written.** Seventh instance:
+  `sessions` gained `head`, and both pickers in `run.ts` copied each row into a fresh literal naming the
+  fields they knew, so a conversation `/new` had set aside still read "You". Nothing type-checks it, because
+  the target type made `head` optional. The cure here was not a test per field: pass the rows through
+  unchanged, so no copy exists to drop one. Prefer that wherever a layer only forwards what it was given.
+  Eighth, found live a day later: the schedule `PATCH` rebuilt the stored row as a literal before
+  validating, so `{expr}` alone erased `tools`, `timeoutMs` and `maxSteps`, the three fields added
+  after it. Its guard writes every optional field, patches one, and requires the rest unmoved.
 - **A reported symptom can be true with a false mechanism, and fixing the mechanism you assumed leaves
   the cause running.** "`init` always creates the agent inside the codebase" was accurate and had
   nothing to do with the default: driven under a pty against the *installed* binary, the wizard offers
