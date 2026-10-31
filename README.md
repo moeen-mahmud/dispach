@@ -3,6 +3,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![CI](https://github.com/moeen-mahmud/dispach/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/moeen-mahmud/dispach/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dispach)](https://www.npmjs.com/package/dispach)
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/moeen-mahmud/badge.svg)](https://hub.xerj.org/contributors/moeen-mahmud)
 
 **The agent backend your product calls over HTTP.** Open source and self-hosted: one API for agents
 with memory, tools, schedules, channels and approvals, on any OpenAI-compatible model.
